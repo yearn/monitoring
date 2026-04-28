@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import requests
 from web3 import Web3
 
@@ -5,6 +7,7 @@ from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import Chain
+from utils.config import Config
 from utils.logging import get_logger
 from utils.web3_wrapper import ChainManager
 
@@ -13,9 +16,11 @@ PROTOCOL = "infinifi"
 logger = get_logger(PROTOCOL)
 
 IUSD_ADDRESS = Web3.to_checksum_address("0x48f9e38f3070AD8945DFEae3FA70987722E3D89c")
+IUSD_DECIMALS = 18
 
 LIQUID_RESERVES_THRESHOLD = 12_000_000
 BACKING_PER_IUSD_MIN = 0.999
+MINT_THRESHOLD_PERCENT = Decimal(Config.get_env("IUSD_LARGE_MINT_THRESHOLD_PERCENT", "0.05"))
 REDEMPTION_TO_LIQUID_RATIO_MAX = 0.8
 FARM_RATIO_CHANGE_ALERT_THRESHOLD = 0.30
 FARM_RATIO_ACTIVATION_ALERT_THRESHOLD = 0.03
@@ -78,6 +83,10 @@ def clear_breach_state(cache_key):
         write_last_value_to_file(cache_filename, cache_key, 0)
 
 
+def _format_iusd_units(raw_value: int) -> Decimal:
+    return Decimal(raw_value) / (Decimal(10) ** IUSD_DECIMALS)
+
+
 def main():
     client = ChainManager.get_client(Chain.MAINNET)
     erc20_abi = load_abi("common-abi/ERC20.json")
@@ -86,17 +95,15 @@ def main():
 
     try:
         # --- 1. iUSD Supply ---
-        # Batch calls for decimals and totalSupply
+        # Batch call for totalSupply
         with client.batch_requests() as batch:
-            batch.add(iusd_contract.functions.decimals())
             batch.add(iusd_contract.functions.totalSupply())
 
             batch_results = client.execute_batch(batch)
 
-        iusd_decimals = int(batch_results[0])
-        iusd_supply_raw = int(batch_results[1])
+        iusd_supply_raw = int(batch_results[0])
 
-        iusd_supply = iusd_supply_raw / (10**iusd_decimals)
+        iusd_supply = iusd_supply_raw / (10**IUSD_DECIMALS)
 
         # --- 2. Fetch API Data ---
         liquid_reserves = 0
@@ -174,6 +181,36 @@ def main():
             backing_per_iusd = 0
 
         # --- Alerts ---
+
+        # Alert 0: Large iUSD mint by supply delta (no event scanning)
+        cache_key_large_mints = f"{PROTOCOL}_large_mints_last_supply"
+        last_supply_cached = int(get_last_value_for_key_from_file(cache_filename, cache_key_large_mints))
+        if last_supply_cached > 0:
+            delta_raw = iusd_supply_raw - last_supply_cached
+            threshold_raw = int(last_supply_cached * MINT_THRESHOLD_PERCENT)
+            if delta_raw >= threshold_raw:
+                delta = _format_iusd_units(delta_raw)
+                previous = _format_iusd_units(last_supply_cached)
+                current = _format_iusd_units(iusd_supply_raw)
+                threshold_tokens = _format_iusd_units(int(last_supply_cached * MINT_THRESHOLD_PERCENT))
+                threshold_percent_display = MINT_THRESHOLD_PERCENT * Decimal(100)
+
+                send_alert(
+                    Alert(
+                        AlertSeverity.LOW,
+                        (
+                            "*iUSD Large Mint Alert (Supply Delta)*\n\n"
+                            f"Threshold: {threshold_percent_display:,.2f}% of totalSupply "
+                            f"(~{threshold_tokens:,.2f} iUSD at previous supply)\n"
+                            f"Supply increase: {delta:,.2f} iUSD\n"
+                            f"Previous totalSupply: {previous:,.2f}\n"
+                            f"Current totalSupply: {current:,.2f}\n\n"
+                            "This monitor intentionally uses only totalSupply deltas (no event scanning)."
+                        ),
+                        PROTOCOL,
+                    )
+                )
+        write_last_value_to_file(cache_filename, cache_key_large_mints, iusd_supply_raw)
 
         # Alert 1: Low Liquid Reserves
         if liquid_reserves > 0:
