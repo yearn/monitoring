@@ -45,6 +45,21 @@ It runs cached `totalSupply` delta checks and alerts when the increase is above:
 
 The GitHub workflow `.github/workflows/hourly.yml` runs this monitor hourly.
 
+## Large Transfer Monitoring (Incremental Event Scanning)
+
+`usdai/large_transfers.py` scans only new `Transfer` logs from cached block state.
+
+It uses chunked `eth_getLogs` calls:
+
+- `USDAI_LARGE_TRANSFER_CHUNK_BLOCKS` (default: `2000`)
+- `USDAI_LARGE_TRANSFER_FIRST_RUN_LOOKBACK_BLOCKS` (default: `2000`)
+
+And alerts when transfer amount is above:
+
+- `USDAI_LARGE_TRANSFER_THRESHOLD` (default: `100000` USDai)
+
+This avoids full-history rescans on every run while still catching large movements.
+
 ## Price Monitoring Scope
 
 `usdai/main.py` does not monitor PYUSD/USD price.
@@ -65,4 +80,10 @@ Run large mint monitor:
 
 ```bash
 uv run usdai/large_mints.py
+```
+
+Run large transfer monitor:
+
+```bash
+uv run usdai/large_transfers.py
 ```
