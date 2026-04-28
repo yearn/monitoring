@@ -199,18 +199,23 @@ def check_markets_pending_cap(name, morpho_contract, chain, w3):
             last_executed_morpho = get_last_executed_morpho_from_file(vault_address, market, PENDING_CAP_TYPE)
 
             if pending_cap_timestamp > last_executed_morpho:
-                difference_in_percentage = ((pending_cap_value - current_cap) / current_cap) * 100
                 time = datetime.fromtimestamp(pending_cap_timestamp).strftime("%Y-%m-%d %H:%M:%S")
                 market_name = fetch_market_name(market, chain)
-                send_telegram_message(
-                    (
+                if current_cap == 0:
+                    message = (
+                        f"Adding new market [{market_name}]({market_url}) with cap {pending_cap_value} "
+                        f"to vault [{name}]({vault_url}) on {chain.name}. "
+                        f"Queued for {time}"
+                    )
+                else:
+                    difference_in_percentage = ((pending_cap_value - current_cap) / current_cap) * 100
+                    message = (
                         f"Updating cap to new cap {pending_cap_value}, current cap {current_cap}, "
                         f"difference: {difference_in_percentage:.2f}%. \n"
                         f"For vault [{name}]({vault_url}) for market: [{market_name}]({market_url}) on {chain.name}. "
                         f"Queued for {time}"
-                    ),
-                    PROTOCOL,
-                )
+                    )
+                send_telegram_message(message, PROTOCOL)
                 write_last_executed_morpho_to_file(vault_address, market, PENDING_CAP_TYPE, pending_cap_timestamp)
             else:
                 logger.info(
