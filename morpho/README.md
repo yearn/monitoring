@@ -44,8 +44,6 @@ To monitor a new Morpho vault, add its address to the `VAULTS_BY_CHAIN` variable
 
 **For YV Collateral Vaults:** If Morpho vault is using Yearn V3 Vault (YV collateral vault) as collateral, additional configuration is needed. Add all Morpho Vaults that are used as strategies in Yearn V3 Vault to `VAULTS_WITH_YV_COLLATERAL_BY_ASSET` mapping, organized by chain and underlying asset address. This enables combined liquidity monitoring for all vaults with the same asset.
 
-For some chains, the Morpho GraphQL API is not available. In this case, alternative script is used [markets_graph.py](./markets_graph.py) which uses The Graph API. Be aware that this script will require additional setup as it uses a different URL for vaults and markets, depending on the curator and frontend. Also, if the new chain is added, it will need new subgraph url define in [`GRAPH_BY_CHAIN`](./markets_graph.py#L29) variable.
-
 ### Bad Debt
 
 Bad debt is fetched from the Morpho GraphQL API. Each market is checked for bad debt; if any market exhibits bad debt, a Telegram message is sent. The script runs hourly via [GitHub Actions](../.github/workflows/hourly.yml). The monitoring logic is implemented in [markets.py#L166](./markets.py#L166).

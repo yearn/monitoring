@@ -9,7 +9,6 @@ from utils.logging import get_logger
 
 API_URL = "https://api.morpho.org/graphql"
 MORPHO_URL = "https://app.morpho.org"
-COMPOUND_URL = "https://compound.blue"
 
 logger = get_logger("morpho.shared")
 
@@ -23,15 +22,11 @@ def get_chain_name(chain: Chain) -> str:
 
 def get_market_url(market_id: str, chain: Chain) -> str:
     """Build the Morpho UI URL for a market by its uniqueKey."""
-    if chain == Chain.POLYGON:
-        return f"{COMPOUND_URL}/borrow/{market_id}"
     return f"{MORPHO_URL}/{get_chain_name(chain)}/market/{market_id}"
 
 
 def get_vault_url(vault_address: str, chain: Chain) -> str:
     """Build the Morpho UI URL for a vault by address."""
-    if chain == Chain.POLYGON:
-        return f"{COMPOUND_URL}/{vault_address}"
     return f"{MORPHO_URL}/{get_chain_name(chain)}/vault/{vault_address}"
 
 
