@@ -126,6 +126,8 @@ env:
   LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
   LLM_MODEL: ${{ secrets.LLM_MODEL }}
   LLM_PROVIDER: ${{ secrets.LLM_PROVIDER }}
+  DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
+  DUNE_LARGE_TRANSFERS_QUERY_ID: ${{ vars.DUNE_LARGE_TRANSFERS_QUERY_ID }}
 
 jobs:
   run:
