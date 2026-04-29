@@ -1,7 +1,7 @@
 """Shared helpers used by both v1 and v2 Morpho monitors."""
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from utils.chains import Chain
 from utils.http import request_with_retry
@@ -11,6 +11,38 @@ API_URL = "https://api.morpho.org/graphql"
 MORPHO_URL = "https://app.morpho.org"
 
 logger = get_logger("morpho.shared")
+
+
+# Yearn-curated Morpho V2 vaults — sourced from
+# https://app.morpho.org/curator/yearn?v2=true (filtered via GraphQL by
+# Yearn's curator addresses). Imported by both ``markets_v2.py`` and
+# ``governance_v2.py``. To add a new vault, append a
+# ``[name, address, risk_level]`` row to the appropriate chain. Risk levels
+# follow the same 1–5 scheme as v1 ``markets.py:VAULTS_BY_CHAIN``.
+VAULTS_V2_BY_CHAIN: Dict[Chain, List[List[Any]]] = {
+    Chain.MAINNET: [
+        # name, address, risk level
+        ["Yearn OG USDC", "0xB885F6d448dA7E2C642Ec31190B629E40E87B069", 3],
+        ["Yearn OG WETH V2", "0xbe518068EB6135117207256F8C9aFf81B4382DB1", 2],
+        ["Yearn USDC", "0xaA8d9E2aBa210639cE6C7cE21385e7c673ACa6f3", 2],
+        ["OUSD Vault V2", "0xFB154c729A16802c4ad1E8f7FF539a8b9f49c960", 2],
+    ],
+    Chain.BASE: [
+        ["Yearn OG USDC V2", "0xe7D0DBE3493830e2Ab62619211A2BfF0Fc60dB42", 2],
+        ["Yearn OG WETH V2", "0x2EfD54529329AD364B8Df988CE3BAb5Ff256ab3E", 2],
+        ["OUSD Vault V2", "0x2Ba14b2e1E7D2189D3550b708DFCA01f899f33c1", 2],
+    ],
+    Chain.KATANA: [
+        ["Yearn OG USDC", "0xca44cbe1FB03691d43d2d93AA460e2fCB03878fE", 1],
+        ["Yearn OG USDT", "0x4284d4F9f4d61eA57B8F0943547c7C19C5B9B249", 1],
+        ["Yearn OG WBTC", "0x22c01834e1A261F8BebCa7D7B459db2F389785FF", 1],
+        ["Yearn OG ETH", "0x5920A6FC553af799542EDA628AdfCc9eA52e141C", 1],
+        ["Yearn KAT", "0x9b1aE9548E4B46cEB6650f6CEc702bAf5CF2b8CC", 3],
+        ["d3nity dUSD V2", "0xf71da79a6eD40F894e883874dCE3f54B1493d930", 3],
+    ],
+}
+
+SUPPORTED_CHAINS: List[Chain] = list(VAULTS_V2_BY_CHAIN.keys())
 
 
 def get_chain_name(chain: Chain) -> str:
@@ -129,28 +161,6 @@ def _parse_market_metrics(raw: Dict[str, Any]) -> MarketMetrics:
             usd=float(bad_debt_raw.get("usd") or 0),
         ),
     )
-
-
-def normalize_vault_name(name: str) -> str:
-    """Normalize vault names for cross-version matching (case- and whitespace-insensitive)."""
-    return " ".join(name.lower().split())
-
-
-def build_v1_name_index(
-    vaults_by_chain: Dict[Chain, List[List[Any]]],
-) -> Dict[Chain, Dict[str, Tuple[int, str]]]:
-    """Build ``{chain: {normalized_name: (risk_level, v1_address)}}`` from the v1 list.
-
-    Used by both markets_v2 and governance_v2 to match v2 vaults discovered via
-    GraphQL against the v1 monitor's hardcoded list, inheriting the v1 risk
-    tier.
-    """
-    index: Dict[Chain, Dict[str, Tuple[int, str]]] = {}
-    for chain, vaults in vaults_by_chain.items():
-        index[chain] = {}
-        for entry in vaults:
-            index[chain][normalize_vault_name(str(entry[0]))] = (int(str(entry[2])), str(entry[1]))
-    return index
 
 
 def fetch_market_metrics(market_ids: List[str], chain: Chain) -> Dict[str, MarketMetrics]:

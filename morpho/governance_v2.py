@@ -27,14 +27,7 @@ from typing import Any, Dict, List
 
 import requests
 
-from morpho._shared import (
-    API_URL,
-    build_v1_name_index,
-    get_vault_url,
-    normalize_vault_name,
-)
-from morpho.markets import VAULTS_BY_CHAIN
-from morpho.markets_v2 import SUPPORTED_CHAINS
+from morpho._shared import API_URL, SUPPORTED_CHAINS, VAULTS_V2_BY_CHAIN, get_vault_url
 from morpho.v2_decoders import decode_submit, submit_data_key
 from utils.cache import (
     get_last_value_for_key_from_file,
@@ -63,14 +56,9 @@ SET_TYPE = "v2_set"
 EXECUTED = -1
 REVOKED = 0
 
-# Page size for the governance snapshot query. Single-vault complexity is
-# ~3700, so 200 vaults = 740k of the 1M maximumComplexity budget.
-_PAGE_SIZE = 200
-_MAX_PAGES = 20
-
 _GOVERNANCE_QUERY = """
-query GovernanceV2($first: Int!, $skip: Int!) {
-  vaultV2s(first: $first, skip: $skip) {
+query GovernanceV2($addresses: [String!]!, $chainIds: [Int!]!) {
+  vaultV2s(first: 200, where: { address_in: $addresses, chainId_in: $chainIds }) {
     items {
       address
       name
@@ -145,50 +133,52 @@ def _checksum_or_empty(value: str) -> str:
 
 
 def fetch_governance_snapshots() -> Dict[Chain, List[V2GovernanceSnapshot]]:
-    """Paginated GraphQL fetch of governance state for all V2 vaults.
+    """GraphQL fetch of governance state for every vault in ``VAULTS_V2_BY_CHAIN``.
 
-    Filters to vaults whose name matches a v1 ``VAULTS_BY_CHAIN`` entry and
-    inherits the v1 risk tier.
+    Issues a single ``vaultV2s(where: { address_in })`` query and joins the
+    result back to the static list to inherit the configured risk level.
     """
-    items: list[dict[str, Any]] = []
-    for page in range(_MAX_PAGES):
-        try:
-            response = request_with_retry(
-                "post",
-                API_URL,
-                json={
-                    "query": _GOVERNANCE_QUERY,
-                    "variables": {"first": _PAGE_SIZE, "skip": page * _PAGE_SIZE},
-                },
-            )
-        except requests.RequestException as e:
-            logger.warning("Failed to fetch v2 governance snapshot (page %d): %s", page, e)
-            break
-        payload = response.json()
-        if "errors" in payload:
-            logger.warning("GraphQL errors fetching v2 governance (page %d): %s", page, payload["errors"])
-            break
-        page_items = payload.get("data", {}).get("vaultV2s", {}).get("items") or []
-        if not page_items:
-            break
-        items.extend(page_items)
-        if len(page_items) < _PAGE_SIZE:
-            break
+    addr_to_meta: dict[str, tuple[Chain, str, int]] = {}
+    addresses: list[str] = []
+    chain_ids: list[int] = []
+    for chain, vaults in VAULTS_V2_BY_CHAIN.items():
+        chain_ids.append(chain.chain_id)
+        for entry in vaults:
+            name, address, risk = str(entry[0]), _checksum_or_empty(str(entry[1])), int(str(entry[2]))
+            addr_to_meta[address.lower()] = (chain, name, risk)
+            addresses.append(address)
 
-    v1_index = build_v1_name_index(VAULTS_BY_CHAIN)
+    if not addresses:
+        return {}
+
+    try:
+        response = request_with_retry(
+            "post",
+            API_URL,
+            json={
+                "query": _GOVERNANCE_QUERY,
+                "variables": {"addresses": addresses, "chainIds": sorted(set(chain_ids))},
+            },
+        )
+    except requests.RequestException as e:
+        logger.warning("Failed to fetch v2 governance snapshot: %s", e)
+        return {chain: [] for chain in SUPPORTED_CHAINS}
+
+    payload = response.json()
+    if "errors" in payload:
+        logger.warning("GraphQL errors fetching v2 governance: %s", payload["errors"])
+        return {chain: [] for chain in SUPPORTED_CHAINS}
+
+    items = payload.get("data", {}).get("vaultV2s", {}).get("items") or []
+    by_addr: dict[str, dict[str, Any]] = {item["address"].lower(): item for item in items}
+
     result: Dict[Chain, List[V2GovernanceSnapshot]] = {chain: [] for chain in SUPPORTED_CHAINS}
 
-    for item in items:
-        try:
-            chain = Chain.from_chain_id(int(item["chain"]["id"]))
-        except (KeyError, ValueError):
+    for addr_lc, (chain, name, risk_level) in addr_to_meta.items():
+        item = by_addr.get(addr_lc)
+        if item is None:
+            logger.warning("V2 vault %s on %s missing from GraphQL response", addr_lc, chain.name)
             continue
-        if chain not in v1_index:
-            continue
-        match = v1_index[chain].get(normalize_vault_name(item["name"]))
-        if match is None:
-            continue
-        risk_level, _v1_addr = match
 
         sentinels = [_checksum_or_empty(s["sentinel"]["address"]) for s in (item.get("sentinels") or [])]
         allocators = [_checksum_or_empty(a["allocator"]["address"]) for a in (item.get("allocators") or [])]
@@ -205,7 +195,7 @@ def fetch_governance_snapshots() -> Dict[Chain, List[V2GovernanceSnapshot]]:
 
         result.setdefault(chain, []).append(
             V2GovernanceSnapshot(
-                name=item["name"],
+                name=name,
                 address=_checksum_or_empty(item["address"]),
                 chain=chain,
                 risk_level=risk_level,
@@ -218,8 +208,8 @@ def fetch_governance_snapshots() -> Dict[Chain, List[V2GovernanceSnapshot]]:
             )
         )
 
-    for chain, vaults in result.items():
-        logger.info("Loaded governance snapshot for %d V2 vault(s) on %s", len(vaults), chain.name)
+    for chain, snapshots in result.items():
+        logger.info("Loaded governance snapshot for %d V2 vault(s) on %s", len(snapshots), chain.name)
     return result
 
 

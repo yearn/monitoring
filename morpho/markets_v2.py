@@ -1,6 +1,6 @@
 """Morpho VaultV2 markets / allocation / risk monitor.
 
-Discovers Yearn-relevant V2 vaults by name-matching against the v1 list, then
+Iterates the explicit ``VAULTS_V2_BY_CHAIN`` list (Yearn-curated V2 vaults), then
 for each vault reads its adapters on-chain and:
 
 * For ``MorphoVaultV1Adapter`` (V2 wraps a v1 MetaMorpho vault) — sanity-checks
@@ -24,12 +24,12 @@ from web3 import Web3
 
 from morpho._shared import (
     API_URL,
+    SUPPORTED_CHAINS,
+    VAULTS_V2_BY_CHAIN,
     MarketMetrics,
-    build_v1_name_index,
     fetch_market_metrics,
     get_market_url,
     get_vault_url,
-    normalize_vault_name,
 )
 from morpho.markets import (
     BAD_DEBT_RATIO,
@@ -55,9 +55,6 @@ ABI_VAULT_V2 = load_abi("morpho/abi/vault_v2.json")
 ABI_MARKET_ADAPTER = load_abi("morpho/abi/morpho_market_v1_adapter_v2.json")
 ABI_VAULT_ADAPTER = load_abi("morpho/abi/morpho_vault_v1_adapter.json")
 
-# Chains that have v1 vaults defined and are eligible for v2 discovery.
-SUPPORTED_CHAINS: list[Chain] = [Chain.MAINNET, Chain.BASE, Chain.KATANA]
-
 ADAPTER_KIND_MARKET = "MorphoMarketV1AdapterV2"
 ADAPTER_KIND_VAULT = "MorphoVaultV1Adapter"
 ADAPTER_KIND_UNKNOWN = "Unknown"
@@ -65,7 +62,7 @@ ADAPTER_KIND_UNKNOWN = "Unknown"
 
 @dataclass
 class V2Vault:
-    """Yearn-relevant V2 vault discovered via GraphQL + matched against v1 list."""
+    """Yearn-curated V2 vault declared in ``VAULTS_V2_BY_CHAIN``."""
 
     name: str
     address: str
@@ -75,7 +72,6 @@ class V2Vault:
     curator: str
     owner: str
     risk_level: int
-    matched_v1_name: str
     total_assets_usd: float = 0.0
     graphql_adapters: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -92,16 +88,13 @@ class AdapterInfo:
 
 
 # ----------------------------------------------------------------------------
-# Vault discovery (GraphQL)
+# Vault state fetch (static list → GraphQL)
 # ----------------------------------------------------------------------------
 
 
-_DISCOVERY_PAGE_SIZE = 200
-_DISCOVERY_MAX_PAGES = 20
-
-_DISCOVERY_QUERY = """
-query DiscoverV2($first: Int!, $skip: Int!) {
-  vaultV2s(first: $first, skip: $skip) {
+_STATE_QUERY = """
+query VaultV2State($addresses: [String!]!, $chainIds: [Int!]!) {
+  vaultV2s(first: 200, where: { address_in: $addresses, chainId_in: $chainIds }) {
     items {
       address
       name
@@ -120,54 +113,55 @@ query DiscoverV2($first: Int!, $skip: Int!) {
 
 
 def discover_v2_vaults_by_chain() -> Dict[Chain, List[V2Vault]]:
-    """Query Morpho GraphQL for V2 vaults and match by name to v1 ``VAULTS_BY_CHAIN``.
+    """Load state for every vault declared in ``VAULTS_V2_BY_CHAIN``.
 
-    Returns a per-chain list of V2 vaults whose ``name`` matches a monitored v1
-    vault's name; the v1 risk tier is inherited.
+    Issues a single GraphQL ``vaultV2s(where: { address_in })`` query, then
+    joins the result back to the static list to inherit the configured risk
+    level. Vaults missing from the GraphQL response are logged and skipped.
     """
-    items: list[dict[str, Any]] = []
-    for page in range(_DISCOVERY_MAX_PAGES):
-        try:
-            response = request_with_retry(
-                "post",
-                API_URL,
-                json={
-                    "query": _DISCOVERY_QUERY,
-                    "variables": {"first": _DISCOVERY_PAGE_SIZE, "skip": page * _DISCOVERY_PAGE_SIZE},
-                },
-            )
-        except requests.RequestException as e:
-            logger.warning("Failed to fetch v2 vault list (page %d): %s", page, e)
-            break
-        data = response.json()
-        if "errors" in data:
-            logger.warning("GraphQL errors during v2 discovery (page %d): %s", page, data["errors"])
-            break
-        page_items = data.get("data", {}).get("vaultV2s", {}).get("items") or []
-        if not page_items:
-            break
-        items.extend(page_items)
-        if len(page_items) < _DISCOVERY_PAGE_SIZE:
-            break
+    addr_to_meta: dict[str, tuple[Chain, str, int]] = {}
+    addresses: list[str] = []
+    chain_ids: list[int] = []
+    for chain, vaults in VAULTS_V2_BY_CHAIN.items():
+        chain_ids.append(chain.chain_id)
+        for entry in vaults:
+            name, address, risk = str(entry[0]), Web3.to_checksum_address(str(entry[1])), int(str(entry[2]))
+            addr_to_meta[address.lower()] = (chain, name, risk)
+            addresses.append(address)
 
-    v1_index = build_v1_name_index(VAULTS_BY_CHAIN)
+    if not addresses:
+        return {}
+
+    try:
+        response = request_with_retry(
+            "post",
+            API_URL,
+            json={
+                "query": _STATE_QUERY,
+                "variables": {"addresses": addresses, "chainIds": sorted(set(chain_ids))},
+            },
+        )
+    except requests.RequestException as e:
+        logger.warning("Failed to fetch v2 vault state: %s", e)
+        return {chain: [] for chain in SUPPORTED_CHAINS}
+
+    data = response.json()
+    if "errors" in data:
+        logger.warning("GraphQL errors fetching v2 state: %s", data["errors"])
+        return {chain: [] for chain in SUPPORTED_CHAINS}
+
+    items = data.get("data", {}).get("vaultV2s", {}).get("items") or []
+    by_addr: dict[str, dict[str, Any]] = {item["address"].lower(): item for item in items}
 
     result: Dict[Chain, List[V2Vault]] = {chain: [] for chain in SUPPORTED_CHAINS}
-    for item in items:
-        try:
-            chain = Chain.from_chain_id(int(item["chain"]["id"]))
-        except (KeyError, ValueError):
+    for addr_lc, (chain, name, risk_level) in addr_to_meta.items():
+        item = by_addr.get(addr_lc)
+        if item is None:
+            logger.warning("V2 vault %s on %s missing from GraphQL response", addr_lc, chain.name)
             continue
-        if chain not in v1_index:
-            continue
-
-        match = v1_index[chain].get(normalize_vault_name(item["name"]))
-        if match is None:
-            continue
-        risk_level, _v1_addr = match
         result.setdefault(chain, []).append(
             V2Vault(
-                name=item["name"],
+                name=name,
                 address=Web3.to_checksum_address(item["address"]),
                 chain=chain,
                 asset_address=item["asset"]["address"],
@@ -175,14 +169,13 @@ def discover_v2_vaults_by_chain() -> Dict[Chain, List[V2Vault]]:
                 curator=(item.get("curator") or {}).get("address") or "",
                 owner=(item.get("owner") or {}).get("address") or "",
                 risk_level=risk_level,
-                matched_v1_name=item["name"],
                 total_assets_usd=float(item.get("totalAssetsUsd") or 0),
                 graphql_adapters=(item.get("adapters") or {}).get("items") or [],
             )
         )
 
     for chain, chain_vaults in result.items():
-        logger.info("Discovered %d V2 vault(s) on %s", len(chain_vaults), chain.name)
+        logger.info("Loaded %d V2 vault(s) on %s", len(chain_vaults), chain.name)
     return result
 
 
