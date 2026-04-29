@@ -274,23 +274,40 @@ def _market_risk_level(market_id: str, chain: Chain) -> int:
     return 5
 
 
-def analyze_market_adapter(
+def score_market_allocations(
     vault: V2Vault,
-    adapter: AdapterInfo,
+    market_adapters: List[AdapterInfo],
     vault_total_assets_usd: float,
 ) -> None:
-    """Score a MorphoMarketV1AdapterV2's per-market allocations against v1 risk tiers."""
-    if vault_total_assets_usd <= 0 or not adapter.market_ids:
+    """Aggregate per-market allocations across **all** market-v1 adapters and alert.
+
+    The vault-level risk score must aggregate every adapter's exposure before
+    comparing to ``MAX_RISK_THRESHOLDS`` — otherwise a curator can split a
+    risky position across two adapters and dodge the threshold per adapter
+    while the vault as a whole exceeds it.
+    """
+    if vault_total_assets_usd <= 0 or not market_adapters:
         return
 
-    metrics = fetch_market_metrics(adapter.market_ids, vault.chain)
+    # Sum allocations per market_id across adapters, in case the same market
+    # is wired through more than one adapter.
+    underlying_per_market: dict[str, int] = {}
+    for adapter in market_adapters:
+        for market_id, expected_assets in zip(adapter.market_ids, adapter.expected_supply_assets):
+            mid = market_id.lower()
+            underlying_per_market[mid] = underlying_per_market.get(mid, 0) + int(expected_assets)
+
+    if not underlying_per_market:
+        return
+
+    metrics = fetch_market_metrics(list(underlying_per_market.keys()), vault.chain)
 
     total_risk_score = 0.0
     allocation_violations: list[str] = []
     bad_debt_alerts: list[str] = []
 
-    for market_id, expected_assets in zip(adapter.market_ids, adapter.expected_supply_assets):
-        market = metrics.get(market_id.lower())
+    for market_id, expected_assets in underlying_per_market.items():
+        market = metrics.get(market_id)
         if not market:
             logger.info("No GraphQL data for market %s; skipping", market_id)
             continue
@@ -387,13 +404,17 @@ def analyze_v2_vault(client: Web3Client, vault: V2Vault) -> None:
     adapter_addresses = list_adapters(client, vault.address)
     adapters = [classify_adapter(client, addr) for addr in adapter_addresses]
 
+    market_adapters: List[AdapterInfo] = []
     for adapter in adapters:
         if adapter.kind == ADAPTER_KIND_MARKET:
-            analyze_market_adapter(vault, adapter, vault.total_assets_usd)
+            market_adapters.append(adapter)
         elif adapter.kind == ADAPTER_KIND_VAULT:
             analyze_vault_adapter(vault, adapter)
         else:
             logger.warning("Skipping unknown adapter kind for %s", adapter.address)
+
+    if market_adapters:
+        score_market_allocations(vault, market_adapters, vault.total_assets_usd)
 
 
 # ----------------------------------------------------------------------------

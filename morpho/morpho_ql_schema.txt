@@ -2109,34 +2109,60 @@ type VaultV2 {
   address: Address!
   name: String!
   symbol: String!
-  whitelisted: Boolean!
   metadata: VaultV2Metadata
 
   """Curators operating on this vault"""
   curators: PaginatedCurators!
-  curatorAddress: Address!
-  ownerAddress: Address!
+
+  """The vault's curator account (use `curator { address }`)."""
+  curator: Account!
+
+  """The vault's owner account (use `owner { address }`)."""
+  owner: Account!
   creationBlockNumber: BigInt!
   creationTimestamp: BigInt!
   asset: Asset!
-  factory: Asset!
+  factory: VaultV2Factory!
   adapters: PaginatedVaultV2Adapters!
   liquidityAdapter: VaultV2Adapter
-  totalAssets: BigInt @deprecated(reason: "currently always metaMorphoAdapter.position.assets")
+  totalAssets: BigInt
   totalSupply: BigInt!
-  totalAssetsUsd: Float @deprecated(reason: "currently always metaMorphoAdapter.position.assetsUsd")
-  idleAssets: BigInt! @deprecated(reason: "currently always 0")
-  idleAssetsUsd: Float @deprecated(reason: "currently always 0")
-  avgApy: Float @deprecated(reason: "currently always metaMorphoAdapter.metaMorpho.state.avgApy")
-  avgNetApy: Float @deprecated(reason: "currently always metaMorphoAdapter.metaMorpho.state.avgNetApy")
-  rewards: [VaultStateReward!]! @deprecated(reason: "currently always metaMorphoAdapter.metaMorpho.state.rewards")
+  totalAssetsUsd: Float
+  idleAssets: BigInt!
+  idleAssetsUsd: Float
+  liquidity: BigInt!
+  liquidityUsd: Float
+  sharePrice: BigInt!
+  rewards: [VaultStateReward!]!
   performanceFee: Float!
   performanceFeeRecipient: Address!
   managementFee: Float!
   managementFeeRecipient: Address!
+  maxRate: BigInt!
+  maxApy: Float!
   allocators: [VaultV2Allocator!]!
+  caps: [VaultV2Cap!]!
   sentinels: [VaultV2Sentinel!]!
   timelocks: [VaultV2Timelock!]!
+  historicalState: VaultV2HistoricalState!
+  warnings: [VaultWarning!]!
+  positions: PaginatedVaultV2Positions!
+  pendingConfigs: [VaultV2PendingConfig!]!
+  listed: Boolean!
+  type: VaultV2Type
+  liquidityData: VaultV2LiquidityData
+  forceDeallocatableLiquidity: BigInt!
+  forceDeallocatableLiquidityUsd: Float
+  avgNetApy: Float
+  avgNetApyExcludingRewards: Float
+  apy: Float
+  netApy: Float
+  netApyExcludingRewards: Float
+  gatesConfig: VaultV2GatesConfig
+  performanceFeeConfig: VaultV2FeeConfig!
+  managementFeeConfig: VaultV2FeeConfig!
+  performanceFeeRecipientConfig: VaultV2FeeRecipientConfig!
+  managementFeeRecipientConfig: VaultV2FeeRecipientConfig!
 }
 
 type VaultV2Position {

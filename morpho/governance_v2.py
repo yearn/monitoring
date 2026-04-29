@@ -106,30 +106,40 @@ def _coerce_bytes(value: Any) -> bytes:
     raise TypeError(f"Cannot coerce {type(value)!r} to bytes")
 
 
-def _get_logs(client: Web3Client, contract: Any, event_name: str, from_block: int, to_block: int) -> list[Any]:
-    """Fetch logs for one event in chunks to respect RPC range limits."""
+def _get_logs(
+    client: Web3Client, contract: Any, event_name: str, from_block: int, to_block: int
+) -> tuple[list[Any], int]:
+    """Fetch logs for one event in chunks to respect RPC range limits.
+
+    Returns ``(logs, last_successful_block)``. ``last_successful_block`` is the
+    highest block fully covered by a successful chunk; if a chunk fails, the
+    caller MUST NOT advance its checkpoint past that value or it will silently
+    drop alerts. Returns ``(_, from_block - 1)`` if the very first chunk fails.
+    """
     if from_block > to_block:
-        return []
+        return [], to_block
     event = contract.events[event_name]
     out: list[Any] = []
     cursor = from_block
+    last_successful = from_block - 1
     while cursor <= to_block:
         end = min(cursor + LOG_CHUNK_SIZE - 1, to_block)
         try:
             chunk = list(event.get_logs(from_block=cursor, to_block=end))
         except Exception as e:
             logger.warning(
-                "get_logs %s failed for %s [%d-%d]: %s",
+                "get_logs %s failed for %s [%d-%d]: %s — checkpoint will not advance",
                 event_name,
                 contract.address,
                 cursor,
                 end,
                 e,
             )
-            chunk = []
+            return out, last_successful
         out.extend(chunk)
+        last_successful = end
         cursor = end + 1
-    return out
+    return out, last_successful
 
 
 def _resolve_lookback(chain: Chain) -> int:
@@ -141,14 +151,19 @@ def _resolve_lookback(chain: Chain) -> int:
 # ----------------------------------------------------------------------------
 
 
-def _alert_submit(vault: V2Vault, source_label: str, log: Any) -> None:
-    """Telegram alert for a freshly submitted timelocked operation."""
+def _alert_submit(vault: V2Vault, emitter: str, source_label: str, log: Any) -> None:
+    """Telegram alert for a freshly submitted timelocked operation.
+
+    ``emitter`` is the contract that emitted the Submit event (vault or adapter).
+    Including it in the cache key prevents two adapters submitting identical
+    calldata from masking each other.
+    """
     args = log["args"]
     data = _coerce_bytes(args["data"])
     executable_at = int(args["executableAt"])
     decoded = decode_submit(data)
     cache_key_id = submit_data_key(data)
-    last = get_last_executed_morpho_from_file(vault.address.lower(), cache_key_id, SUBMIT_TYPE)
+    last = get_last_executed_morpho_from_file(emitter.lower(), cache_key_id, SUBMIT_TYPE)
     if last == executable_at or last == -1:
         # Already alerted (and possibly executed) — skip.
         return
@@ -162,15 +177,15 @@ def _alert_submit(vault: V2Vault, source_label: str, log: Any) -> None:
         f"🔗 Tx: {tx_link}",
         PROTOCOL,
     )
-    write_last_executed_morpho_to_file(vault.address.lower(), cache_key_id, SUBMIT_TYPE, executable_at)
+    write_last_executed_morpho_to_file(emitter.lower(), cache_key_id, SUBMIT_TYPE, executable_at)
 
 
-def _alert_accept(vault: V2Vault, source_label: str, log: Any) -> None:
+def _alert_accept(vault: V2Vault, emitter: str, source_label: str, log: Any) -> None:
     args = log["args"]
     data = _coerce_bytes(args["data"])
     decoded = decode_submit(data)
     cache_key_id = submit_data_key(data)
-    last = get_last_executed_morpho_from_file(vault.address.lower(), cache_key_id, SUBMIT_TYPE)
+    last = get_last_executed_morpho_from_file(emitter.lower(), cache_key_id, SUBMIT_TYPE)
     if last == -1:
         return
     tx_link = _explorer_link(vault.chain, log["transactionHash"].hex())
@@ -180,15 +195,15 @@ def _alert_accept(vault: V2Vault, source_label: str, log: Any) -> None:
         f"🔗 Tx: {tx_link}",
         PROTOCOL,
     )
-    write_last_executed_morpho_to_file(vault.address.lower(), cache_key_id, SUBMIT_TYPE, -1)
+    write_last_executed_morpho_to_file(emitter.lower(), cache_key_id, SUBMIT_TYPE, -1)
 
 
-def _alert_revoke(vault: V2Vault, source_label: str, log: Any) -> None:
+def _alert_revoke(vault: V2Vault, emitter: str, source_label: str, log: Any) -> None:
     args = log["args"]
     data = _coerce_bytes(args["data"])
     decoded = decode_submit(data)
     cache_key_id = submit_data_key(data)
-    last = get_last_executed_morpho_from_file(vault.address.lower(), cache_key_id, SUBMIT_TYPE)
+    last = get_last_executed_morpho_from_file(emitter.lower(), cache_key_id, SUBMIT_TYPE)
     if last == 0:
         return
     sender = args.get("sender", "?")
@@ -199,14 +214,14 @@ def _alert_revoke(vault: V2Vault, source_label: str, log: Any) -> None:
         f"🔗 Tx: {tx_link}",
         PROTOCOL,
     )
-    write_last_executed_morpho_to_file(vault.address.lower(), cache_key_id, SUBMIT_TYPE, 0)
+    write_last_executed_morpho_to_file(emitter.lower(), cache_key_id, SUBMIT_TYPE, 0)
 
 
-def _alert_instant(vault: V2Vault, event_name: str, log: Any) -> None:
+def _alert_instant(vault: V2Vault, emitter: str, event_name: str, log: Any) -> None:
     """Alert for owner-controlled instant changes (no timelock)."""
     tx_hash = log["transactionHash"].hex()
     instant_id = f"{tx_hash}+{log.get('logIndex', 0)}"
-    last = get_last_executed_morpho_from_file(vault.address.lower(), instant_id, INSTANT_TYPE)
+    last = get_last_executed_morpho_from_file(emitter.lower(), instant_id, INSTANT_TYPE)
     if last:
         return
     args = log["args"]
@@ -224,14 +239,14 @@ def _alert_instant(vault: V2Vault, event_name: str, log: Any) -> None:
         f"🚨 V2 [{vault.name}]({_vault_url(vault)}) instant change on {vault.chain.name}\n{body}\n🔗 Tx: {tx_link}",
         PROTOCOL,
     )
-    write_last_executed_morpho_to_file(vault.address.lower(), instant_id, INSTANT_TYPE, 1)
+    write_last_executed_morpho_to_file(emitter.lower(), instant_id, INSTANT_TYPE, 1)
 
 
-def _alert_audit(vault: V2Vault, source_label: str, event_name: str, log: Any) -> None:
+def _alert_audit(vault: V2Vault, emitter: str, source_label: str, event_name: str, log: Any) -> None:
     """Lightweight informational alert for audit events that are useful but not critical."""
     tx_hash = log["transactionHash"].hex()
     instant_id = f"{tx_hash}+{log.get('logIndex', 0)}+{event_name}"
-    last = get_last_executed_morpho_from_file(vault.address.lower(), instant_id, INSTANT_TYPE)
+    last = get_last_executed_morpho_from_file(emitter.lower(), instant_id, INSTANT_TYPE)
     if last:
         return
     args = log["args"]
@@ -255,7 +270,7 @@ def _alert_audit(vault: V2Vault, source_label: str, event_name: str, log: Any) -
         f"ℹ️ V2 [{vault.name}]({_vault_url(vault)}) {source_label} on {vault.chain.name}\n{body}\n🔗 Tx: {tx_link}",
         PROTOCOL,
     )
-    write_last_executed_morpho_to_file(vault.address.lower(), instant_id, INSTANT_TYPE, 1)
+    write_last_executed_morpho_to_file(emitter.lower(), instant_id, INSTANT_TYPE, 1)
 
 
 # ----------------------------------------------------------------------------
@@ -275,7 +290,12 @@ def _process_target(
     chain_id: int,
     latest_block: int,
 ) -> None:
-    """Replay events on a single contract (vault or adapter) and alert on each."""
+    """Replay events on a single contract (vault or adapter) and alert on each.
+
+    The checkpoint only advances to ``min(last_successful_block)`` across all
+    polled events. If any chunk fails, the next run replays the failed range so
+    no Submit / Accept / Revoke is silently dropped.
+    """
     contract = client.get_contract(Web3.to_checksum_address(address), abi)
 
     last_block = get_last_processed_block(address, chain_id)
@@ -285,33 +305,53 @@ def _process_target(
     if from_block > latest_block:
         return
 
+    safe_checkpoints: list[int] = []
+
     for event_name in timelock_events:
-        for log in _get_logs(client, contract, event_name, from_block, latest_block):
+        logs, last_ok = _get_logs(client, contract, event_name, from_block, latest_block)
+        safe_checkpoints.append(last_ok)
+        for log in logs:
             try:
                 if event_name == "Submit":
-                    _alert_submit(vault, label, log)
+                    _alert_submit(vault, address, label, log)
                 elif event_name == "Accept":
-                    _alert_accept(vault, label, log)
+                    _alert_accept(vault, address, label, log)
                 elif event_name == "Revoke":
-                    _alert_revoke(vault, label, log)
+                    _alert_revoke(vault, address, label, log)
             except Exception as e:
                 logger.exception("Failed to process %s event on %s: %s", event_name, address, e)
 
     for event_name in audit_events:
-        for log in _get_logs(client, contract, event_name, from_block, latest_block):
+        logs, last_ok = _get_logs(client, contract, event_name, from_block, latest_block)
+        safe_checkpoints.append(last_ok)
+        for log in logs:
             try:
-                _alert_audit(vault, label, event_name, log)
+                _alert_audit(vault, address, label, event_name, log)
             except Exception as e:
                 logger.exception("Failed to process audit %s on %s: %s", event_name, address, e)
 
     for event_name in instant_events:
-        for log in _get_logs(client, contract, event_name, from_block, latest_block):
+        logs, last_ok = _get_logs(client, contract, event_name, from_block, latest_block)
+        safe_checkpoints.append(last_ok)
+        for log in logs:
             try:
-                _alert_instant(vault, event_name, log)
+                _alert_instant(vault, address, event_name, log)
             except Exception as e:
                 logger.exception("Failed to process instant %s on %s: %s", event_name, address, e)
 
-    write_last_processed_block(address, chain_id, latest_block)
+    if not safe_checkpoints:
+        return
+    new_checkpoint = min(safe_checkpoints)
+    if new_checkpoint > last_block:
+        write_last_processed_block(address, chain_id, new_checkpoint)
+    else:
+        logger.warning(
+            "Not advancing checkpoint for %s on chain %d: log fetch failed in range [%d, %d]",
+            address,
+            chain_id,
+            from_block,
+            latest_block,
+        )
 
 
 # ----------------------------------------------------------------------------
