@@ -44,6 +44,20 @@ def morpho_key(vault_address: str, market_id: str, value_type: str) -> str:
     return vault_address + "+" + market_id + "+" + value_type
 
 
+def get_last_processed_block(address: str, chain_id: int) -> int:
+    """Return the last block processed for an event-polling loop, or 0 if unset."""
+    return int(get_last_value_for_key_from_file(morpho_filename, _block_key(address, chain_id)))
+
+
+def write_last_processed_block(address: str, chain_id: int, block: int) -> None:
+    """Persist the last block processed for an event-polling loop."""
+    write_last_value_to_file(morpho_filename, _block_key(address, chain_id), block)
+
+
+def _block_key(address: str, chain_id: int) -> str:
+    return f"v2_block+{chain_id}+{address.lower()}"
+
+
 def get_last_value_for_key_from_file(filename: str, wanted_key: str) -> Union[str, int]:
     if not os.path.exists(filename):
         return 0

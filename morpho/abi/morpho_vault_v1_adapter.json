@@ -1,0 +1,50 @@
+[
+    {
+        "type": "function",
+        "name": "parentVault",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}]
+    },
+    {
+        "type": "function",
+        "name": "morphoVaultV1",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}]
+    },
+    {
+        "type": "function",
+        "name": "adapterId",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "bytes32"}]
+    },
+    {
+        "type": "function",
+        "name": "skimRecipient",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}]
+    },
+    {
+        "type": "function",
+        "name": "realAssets",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "uint256"}]
+    },
+    {
+        "type": "function",
+        "name": "allocation",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "uint256"}]
+    },
+    {
+        "type": "event",
+        "name": "SetSkimRecipient",
+        "anonymous": false,
+        "inputs": [{"indexed": false, "name": "newSkimRecipient", "type": "address"}]
+    }
+]

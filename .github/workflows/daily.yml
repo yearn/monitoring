@@ -21,6 +21,7 @@ jobs:
         MORPHO_FILENAME=cache-id-daily.txt
       scripts: |
         morpho/governance.py
+        morpho/governance_v2.py
         ethena/ethena.py
         strata/main.py
         cap/liquidity.py

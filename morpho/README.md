@@ -128,6 +128,39 @@ The system monitors the allocation ratio for each market hourly:
 
 If any market's allocation exceeds its adjusted threshold, an alert is triggered with a corresponding Telegram message. This mechanism ensures that vaults maintain proper diversification and are not overly concentrated in higher-risk markets.
 
+## Vault V2 Monitoring
+
+Morpho's [Vault V2](https://github.com/morpho-org/vault-v2) replaces the v1 single-vault timelock with a **per-function timelock** keyed by arbitrary calldata, plus a richer adapter system. Yearn-curated v2 vaults are monitored separately:
+
+- [`governance_v2.py`](./governance_v2.py) — daily, replays `Submit` / `Accept` / `Revoke` events on each v2 vault and on each `MorphoMarketV1AdapterV2` adapter, decodes the embedded calldata, and posts a Telegram alert per pending change. Also alerts on owner-controlled instant changes (`SetOwner`, `SetCurator`, `SetIsSentinel`) and audit events (`AddAdapter`, `RemoveAdapter`, `IncreaseTimelock`, `DecreaseTimelock`, `Abdicate`).
+- [`markets_v2.py`](./markets_v2.py) — hourly, walks each v2 vault's adapters and runs the existing v1 risk-tier scoring against the underlying Morpho Blue markets when the vault uses `MorphoMarketV1AdapterV2`. For `MorphoVaultV1Adapter` (today's common case) the wrapped v1 vault keeps receiving its full v1 analysis via `markets.py`; we only flag the case where v2 introduces a new wrapped v1 vault that operators should add to `VAULTS_BY_CHAIN`.
+- [`v2_decoders.py`](./v2_decoders.py) — selector→signature map and decoders for every v2 timelocked function (and the three `idData` tag prefixes used by `increaseAbsoluteCap`/`increaseRelativeCap`).
+
+### Vault discovery
+
+V2 vaults are **not** hardcoded. On each run we query `vaultV2s` from Morpho's GraphQL API and match by `name` against the v1 [`VAULTS_BY_CHAIN`](./markets.py#L29) entries; matching vaults inherit the v1 risk tier. To start monitoring a new v2 vault, ensure its v1 counterpart is in the v1 list with the same name (case- and whitespace-insensitive).
+
+### Cache
+
+Both scripts share `MORPHO_FILENAME` (default `cache-id.txt`). Three new key types are added by v2:
+
+| Key suffix | Value | Meaning |
+| --- | --- | --- |
+| `v2_submit` (segment = `keccak(data)`) | `executableAt` ts, `-1`, or `0` | Pending / executed / revoked |
+| `v2_instant` (segment = `tx_hash+log_index[+event]`) | `1` | Owner-action / audit event already alerted |
+| `v2_block` (segment = `chain_id+address`) | block number | Resume point for event polling per address |
+
+### How to run locally
+
+```bash
+# Hourly (allocation + risk)
+python morpho/markets_v2.py
+# Daily (timelocks + role changes)
+python morpho/governance_v2.py
+```
+
+Set `MORPHO_FILENAME=/tmp/morpho-cache.txt` to use an isolated cache while testing.
+
 ## API Docs
 
 Morpho GraphQL API wizard is available at [https://api.morpho.org/graphql](https://api.morpho.org/graphql). GraphQL schema is available in [morpho_ql_schema.txt](./morpho_ql_schema.txt) file. For fetching a market oracle and validating it against RPC (including Chainlink, RedStone, Chronicle, API3), see [morpho-oracle-validation.md](./morpho-oracle-validation.md).

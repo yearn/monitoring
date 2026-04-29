@@ -1,0 +1,317 @@
+[
+    {
+        "type": "function",
+        "name": "owner",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}]
+    },
+    {
+        "type": "function",
+        "name": "curator",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}]
+    },
+    {
+        "type": "function",
+        "name": "asset",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}]
+    },
+    {
+        "type": "function",
+        "name": "name",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "string"}]
+    },
+    {
+        "type": "function",
+        "name": "symbol",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "string"}]
+    },
+    {
+        "type": "function",
+        "name": "totalAssets",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "uint256"}]
+    },
+    {
+        "type": "function",
+        "name": "adapters",
+        "stateMutability": "view",
+        "inputs": [{"name": "", "type": "uint256"}],
+        "outputs": [{"name": "", "type": "address"}]
+    },
+    {
+        "type": "function",
+        "name": "adaptersLength",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "uint256"}]
+    },
+    {
+        "type": "function",
+        "name": "isAdapter",
+        "stateMutability": "view",
+        "inputs": [{"name": "", "type": "address"}],
+        "outputs": [{"name": "", "type": "bool"}]
+    },
+    {
+        "type": "function",
+        "name": "isSentinel",
+        "stateMutability": "view",
+        "inputs": [{"name": "", "type": "address"}],
+        "outputs": [{"name": "", "type": "bool"}]
+    },
+    {
+        "type": "function",
+        "name": "isAllocator",
+        "stateMutability": "view",
+        "inputs": [{"name": "", "type": "address"}],
+        "outputs": [{"name": "", "type": "bool"}]
+    },
+    {
+        "type": "function",
+        "name": "timelock",
+        "stateMutability": "view",
+        "inputs": [{"name": "", "type": "bytes4"}],
+        "outputs": [{"name": "", "type": "uint256"}]
+    },
+    {
+        "type": "function",
+        "name": "abdicated",
+        "stateMutability": "view",
+        "inputs": [{"name": "", "type": "bytes4"}],
+        "outputs": [{"name": "", "type": "bool"}]
+    },
+    {
+        "type": "function",
+        "name": "executableAt",
+        "stateMutability": "view",
+        "inputs": [{"name": "", "type": "bytes"}],
+        "outputs": [{"name": "", "type": "uint256"}]
+    },
+    {
+        "type": "function",
+        "name": "absoluteCap",
+        "stateMutability": "view",
+        "inputs": [{"name": "id", "type": "bytes32"}],
+        "outputs": [{"name": "", "type": "uint256"}]
+    },
+    {
+        "type": "function",
+        "name": "relativeCap",
+        "stateMutability": "view",
+        "inputs": [{"name": "id", "type": "bytes32"}],
+        "outputs": [{"name": "", "type": "uint256"}]
+    },
+    {
+        "type": "function",
+        "name": "allocation",
+        "stateMutability": "view",
+        "inputs": [{"name": "id", "type": "bytes32"}],
+        "outputs": [{"name": "", "type": "uint256"}]
+    },
+    {
+        "type": "function",
+        "name": "liquidityAdapter",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}]
+    },
+    {
+        "type": "function",
+        "name": "performanceFee",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "uint96"}]
+    },
+    {
+        "type": "function",
+        "name": "managementFee",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "uint96"}]
+    },
+    {
+        "type": "function",
+        "name": "performanceFeeRecipient",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}]
+    },
+    {
+        "type": "function",
+        "name": "managementFeeRecipient",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}]
+    },
+    {
+        "type": "event",
+        "name": "Submit",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "selector", "type": "bytes4"},
+            {"indexed": false, "name": "data", "type": "bytes"},
+            {"indexed": false, "name": "executableAt", "type": "uint256"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "Accept",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "selector", "type": "bytes4"},
+            {"indexed": false, "name": "data", "type": "bytes"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "Revoke",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "sender", "type": "address"},
+            {"indexed": true, "name": "selector", "type": "bytes4"},
+            {"indexed": false, "name": "data", "type": "bytes"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "SetOwner",
+        "anonymous": false,
+        "inputs": [{"indexed": true, "name": "newOwner", "type": "address"}]
+    },
+    {
+        "type": "event",
+        "name": "SetCurator",
+        "anonymous": false,
+        "inputs": [{"indexed": true, "name": "newCurator", "type": "address"}]
+    },
+    {
+        "type": "event",
+        "name": "SetIsSentinel",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "account", "type": "address"},
+            {"indexed": false, "name": "newIsSentinel", "type": "bool"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "SetIsAllocator",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "account", "type": "address"},
+            {"indexed": false, "name": "newIsAllocator", "type": "bool"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "AddAdapter",
+        "anonymous": false,
+        "inputs": [{"indexed": true, "name": "account", "type": "address"}]
+    },
+    {
+        "type": "event",
+        "name": "RemoveAdapter",
+        "anonymous": false,
+        "inputs": [{"indexed": true, "name": "account", "type": "address"}]
+    },
+    {
+        "type": "event",
+        "name": "IncreaseTimelock",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "selector", "type": "bytes4"},
+            {"indexed": false, "name": "newDuration", "type": "uint256"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "DecreaseTimelock",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "selector", "type": "bytes4"},
+            {"indexed": false, "name": "newDuration", "type": "uint256"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "Abdicate",
+        "anonymous": false,
+        "inputs": [{"indexed": true, "name": "selector", "type": "bytes4"}]
+    },
+    {
+        "type": "event",
+        "name": "IncreaseAbsoluteCap",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "id", "type": "bytes32"},
+            {"indexed": false, "name": "idData", "type": "bytes"},
+            {"indexed": false, "name": "newAbsoluteCap", "type": "uint256"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "DecreaseAbsoluteCap",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "sender", "type": "address"},
+            {"indexed": true, "name": "id", "type": "bytes32"},
+            {"indexed": false, "name": "idData", "type": "bytes"},
+            {"indexed": false, "name": "newAbsoluteCap", "type": "uint256"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "IncreaseRelativeCap",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "id", "type": "bytes32"},
+            {"indexed": false, "name": "idData", "type": "bytes"},
+            {"indexed": false, "name": "newRelativeCap", "type": "uint256"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "DecreaseRelativeCap",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "sender", "type": "address"},
+            {"indexed": true, "name": "id", "type": "bytes32"},
+            {"indexed": false, "name": "idData", "type": "bytes"},
+            {"indexed": false, "name": "newRelativeCap", "type": "uint256"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "Allocate",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "sender", "type": "address"},
+            {"indexed": true, "name": "adapter", "type": "address"},
+            {"indexed": false, "name": "assets", "type": "uint256"},
+            {"indexed": false, "name": "ids", "type": "bytes32[]"},
+            {"indexed": false, "name": "change", "type": "int256"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "Deallocate",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "sender", "type": "address"},
+            {"indexed": true, "name": "adapter", "type": "address"},
+            {"indexed": false, "name": "assets", "type": "uint256"},
+            {"indexed": false, "name": "ids", "type": "bytes32[]"},
+            {"indexed": false, "name": "change", "type": "int256"}
+        ]
+    }
+]

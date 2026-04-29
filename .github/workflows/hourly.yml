@@ -19,6 +19,7 @@ jobs:
       scripts: |
         3jane/main.py
         morpho/markets.py
+        morpho/markets_v2.py
         aave/main.py
         lido/steth/main.py
         lrt-pegs/curve/main.py
