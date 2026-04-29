@@ -17,7 +17,7 @@ Liquidity monitoring is deferred to phase 2 (see TODO at bottom).
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import requests
 from web3 import Web3
@@ -25,9 +25,11 @@ from web3 import Web3
 from morpho._shared import (
     API_URL,
     MarketMetrics,
+    build_v1_name_index,
     fetch_market_metrics,
     get_market_url,
     get_vault_url,
+    normalize_vault_name,
 )
 from morpho.markets import (
     BAD_DEBT_RATIO,
@@ -148,12 +150,7 @@ def discover_v2_vaults_by_chain() -> Dict[Chain, List[V2Vault]]:
         if len(page_items) < _DISCOVERY_PAGE_SIZE:
             break
 
-    # Build a name -> (risk_level, v1_address) map per chain for fast matching.
-    v1_index: Dict[Chain, Dict[str, Tuple[int, str]]] = {}
-    for v1_chain, v1_vaults in VAULTS_BY_CHAIN.items():
-        v1_index[v1_chain] = {}
-        for entry in v1_vaults:
-            v1_index[v1_chain][_normalize_name(str(entry[0]))] = (int(str(entry[2])), str(entry[1]))
+    v1_index = build_v1_name_index(VAULTS_BY_CHAIN)
 
     result: Dict[Chain, List[V2Vault]] = {chain: [] for chain in SUPPORTED_CHAINS}
     for item in items:
@@ -164,7 +161,7 @@ def discover_v2_vaults_by_chain() -> Dict[Chain, List[V2Vault]]:
         if chain not in v1_index:
             continue
 
-        match = v1_index[chain].get(_normalize_name(item["name"]))
+        match = v1_index[chain].get(normalize_vault_name(item["name"]))
         if match is None:
             continue
         risk_level, _v1_addr = match
@@ -187,11 +184,6 @@ def discover_v2_vaults_by_chain() -> Dict[Chain, List[V2Vault]]:
     for chain, chain_vaults in result.items():
         logger.info("Discovered %d V2 vault(s) on %s", len(chain_vaults), chain.name)
     return result
-
-
-def _normalize_name(name: str) -> str:
-    """Normalize vault names for matching (case-insensitive, whitespace-collapsed)."""
-    return " ".join(name.lower().split())
 
 
 # ----------------------------------------------------------------------------

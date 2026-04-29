@@ -132,7 +132,7 @@ If any market's allocation exceeds its adjusted threshold, an alert is triggered
 
 Morpho's [Vault V2](https://github.com/morpho-org/vault-v2) replaces the v1 single-vault timelock with a **per-function timelock** keyed by arbitrary calldata, plus a richer adapter system. Yearn-curated v2 vaults are monitored separately:
 
-- [`governance_v2.py`](./governance_v2.py) — daily, replays `Submit` / `Accept` / `Revoke` events on each v2 vault and on each `MorphoMarketV1AdapterV2` adapter, decodes the embedded calldata, and posts a Telegram alert per pending change. Also alerts on owner-controlled instant changes (`SetOwner`, `SetCurator`, `SetIsSentinel`) and audit events (`AddAdapter`, `RemoveAdapter`, `IncreaseTimelock`, `DecreaseTimelock`, `Abdicate`).
+- [`governance_v2.py`](./governance_v2.py) — daily, pulls a per-vault governance **snapshot** from Morpho's GraphQL API (`vaultV2s.pendingConfigs` + `owner` / `curator` / `sentinels` / `allocators` / `adapters`) and diffs it against the persisted cache. Mirrors v1's pull-based approach (`pendingTimelock` / `pendingGuardian` / `pendingCap`) so RPC usage stays bounded. Alerts on: new pending timelocked operations, executed or revoked operations, owner / curator changes, sentinel / allocator / adapter set changes.
 - [`markets_v2.py`](./markets_v2.py) — hourly, walks each v2 vault's adapters and runs the existing v1 risk-tier scoring against the underlying Morpho Blue markets when the vault uses `MorphoMarketV1AdapterV2`. For `MorphoVaultV1Adapter` (today's common case) the wrapped v1 vault keeps receiving its full v1 analysis via `markets.py`; we only flag the case where v2 introduces a new wrapped v1 vault that operators should add to `VAULTS_BY_CHAIN`.
 - [`v2_decoders.py`](./v2_decoders.py) — selector→signature map and decoders for every v2 timelocked function (and the three `idData` tag prefixes used by `increaseAbsoluteCap`/`increaseRelativeCap`).
 
@@ -142,13 +142,18 @@ V2 vaults are **not** hardcoded. On each run we query `vaultV2s` from Morpho's G
 
 ### Cache
 
-Both scripts share `MORPHO_FILENAME` (default `cache-id.txt`). Three new key types are added by v2:
+Both scripts share `MORPHO_FILENAME` (default `cache-id.txt`). New key types added by v2:
 
-| Key suffix | Value | Meaning |
-| --- | --- | --- |
-| `v2_submit` (segment = `keccak(data)`) | `executableAt` ts, `-1`, or `0` | Pending / executed / revoked |
-| `v2_instant` (segment = `tx_hash+log_index[+event]`) | `1` | Owner-action / audit event already alerted |
-| `v2_block` (segment = `chain_id+address`) | block number | Resume point for event polling per address |
+| Key suffix | Segment | Value | Meaning |
+| --- | --- | --- | --- |
+| `v2_pending` | `keccak(data)` | `validAt` ts, `-1`, or `0` | Pending timelock operation: pending / executed / revoked |
+| `v2_pending_index` | `pending_keys` | comma-joined `keccak(data)` | Reverse index used to detect operations that disappeared from `pendingConfigs` |
+| `v2_role` | `owner` / `curator` | lowercase address | Last-known instant-role address |
+| `v2_set` | `sentinels` / `allocators` / `adapters` | comma-joined lowercase addresses | Last-known role set |
+
+### Limitations
+
+`MorphoMarketV1AdapterV2` has its own internal timelock system (`setSkimRecipient`, `burnShares`, `increaseTimelock`, etc.). The Morpho GraphQL API does **not** expose adapter-internal pending operations, and replaying `Submit` events on each adapter would reintroduce the RPC cost we're explicitly avoiding. Phase-2 candidate.
 
 ### How to run locally
 

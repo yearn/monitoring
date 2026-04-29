@@ -1,7 +1,7 @@
 """Shared helpers used by both v1 and v2 Morpho monitors."""
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from utils.chains import Chain
 from utils.http import request_with_retry
@@ -134,6 +134,28 @@ def _parse_market_metrics(raw: Dict[str, Any]) -> MarketMetrics:
             usd=float(bad_debt_raw.get("usd") or 0),
         ),
     )
+
+
+def normalize_vault_name(name: str) -> str:
+    """Normalize vault names for cross-version matching (case- and whitespace-insensitive)."""
+    return " ".join(name.lower().split())
+
+
+def build_v1_name_index(
+    vaults_by_chain: Dict[Chain, List[List[Any]]],
+) -> Dict[Chain, Dict[str, Tuple[int, str]]]:
+    """Build ``{chain: {normalized_name: (risk_level, v1_address)}}`` from the v1 list.
+
+    Used by both markets_v2 and governance_v2 to match v2 vaults discovered via
+    GraphQL against the v1 monitor's hardcoded list, inheriting the v1 risk
+    tier.
+    """
+    index: Dict[Chain, Dict[str, Tuple[int, str]]] = {}
+    for chain, vaults in vaults_by_chain.items():
+        index[chain] = {}
+        for entry in vaults:
+            index[chain][normalize_vault_name(str(entry[0]))] = (int(str(entry[2])), str(entry[1]))
+    return index
 
 
 def fetch_market_metrics(market_ids: List[str], chain: Chain) -> Dict[str, MarketMetrics]:

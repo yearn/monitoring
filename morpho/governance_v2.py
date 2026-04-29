@@ -1,149 +1,248 @@
-"""Morpho VaultV2 timelock + role-change monitor.
+"""Morpho VaultV2 governance monitor — GraphQL snapshot diff.
 
-V2 timelocks store pending changes in a per-calldata mapping
-(``executableAt[bytes data]``) that cannot be enumerated, so we replay
-``Submit`` / ``Accept`` / ``Revoke`` events from each vault and each
-``MorphoMarketV1AdapterV2`` adapter, decoding the embedded calldata into a
-human-readable Telegram alert.
+Like v1's ``governance.py`` (which polls ``pendingTimelock``/``pendingGuardian``/
+``pendingCap`` on-chain), this monitor pulls the *current* governance state on
+every run and diffs it against the cached snapshot. No event-log polling, so
+RPC usage stays bounded to a single GraphQL query per chain.
 
-Owner-controlled, *non*-timelocked changes (``SetOwner``, ``SetCurator``,
-``SetIsSentinel``) are alerted on first sighting since they take effect
-instantly and can hand control of the vault to an unexpected actor.
+Detected and alerted:
+
+* **Pending timelocked operations** (``vaultV2s.pendingConfigs``) — appearance,
+  execution, and revocation. Each pending config is identified by
+  ``keccak256(data)`` so two adapters with identical calldata don't collide.
+* **Owner / curator changes** — instant, no timelock.
+* **Sentinels / allocators / adapters** — added or removed.
+
+NOT covered: ``MorphoMarketV1AdapterV2``'s own internal timelock system. The
+GraphQL API does not surface adapter-internal pending operations; replaying
+their Submit/Accept/Revoke events would reintroduce the RPC cost we're
+explicitly avoiding. Phase-2 candidate.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Iterable
+from typing import Any, Dict, List
 
-from web3 import Web3
+import requests
 
-from morpho._shared import get_vault_url
-from morpho.markets_v2 import (
-    ABI_MARKET_ADAPTER,
-    ABI_VAULT_V2,
-    ADAPTER_KIND_MARKET,
-    AdapterInfo,
-    V2Vault,
-    classify_adapter,
-    discover_v2_vaults_by_chain,
-    list_adapters,
+from morpho._shared import (
+    API_URL,
+    build_v1_name_index,
+    get_vault_url,
+    normalize_vault_name,
 )
-from morpho.v2_decoders import decode_submit, selector_function_name, submit_data_key
+from morpho.markets import VAULTS_BY_CHAIN
+from morpho.markets_v2 import SUPPORTED_CHAINS
+from morpho.v2_decoders import decode_submit, submit_data_key
 from utils.cache import (
-    get_last_executed_morpho_from_file,
-    get_last_processed_block,
-    write_last_executed_morpho_to_file,
-    write_last_processed_block,
+    get_last_value_for_key_from_file,
+    morpho_filename,
+    morpho_key,
+    write_last_value_to_file,
 )
 from utils.chains import Chain
+from utils.http import request_with_retry
 from utils.logging import get_logger
 from utils.telegram import send_telegram_message
-from utils.web3_wrapper import ChainManager, Web3Client
 
 PROTOCOL = "morpho"
 logger = get_logger("morpho.governance_v2")
 
 # Cache value-type tags used with utils.cache.morpho_key.
-SUBMIT_TYPE = "v2_submit"
-INSTANT_TYPE = "v2_instant"
+PENDING_TYPE = "v2_pending"
+PENDING_INDEX_TYPE = "v2_pending_index"
+ROLE_TYPE = "v2_role"
+SET_TYPE = "v2_set"
 
-# Default lookback per chain when no last_processed_block is recorded.
-# Conservative ~24h windows; the actual cadence is daily so this only matters
-# on first run.
-LOOKBACK_BLOCKS_BY_CHAIN: dict[Chain, int] = {
-    Chain.MAINNET: 8000,
-    Chain.BASE: 50000,
-    Chain.KATANA: 50000,
-    Chain.POLYGON: 50000,
+# Sentinel cache values for pending operations:
+# * positive int: validAt of the latest pending submission we've alerted on
+# * -1: pending config was executed (Accept), don't re-alert if it reappears
+# * 0: pending config was revoked (Revoke), allow new Submit alerts to fire
+EXECUTED = -1
+REVOKED = 0
+
+# Page size for the governance snapshot query. Single-vault complexity is
+# ~3700, so 200 vaults = 740k of the 1M maximumComplexity budget.
+_PAGE_SIZE = 200
+_MAX_PAGES = 20
+
+_GOVERNANCE_QUERY = """
+query GovernanceV2($first: Int!, $skip: Int!) {
+  vaultV2s(first: $first, skip: $skip) {
+    items {
+      address
+      name
+      chain { id }
+      owner { address }
+      curator { address }
+      sentinels { sentinel { address } }
+      allocators { allocator { address } }
+      adapters { items { address type } }
+      pendingConfigs {
+        items { validAt functionName data txHash }
+      }
+    }
+  }
 }
-DEFAULT_LOOKBACK_BLOCKS = 50000
-
-# Block range chunk size for eth_getLogs to stay within RPC limits.
-LOG_CHUNK_SIZE = 5000
-
-# Events polled on the VaultV2 contract.
-_VAULT_TIMELOCK_EVENTS = ("Submit", "Accept", "Revoke")
-_VAULT_INSTANT_EVENTS = ("SetOwner", "SetCurator", "SetIsSentinel")
-_VAULT_AUDIT_EVENTS = (
-    "AddAdapter",
-    "RemoveAdapter",
-    "IncreaseTimelock",
-    "DecreaseTimelock",
-    "Abdicate",
-)
-
-# Events polled on each MorphoMarketV1AdapterV2 contract.
-_ADAPTER_TIMELOCK_EVENTS = ("Submit", "Accept", "Revoke")
-_ADAPTER_AUDIT_EVENTS = ("IncreaseTimelock", "DecreaseTimelock", "Abdicate")
+"""
 
 
 # ----------------------------------------------------------------------------
-# Helpers
+# Snapshot dataclasses
 # ----------------------------------------------------------------------------
 
 
-def _format_ts(ts: int) -> str:
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+@dataclass(frozen=True)
+class PendingConfig:
+    """One pending timelocked operation reported by Morpho GraphQL."""
+
+    valid_at: int
+    function_name: str
+    data: bytes
+    tx_hash: str
+
+    @property
+    def data_hash(self) -> str:
+        """Stable cache-key hash for this pending operation."""
+        return submit_data_key(self.data)
 
 
-def _vault_url(vault: V2Vault) -> str:
-    return get_vault_url(vault.address, vault.chain)
+@dataclass
+class V2GovernanceSnapshot:
+    """Per-vault governance state snapshot used for diffing against cache."""
+
+    name: str
+    address: str  # checksummed
+    chain: Chain
+    risk_level: int
+    owner: str  # checksummed
+    curator: str
+    sentinels: List[str]  # checksummed, sorted
+    allocators: List[str]
+    adapters: List[str]
+    pending_configs: List[PendingConfig] = field(default_factory=list)
 
 
-def _explorer_link(chain: Chain, tx_hash: str) -> str:
-    base = chain.explorer_url
-    if not base:
-        return tx_hash
-    return f"[{tx_hash[:10]}…]({base}/tx/{tx_hash})"
+# ----------------------------------------------------------------------------
+# GraphQL fetch
+# ----------------------------------------------------------------------------
 
 
-def _coerce_bytes(value: Any) -> bytes:
-    if isinstance(value, (bytes, bytearray)):
-        return bytes(value)
-    if isinstance(value, str):
-        return bytes.fromhex(value[2:] if value.startswith("0x") else value)
-    raise TypeError(f"Cannot coerce {type(value)!r} to bytes")
+def _hex_to_bytes(value: str) -> bytes:
+    if value.startswith("0x"):
+        value = value[2:]
+    return bytes.fromhex(value)
 
 
-def _get_logs(
-    client: Web3Client, contract: Any, event_name: str, from_block: int, to_block: int
-) -> tuple[list[Any], int]:
-    """Fetch logs for one event in chunks to respect RPC range limits.
+def _checksum_or_empty(value: str) -> str:
+    if not value:
+        return ""
+    from web3 import Web3
 
-    Returns ``(logs, last_successful_block)``. ``last_successful_block`` is the
-    highest block fully covered by a successful chunk; if a chunk fails, the
-    caller MUST NOT advance its checkpoint past that value or it will silently
-    drop alerts. Returns ``(_, from_block - 1)`` if the very first chunk fails.
+    return Web3.to_checksum_address(value)
+
+
+def fetch_governance_snapshots() -> Dict[Chain, List[V2GovernanceSnapshot]]:
+    """Paginated GraphQL fetch of governance state for all V2 vaults.
+
+    Filters to vaults whose name matches a v1 ``VAULTS_BY_CHAIN`` entry and
+    inherits the v1 risk tier.
     """
-    if from_block > to_block:
-        return [], to_block
-    event = contract.events[event_name]
-    out: list[Any] = []
-    cursor = from_block
-    last_successful = from_block - 1
-    while cursor <= to_block:
-        end = min(cursor + LOG_CHUNK_SIZE - 1, to_block)
+    items: list[dict[str, Any]] = []
+    for page in range(_MAX_PAGES):
         try:
-            chunk = list(event.get_logs(from_block=cursor, to_block=end))
-        except Exception as e:
-            logger.warning(
-                "get_logs %s failed for %s [%d-%d]: %s — checkpoint will not advance",
-                event_name,
-                contract.address,
-                cursor,
-                end,
-                e,
+            response = request_with_retry(
+                "post",
+                API_URL,
+                json={
+                    "query": _GOVERNANCE_QUERY,
+                    "variables": {"first": _PAGE_SIZE, "skip": page * _PAGE_SIZE},
+                },
             )
-            return out, last_successful
-        out.extend(chunk)
-        last_successful = end
-        cursor = end + 1
-    return out, last_successful
+        except requests.RequestException as e:
+            logger.warning("Failed to fetch v2 governance snapshot (page %d): %s", page, e)
+            break
+        payload = response.json()
+        if "errors" in payload:
+            logger.warning("GraphQL errors fetching v2 governance (page %d): %s", page, payload["errors"])
+            break
+        page_items = payload.get("data", {}).get("vaultV2s", {}).get("items") or []
+        if not page_items:
+            break
+        items.extend(page_items)
+        if len(page_items) < _PAGE_SIZE:
+            break
+
+    v1_index = build_v1_name_index(VAULTS_BY_CHAIN)
+    result: Dict[Chain, List[V2GovernanceSnapshot]] = {chain: [] for chain in SUPPORTED_CHAINS}
+
+    for item in items:
+        try:
+            chain = Chain.from_chain_id(int(item["chain"]["id"]))
+        except (KeyError, ValueError):
+            continue
+        if chain not in v1_index:
+            continue
+        match = v1_index[chain].get(normalize_vault_name(item["name"]))
+        if match is None:
+            continue
+        risk_level, _v1_addr = match
+
+        sentinels = [_checksum_or_empty(s["sentinel"]["address"]) for s in (item.get("sentinels") or [])]
+        allocators = [_checksum_or_empty(a["allocator"]["address"]) for a in (item.get("allocators") or [])]
+        adapters = [_checksum_or_empty(a["address"]) for a in ((item.get("adapters") or {}).get("items") or [])]
+        pending = [
+            PendingConfig(
+                valid_at=int(pc["validAt"]),
+                function_name=pc["functionName"],
+                data=_hex_to_bytes(pc["data"]),
+                tx_hash=pc["txHash"],
+            )
+            for pc in ((item.get("pendingConfigs") or {}).get("items") or [])
+        ]
+
+        result.setdefault(chain, []).append(
+            V2GovernanceSnapshot(
+                name=item["name"],
+                address=_checksum_or_empty(item["address"]),
+                chain=chain,
+                risk_level=risk_level,
+                owner=_checksum_or_empty((item.get("owner") or {}).get("address") or ""),
+                curator=_checksum_or_empty((item.get("curator") or {}).get("address") or ""),
+                sentinels=sorted(sentinels),
+                allocators=sorted(allocators),
+                adapters=sorted(adapters),
+                pending_configs=pending,
+            )
+        )
+
+    for chain, vaults in result.items():
+        logger.info("Loaded governance snapshot for %d V2 vault(s) on %s", len(vaults), chain.name)
+    return result
 
 
-def _resolve_lookback(chain: Chain) -> int:
-    return LOOKBACK_BLOCKS_BY_CHAIN.get(chain, DEFAULT_LOOKBACK_BLOCKS)
+# ----------------------------------------------------------------------------
+# Cache helpers
+# ----------------------------------------------------------------------------
+
+
+def _read_int(key: str) -> int:
+    raw = get_last_value_for_key_from_file(morpho_filename, key)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _read_str(key: str) -> str:
+    raw = get_last_value_for_key_from_file(morpho_filename, key)
+    return str(raw) if raw else ""
+
+
+def _write(key: str, value: Any) -> None:
+    write_last_value_to_file(morpho_filename, key, value)
 
 
 # ----------------------------------------------------------------------------
@@ -151,207 +250,153 @@ def _resolve_lookback(chain: Chain) -> int:
 # ----------------------------------------------------------------------------
 
 
-def _alert_submit(vault: V2Vault, emitter: str, source_label: str, log: Any) -> None:
-    """Telegram alert for a freshly submitted timelocked operation.
+def _format_ts(ts: int) -> str:
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
-    ``emitter`` is the contract that emitted the Submit event (vault or adapter).
-    Including it in the cache key prevents two adapters submitting identical
-    calldata from masking each other.
-    """
-    args = log["args"]
-    data = _coerce_bytes(args["data"])
-    executable_at = int(args["executableAt"])
-    decoded = decode_submit(data)
-    cache_key_id = submit_data_key(data)
-    last = get_last_executed_morpho_from_file(emitter.lower(), cache_key_id, SUBMIT_TYPE)
-    if last == executable_at or last == -1:
-        # Already alerted (and possibly executed) — skip.
-        return
 
-    ts = _format_ts(executable_at)
-    tx_link = _explorer_link(vault.chain, log["transactionHash"].hex())
+def _explorer_link(chain: Chain, tx_hash: str) -> str:
+    base = chain.explorer_url
+    if not base or not tx_hash:
+        return tx_hash
+    return f"[{tx_hash[:10]}…]({base}/tx/{tx_hash})"
+
+
+def _alert_pending_new(snapshot: V2GovernanceSnapshot, pc: PendingConfig) -> None:
+    decoded = decode_submit(pc.data)
     send_telegram_message(
-        f"⏳ V2 [{vault.name}]({_vault_url(vault)}) {source_label} on {vault.chain.name}\n"
+        f"⏳ V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
+        f"on {snapshot.chain.name}\n"
         f"📥 Submitted: `{decoded}`\n"
-        f"⏰ Executable at: {ts}\n"
-        f"🔗 Tx: {tx_link}",
+        f"⏰ Executable at: {_format_ts(pc.valid_at)}\n"
+        f"🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}",
         PROTOCOL,
     )
-    write_last_executed_morpho_to_file(emitter.lower(), cache_key_id, SUBMIT_TYPE, executable_at)
 
 
-def _alert_accept(vault: V2Vault, emitter: str, source_label: str, log: Any) -> None:
-    args = log["args"]
-    data = _coerce_bytes(args["data"])
-    decoded = decode_submit(data)
-    cache_key_id = submit_data_key(data)
-    last = get_last_executed_morpho_from_file(emitter.lower(), cache_key_id, SUBMIT_TYPE)
-    if last == -1:
-        return
-    tx_link = _explorer_link(vault.chain, log["transactionHash"].hex())
-    send_telegram_message(
-        f"✅ V2 [{vault.name}]({_vault_url(vault)}) {source_label} on {vault.chain.name}\n"
-        f"🔓 Executed: `{decoded}`\n"
-        f"🔗 Tx: {tx_link}",
-        PROTOCOL,
-    )
-    write_last_executed_morpho_to_file(emitter.lower(), cache_key_id, SUBMIT_TYPE, -1)
-
-
-def _alert_revoke(vault: V2Vault, emitter: str, source_label: str, log: Any) -> None:
-    args = log["args"]
-    data = _coerce_bytes(args["data"])
-    decoded = decode_submit(data)
-    cache_key_id = submit_data_key(data)
-    last = get_last_executed_morpho_from_file(emitter.lower(), cache_key_id, SUBMIT_TYPE)
-    if last == 0:
-        return
-    sender = args.get("sender", "?")
-    tx_link = _explorer_link(vault.chain, log["transactionHash"].hex())
-    send_telegram_message(
-        f"⚠️ V2 [{vault.name}]({_vault_url(vault)}) {source_label} on {vault.chain.name}\n"
-        f"🛑 Revoked by `{sender}`: `{decoded}`\n"
-        f"🔗 Tx: {tx_link}",
-        PROTOCOL,
-    )
-    write_last_executed_morpho_to_file(emitter.lower(), cache_key_id, SUBMIT_TYPE, 0)
-
-
-def _alert_instant(vault: V2Vault, emitter: str, event_name: str, log: Any) -> None:
-    """Alert for owner-controlled instant changes (no timelock)."""
-    tx_hash = log["transactionHash"].hex()
-    instant_id = f"{tx_hash}+{log.get('logIndex', 0)}"
-    last = get_last_executed_morpho_from_file(emitter.lower(), instant_id, INSTANT_TYPE)
-    if last:
-        return
-    args = log["args"]
-    if event_name == "SetOwner":
-        body = f"👑 New owner: `{args['newOwner']}`"
-    elif event_name == "SetCurator":
-        body = f"🎩 New curator: `{args['newCurator']}`"
-    elif event_name == "SetIsSentinel":
-        body = f"🛡️ Sentinel `{args['account']}` set to {bool(args['newIsSentinel'])}"
-    else:
-        body = f"{event_name}: {dict(args)}"
-
-    tx_link = _explorer_link(vault.chain, tx_hash)
-    send_telegram_message(
-        f"🚨 V2 [{vault.name}]({_vault_url(vault)}) instant change on {vault.chain.name}\n{body}\n🔗 Tx: {tx_link}",
-        PROTOCOL,
-    )
-    write_last_executed_morpho_to_file(emitter.lower(), instant_id, INSTANT_TYPE, 1)
-
-
-def _alert_audit(vault: V2Vault, emitter: str, source_label: str, event_name: str, log: Any) -> None:
-    """Lightweight informational alert for audit events that are useful but not critical."""
-    tx_hash = log["transactionHash"].hex()
-    instant_id = f"{tx_hash}+{log.get('logIndex', 0)}+{event_name}"
-    last = get_last_executed_morpho_from_file(emitter.lower(), instant_id, INSTANT_TYPE)
-    if last:
-        return
-    args = log["args"]
-    if event_name in ("AddAdapter", "RemoveAdapter"):
-        verb = "added" if event_name == "AddAdapter" else "removed"
-        body = f"🧩 Adapter `{args['account']}` {verb}"
-    elif event_name in ("IncreaseTimelock", "DecreaseTimelock"):
-        sel = _coerce_bytes(args["selector"])
-        sel_name = selector_function_name(sel) or f"0x{sel.hex()}"
-        verb = "increased" if event_name == "IncreaseTimelock" else "decreased"
-        body = f"⏱️ Timelock {verb} for `{sel_name}` → {int(args['newDuration'])}s"
-    elif event_name == "Abdicate":
-        sel = _coerce_bytes(args["selector"])
-        sel_name = selector_function_name(sel) or f"0x{sel.hex()}"
-        body = f"🪦 Abdicated `{sel_name}` (function permanently disabled)"
-    else:
-        body = f"{event_name}: {dict(args)}"
-
-    tx_link = _explorer_link(vault.chain, tx_hash)
-    send_telegram_message(
-        f"ℹ️ V2 [{vault.name}]({_vault_url(vault)}) {source_label} on {vault.chain.name}\n{body}\n🔗 Tx: {tx_link}",
-        PROTOCOL,
-    )
-    write_last_executed_morpho_to_file(emitter.lower(), instant_id, INSTANT_TYPE, 1)
-
-
-# ----------------------------------------------------------------------------
-# Per-target processing
-# ----------------------------------------------------------------------------
-
-
-def _process_target(
-    client: Web3Client,
-    vault: V2Vault,
-    address: str,
-    abi: list[dict[str, Any]],
-    label: str,
-    timelock_events: Iterable[str],
-    audit_events: Iterable[str],
-    instant_events: Iterable[str],
-    chain_id: int,
-    latest_block: int,
+def _alert_pending_resolved(
+    snapshot: V2GovernanceSnapshot,
+    data_hash: str,
+    last_valid_at: int,
 ) -> None:
-    """Replay events on a single contract (vault or adapter) and alert on each.
+    """Alert that a previously-pending operation no longer appears in pendingConfigs.
 
-    The checkpoint only advances to ``min(last_successful_block)`` across all
-    polled events. If any chunk fails, the next run replays the failed range so
-    no Submit / Accept / Revoke is silently dropped.
+    We can't always distinguish ``Accept`` from ``Revoke`` from a snapshot diff,
+    but ``validAt`` gives a strong hint: if it has elapsed, the operation was
+    almost certainly executed; otherwise it was almost certainly revoked.
     """
-    contract = client.get_contract(Web3.to_checksum_address(address), abi)
+    now = int(datetime.now().timestamp())
+    verb = "executed" if last_valid_at <= now else "revoked"
+    icon = "✅" if verb == "executed" else "🛑"
+    send_telegram_message(
+        f"{icon} V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
+        f"on {snapshot.chain.name}\n"
+        f"Pending operation `{data_hash[:10]}…` was {verb} "
+        f"(was due {_format_ts(last_valid_at)}).",
+        PROTOCOL,
+    )
 
-    last_block = get_last_processed_block(address, chain_id)
-    if last_block <= 0:
-        last_block = max(0, latest_block - _resolve_lookback(vault.chain))
-    from_block = last_block + 1
-    if from_block > latest_block:
-        return
 
-    safe_checkpoints: list[int] = []
+def _alert_role_change(snapshot: V2GovernanceSnapshot, role: str, before: str, after: str) -> None:
+    icon = "👑" if role == "owner" else "🎩"
+    send_telegram_message(
+        f"🚨 V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
+        f"on {snapshot.chain.name}\n"
+        f"{icon} {role.capitalize()} changed: `{before}` → `{after}`",
+        PROTOCOL,
+    )
 
-    for event_name in timelock_events:
-        logs, last_ok = _get_logs(client, contract, event_name, from_block, latest_block)
-        safe_checkpoints.append(last_ok)
-        for log in logs:
-            try:
-                if event_name == "Submit":
-                    _alert_submit(vault, address, label, log)
-                elif event_name == "Accept":
-                    _alert_accept(vault, address, label, log)
-                elif event_name == "Revoke":
-                    _alert_revoke(vault, address, label, log)
-            except Exception as e:
-                logger.exception("Failed to process %s event on %s: %s", event_name, address, e)
 
-    for event_name in audit_events:
-        logs, last_ok = _get_logs(client, contract, event_name, from_block, latest_block)
-        safe_checkpoints.append(last_ok)
-        for log in logs:
-            try:
-                _alert_audit(vault, address, label, event_name, log)
-            except Exception as e:
-                logger.exception("Failed to process audit %s on %s: %s", event_name, address, e)
+def _alert_set_diff(
+    snapshot: V2GovernanceSnapshot,
+    set_name: str,
+    added: set[str],
+    removed: set[str],
+) -> None:
+    icon = {"sentinels": "🛡️", "allocators": "🎯", "adapters": "🧩"}.get(set_name, "ℹ️")
+    lines: list[str] = []
+    for addr in sorted(added):
+        lines.append(f"  + `{addr}`")
+    for addr in sorted(removed):
+        lines.append(f"  − `{addr}`")
+    send_telegram_message(
+        f"{icon} V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
+        f"{set_name} changed on {snapshot.chain.name}\n" + "\n".join(lines),
+        PROTOCOL,
+    )
 
-    for event_name in instant_events:
-        logs, last_ok = _get_logs(client, contract, event_name, from_block, latest_block)
-        safe_checkpoints.append(last_ok)
-        for log in logs:
-            try:
-                _alert_instant(vault, address, event_name, log)
-            except Exception as e:
-                logger.exception("Failed to process instant %s on %s: %s", event_name, address, e)
 
-    if not safe_checkpoints:
-        return
-    new_checkpoint = min(safe_checkpoints)
-    if new_checkpoint > last_block:
-        write_last_processed_block(address, chain_id, new_checkpoint)
-    else:
-        logger.warning(
-            "Not advancing checkpoint for %s on chain %d: log fetch failed in range [%d, %d]",
-            address,
-            chain_id,
-            from_block,
-            latest_block,
-        )
+# ----------------------------------------------------------------------------
+# Diff logic
+# ----------------------------------------------------------------------------
+
+
+def _diff_pending(snapshot: V2GovernanceSnapshot) -> None:
+    addr = snapshot.address.lower()
+
+    current_keys: set[str] = set()
+    for pc in snapshot.pending_configs:
+        current_keys.add(pc.data_hash)
+        cache_key = morpho_key(addr, pc.data_hash, PENDING_TYPE)
+        last = _read_int(cache_key)
+        # Already alerted at this validAt, or marked executed.
+        if last == pc.valid_at or last == EXECUTED:
+            continue
+        _alert_pending_new(snapshot, pc)
+        _write(cache_key, pc.valid_at)
+
+    # Detect resolved entries: anything in last-run's index that isn't in the
+    # current pending list.
+    index_key = morpho_key(addr, "pending_keys", PENDING_INDEX_TYPE)
+    previous_index = _read_str(index_key)
+    previous_keys = {h for h in previous_index.split(",") if h} if previous_index else set()
+    resolved = previous_keys - current_keys
+    for data_hash in resolved:
+        cache_key = morpho_key(addr, data_hash, PENDING_TYPE)
+        last = _read_int(cache_key)
+        if last <= 0:
+            # Already marked executed/revoked.
+            continue
+        _alert_pending_resolved(snapshot, data_hash, last)
+        _write(cache_key, EXECUTED if last <= int(datetime.now().timestamp()) else REVOKED)
+
+    _write(index_key, ",".join(sorted(current_keys)))
+
+
+def _diff_single_role(snapshot: V2GovernanceSnapshot, role: str, current: str) -> None:
+    cache_key = morpho_key(snapshot.address.lower(), role, ROLE_TYPE)
+    last = _read_str(cache_key)
+    cur_lc = current.lower()
+    if last and last != cur_lc:
+        _alert_role_change(snapshot, role, last, current)
+    _write(cache_key, cur_lc)
+
+
+def _diff_set(snapshot: V2GovernanceSnapshot, set_name: str, current: List[str]) -> None:
+    cache_key = morpho_key(snapshot.address.lower(), set_name, SET_TYPE)
+    last_str = _read_str(cache_key)
+    last_set = {a for a in last_str.split(",") if a} if last_str else set()
+    current_set = {addr.lower() for addr in current}
+    added = current_set - last_set
+    removed = last_set - current_set
+    # Only alert if we have a baseline — first run seeds the cache silently.
+    if last_str and (added or removed):
+        # Re-checksum addresses for display.
+        from web3 import Web3
+
+        added_cs: set[str] = {str(Web3.to_checksum_address(a)) for a in added}
+        removed_cs: set[str] = {str(Web3.to_checksum_address(a)) for a in removed}
+        _alert_set_diff(snapshot, set_name, added_cs, removed_cs)
+    _write(cache_key, ",".join(sorted(current_set)))
+
+
+def diff_and_alert(snapshot: V2GovernanceSnapshot) -> None:
+    """Diff a vault's snapshot against persisted state and emit Telegram alerts."""
+    _diff_pending(snapshot)
+    _diff_single_role(snapshot, "owner", snapshot.owner)
+    _diff_single_role(snapshot, "curator", snapshot.curator)
+    _diff_set(snapshot, "sentinels", snapshot.sentinels)
+    _diff_set(snapshot, "allocators", snapshot.allocators)
+    _diff_set(snapshot, "adapters", snapshot.adapters)
 
 
 # ----------------------------------------------------------------------------
@@ -359,59 +404,20 @@ def _process_target(
 # ----------------------------------------------------------------------------
 
 
-def process_vault(client: Web3Client, vault: V2Vault, latest_block: int) -> None:
-    """Process timelock + role events on a vault and on each market-v1 adapter."""
-    chain_id = vault.chain.chain_id
-
-    _process_target(
-        client,
-        vault,
-        vault.address,
-        ABI_VAULT_V2,
-        label="vault",
-        timelock_events=_VAULT_TIMELOCK_EVENTS,
-        audit_events=_VAULT_AUDIT_EVENTS,
-        instant_events=_VAULT_INSTANT_EVENTS,
-        chain_id=chain_id,
-        latest_block=latest_block,
-    )
-
-    # Discover adapters on-chain and process timelock events on the market-v1 ones.
-    adapter_addresses = list_adapters(client, vault.address)
-    for adapter_addr in adapter_addresses:
-        info: AdapterInfo = classify_adapter(client, adapter_addr)
-        if info.kind != ADAPTER_KIND_MARKET:
-            continue
-        _process_target(
-            client,
-            vault,
-            info.address,
-            ABI_MARKET_ADAPTER,
-            label=f"adapter `{info.address}`",
-            timelock_events=_ADAPTER_TIMELOCK_EVENTS,
-            audit_events=_ADAPTER_AUDIT_EVENTS,
-            instant_events=(),
-            chain_id=chain_id,
-            latest_block=latest_block,
-        )
-
-
 def main() -> None:
-    """Discover Yearn-relevant V2 vaults and replay governance events on each."""
+    """Pull governance snapshots from GraphQL and alert on diffs vs. the cache."""
     logger.info("Checking Morpho V2 governance...")
-    vaults_by_chain = discover_v2_vaults_by_chain()
-    if not any(vaults_by_chain.values()):
+    snapshots_by_chain = fetch_governance_snapshots()
+    if not any(snapshots_by_chain.values()):
         logger.info("No matching V2 vaults found; nothing to monitor yet.")
         return
 
-    for chain, vaults in vaults_by_chain.items():
+    for chain, vaults in snapshots_by_chain.items():
         if not vaults:
             continue
-        client = ChainManager.get_client(chain)
-        latest_block = client.eth.block_number
         for vault in vaults:
             try:
-                process_vault(client, vault, latest_block)
+                diff_and_alert(vault)
             except Exception as e:
                 logger.exception("Failed to process governance for %s on %s: %s", vault.address, chain.name, e)
 
