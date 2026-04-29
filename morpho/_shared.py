@@ -1,6 +1,7 @@
 """Shared helpers used by both v1 and v2 Morpho monitors."""
 
-from typing import Any, Dict, List
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 from utils.chains import Chain
 from utils.http import request_with_retry
@@ -64,18 +65,82 @@ def fetch_market_name(market_id: str, chain: Chain) -> str:
         return market_id
 
 
-def fetch_market_metrics(market_ids: List[str], chain: Chain) -> Dict[str, Dict[str, Any]]:
-    """Fetch state + bad debt for a batch of market uniqueKeys keyed by id.
+@dataclass(frozen=True)
+class Asset:
+    """Token metadata as returned by Morpho GraphQL."""
 
-    Returns a dict keyed by lowercase market_id with shape::
+    address: str
+    symbol: str
+    decimals: Optional[int] = None
 
-        {
-            "uniqueKey": str,
-            "loanAsset": {"symbol": str, "address": str},
-            "collateralAsset": {"symbol": str, "address": str} | None,
-            "state": {"utilization": float, "borrowAssetsUsd": float, "supplyAssetsUsd": float},
-            "badDebt": {"underlying": int, "usd": float},
-        }
+
+@dataclass(frozen=True)
+class MarketState:
+    """Per-market borrow/supply balances at the time of query."""
+
+    utilization: float
+    borrow_assets: int
+    supply_assets: int
+    borrow_assets_usd: float
+    supply_assets_usd: float
+
+
+@dataclass(frozen=True)
+class BadDebt:
+    """Bad debt accrued on a market."""
+
+    underlying: int
+    usd: float
+
+
+@dataclass(frozen=True)
+class MarketMetrics:
+    """State + bad debt for a single Morpho Blue market."""
+
+    unique_key: str
+    loan_asset: Asset
+    collateral_asset: Optional[Asset]
+    state: MarketState
+    bad_debt: BadDebt
+
+
+def _parse_asset(raw: Optional[Dict[str, Any]]) -> Optional[Asset]:
+    if not raw:
+        return None
+    return Asset(
+        address=raw.get("address", ""),
+        symbol=raw.get("symbol", ""),
+        decimals=raw.get("decimals"),
+    )
+
+
+def _parse_market_metrics(raw: Dict[str, Any]) -> MarketMetrics:
+    state_raw = raw.get("state") or {}
+    bad_debt_raw = raw.get("badDebt") or {}
+    loan_asset = _parse_asset(raw.get("loanAsset")) or Asset(address="", symbol="")
+    return MarketMetrics(
+        unique_key=raw["uniqueKey"],
+        loan_asset=loan_asset,
+        collateral_asset=_parse_asset(raw.get("collateralAsset")),
+        state=MarketState(
+            utilization=float(state_raw.get("utilization") or 0),
+            borrow_assets=int(state_raw.get("borrowAssets") or 0),
+            supply_assets=int(state_raw.get("supplyAssets") or 0),
+            borrow_assets_usd=float(state_raw.get("borrowAssetsUsd") or 0),
+            supply_assets_usd=float(state_raw.get("supplyAssetsUsd") or 0),
+        ),
+        bad_debt=BadDebt(
+            underlying=int(bad_debt_raw.get("underlying") or 0),
+            usd=float(bad_debt_raw.get("usd") or 0),
+        ),
+    )
+
+
+def fetch_market_metrics(market_ids: List[str], chain: Chain) -> Dict[str, MarketMetrics]:
+    """Fetch state + bad debt for a batch of market uniqueKeys.
+
+    Returns a dict keyed by lowercase market_id mapping to a ``MarketMetrics``
+    dataclass. Empty dict on GraphQL error or empty input.
     """
     if not market_ids:
         return {}
@@ -108,4 +173,4 @@ def fetch_market_metrics(market_ids: List[str], chain: Chain) -> Dict[str, Dict[
         logger.warning("GraphQL error fetching market metrics: %s", payload["errors"])
         return {}
     items = payload.get("data", {}).get("markets", {}).get("items", []) or []
-    return {item["uniqueKey"].lower(): item for item in items}
+    return {item["uniqueKey"].lower(): _parse_market_metrics(item) for item in items}

@@ -24,6 +24,7 @@ from web3 import Web3
 
 from morpho._shared import (
     API_URL,
+    MarketMetrics,
     fetch_market_metrics,
     get_market_url,
     get_vault_url,
@@ -310,8 +311,8 @@ def analyze_market_adapter(
             )
 
         # Bad debt — same threshold as v1.
-        bad_debt_usd = market.get("badDebt", {}).get("usd") or 0
-        borrow_usd = market["state"].get("borrowAssetsUsd") or 0
+        bad_debt_usd = market.bad_debt.usd
+        borrow_usd = market.state.borrow_assets_usd
         if borrow_usd > 0 and bad_debt_usd / borrow_usd > BAD_DEBT_RATIO:
             bad_debt_alerts.append(
                 f"- {market_label}: ${bad_debt_usd:,.2f} ({bad_debt_usd / borrow_usd:.2%} of borrowed)"
@@ -344,29 +345,25 @@ def analyze_market_adapter(
         )
 
 
-def _allocation_to_usd(market: Dict[str, Any], expected_assets: int) -> Optional[float]:
+def _allocation_to_usd(market: MarketMetrics, expected_assets: int) -> Optional[float]:
     """Convert ``expectedSupplyAssets`` (underlying units) to USD via market state ratio.
 
     Uses ``supplyAssetsUsd / supplyAssets`` when both are non-zero, falling back to
     the borrow side ratio. Returns None when neither side carries enough state to
     derive a price (typically a freshly created or empty market).
     """
-    state = market.get("state") or {}
-    supply_usd = state.get("supplyAssetsUsd") or 0
-    supply_under = int(state.get("supplyAssets") or 0)
-    if supply_under > 0 and supply_usd > 0:
-        return expected_assets * supply_usd / supply_under
-    borrow_usd = state.get("borrowAssetsUsd") or 0
-    borrow_under = int(state.get("borrowAssets") or 0)
-    if borrow_under > 0 and borrow_usd > 0:
-        return expected_assets * borrow_usd / borrow_under
+    state = market.state
+    if state.supply_assets > 0 and state.supply_assets_usd > 0:
+        return expected_assets * state.supply_assets_usd / state.supply_assets
+    if state.borrow_assets > 0 and state.borrow_assets_usd > 0:
+        return expected_assets * state.borrow_assets_usd / state.borrow_assets
     return None
 
 
-def _market_label(market: Dict[str, Any], market_id: str, chain: Chain) -> str:
+def _market_label(market: MarketMetrics, market_id: str, chain: Chain) -> str:
     """Render a clickable Markdown label for a Morpho Blue market."""
-    loan = (market.get("loanAsset") or {}).get("symbol") or "?"
-    coll = (market.get("collateralAsset") or {}).get("symbol") or "idle"
+    loan = market.loan_asset.symbol or "?"
+    coll = market.collateral_asset.symbol if market.collateral_asset else "idle"
     return f"[{coll}/{loan}]({get_market_url(market_id, chain)})"
 
 
