@@ -223,7 +223,6 @@ def main():
                 and last_reserves >= LIQUID_RESERVES_THRESHOLD
             ):
                 msg = f"📉 *Infinifi Liquid Reserves Alert*\n\nReserves dropped below ${LIQUID_RESERVES_THRESHOLD:,.0f}: ${liquid_reserves:,.2f}"
-                # TODO: add hook data
                 send_alert(Alert(AlertSeverity.HIGH, msg, PROTOCOL))
 
             write_last_value_to_file(cache_filename, cache_key_reserves, liquid_reserves)
