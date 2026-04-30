@@ -222,7 +222,14 @@ def main():
                 and liquid_reserves < LIQUID_RESERVES_THRESHOLD
                 and last_reserves >= LIQUID_RESERVES_THRESHOLD
             ):
-                msg = f"📉 *Infinifi Liquid Reserves Alert*\n\nReserves dropped below ${LIQUID_RESERVES_THRESHOLD:,.0f}: ${liquid_reserves:,.2f}"
+                msg = (
+                    "📉 *Infinifi Liquid Reserves Alert*\n\n"
+                    f"Reserves dropped below ${LIQUID_RESERVES_THRESHOLD:,.0f}.\n"
+                    f"Previous: ${last_reserves:,.2f}\n"
+                    f"Current: ${liquid_reserves:,.2f}\n"
+                    f"Total backing: ${total_backing:,.2f}\n"
+                    f"Liquid ratio: {reserve_ratio:.2%}"
+                )
                 send_alert(Alert(AlertSeverity.HIGH, msg, PROTOCOL))
 
             write_last_value_to_file(cache_filename, cache_key_reserves, liquid_reserves)
