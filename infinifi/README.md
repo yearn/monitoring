@@ -11,7 +11,7 @@ This folder contains monitoring scripts for the Infinifi protocol.
 
 ## Alerts
 
-- **Liquid Reserves**: A Telegram alert is triggered if liquid reserves drop below $12M.
+- **Liquid Reserves**: A Telegram alert is triggered if liquid reserves drop below $8M.
 - **Reserve Ratio Breach**: Alert if liquid ratio falls below protocol `reserveRatio` target.
 - **Illiquid Ratio Breach**: Alert if illiquid ratio rises above protocol `illiquidTargetRatio`.
 - **Backing Per iUSD**: Alert if `totalTVL / iUSD supply` drops below `0.999`.
