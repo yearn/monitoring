@@ -32,7 +32,6 @@ VAULTS_BY_CHAIN = {
         ["Gauntlet USDT Prime", "0x8CB3649114051cA5119141a34C200D65dc0Faa73"],
         ["Gauntlet WETH Core", "0x4881Ef0BF6d2365D3dd6499ccd7532bcdBCE0658"],
         ["Gauntlet USDC Core", "0x8eB67A509616cd6A7c1B3c8C21D48FF57df3d458"],
-        ["Gauntlet DAI Core", "0x500331c9fF24D9d11aee6B07734Aa72343EA74a5"],
         ["VaultBridge USDC", "0xBEefb9f61CC44895d8AEc381373555a64191A9c4"],
         ["VaultBridge USDT", "0xc54b4E08C1Dcc199fdd35c6b5Ab589ffD3428a8d"],
         ["VaultBridge WETH", "0x31A5684983EeE865d943A696AAC155363bA024f9"],
@@ -52,11 +51,6 @@ VAULTS_BY_CHAIN = {
         # ["Seamless/Gauntlet USDC", "0x616a4E1db48e22028f6bbf20444Cd3b8e3273738"],
         # ["Seamless/Gauntlet WETH", "0x27D8c7273fd3fcC6956a0B370cE5Fd4A7fc65c18"],
         # ["Seamless/Gauntlet cbBTC", "0x5a47C803488FE2BB0A0EAaf346b420e4dF22F3C7"],
-    ],
-    Chain.POLYGON: [
-        ["Compound WETH", "0xF5C81d25ee174d83f1FD202cA94AE6070d073cCF"],
-        ["Compound USDC", "0x781FB7F6d845E3bE129289833b04d43Aa8558c42"],
-        ["Compound USDT", "0xfD06859A671C21497a2EB8C5E3fEA48De924D6c8"],
     ],
     Chain.KATANA: [
         ["Gauntlet WBTC", "0xf243523996ADbb273F0B237B53f30017C4364bBC"],
