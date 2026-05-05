@@ -11,6 +11,7 @@ import urllib.request
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
+from eth_utils import to_checksum_address
 
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.calldata.decoder import format_call_lines
@@ -132,7 +133,18 @@ def format_delay(seconds: int) -> str:
 def load_events(limit: int, since_ts: int, timelocks: list[TimelockConfig] | None = None) -> dict | None:
     """Fetch TimelockEvent events from the Envio GraphQL API."""
     source = timelocks if timelocks is not None else TIMELOCK_LIST
-    addresses = [t.address for t in source]
+    # Some Envio deployments store timelockAddress checksummed; include both
+    # representations to avoid case-sensitive misses.
+    addresses = sorted(
+        {
+            addr
+            for t in source
+            for addr in (
+                t.address,
+                to_checksum_address(t.address),
+            )
+        }
+    )
     _logger.info("load_events limit=%s since_ts=%s addresses=%s", limit, since_ts, len(addresses))
     query = """
     query GetTimelockEvents($limit: Int!, $sinceTs: Int!, $addresses: [String!]!) {
