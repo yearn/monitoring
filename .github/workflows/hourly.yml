@@ -30,6 +30,7 @@ jobs:
         # silo/ur_sniff.py
         usdai/main.py
         usdai/large_mints.py
+        stables/dune_large_transfers.py
         yearn/alert_large_flows.py
         maple/main.py
         timelock/timelock_alerts.py
