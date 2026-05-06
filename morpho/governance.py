@@ -38,12 +38,17 @@ VAULTS_BY_CHAIN = {
         ["VaultBridge WBTC", "0x812B2C6Ab3f4471c0E43D4BB61098a9211017427"],
         ["Sentora PYUSD", "0x19b3cD7032B8C062E8d44EaCad661a0970DD8c55"],
         ["Sentora RLUSD", "0x71cb2F8038B2C5D65ddc740B2F3268890CD2A89C"],
+        ["Yearn OG WETH", "0xE89371eAaAC6D46d4C3ED23453241987916224FC"],
+        ["Yearn OG USDC", "0xF9bdDd4A9b3A45f980e11fDDE96e16364dDBEc49"],
+        ["Yearn USDT", "0x0963232eB842BAF53E8e517691f81745C1F228a0"],
+        ["Yearn WBTC", "0x2bB005127069A0F0325Fb7370967E8A2b64FB77E"],
+        ["Yearn USDC", "0x68Aea7b82Df6CcdF76235D46445Ed83f85F845A3"],
         # ["Gauntlet WBTC Core", "0x443df5eEE3196e9b2Dd77CaBd3eA76C3dee8f9b2"],
         # ["Gauntlet LRT Core", "0x7Db8c75A903d66D669b2002870975cc5aA842b6D"],
         # ["MEV Capital USDC", "0xd63070114470f685b75B74D60EEc7c1113d33a3D"],
     ],
     Chain.BASE: [
-        ["Moonwell Flagship USDC", "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca"],
+        # ["Moonwell Flagship USDC", "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca"],
         # NOTE: no funds in vaults below
         # ["Moonwell Flagship ETH", "0xa0E430870c4604CcfC7B38Ca7845B1FF653D0ff1"],
         # ["Moonwell Flagship EURC", "0xf24608E0CCb972b0b0f4A6446a0BBf58c701a026"],
@@ -59,6 +64,10 @@ VAULTS_BY_CHAIN = {
         ["Gauntlet WETH", "0xC5e7AB07030305fc925175b25B93b285d40dCdFf"],
         ["Steakhouse Prime USDC", "0x61D4F9D3797BA4dA152238c53a6f93Fb665C3c1d"],
         ["Steakhouse High Yield USDC", "0x1445A01a57D7B7663CfD7B4EE0a8Ec03B379aabD"],
+        ["Yearn OG WETH", "0xFaDe0C546f44e33C134c4036207B314AC643dc2E"],
+        ["Yearn OG USDC", "0xCE2b8e464Fc7b5E58710C24b7e5EBFB6027f29D7"],
+        ["Yearn OG USDT", "0x8ED68f91AfbE5871dCE31ae007a936ebE8511d47"],
+        ["Yearn OG WBTC", "0xe107cCdeb8e20E499545C813f98Cc90619b29859"],
     ],
 }
 
@@ -89,6 +98,59 @@ def get_vault_url_by_name(vault_name, chain: Chain):
             else:
                 return f"{MORPHO_URL}/{get_chain_name(chain)}/vault/{address}"
     return None
+
+
+def fetch_pending_cap_market_ids(vault_address: str, chain: Chain) -> list[str]:
+    """Fetch market unique keys with pending cap submissions for a vault from Morpho GraphQL API.
+
+    Catches brand-new markets where submitCap has been called but acceptCap has not run yet —
+    those markets are not yet in supplyQueue or withdrawQueue, so the on-chain queue iteration
+    misses them.
+
+    Returns a list of hex-encoded market IDs, or an empty list on failure.
+    """
+    query = """
+    query GetVaultPendingCaps($address: String!, $chainId: Int!) {
+        vaultByAddress(address: $address, chainId: $chainId) {
+            state {
+                pendingConfigs {
+                    items {
+                        functionName
+                        decodedData {
+                            __typename
+                            ... on VaultSetCapPendingData {
+                                market { marketId }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    """
+    try:
+        response = request_with_retry(
+            "post",
+            API_URL,
+            json={"query": query, "variables": {"address": vault_address, "chainId": chain.chain_id}},
+        )
+        data = response.json()
+        items = (
+            (((data.get("data") or {}).get("vaultByAddress") or {}).get("state") or {}).get("pendingConfigs") or {}
+        ).get("items") or []
+        market_ids = []
+        for item in items:
+            if item.get("functionName") != "SetCap":
+                continue
+            decoded = item.get("decodedData") or {}
+            market = decoded.get("market") or {}
+            marketId = market.get("marketId")
+            if marketId:
+                market_ids.append(marketId)
+        return market_ids
+    except Exception as e:
+        logger.warning("Failed to fetch pending caps for vault %s: %s", vault_address, e)
+        return []
 
 
 def fetch_market_name(market_id: str, chain: Chain) -> str:
@@ -151,7 +213,13 @@ def check_markets_pending_cap(name, morpho_contract, chain, w3):
                 len(market_responses),
             )
 
-    markets = list(set(market_responses))
+    # supplyQueue/withdrawQueue only contain markets that have been accepted at least once.
+    # Brand-new markets with a pending cap (submitCap called, acceptCap not yet run) are not
+    # in any queue, so the GraphQL pendingCaps lookup is needed to catch them.
+    pending_cap_market_ids = {
+        bytes.fromhex(market_id.removeprefix("0x")) for market_id in fetch_pending_cap_market_ids(vault_address, chain)
+    }
+    markets = list(set(market_responses) | pending_cap_market_ids)
 
     with w3.batch_requests() as batch:
         for market in markets:
@@ -184,12 +252,11 @@ def check_markets_pending_cap(name, morpho_contract, chain, w3):
         vault_url = get_vault_url_by_name(name, chain)
 
         # pending_cap check
+        # Don't skip past timestamps: a pending cap whose timelock has expired but hasn't been
+        # accepted yet is still pending action, and may have been missed by earlier runs (e.g.,
+        # if the market was brand-new and not yet visible to the on-chain queue iteration).
+        # The cache check below dedupes so we only alert once per unique timestamp.
         if pending_cap_timestamp > 0:
-            current_time = int(datetime.now().timestamp())
-            if pending_cap_timestamp <= current_time:
-                # skip if the pending cap is already in the past
-                continue
-
             last_executed_morpho = get_last_executed_morpho_from_file(vault_address, market, PENDING_CAP_TYPE)
 
             if pending_cap_timestamp > last_executed_morpho:
@@ -280,7 +347,6 @@ def get_data_for_chain(chain: Chain):
 
 def main():
     get_data_for_chain(Chain.MAINNET)
-    get_data_for_chain(Chain.POLYGON)
     get_data_for_chain(Chain.KATANA)
     get_data_for_chain(Chain.BASE)
 
