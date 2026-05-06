@@ -31,6 +31,7 @@ jobs:
         usdai/main.py
         usdai/large_mints.py
         yearn/alert_large_flows.py
+        yearn/yvusd.py
         maple/main.py
         timelock/timelock_alerts.py
         # always run proposals after timelock alerts
