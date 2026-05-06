@@ -25,6 +25,7 @@ jobs:
         lrt-pegs/fluid/main.py
         rtoken/monitor_rtoken.py
         lrt-pegs/origin_protocol.py
+        prices/main.py
         # euler/markets.py
         infinifi/main.py
         # silo/ur_sniff.py
