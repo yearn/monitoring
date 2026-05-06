@@ -1,0 +1,188 @@
+[
+    {
+        "type": "function",
+        "name": "parentVault",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}]
+    },
+    {
+        "type": "function",
+        "name": "morpho",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}]
+    },
+    {
+        "type": "function",
+        "name": "asset",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}]
+    },
+    {
+        "type": "function",
+        "name": "adapterId",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "bytes32"}]
+    },
+    {
+        "type": "function",
+        "name": "adaptiveCurveIrm",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}]
+    },
+    {
+        "type": "function",
+        "name": "marketIds",
+        "stateMutability": "view",
+        "inputs": [{"name": "", "type": "uint256"}],
+        "outputs": [{"name": "", "type": "bytes32"}]
+    },
+    {
+        "type": "function",
+        "name": "marketIdsLength",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "uint256"}]
+    },
+    {
+        "type": "function",
+        "name": "supplyShares",
+        "stateMutability": "view",
+        "inputs": [{"name": "marketId", "type": "bytes32"}],
+        "outputs": [{"name": "", "type": "uint256"}]
+    },
+    {
+        "type": "function",
+        "name": "expectedSupplyAssets",
+        "stateMutability": "view",
+        "inputs": [{"name": "marketId", "type": "bytes32"}],
+        "outputs": [{"name": "", "type": "uint256"}]
+    },
+    {
+        "type": "function",
+        "name": "realAssets",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "uint256"}]
+    },
+    {
+        "type": "function",
+        "name": "skimRecipient",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}]
+    },
+    {
+        "type": "function",
+        "name": "timelock",
+        "stateMutability": "view",
+        "inputs": [{"name": "", "type": "bytes4"}],
+        "outputs": [{"name": "", "type": "uint256"}]
+    },
+    {
+        "type": "function",
+        "name": "abdicated",
+        "stateMutability": "view",
+        "inputs": [{"name": "", "type": "bytes4"}],
+        "outputs": [{"name": "", "type": "bool"}]
+    },
+    {
+        "type": "function",
+        "name": "executableAt",
+        "stateMutability": "view",
+        "inputs": [{"name": "", "type": "bytes"}],
+        "outputs": [{"name": "", "type": "uint256"}]
+    },
+    {
+        "type": "event",
+        "name": "Submit",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "selector", "type": "bytes4"},
+            {"indexed": false, "name": "data", "type": "bytes"},
+            {"indexed": false, "name": "executableAt", "type": "uint256"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "Accept",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "selector", "type": "bytes4"},
+            {"indexed": false, "name": "data", "type": "bytes"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "Revoke",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "sender", "type": "address"},
+            {"indexed": true, "name": "selector", "type": "bytes4"},
+            {"indexed": false, "name": "data", "type": "bytes"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "IncreaseTimelock",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "selector", "type": "bytes4"},
+            {"indexed": false, "name": "newDuration", "type": "uint256"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "DecreaseTimelock",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "selector", "type": "bytes4"},
+            {"indexed": false, "name": "newDuration", "type": "uint256"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "Abdicate",
+        "anonymous": false,
+        "inputs": [{"indexed": true, "name": "selector", "type": "bytes4"}]
+    },
+    {
+        "type": "event",
+        "name": "SetSkimRecipient",
+        "anonymous": false,
+        "inputs": [{"indexed": false, "name": "newSkimRecipient", "type": "address"}]
+    },
+    {
+        "type": "event",
+        "name": "BurnShares",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "marketId", "type": "bytes32"},
+            {"indexed": false, "name": "supplySharesBefore", "type": "uint256"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "Allocate",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "marketId", "type": "bytes32"},
+            {"indexed": false, "name": "newAllocation", "type": "uint256"},
+            {"indexed": false, "name": "mintedShares", "type": "uint256"}
+        ]
+    },
+    {
+        "type": "event",
+        "name": "Deallocate",
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "name": "marketId", "type": "bytes32"},
+            {"indexed": false, "name": "newAllocation", "type": "uint256"},
+            {"indexed": false, "name": "burnedShares", "type": "uint256"}
+        ]
+    }
+]

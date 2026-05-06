@@ -44,8 +44,6 @@ To monitor a new Morpho vault, add its address to the `VAULTS_BY_CHAIN` variable
 
 **For YV Collateral Vaults:** If Morpho vault is using Yearn V3 Vault (YV collateral vault) as collateral, additional configuration is needed. Add all Morpho Vaults that are used as strategies in Yearn V3 Vault to `VAULTS_WITH_YV_COLLATERAL_BY_ASSET` mapping, organized by chain and underlying asset address. This enables combined liquidity monitoring for all vaults with the same asset.
 
-For some chains, the Morpho GraphQL API is not available. In this case, alternative script is used [markets_graph.py](./markets_graph.py) which uses The Graph API. Be aware that this script will require additional setup as it uses a different URL for vaults and markets, depending on the curator and frontend. Also, if the new chain is added, it will need new subgraph url define in [`GRAPH_BY_CHAIN`](./markets_graph.py#L29) variable.
-
 ### Bad Debt
 
 Bad debt is fetched from the Morpho GraphQL API. Each market is checked for bad debt; if any market exhibits bad debt, a Telegram message is sent. The script runs hourly via [GitHub Actions](../.github/workflows/hourly.yml). The monitoring logic is implemented in [markets.py#L166](./markets.py#L166).
@@ -127,6 +125,46 @@ The system monitors the allocation ratio for each market hourly:
 ```
 
 If any market's allocation exceeds its adjusted threshold, an alert is triggered with a corresponding Telegram message. This mechanism ensures that vaults maintain proper diversification and are not overly concentrated in higher-risk markets.
+
+## Vault V2 Monitoring
+
+Morpho's [Vault V2](https://github.com/morpho-org/vault-v2) replaces the v1 single-vault timelock with a **per-function timelock** keyed by arbitrary calldata, plus a richer adapter system. Yearn-curated v2 vaults are monitored separately:
+
+- [`governance_v2.py`](./governance_v2.py) — daily, pulls a per-vault governance **snapshot** from Morpho's GraphQL API (`vaultV2s.pendingConfigs` + `owner` / `curator` / `sentinels` / `allocators` / `adapters`) and diffs it against the persisted cache. Mirrors v1's pull-based approach (`pendingTimelock` / `pendingGuardian` / `pendingCap`) so RPC usage stays bounded. Alerts on: new pending timelocked operations, executed or revoked operations, owner / curator changes, sentinel / allocator / adapter set changes.
+- [`markets_v2.py`](./markets_v2.py) — hourly, walks each v2 vault's adapters and runs the existing v1 risk-tier scoring against the underlying Morpho Blue markets when the vault uses `MorphoMarketV1AdapterV2`. For `MorphoVaultV1Adapter` (today's common case) the wrapped v1 vault keeps receiving its full v1 analysis via `markets.py`; we only flag the case where v2 introduces a new wrapped v1 vault that operators should add to `VAULTS_BY_CHAIN`.
+- [`v2_decoders.py`](./v2_decoders.py) — selector→signature map and decoders for every v2 timelocked function (and the three `idData` tag prefixes used by `increaseAbsoluteCap`/`increaseRelativeCap`).
+
+### Vault list
+
+Monitored v2 vaults live in [`VAULTS_V2_BY_CHAIN`](./markets_v2.py) — same shape as the v1 [`VAULTS_BY_CHAIN`](./markets.py#L29), one `[name, address, risk_level]` row per vault. The initial list is sourced from [Yearn's curator page on Morpho](https://app.morpho.org/curator/yearn?v2=true) (filtered via GraphQL by Yearn's curator addresses) and is kept manually so a third-party squatting on the name doesn't get monitored as a Yearn vault.
+
+To add a new v2 vault, append a row to the chain's list and pick a risk tier (1–5).
+
+### Cache
+
+Both scripts share `MORPHO_FILENAME` (default `cache-id.txt`). New key types added by v2:
+
+| Key suffix | Segment | Value | Meaning |
+| --- | --- | --- | --- |
+| `v2_pending` | `keccak(data)` | `validAt` ts, `-1`, or `0` | Pending timelock operation: pending / executed / revoked |
+| `v2_pending_index` | `pending_keys` | comma-joined `keccak(data)` | Reverse index used to detect operations that disappeared from `pendingConfigs` |
+| `v2_role` | `owner` / `curator` | lowercase address | Last-known instant-role address |
+| `v2_set` | `sentinels` / `allocators` / `adapters` | comma-joined lowercase addresses | Last-known role set |
+
+### Limitations
+
+`MorphoMarketV1AdapterV2` has its own internal timelock system (`setSkimRecipient`, `burnShares`, `increaseTimelock`, etc.). The Morpho GraphQL API does **not** expose adapter-internal pending operations, and replaying `Submit` events on each adapter would reintroduce the RPC cost we're explicitly avoiding. Phase-2 candidate.
+
+### How to run locally
+
+```bash
+# Hourly (allocation + risk)
+python morpho/markets_v2.py
+# Daily (timelocks + role changes)
+python morpho/governance_v2.py
+```
+
+Set `MORPHO_FILENAME=/tmp/morpho-cache.txt` to use an isolated cache while testing.
 
 ## API Docs
 

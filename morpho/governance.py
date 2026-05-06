@@ -16,7 +16,6 @@ from utils.web3_wrapper import ChainManager
 PROTOCOL = "morpho"
 logger = get_logger("morpho.governance")
 MORPHO_URL = "https://app.morpho.org"
-COMPOUND_URL = "https://compound.blue"
 API_URL = "https://api.morpho.org/graphql"
 
 PENDING_CAP_TYPE = "pending_cap"
@@ -74,20 +73,14 @@ def get_chain_name(chain: Chain):
 
 
 def get_market_url(market, chain: Chain):
-    if chain == Chain.POLYGON:
-        return f"{COMPOUND_URL}/borrow/{market}"
-    else:
-        return f"{MORPHO_URL}/{get_chain_name(chain)}/market/{market}"
+    return f"{MORPHO_URL}/{get_chain_name(chain)}/market/{market}"
 
 
 def get_vault_url_by_name(vault_name, chain: Chain):
     vaults = VAULTS_BY_CHAIN[chain]
     for name, address in vaults:
         if name == vault_name:
-            if chain == Chain.POLYGON:
-                return f"{COMPOUND_URL}/{address}"
-            else:
-                return f"{MORPHO_URL}/{get_chain_name(chain)}/vault/{address}"
+            return f"{MORPHO_URL}/{get_chain_name(chain)}/vault/{address}"
     return None
 
 
@@ -280,7 +273,6 @@ def get_data_for_chain(chain: Chain):
 
 def main():
     get_data_for_chain(Chain.MAINNET)
-    get_data_for_chain(Chain.POLYGON)
     get_data_for_chain(Chain.KATANA)
     get_data_for_chain(Chain.BASE)
 
