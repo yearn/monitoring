@@ -8,6 +8,7 @@ from utils.cache import (
     write_last_executed_morpho_to_file,
 )
 from utils.chains import Chain
+from utils.formatting import format_token_amount, format_with_suffix
 from utils.http import request_with_retry
 from utils.logging import get_logger
 from utils.telegram import send_telegram_message
@@ -145,10 +146,11 @@ def fetch_pending_cap_market_ids(vault_address: str, chain: Chain) -> list[str]:
         return []
 
 
-def fetch_market_name(market_id: str, chain: Chain) -> str:
-    """Fetch market name from Morpho GraphQL API.
+def fetch_market_info(market_id: str, chain: Chain) -> tuple[str, int | None]:
+    """Fetch market name and loan asset decimals from Morpho GraphQL API.
 
-    Returns a human-readable name like 'WBTC/USDC (86.00%)' or falls back to the market ID.
+    Returns a tuple of (name, decimals) where name is a human-readable label like
+    'WBTC/USDC (86.00%)'. On failure returns (market_id, None).
     """
     query = """
     query GetMarket($uniqueKey: String!, $chainId: Int!) {
@@ -168,12 +170,24 @@ def fetch_market_name(market_id: str, chain: Chain) -> str:
         data = response.json()
         market = data["data"]["marketByUniqueKey"]
         collateral_symbol = market["collateralAsset"]["symbol"] if market.get("collateralAsset") else "idle"
-        loan_symbol = market["loanAsset"]["symbol"]
+        loan_asset = market["loanAsset"]
+        loan_symbol = loan_asset["symbol"]
+        decimals = int(loan_asset["decimals"])
         lltv_pct = int(market["lltv"]) / 1e18 * 100
-        return f"{collateral_symbol}/{loan_symbol} ({lltv_pct:.2f}%)"
+        return f"{collateral_symbol}/{loan_symbol} ({lltv_pct:.2f}%)", decimals
     except Exception as e:
-        logger.warning("Failed to fetch market name for %s: %s", market_id, e)
-        return market_id
+        logger.warning("Failed to fetch market info for %s: %s", market_id, e)
+        return market_id, None
+
+
+def format_cap(cap: int, decimals: int | None) -> str:
+    """Format a raw supply cap as a human-readable amount with K/M/B suffix.
+
+    Falls back to comma-separated raw if decimals are unknown.
+    """
+    if decimals is None or decimals <= 0:
+        return f"{cap:,}"
+    return format_with_suffix(format_token_amount(cap, decimals))
 
 
 def check_markets_pending_cap(name, morpho_contract, chain, w3):
@@ -253,17 +267,19 @@ def check_markets_pending_cap(name, morpho_contract, chain, w3):
 
             if pending_cap_timestamp > last_executed_morpho:
                 time = datetime.fromtimestamp(pending_cap_timestamp).strftime("%Y-%m-%d %H:%M:%S")
-                market_name = fetch_market_name(market, chain)
+                market_name, decimals = fetch_market_info(market, chain)
+                pending_cap_str = format_cap(pending_cap_value, decimals)
                 if current_cap == 0:
                     message = (
-                        f"Adding new market [{market_name}]({market_url}) with cap {pending_cap_value} "
+                        f"Adding new market [{market_name}]({market_url}) with cap {pending_cap_str} "
                         f"to vault [{name}]({vault_url}) on {chain.name}. "
                         f"Queued for {time}"
                     )
                 else:
                     difference_in_percentage = ((pending_cap_value - current_cap) / current_cap) * 100
+                    current_cap_str = format_cap(current_cap, decimals)
                     message = (
-                        f"Updating cap to new cap {pending_cap_value}, current cap {current_cap}, "
+                        f"Updating cap to new cap {pending_cap_str}, current cap {current_cap_str}, "
                         f"difference: {difference_in_percentage:.2f}%. \n"
                         f"For vault [{name}]({vault_url}) for market: [{market_name}]({market_url}) on {chain.name}. "
                         f"Queued for {time}"
@@ -283,7 +299,7 @@ def check_markets_pending_cap(name, morpho_contract, chain, w3):
         if removable_at > 0:
             if removable_at > get_last_executed_morpho_from_file(vault_address, market, REMOVABLE_AT_TYPE):
                 time = datetime.fromtimestamp(removable_at).strftime("%Y-%m-%d %H:%M:%S")
-                market_name = fetch_market_name(market, chain)
+                market_name, _ = fetch_market_info(market, chain)
                 send_telegram_message(
                     f"Vault [{name}]({vault_url}) queued to remove market: [{market_name}]({market_url}) at {time}",
                     PROTOCOL,
