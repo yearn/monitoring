@@ -43,19 +43,11 @@ VAULTS_BY_CHAIN = {
         ["Yearn USDT", "0x0963232eB842BAF53E8e517691f81745C1F228a0"],
         ["Yearn WBTC", "0x2bB005127069A0F0325Fb7370967E8A2b64FB77E"],
         ["Yearn USDC", "0x68Aea7b82Df6CcdF76235D46445Ed83f85F845A3"],
-        # ["Gauntlet WBTC Core", "0x443df5eEE3196e9b2Dd77CaBd3eA76C3dee8f9b2"],
-        # ["Gauntlet LRT Core", "0x7Db8c75A903d66D669b2002870975cc5aA842b6D"],
-        # ["MEV Capital USDC", "0xd63070114470f685b75B74D60EEc7c1113d33a3D"],
     ],
     Chain.BASE: [
-        # ["Moonwell Flagship USDC", "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca"],
-        # NOTE: no funds in vaults below
-        # ["Moonwell Flagship ETH", "0xa0E430870c4604CcfC7B38Ca7845B1FF653D0ff1"],
-        # ["Moonwell Flagship EURC", "0xf24608E0CCb972b0b0f4A6446a0BBf58c701a026"],
-        # ["Moonwell Frontier cbBTC", "0x543257eF2161176D7C8cD90BA65C2d4CaEF5a796"],
-        # ["Seamless/Gauntlet USDC", "0x616a4E1db48e22028f6bbf20444Cd3b8e3273738"],
-        # ["Seamless/Gauntlet WETH", "0x27D8c7273fd3fcC6956a0B370cE5Fd4A7fc65c18"],
-        # ["Seamless/Gauntlet cbBTC", "0x5a47C803488FE2BB0A0EAaf346b420e4dF22F3C7"],
+        ["Moonwell Flagship USDC", "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca"],
+        ["Yearn OG USDC", "0xef417a2512C5a41f69AE4e021648b69a7CdE5D03"],
+        ["Yearn OG WETH", "0x1D795E29044A62Da42D927c4b179269139A28A6B"],
     ],
     Chain.KATANA: [
         ["Gauntlet WBTC", "0xf243523996ADbb273F0B237B53f30017C4364bBC"],

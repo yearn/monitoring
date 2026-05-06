@@ -34,8 +34,11 @@ VAULTS_BY_CHAIN = {
         ["Gauntlet WETH Prime", "0x2371e134e3455e0593363cBF89d3b6cf53740618", 1],
         ["Gauntlet USDC Prime", "0xdd0f28e19C1780eb6396170735D45153D261490d", 1],
         ["Gauntlet USDT Prime", "0x8CB3649114051cA5119141a34C200D65dc0Faa73", 1],
+        ["Yearn USDC", "0x68Aea7b82Df6CcdF76235D46445Ed83f85F845A3", 1],
+        ["Yearn USDT", "0x0963232eB842BAF53E8e517691f81745C1F228a0", 1],
+        ["Yearn WBTC", "0x2bB005127069A0F0325Fb7370967E8A2b64FB77E", 1],
         ["Yearn OG WETH", "0xE89371eAaAC6D46d4C3ED23453241987916224FC", 2],
-        ["Yearn OG USDC", "0xF9bdDd4A9b3A45f980e11fDDE96e16364dDBEc49", 3],
+        ["Yearn OG USDC", "0xF9bdDd4A9b3A45f980e11fDDE96e16364dDBEc49", 2],
         # these vaults are not used by yVaults
         # ["Gauntlet WBTC Core", "0x443df5eEE3196e9b2Dd77CaBd3eA76C3dee8f9b2", 3],
         # ["Gauntlet WETH Core", "0x4881Ef0BF6d2365D3dd6499ccd7532bcdBCE0658", 3],
@@ -50,23 +53,18 @@ VAULTS_BY_CHAIN = {
         ["Sentora RLUSD", "0x71cb2F8038B2C5D65ddc740B2F3268890CD2A89C", 2],
     ],
     Chain.BASE: [
-        ["GauntletUSDC Prime", "0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61", 1],
-        ["Gauntlet USDT Prime", "0x585867B44914942578149766B305496374E33682", 1],
-        ["SteakhousePrime USDC", "0xBEEFE94c8aD530842bfE7d8B397938fFc1cb83b2", 1],
         ["Moonwell Flagship USDC", "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca", 1],
-        ["Moonwell Flagship ETH", "0xa0E430870c4604CcfC7B38Ca7845B1FF653D0ff1", 2],
-        ["Moonwell Flagship EURC", "0xf24608E0CCb972b0b0f4A6446a0BBf58c701a026", 2],
-        ["Gauntlet WETH Core", "0x6b13c060F13Af1fdB319F52315BbbF3fb1D88844", 2],
-        ["Seamless/Gauntlet WETH", "0x27D8c7273fd3fcC6956a0B370cE5Fd4A7fc65c18", 2],
-        ["Seamless/Gauntlet USDC", "0x616a4E1db48e22028f6bbf20444Cd3b8e3273738", 2],
-        ["Seamless/Gauntlet cbBTC", "0x5a47C803488FE2BB0A0EAaf346b420e4dF22F3C7", 2],
+        ["Yearn OG USDC", "0xef417a2512C5a41f69AE4e021648b69a7CdE5D03", 2],
         ["Yearn OG WETH", "0x1D795E29044A62Da42D927c4b179269139A28A6B", 2],
-        # ["Yearn OG USDC", "0xef417a2512C5a41f69AE4e021648b69a7CdE5D03", 2],
-        [
-            "Moonwell Frontier cbBTC",
-            "0x543257eF2161176D7C8cD90BA65C2d4CaEF5a796",
-            3,
-        ],
+        # ["GauntletUSDC Prime", "0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61", 1],
+        # ["Gauntlet USDT Prime", "0x585867B44914942578149766B305496374E33682", 1],
+        # ["SteakhousePrime USDC", "0xBEEFE94c8aD530842bfE7d8B397938fFc1cb83b2", 1],
+        # ["Moonwell Flagship ETH", "0xa0E430870c4604CcfC7B38Ca7845B1FF653D0ff1", 2],
+        # ["Moonwell Flagship EURC", "0xf24608E0CCb972b0b0f4A6446a0BBf58c701a026", 2],
+        # ["Gauntlet WETH Core", "0x6b13c060F13Af1fdB319F52315BbbF3fb1D88844", 2],
+        # ["Seamless/Gauntlet WETH", "0x27D8c7273fd3fcC6956a0B370cE5Fd4A7fc65c18", 2],
+        # ["Seamless/Gauntlet USDC", "0x616a4E1db48e22028f6bbf20444Cd3b8e3273738", 2],
+        # ["Seamless/Gauntlet cbBTC", "0x5a47C803488FE2BB0A0EAaf346b420e4dF22F3C7", 2],
     ],
     Chain.KATANA: [
         ["Yearn OG WETH", "0xFaDe0C546f44e33C134c4036207B314AC643dc2E", 1],
@@ -155,6 +153,7 @@ MARKETS_RISK_1 = {
         "0xe7e9694b754c4d4f7e21faf7223f6fa71abaeb10296a4c43a54a7977149687d2",  # wstETH/USDT -> lltv 86%, oracle: compound oracle wstETH/ETH, chainlink ETH/USD and chainlink USDT/USD
         "0x37e7484d642d90f14451f1910ba4b7b8e4c3ccdd0ec28f8b2bdb35479e472ba7",  # weETH/WETH -> lltv 94.5%, oracle: origami weETH/ETH which calls WEETH.getRate(). Alike assets.
         "0x45671fb8d5dea1c4fbca0b8548ad742f6643300eeb8dbd34ad64a658b2b05bca",  # cbBTC/USDT -> lltv 86%, oracle: chainlink BTC/USD, hardcoded USDT=USD.
+        "0x39d6cc9211d023cc16708a2378d821d394d8cfaa3640e3a4d4638d292e10035d",  # cbBTC/WBTC -> lltv 94.5%, oracle: chainlink cbBTC/USD and chainlink WBTC/USD.
     ],
     Chain.BASE: [
         "0x7fc498ddcb7707d6f85f6dc81f61edb6dc8d7f1b47a83b55808904790564929a",  # cbETH/EURC -> lltv 86%, oracle: Chainlink cbETH/ETH and Chainlink ETH/USD and Chainlink EURC/USD.
