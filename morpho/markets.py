@@ -154,6 +154,7 @@ MARKETS_RISK_1 = {
         "0x37e7484d642d90f14451f1910ba4b7b8e4c3ccdd0ec28f8b2bdb35479e472ba7",  # weETH/WETH -> lltv 94.5%, oracle: origami weETH/ETH which calls WEETH.getRate(). Alike assets.
         "0x45671fb8d5dea1c4fbca0b8548ad742f6643300eeb8dbd34ad64a658b2b05bca",  # cbBTC/USDT -> lltv 86%, oracle: chainlink BTC/USD, hardcoded USDT=USD.
         "0x39d6cc9211d023cc16708a2378d821d394d8cfaa3640e3a4d4638d292e10035d",  # cbBTC/WBTC -> lltv 94.5%, oracle: chainlink cbBTC/USD and chainlink WBTC/USD.
+        "0x34377fc4f617c51818e92c79df31ff270c6a91bc94ad32e367fdf59b9f4ac5dd",  # weETH/USDC -> lltv 77%, oracle: Chainlink weETH/ETH exchange rate and Chainlink ETH/USD; Morpho dummy quote feed (USDC = $1).
     ],
     Chain.BASE: [
         "0x7fc498ddcb7707d6f85f6dc81f61edb6dc8d7f1b47a83b55808904790564929a",  # cbETH/EURC -> lltv 86%, oracle: Chainlink cbETH/ETH and Chainlink ETH/USD and Chainlink EURC/USD.
