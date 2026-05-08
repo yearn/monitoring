@@ -345,7 +345,7 @@ def main():
 
                 send_alert(
                     Alert(
-                        AlertSeverity.MEDIUM,
+                        AlertSeverity.LOW,
                         "*Infinifi Farm Allocation Shift Alert*\n\n"
                         "Farm allocation ratio changed by more than 10% vs previous run:\n" + "\n".join(moved_lines),
                         PROTOCOL,
