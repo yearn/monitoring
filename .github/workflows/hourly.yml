@@ -27,7 +27,6 @@ jobs:
         lrt-pegs/origin_protocol.py
         # euler/markets.py
         infinifi/main.py
-        # silo/ur_sniff.py
         usdai/main.py
         usdai/large_mints.py
         yearn/alert_large_flows.py
