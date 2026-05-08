@@ -57,9 +57,6 @@ PROXY_UPGRADE_SIGNATURES = [
 
 # combined addresses, add more addresses if needed, last item is optional for additional info message
 ALL_SAFE_ADDRESSES = [
-    ["SILO", "mainnet", "0xE8e8041cB5E3158A0829A19E014CA1cf91098554"],
-    # ["SILO", "optimism-main", "0x468CD12aa9e9fe4301DB146B0f7037831B52382d"],
-    ["SILO", "arbitrum-main", "0x865A1DA42d512d8854c7b0599c962F67F5A5A9d9"],
     [
         "LIDO",
         "mainnet",
