@@ -111,18 +111,6 @@ ALL_SAFE_ADDRESSES = [
     [
         "LRT",
         "mainnet",
-        "0x94877640dD9E6F1e3Cb56Bf7b5665b7152601295",
-        "thBILL & tULTRA owner multisig. Markets used on Morpho Arbitrum",
-    ],  # thBILL & tULTRA owner multisig
-    [
-        "LRT",
-        "mainnet",
-        "0x2536f2Ef78B0DF34299CaD6e59300F8f83fE1Ec4",
-        "thBILL minter role. Markets used on Morpho Arbitrum",
-    ],  # thBILL minter role
-    [
-        "LRT",
-        "mainnet",
         "0x9F6e831c8F8939DC0C830C6e492e7cEf4f9C2F5f",
         "tBTC bridge owner multisig. aka, Council Multisig",
     ],  # tBTC bridge owner multisig (Council Multisig)
