@@ -13,8 +13,9 @@ from utils.llm.base import LLMError
 from utils.logging import get_logger
 from utils.paste import upload_to_paste
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
+from utils.source_context import SourceContext, format_source_context, get_source_context
 from utils.telegram import escape_markdown
-from utils.tenderly.simulation import SimulationResult, simulate_transaction
+from utils.tenderly.simulation import SimulationResult, StateChange, simulate_transaction
 
 logger = get_logger("utils.llm.ai_explainer")
 
@@ -29,7 +30,19 @@ DETAIL: A thorough analysis covering:
 - Asset/token flow changes
 - State changes and their impact
 - Risk assessment (LOW/MEDIUM/HIGH/CRITICAL)
-- Any concerns or notable observations"""
+- Any concerns or notable observations
+
+Critical rules for parameter interpretation:
+- Do NOT assume the semantic meaning of a parameter from its function name. DeFi protocols
+  use inverted or non-standard conventions. For example, a "maxSlippage" value may represent
+  a minimum-output ratio (where 0.99e18 means tight 1% protection), not a maximum tolerated
+  deviation. A "fee" may be scaled to 1e4, 1e6, or 1e18.
+- Whenever a Contract Source Context section is provided below, trust the natspec comments
+  there over your prior assumptions about the function name.
+- If source context is NOT provided and the unit/meaning is ambiguous, say so explicitly
+  ("the unit cannot be confirmed without source context") rather than guessing. Quote the
+  raw value and its 1e18-normalized form.
+- Never assign HIGH/CRITICAL risk on the basis of a guessed unit interpretation."""
 
 FORMAT_REMINDER = """
 Format your response exactly as:
@@ -45,6 +58,34 @@ class Explanation:
 
     summary: str
     detail: str
+
+
+def _collect_source_contexts(
+    targets_and_calls: list[tuple[str, DecodedCall]],
+    chain_id: int,
+) -> list[SourceContext]:
+    """Fetch source context for each (target, decoded_call) pair, best-effort.
+
+    Deduplicates by (target, function_name). Silent on failure so a missing
+    Etherscan key or unverified contract never blocks an explanation.
+    """
+    contexts: list[SourceContext] = []
+    seen: set[tuple[str, str]] = set()
+    for target, decoded in targets_and_calls:
+        if not target or not decoded.function_name:
+            continue
+        key = (target.lower(), decoded.function_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            ctx = get_source_context(chain_id, target, decoded.function_name)
+        except Exception as e:  # noqa: BLE001 - best-effort enrichment
+            logger.info("Source context fetch failed for %s.%s: %s", target, decoded.function_name, e)
+            continue
+        if ctx:
+            contexts.append(ctx)
+    return contexts
 
 
 def _get_proxy_upgrade_info(calldata: str, target: str, chain_id: int) -> str:
@@ -75,6 +116,48 @@ def _format_decoded_calls(calls: list[DecodedCall]) -> str:
             lines.append(f"  {type_str}: {value}")
         parts.append("\n".join(lines))
     return "\n\n".join(parts)
+
+
+_SETTER_PREFIXES = ("set", "update", "configure", "change", "adjust")
+
+
+def _is_setter_call(decoded: DecodedCall) -> bool:
+    """Detect setter-style calls where state-diff promotion is useful."""
+    name = decoded.function_name
+    return any(
+        name.startswith(prefix) and len(name) > len(prefix) and name[len(prefix)].isupper()
+        for prefix in _SETTER_PREFIXES
+    )
+
+
+def _format_state_change(sc: StateChange) -> str:
+    """Format a single state change for the promoted effect block."""
+    return f"  {sc.contract_address} slot {sc.key}: {sc.original} -> {sc.dirty}"
+
+
+def _format_promoted_effects(
+    decoded_calls: list[DecodedCall],
+    simulation: SimulationResult | None,
+    target: str,
+) -> str:
+    """Surface the most relevant state diffs near the top for setter-style calls.
+
+    Returns "" if no setter call is present or no state changes match.
+    """
+    if not simulation or not simulation.state_changes:
+        return ""
+    if not any(_is_setter_call(c) for c in decoded_calls):
+        return ""
+
+    target_lower = target.lower() if target else ""
+    primary = [sc for sc in simulation.state_changes if sc.contract_address.lower() == target_lower]
+    relevant = primary or simulation.state_changes
+    shown = relevant[:5]
+    lines = ["State changes caused by this call:"]
+    lines.extend(_format_state_change(sc) for sc in shown)
+    if len(relevant) > len(shown):
+        lines.append(f"  ... and {len(relevant) - len(shown)} more (see full simulation below)")
+    return "\n".join(lines)
 
 
 def _format_simulation_context(sim: SimulationResult) -> str:
@@ -120,6 +203,7 @@ def _build_prompt(
     protocol: str = "",
     label: str = "",
     proxy_upgrade_info: str = "",
+    source_contexts: list[SourceContext] | None = None,
 ) -> str:
     """Build the full prompt for the LLM."""
     parts: list[str] = [SYSTEM_PROMPT, ""]
@@ -133,6 +217,14 @@ def _build_prompt(
         parts.append(f"ETH Value: {value / 1e18:.6f} ETH")
 
     parts.append(f"\n--- Decoded Calldata ---\n{_format_decoded_calls(decoded_calls)}")
+
+    if source_contexts:
+        rendered = "\n\n".join(format_source_context(ctx) for ctx in source_contexts)
+        parts.append(f"\n--- Contract Source Context ---\n{rendered}")
+
+    effects = _format_promoted_effects(decoded_calls, simulation, target)
+    if effects:
+        parts.append(f"\n--- Effects ---\n{effects}")
 
     if proxy_upgrade_info:
         parts.append(f"\n--- Proxy Upgrade ---\n{proxy_upgrade_info}")
@@ -234,7 +326,11 @@ def explain_transaction(
     # Step 2: Detect proxy upgrade (best-effort)
     proxy_upgrade_info = _get_proxy_upgrade_info(calldata, target, chain_id)
 
-    # Step 3: Simulate via Tenderly (best-effort)
+    # Step 3: Fetch verified source context for the called function (best-effort).
+    # Grounds the LLM in the contract's actual natspec rather than function-name guesses.
+    source_contexts = _collect_source_contexts([(target, decoded)], chain_id)
+
+    # Step 4: Simulate via Tenderly (best-effort)
     simulation = simulate_transaction(
         target=target,
         calldata=calldata,
@@ -247,7 +343,7 @@ def explain_transaction(
     else:
         logger.info("Simulation unavailable, proceeding with decoded calldata only")
 
-    # Step 4: Build prompt and call LLM
+    # Step 5: Build prompt and call LLM
     prompt = _build_prompt(
         target=target,
         value=value,
@@ -256,6 +352,7 @@ def explain_transaction(
         protocol=protocol,
         label=label,
         proxy_upgrade_info=proxy_upgrade_info,
+        source_contexts=source_contexts,
     )
     logger.info("Full AI context for %s:\n%s", target, prompt)
 
@@ -295,6 +392,7 @@ def explain_batch_transaction(
         return None
 
     decoded_calls: list[DecodedCall] = []
+    decoded_with_target: list[tuple[str, DecodedCall]] = []
     simulations: list[SimulationResult | None] = []
 
     for call in calls:
@@ -305,6 +403,7 @@ def explain_batch_transaction(
         decoded = decode_calldata(data)
         if decoded:
             decoded_calls.append(decoded)
+            decoded_with_target.append((target, decoded))
 
         sim = simulate_transaction(
             target=target,
@@ -329,6 +428,8 @@ def explain_batch_transaction(
             upgrade_parts.append(info)
     proxy_upgrade_info = "\n".join(upgrade_parts)
 
+    source_contexts = _collect_source_contexts(decoded_with_target, chain_id)
+
     # For batch, show all targets
     targets = ", ".join(c.get("target", "?") for c in calls)
     total_value = sum(int(c.get("value", "0")) for c in calls)
@@ -341,6 +442,7 @@ def explain_batch_transaction(
         protocol=protocol,
         label=label,
         proxy_upgrade_info=proxy_upgrade_info,
+        source_contexts=source_contexts,
     )
     logger.info("Full AI context for batch (%s calls):\n%s", len(calls), prompt)
 
