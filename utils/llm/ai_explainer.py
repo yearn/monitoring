@@ -15,7 +15,7 @@ from utils.paste import upload_to_paste
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
 from utils.source_context import SourceContext, format_source_context, get_source_context
 from utils.telegram import escape_markdown
-from utils.tenderly.simulation import SimulationResult, StateChange, simulate_transaction
+from utils.tenderly.simulation import SimulationResult, simulate_transaction
 
 logger = get_logger("utils.llm.ai_explainer")
 
@@ -80,7 +80,7 @@ def _collect_source_contexts(
         seen.add(key)
         try:
             ctx = get_source_context(chain_id, target, decoded.function_name)
-        except Exception as e:  # noqa: BLE001 - best-effort enrichment
+        except Exception as e:  # noqa: BLE001
             logger.info("Source context fetch failed for %s.%s: %s", target, decoded.function_name, e)
             continue
         if ctx:
@@ -116,48 +116,6 @@ def _format_decoded_calls(calls: list[DecodedCall]) -> str:
             lines.append(f"  {type_str}: {value}")
         parts.append("\n".join(lines))
     return "\n\n".join(parts)
-
-
-_SETTER_PREFIXES = ("set", "update", "configure", "change", "adjust")
-
-
-def _is_setter_call(decoded: DecodedCall) -> bool:
-    """Detect setter-style calls where state-diff promotion is useful."""
-    name = decoded.function_name
-    return any(
-        name.startswith(prefix) and len(name) > len(prefix) and name[len(prefix)].isupper()
-        for prefix in _SETTER_PREFIXES
-    )
-
-
-def _format_state_change(sc: StateChange) -> str:
-    """Format a single state change for the promoted effect block."""
-    return f"  {sc.contract_address} slot {sc.key}: {sc.original} -> {sc.dirty}"
-
-
-def _format_promoted_effects(
-    decoded_calls: list[DecodedCall],
-    simulation: SimulationResult | None,
-    target: str,
-) -> str:
-    """Surface the most relevant state diffs near the top for setter-style calls.
-
-    Returns "" if no setter call is present or no state changes match.
-    """
-    if not simulation or not simulation.state_changes:
-        return ""
-    if not any(_is_setter_call(c) for c in decoded_calls):
-        return ""
-
-    target_lower = target.lower() if target else ""
-    primary = [sc for sc in simulation.state_changes if sc.contract_address.lower() == target_lower]
-    relevant = primary or simulation.state_changes
-    shown = relevant[:5]
-    lines = ["State changes caused by this call:"]
-    lines.extend(_format_state_change(sc) for sc in shown)
-    if len(relevant) > len(shown):
-        lines.append(f"  ... and {len(relevant) - len(shown)} more (see full simulation below)")
-    return "\n".join(lines)
 
 
 def _format_simulation_context(sim: SimulationResult) -> str:
@@ -221,10 +179,6 @@ def _build_prompt(
     if source_contexts:
         rendered = "\n\n".join(format_source_context(ctx) for ctx in source_contexts)
         parts.append(f"\n--- Contract Source Context ---\n{rendered}")
-
-    effects = _format_promoted_effects(decoded_calls, simulation, target)
-    if effects:
-        parts.append(f"\n--- Effects ---\n{effects}")
 
     if proxy_upgrade_info:
         parts.append(f"\n--- Proxy Upgrade ---\n{proxy_upgrade_info}")
@@ -315,22 +269,15 @@ def explain_transaction(
     if not calldata or len(calldata) < 10:
         return None
 
-    # Step 1: Decode calldata (reuse existing decoder)
     decoded = decode_calldata(calldata)
     if not decoded:
         logger.info("Could not decode calldata for %s, skipping AI explanation", target)
         return None
 
     decoded_calls = [decoded]
-
-    # Step 2: Detect proxy upgrade (best-effort)
     proxy_upgrade_info = _get_proxy_upgrade_info(calldata, target, chain_id)
-
-    # Step 3: Fetch verified source context for the called function (best-effort).
-    # Grounds the LLM in the contract's actual natspec rather than function-name guesses.
     source_contexts = _collect_source_contexts([(target, decoded)], chain_id)
 
-    # Step 4: Simulate via Tenderly (best-effort)
     simulation = simulate_transaction(
         target=target,
         calldata=calldata,
@@ -343,7 +290,6 @@ def explain_transaction(
     else:
         logger.info("Simulation unavailable, proceeding with decoded calldata only")
 
-    # Step 5: Build prompt and call LLM
     prompt = _build_prompt(
         target=target,
         value=value,

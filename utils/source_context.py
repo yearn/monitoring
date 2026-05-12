@@ -24,9 +24,18 @@ ETHERSCAN_V2_API_URL = "https://api.etherscan.io/v2/api"
 # always under a few hundred chars in practice.
 MAX_SNIPPET_CHARS = 4000
 
-# In-memory cache keyed by (chain_id, address_lower) -> concatenated source.
-# Workflows are short-lived so a per-process dict is sufficient.
-_source_cache: dict[tuple[int, str], str | None] = {}
+# Per-process cache: (chain_id, address_lower) -> (contract_name, source) or None for miss.
+# Workflows are short-lived so a process-lifetime dict is sufficient.
+_source_cache: dict[tuple[int, str], tuple[str, str] | None] = {}
+
+_NATSPEC_LINE = r"(?:[ \t]*///.*\n|[ \t]*\*[^/].*\n|[ \t]*/\*\*[\s\S]*?\*/[ \t]*\n)"
+_NATSPEC_BLOCK = rf"(?:(?:{_NATSPEC_LINE})+)?"
+
+# Statement-leading `<name> = ` (excludes `==` and typed locals like `uint256 x = 1`,
+# which would have a type identifier before x on the same line).
+_ASSIGNMENT_RE = re.compile(r"(?:^|[;{}\n])\s*([a-zA-Z_]\w*)\s*=(?!=)", re.MULTILINE)
+
+_CONTROL_KEYWORDS = frozenset({"if", "for", "while", "require", "revert", "return", "emit", "assembly", "unchecked"})
 
 
 @dataclass(frozen=True)
@@ -49,11 +58,9 @@ def _fetch_source(chain_id: int, address: str) -> tuple[str, str] | None:
     if not api_key:
         return None
 
-    address_lower = address.lower()
-    cache_key = (chain_id, address_lower)
+    cache_key = (chain_id, address.lower())
     if cache_key in _source_cache:
-        cached = _source_cache[cache_key]
-        return ("", cached) if cached else None
+        return _source_cache[cache_key]
 
     params = {
         "chainid": str(chain_id),
@@ -63,65 +70,43 @@ def _fetch_source(chain_id: int, address: str) -> tuple[str, str] | None:
         "apikey": api_key,
     }
     data = fetch_json(ETHERSCAN_V2_API_URL, params=params)
-    if not data or data.get("status") != "1":
-        _source_cache[cache_key] = None
-        return None
-
-    results = data.get("result") or []
-    if not results:
-        _source_cache[cache_key] = None
-        return None
-
-    entry = results[0]
+    results = (data or {}).get("result") or [] if (data or {}).get("status") == "1" else []
+    entry = results[0] if results else {}
     raw_source = entry.get("SourceCode") or ""
-    contract_name = entry.get("ContractName") or ""
 
     if not raw_source:
         _source_cache[cache_key] = None
         return None
 
-    concatenated = _concat_sources(raw_source)
-    _source_cache[cache_key] = concatenated
-    return (contract_name, concatenated)
+    result = (entry.get("ContractName") or "", _concat_sources(raw_source))
+    _source_cache[cache_key] = result
+    return result
 
 
 def _concat_sources(raw_source: str) -> str:
     """Etherscan returns either a single-file string or a JSON blob of files.
 
-    Multi-file: wrapped in double braces `{{ ... }}` (standard JSON input format).
-    Returns a single concatenated string for searching.
+    Multi-file solc input is wrapped in double braces `{{ ... }}`; standard JSON
+    has single braces. Returns concatenated file contents for searching.
     """
     stripped = raw_source.strip()
-    if stripped.startswith("{{") and stripped.endswith("}}"):
-        # Standard JSON input: strip the outer braces
-        try:
-            parsed = json.loads(stripped[1:-1])
-        except json.JSONDecodeError:
-            return raw_source
-        sources = parsed.get("sources") or {}
-        return "\n\n".join(f["content"] for f in sources.values() if isinstance(f, dict) and "content" in f)
+    if not (stripped.startswith("{") and stripped.endswith("}")):
+        return raw_source
 
-    if stripped.startswith("{") and stripped.endswith("}"):
-        try:
-            parsed = json.loads(stripped)
-            if isinstance(parsed, dict) and "sources" in parsed:
-                sources = parsed["sources"]
-                return "\n\n".join(f["content"] for f in sources.values() if isinstance(f, dict) and "content" in f)
-        except json.JSONDecodeError:
-            pass
+    payload = stripped[1:-1] if stripped.startswith("{{") else stripped
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError:
+        return raw_source
 
-    return raw_source
-
-
-_NATSPEC_LINE = r"(?:[ \t]*///.*\n|[ \t]*\*[^/].*\n|[ \t]*/\*\*[\s\S]*?\*/[ \t]*\n)"
-_NATSPEC_BLOCK = rf"(?:(?:{_NATSPEC_LINE})+)?"
+    sources = parsed.get("sources") if isinstance(parsed, dict) else None
+    if not isinstance(sources, dict):
+        return raw_source
+    return "\n\n".join(f["content"] for f in sources.values() if isinstance(f, dict) and "content" in f)
 
 
 def _extract_function_snippet(source: str, function_name: str) -> str:
-    """Find a function definition and any preceding natspec comment block.
-
-    Returns the natspec lines + the function signature line, or "" if not found.
-    """
+    """Find a function definition and any preceding natspec comment block."""
     pattern = re.compile(
         rf"({_NATSPEC_BLOCK})([ \t]*function\s+{re.escape(function_name)}\b[^{{;]*[{{;])",
         re.MULTILINE,
@@ -129,46 +114,24 @@ def _extract_function_snippet(source: str, function_name: str) -> str:
     match = pattern.search(source)
     if not match:
         return ""
-
     natspec = match.group(1) or ""
-    signature_line = match.group(2).strip()
-    return f"{natspec.rstrip()}\n{signature_line}".strip()
+    return f"{natspec.rstrip()}\n{match.group(2).strip()}".strip()
 
 
 def _find_state_var_writes(source: str, function_name: str) -> list[str]:
-    """Find state variable names assigned to inside the function body.
-
-    Locates `<name> = ...` assignments (excluding `==`, declarations, and `:=`).
-    Returns variable names in order encountered, deduplicated.
-    """
+    """State variable names assigned inside the function body, deduped, in order."""
     body = _extract_function_body(source, function_name)
     if not body:
         return []
 
-    # Match `<name> = ` where the name starts a statement (preceded by ;, {, } or
-    # newline). This excludes typed local declarations like `uint256 local = 1`
-    # because they're preceded by a type identifier on the same line.
-    assignment_pattern = re.compile(r"(?:^|[;{}\n])\s*([a-zA-Z_]\w*)\s*=(?!=)", re.MULTILINE)
     seen: set[str] = set()
     ordered: list[str] = []
-    keywords = {
-        "if",
-        "for",
-        "while",
-        "require",
-        "revert",
-        "return",
-        "emit",
-        "assembly",
-        "unchecked",
-    }
-    for m in assignment_pattern.finditer(body):
+    for m in _ASSIGNMENT_RE.finditer(body):
         name = m.group(1)
-        if name in keywords or name.startswith("_"):
+        if name in _CONTROL_KEYWORDS or name.startswith("_") or name in seen:
             continue
-        if name not in seen:
-            seen.add(name)
-            ordered.append(name)
+        seen.add(name)
+        ordered.append(name)
     return ordered
 
 
@@ -183,10 +146,9 @@ def _extract_function_body(source: str, function_name: str) -> str:
     depth = 1
     i = start
     while i < len(source) and depth > 0:
-        c = source[i]
-        if c == "{":
+        if source[i] == "{":
             depth += 1
-        elif c == "}":
+        elif source[i] == "}":
             depth -= 1
         i += 1
     if depth != 0:
@@ -197,9 +159,8 @@ def _extract_function_body(source: str, function_name: str) -> str:
 def _extract_state_var_snippet(source: str, var_name: str) -> str:
     """Find a state variable declaration with any preceding natspec.
 
-    Matches lines like `uint256 public maxSlippage;` or `mapping(...) public foo;`.
-    Skips matches inside function bodies (heuristic: requires `public`, `private`,
-    `internal`, `external`, `immutable`, or `constant` modifier).
+    Requires a visibility modifier so local declarations inside function bodies
+    don't match.
     """
     pattern = re.compile(
         rf"({_NATSPEC_BLOCK})("
@@ -214,10 +175,8 @@ def _extract_state_var_snippet(source: str, var_name: str) -> str:
     match = pattern.search(source)
     if not match:
         return ""
-
     natspec = match.group(1) or ""
-    decl_line = match.group(2).strip()
-    return f"{natspec.rstrip()}\n{decl_line}".strip()
+    return f"{natspec.rstrip()}\n{match.group(2).strip()}".strip()
 
 
 def get_source_context(chain_id: int, address: str, function_name: str) -> SourceContext | None:

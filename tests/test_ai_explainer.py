@@ -8,9 +8,7 @@ from utils.llm.ai_explainer import (
     Explanation,
     _build_prompt,
     _format_decoded_calls,
-    _format_promoted_effects,
     _format_simulation_context,
-    _is_setter_call,
     _parse_explanation,
     explain_transaction,
     format_explanation_line,
@@ -151,88 +149,8 @@ class TestBuildPrompt(unittest.TestCase):
         self.assertIn("SUCCESS", result)
 
 
-class TestIsSetterCall(unittest.TestCase):
-    """Tests for _is_setter_call."""
-
-    def test_set_prefix_with_camelcase(self) -> None:
-        call = DecodedCall(function_name="setMaxSlippage", signature="setMaxSlippage(uint256)")
-        self.assertTrue(_is_setter_call(call))
-
-    def test_update_prefix(self) -> None:
-        call = DecodedCall(function_name="updateFee", signature="updateFee(uint256)")
-        self.assertTrue(_is_setter_call(call))
-
-    def test_configure_prefix(self) -> None:
-        call = DecodedCall(function_name="configureOracle", signature="configureOracle(address)")
-        self.assertTrue(_is_setter_call(call))
-
-    def test_non_setter(self) -> None:
-        call = DecodedCall(function_name="deposit", signature="deposit(uint256)")
-        self.assertFalse(_is_setter_call(call))
-
-    def test_set_lowercase_continuation_is_not_setter(self) -> None:
-        # `settle` starts with "set" but is not a setter — guarded by isupper check
-        call = DecodedCall(function_name="settle", signature="settle()")
-        self.assertFalse(_is_setter_call(call))
-
-
-class TestFormatPromotedEffects(unittest.TestCase):
-    """Tests for _format_promoted_effects."""
-
-    def test_setter_with_matching_state_change(self) -> None:
-        decoded = [DecodedCall(function_name="setMaxSlippage", signature="setMaxSlippage(uint256)")]
-        sim = SimulationResult(
-            success=True,
-            gas_used=50000,
-            state_changes=[
-                StateChange(
-                    contract_address="0xTarget",
-                    key="0x02",
-                    original="0x0",
-                    dirty="0xde0b6b3a7640000",
-                )
-            ],
-        )
-        result = _format_promoted_effects(decoded, sim, target="0xTarget")
-        self.assertIn("State changes caused by this call:", result)
-        self.assertIn("0x0 -> 0xde0b6b3a7640000", result)
-
-    def test_non_setter_returns_empty(self) -> None:
-        decoded = [DecodedCall(function_name="deposit", signature="deposit(uint256)")]
-        sim = SimulationResult(
-            success=True,
-            gas_used=50000,
-            state_changes=[StateChange(contract_address="0xT", key="0x01", original="0x0", dirty="0x1")],
-        )
-        self.assertEqual(_format_promoted_effects(decoded, sim, target="0xT"), "")
-
-    def test_no_simulation_returns_empty(self) -> None:
-        decoded = [DecodedCall(function_name="setFee", signature="setFee(uint256)")]
-        self.assertEqual(_format_promoted_effects(decoded, None, target="0xT"), "")
-
-    def test_no_state_changes_returns_empty(self) -> None:
-        decoded = [DecodedCall(function_name="setFee", signature="setFee(uint256)")]
-        sim = SimulationResult(success=True, gas_used=50000)
-        self.assertEqual(_format_promoted_effects(decoded, sim, target="0xT"), "")
-
-    def test_filters_to_target_contract(self) -> None:
-        decoded = [DecodedCall(function_name="setFee", signature="setFee(uint256)")]
-        sim = SimulationResult(
-            success=True,
-            gas_used=50000,
-            state_changes=[
-                StateChange(contract_address="0xOther", key="0x01", original="0x0", dirty="0x1"),
-                StateChange(contract_address="0xTarget", key="0x02", original="0x0", dirty="0x5"),
-            ],
-        )
-        result = _format_promoted_effects(decoded, sim, target="0xTarget")
-        self.assertIn("0xTarget", result)
-        # Other-contract storage change should not appear when target has its own
-        self.assertNotIn("0xOther", result)
-
-
 class TestBuildPromptWithSourceContext(unittest.TestCase):
-    """Tests that source context is included and effects are promoted in the prompt."""
+    """Tests for source context injection and hardened system prompt."""
 
     def test_source_context_appears_in_prompt(self) -> None:
         calls = [DecodedCall(function_name="setMaxSlippage", signature="setMaxSlippage(uint256)")]
@@ -250,17 +168,6 @@ class TestBuildPromptWithSourceContext(unittest.TestCase):
         )
         self.assertIn("Contract Source Context", result)
         self.assertIn("so actually 1 - slippage", result)
-
-    def test_promoted_effects_appear_in_prompt(self) -> None:
-        calls = [DecodedCall(function_name="setMaxSlippage", signature="setMaxSlippage(uint256)")]
-        sim = SimulationResult(
-            success=True,
-            gas_used=50000,
-            state_changes=[StateChange(contract_address="0xT", key="0x02", original="0x0", dirty="0xdeadbeef")],
-        )
-        result = _build_prompt(target="0xT", value=0, decoded_calls=calls, simulation=sim)
-        self.assertIn("--- Effects ---", result)
-        self.assertIn("0xdeadbeef", result)
 
     def test_hardened_prompt_includes_unit_guidance(self) -> None:
         calls = [DecodedCall(function_name="pause", signature="pause()")]
