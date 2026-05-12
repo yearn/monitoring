@@ -14,6 +14,7 @@ from utils.llm.ai_explainer import (
     format_explanation_line,
 )
 from utils.llm.base import LLMError
+from utils.source_context import SourceContext
 from utils.tenderly.simulation import AssetChange, SimulationResult, StateChange
 
 
@@ -148,6 +149,33 @@ class TestBuildPrompt(unittest.TestCase):
         self.assertIn("SUCCESS", result)
 
 
+class TestBuildPromptWithSourceContext(unittest.TestCase):
+    """Tests for source context injection and hardened system prompt."""
+
+    def test_source_context_appears_in_prompt(self) -> None:
+        calls = [DecodedCall(function_name="setMaxSlippage", signature="setMaxSlippage(uint256)")]
+        ctx = SourceContext(
+            contract_name="Farm",
+            function_snippet="/// @notice tight\nfunction setMaxSlippage(uint256) external;",
+            state_var_snippets=["/// @dev so actually 1 - slippage\nuint256 public maxSlippage;"],
+        )
+        result = _build_prompt(
+            target="0xT",
+            value=0,
+            decoded_calls=calls,
+            simulation=None,
+            source_contexts=[ctx],
+        )
+        self.assertIn("Contract Source Context", result)
+        self.assertIn("so actually 1 - slippage", result)
+
+    def test_hardened_prompt_includes_unit_guidance(self) -> None:
+        calls = [DecodedCall(function_name="pause", signature="pause()")]
+        result = _build_prompt(target="0xT", value=0, decoded_calls=calls, simulation=None)
+        self.assertIn("Do NOT assume the semantic meaning", result)
+        self.assertIn("source context", result.lower())
+
+
 class TestExplainTransaction(unittest.TestCase):
     """Tests for explain_transaction."""
 
@@ -159,6 +187,7 @@ class TestExplainTransaction(unittest.TestCase):
         result = explain_transaction(target="0xTarget", calldata="0x1234", chain_id=1)
         self.assertIsNone(result)
 
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
     @patch("utils.llm.ai_explainer.get_llm_provider")
     @patch("utils.llm.ai_explainer.simulate_transaction")
     @patch("utils.llm.ai_explainer.decode_calldata")
@@ -167,6 +196,7 @@ class TestExplainTransaction(unittest.TestCase):
         mock_decode: MagicMock,
         mock_simulate: MagicMock,
         mock_get_provider: MagicMock,
+        mock_source: MagicMock,
     ) -> None:
         mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
         mock_simulate.return_value = SimulationResult(success=True, gas_used=50000)
@@ -188,6 +218,7 @@ class TestExplainTransaction(unittest.TestCase):
         mock_simulate.assert_called_once()
         mock_provider.complete.assert_called_once()
 
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
     @patch("utils.llm.ai_explainer.get_llm_provider")
     @patch("utils.llm.ai_explainer.simulate_transaction")
     @patch("utils.llm.ai_explainer.decode_calldata")
@@ -196,6 +227,7 @@ class TestExplainTransaction(unittest.TestCase):
         mock_decode: MagicMock,
         mock_simulate: MagicMock,
         mock_get_provider: MagicMock,
+        mock_source: MagicMock,
     ) -> None:
         mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
         mock_simulate.return_value = None
@@ -212,6 +244,7 @@ class TestExplainTransaction(unittest.TestCase):
         result = explain_transaction(target="0xTarget", calldata="0x11223344", chain_id=1)
         self.assertIsNone(result)
 
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
     @patch("utils.llm.ai_explainer.get_llm_provider")
     @patch("utils.llm.ai_explainer.simulate_transaction")
     @patch("utils.llm.ai_explainer.decode_calldata")
@@ -220,6 +253,7 @@ class TestExplainTransaction(unittest.TestCase):
         mock_decode: MagicMock,
         mock_simulate: MagicMock,
         mock_get_provider: MagicMock,
+        mock_source: MagicMock,
     ) -> None:
         """If simulation fails, should still explain using decoded calldata only."""
         mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
@@ -232,6 +266,36 @@ class TestExplainTransaction(unittest.TestCase):
         result = explain_transaction(target="0xTarget", calldata="0x8456cb59", chain_id=1)
         self.assertIsNotNone(result)
         self.assertEqual(result.summary, "This pauses the protocol.")
+
+    @patch("utils.llm.ai_explainer.get_source_context")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction")
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    def test_source_context_passed_to_llm(
+        self,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        """When source context is available, it should be injected into the prompt."""
+        mock_decode.return_value = DecodedCall(function_name="setMaxSlippage", signature="setMaxSlippage(uint256)")
+        mock_simulate.return_value = SimulationResult(success=True, gas_used=50000)
+        mock_source.return_value = SourceContext(
+            contract_name="Farm",
+            function_snippet="function setMaxSlippage(uint256) external;",
+            state_var_snippets=["/// @dev so actually 1 - slippage\nuint256 public maxSlippage;"],
+        )
+        mock_provider = MagicMock()
+        mock_provider.complete.return_value = "TLDR: Tight slippage."
+        mock_provider.model_name = "test-model"
+        mock_get_provider.return_value = mock_provider
+
+        explain_transaction(target="0xTarget", calldata="0x12345678" + "00" * 32, chain_id=1)
+
+        prompt = mock_provider.complete.call_args[0][0]
+        self.assertIn("Contract Source Context", prompt)
+        self.assertIn("so actually 1 - slippage", prompt)
 
 
 class TestParseExplanation(unittest.TestCase):

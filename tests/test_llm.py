@@ -176,7 +176,7 @@ class TestFactory(unittest.TestCase):
         env = {"LLM_PROVIDER": "venice", "LLM_API_KEY": "test-key"}
         with patch.dict(os.environ, env, clear=True):
             provider = get_llm_provider()
-            self.assertEqual(provider.model_name, "grok-41-fast")
+            self.assertEqual(provider.model_name, "deepseek-v4-flash")
 
     @patch("openai.OpenAI")
     def test_openai_defaults(self, mock_openai_cls: MagicMock) -> None:
