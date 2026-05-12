@@ -13,7 +13,7 @@ from web3 import Web3
 
 from utils.chains import EXPLORER_URLS, Chain
 from utils.logging import get_logger
-from utils.telegram import send_telegram_message_with_fallback
+from utils.telegram import send_telegram_message
 from utils.web3_wrapper import ChainManager
 
 load_dotenv()
@@ -80,7 +80,6 @@ def build_alert_message(violations: list[DelayViolation]) -> str:
     lines = [
         "⏰ *Yearn Timelock Delay Check*",
         f"Found {len(violations)} chain(s) with min delay below 7 days:",
-        "",
     ]
     for v in violations:
         explorer = EXPLORER_URLS.get(v.chain.chain_id)
@@ -108,11 +107,7 @@ def main() -> None:
         return
 
     message = build_alert_message(violations)
-    fallback = (
-        f"⏰ *Yearn Timelock Delay Check*\n"
-        f"Found {len(violations)} chain(s) with min delay below 7 days. Check the logs."
-    )
-    send_telegram_message_with_fallback(message, PROTOCOL, fallback, max_length=2000)
+    send_telegram_message(message, PROTOCOL, disable_notification=True)
 
 
 if __name__ == "__main__":
