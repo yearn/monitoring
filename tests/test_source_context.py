@@ -189,6 +189,55 @@ class TestGetSourceContext(unittest.TestCase):
         # Two calls — Etherscan should be hit only once
         self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]
 
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.proxy.get_current_implementation")
+    @patch("utils.source_context.fetch_json")
+    def test_follows_proxy_when_function_not_in_target(self, mock_fetch: object, mock_impl: object) -> None:
+        # Proxy source has no `setMaxSlippage`; implementation has it.
+        proxy_source = "contract ERC1967Proxy { fallback() external payable {} }"
+        mock_fetch.side_effect = [  # type: ignore[attr-defined]
+            {"status": "1", "result": [{"SourceCode": proxy_source, "ContractName": "ERC1967Proxy"}]},
+            {"status": "1", "result": [{"SourceCode": INFINIFI_FARM_SOURCE, "ContractName": "Farm"}]},
+        ]
+        mock_impl.return_value = "0xImplementation"  # type: ignore[attr-defined]
+
+        ctx = get_source_context(1, "0xProxy", "setMaxSlippage")
+
+        self.assertIsNotNone(ctx)
+        assert ctx is not None
+        self.assertEqual(ctx.contract_name, "Farm")
+        self.assertIn("so actually 1 - slippage", ctx.state_var_snippets[0])
+        mock_impl.assert_called_once_with("0xProxy", 1)  # type: ignore[attr-defined]
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.proxy.get_current_implementation", return_value=None)
+    @patch("utils.source_context.fetch_json")
+    def test_no_proxy_follow_when_no_impl(self, mock_fetch: object, mock_impl: object) -> None:
+        # Function missing from source, no proxy impl → return None.
+        proxy_source = "contract ERC1967Proxy { fallback() external payable {} }"
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "status": "1",
+            "result": [{"SourceCode": proxy_source, "ContractName": "ERC1967Proxy"}],
+        }
+        ctx = get_source_context(1, "0xPlain", "setMaxSlippage")
+        self.assertIsNone(ctx)
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.proxy.get_current_implementation")
+    @patch("utils.source_context.fetch_json")
+    def test_proxy_follow_skipped_when_impl_equals_target(self, mock_fetch: object, mock_impl: object) -> None:
+        # get_current_implementation returns same address (heuristic guard) → don't loop.
+        proxy_source = "contract Plain { function bar() external {} }"
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "status": "1",
+            "result": [{"SourceCode": proxy_source, "ContractName": "Plain"}],
+        }
+        mock_impl.return_value = "0xABC"  # type: ignore[attr-defined]
+        ctx = get_source_context(1, "0xABC", "setMaxSlippage")
+        self.assertIsNone(ctx)
+        # Should only fetch once (the target), not retry for impl
+        self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]
+
 
 class TestFormatSourceContext(unittest.TestCase):
     def test_includes_contract_name_and_snippets(self) -> None:

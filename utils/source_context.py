@@ -179,17 +179,8 @@ def _extract_state_var_snippet(source: str, var_name: str) -> str:
     return f"{natspec.rstrip()}\n{match.group(2).strip()}".strip()
 
 
-def get_source_context(chain_id: int, address: str, function_name: str) -> SourceContext | None:
-    """Fetch source and extract natspec for `function_name` and its state writes.
-
-    Best-effort: returns None if the contract is unverified, the API key is
-    missing, or the function cannot be located in the source.
-    """
-    fetched = _fetch_source(chain_id, address)
-    if not fetched:
-        return None
-    contract_name, source = fetched
-
+def _build_context(contract_name: str, source: str, function_name: str) -> SourceContext | None:
+    """Extract natspec snippets from a source string. None if the function isn't found."""
     func_snippet = _extract_function_snippet(source, function_name)
     if not func_snippet:
         return None
@@ -211,6 +202,32 @@ def get_source_context(chain_id: int, address: str, function_name: str) -> Sourc
         function_snippet=func_snippet,
         state_var_snippets=var_snippets,
     )
+
+
+def get_source_context(chain_id: int, address: str, function_name: str) -> SourceContext | None:
+    """Fetch source and extract natspec for `function_name` and its state writes.
+
+    If the function isn't present in the target's verified source, follow the
+    EIP-1967 proxy slot (if any) and retry against the implementation source.
+    Best-effort: returns None on any failure (unverified, missing key, no match).
+    """
+    fetched = _fetch_source(chain_id, address)
+    if fetched:
+        ctx = _build_context(fetched[0], fetched[1], function_name)
+        if ctx:
+            return ctx
+
+    # Function not in proxy source — try the implementation if this is a proxy.
+    from utils.proxy import get_current_implementation
+
+    impl = get_current_implementation(address, chain_id)
+    if not impl or impl.lower() == address.lower():
+        return None
+
+    fetched_impl = _fetch_source(chain_id, impl)
+    if not fetched_impl:
+        return None
+    return _build_context(fetched_impl[0], fetched_impl[1], function_name)
 
 
 def format_source_context(ctx: SourceContext) -> str:
