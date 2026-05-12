@@ -3,11 +3,16 @@ from unittest.mock import MagicMock, patch
 
 from utils.chains import Chain
 from yearn.yvusd import (
+    CACHE_KEY_COOLDOWN_FETCH_FAILED,
+    CACHE_KEY_FLASHLOAN_PREFIX,
+    CACHE_KEY_NEG_APR_PREFIX,
+    CACHE_KEY_RPC_MISSING_PREFIX,
     CCTP_REPORT_SKEW_HOURS,
     CCTP_REPORT_STALENESS_HOURS,
     LOOPER_CHAIN_CONFIG,
     YVUSD_VAULT,
     LooperPosition,
+    _check_negative_strategy_apr,
     _collect_looper_positions,
     check_flashloan_liquidity,
     check_large_cooldowns,
@@ -23,11 +28,12 @@ def _make_remote_strategy_mock(last_report: int, total_assets: int) -> MagicMock
     return contract
 
 
+@patch("yearn.yvusd._has_configured_rpc", return_value=True)
 class TestYvUsdCctpChecks(unittest.TestCase):
     @patch("yearn.yvusd.send_alert")
     @patch("yearn.yvusd.ChainManager.get_client")
     def test_alerts_on_report_skew_between_local_and_remote(
-        self, mock_get_client: MagicMock, mock_send_alert: MagicMock
+        self, mock_get_client: MagicMock, mock_send_alert: MagicMock, _mock_has_rpc: MagicMock
     ):
         now = 1_000_000
         local_last_report = now - 3600
@@ -73,7 +79,9 @@ class TestYvUsdCctpChecks(unittest.TestCase):
 
     @patch("yearn.yvusd.send_alert")
     @patch("yearn.yvusd.ChainManager.get_client")
-    def test_alerts_on_remote_staleness(self, mock_get_client: MagicMock, mock_send_alert: MagicMock):
+    def test_alerts_on_remote_staleness(
+        self, mock_get_client: MagicMock, mock_send_alert: MagicMock, _mock_has_rpc: MagicMock
+    ):
         now = 1_000_000
         stale_seconds = int((CCTP_REPORT_STALENESS_HOURS + 1) * 3600)
 
@@ -114,7 +122,9 @@ class TestYvUsdCctpChecks(unittest.TestCase):
 
     @patch("yearn.yvusd.send_alert")
     @patch("yearn.yvusd.ChainManager.get_client")
-    def test_alerts_when_remote_lookup_fails(self, mock_get_client: MagicMock, mock_send_alert: MagicMock):
+    def test_alerts_when_remote_lookup_fails(
+        self, mock_get_client: MagicMock, mock_send_alert: MagicMock, _mock_has_rpc: MagicMock
+    ):
         """Failure to read remote state must surface an alert, not silently skip."""
         now = 1_000_000
 
@@ -220,10 +230,18 @@ class TestYvUsdLooperPositionCollection(unittest.TestCase):
 
 
 class TestYvUsdFlashloanLiquidity(unittest.TestCase):
+    @patch("yearn.yvusd.get_cache_value", return_value=0)
+    @patch("yearn.yvusd.set_cache_value")
+    @patch("yearn.yvusd._has_configured_rpc", return_value=True)
     @patch("yearn.yvusd.send_alert")
     @patch("yearn.yvusd.ChainManager.get_client")
     def test_alerts_on_insufficient_liquidity_for_cross_chain_looper(
-        self, mock_get_client: MagicMock, mock_send_alert: MagicMock
+        self,
+        mock_get_client: MagicMock,
+        mock_send_alert: MagicMock,
+        _mock_has_rpc: MagicMock,
+        _mock_set_cache: MagicMock,
+        _mock_get_cache: MagicMock,
     ):
         # Borrow shares == borrow assets when total_borrow_shares == total_borrow_assets
         # market: total_supply=10M USDC, total_borrow=9M USDC, shares match -> liquidity = 1M
@@ -326,6 +344,247 @@ class TestLooperPositionDataclass(unittest.TestCase):
         b = LooperPosition(Chain.MAINNET, "0xaa", "0xbb", "name", "0xbb")
         self.assertEqual(a, b)
         self.assertEqual(hash(a), hash(b))
+
+
+class TestYvUsdMissingRpcGuard(unittest.TestCase):
+    """Cross-chain strategies on chains without a configured PROVIDER_URL should
+    surface a single MEDIUM alert and skip — not spam a failure alert hourly."""
+
+    KATANA_STRATEGY = {
+        "address": "0xc5b16E7eFe1CA05714477b8edcAb4deE9b93a27C",
+        "debt": "2220302251405",
+        "meta": {
+            "name": "Katana yvUSDC Compounder",
+            "type": "cross-chain",
+            "remote_chain_id": Chain.KATANA.chain_id,
+            "remote_vault": "0x80c34BD3A3569E126e7055831036aa7b212cB159",
+            "remote_vault_type": "default",
+        },
+    }
+
+    def _client(self, local_last_report: int = 0):
+        client = MagicMock()
+        client.eth.contract.return_value = MagicMock()
+        client.batch_requests.return_value.__enter__.return_value = MagicMock()
+        client.batch_requests.return_value.__exit__.return_value = False
+        client.execute_batch.return_value = [(1, local_last_report, 2_220_302_251_405, 0)]
+        return client
+
+    @patch("yearn.yvusd.set_cache_value")
+    @patch("yearn.yvusd.get_cache_value", return_value=0)
+    @patch("yearn.yvusd.send_alert")
+    @patch("yearn.yvusd.ChainManager.get_client")
+    @patch("yearn.yvusd._has_configured_rpc", return_value=False)
+    def test_staleness_alerts_once_when_remote_rpc_missing(
+        self,
+        _mock_has_rpc: MagicMock,
+        mock_get_client: MagicMock,
+        mock_send_alert: MagicMock,
+        _mock_get_cache: MagicMock,
+        mock_set_cache: MagicMock,
+    ):
+        now = 1_000_000
+        api_data = {YVUSD_VAULT: {"meta": {"strategies": [self.KATANA_STRATEGY]}}}
+
+        with patch("yearn.yvusd.time.time", return_value=now):
+            check_strategy_staleness(self._client(local_last_report=now - 3600), api_data)
+
+        # ChainManager.get_client must NOT have been called for the remote chain.
+        mock_get_client.assert_not_called()
+
+        # One MEDIUM alert about the missing RPC.
+        mock_send_alert.assert_called_once()
+        alert = mock_send_alert.call_args.args[0]
+        self.assertIn("missing RPC", alert.message)
+        self.assertIn("katana", alert.message.lower())
+
+        # Dedup flag is written so subsequent runs stay silent.
+        mock_set_cache.assert_called_once()
+        cache_key = mock_set_cache.call_args.args[0]
+        self.assertEqual(cache_key, f"{CACHE_KEY_RPC_MISSING_PREFIX}KATANA")
+
+    @patch("yearn.yvusd.set_cache_value")
+    @patch("yearn.yvusd.get_cache_value", return_value=1)  # already-alerted flag set
+    @patch("yearn.yvusd.send_alert")
+    @patch("yearn.yvusd.ChainManager.get_client")
+    @patch("yearn.yvusd._has_configured_rpc", return_value=False)
+    def test_staleness_does_not_realert_when_already_flagged(
+        self,
+        _mock_has_rpc: MagicMock,
+        mock_get_client: MagicMock,
+        mock_send_alert: MagicMock,
+        _mock_get_cache: MagicMock,
+        mock_set_cache: MagicMock,
+    ):
+        now = 1_000_000
+        api_data = {YVUSD_VAULT: {"meta": {"strategies": [self.KATANA_STRATEGY]}}}
+
+        with patch("yearn.yvusd.time.time", return_value=now):
+            check_strategy_staleness(self._client(local_last_report=now - 3600), api_data)
+
+        mock_get_client.assert_not_called()
+        mock_send_alert.assert_not_called()
+        mock_set_cache.assert_not_called()
+
+
+class TestYvUsdCooldownFailureAlert(unittest.TestCase):
+    @patch("yearn.yvusd.set_cache_value")
+    @patch("yearn.yvusd.get_cache_value", return_value=0)
+    @patch("yearn.yvusd.send_alert")
+    def test_alerts_medium_on_first_get_logs_failure(
+        self, mock_send_alert: MagicMock, _mock_get_cache: MagicMock, mock_set_cache: MagicMock
+    ):
+        client = MagicMock()
+        client.eth.block_number = 200
+        locked = MagicMock()
+        locked.events.CooldownStarted.get_logs.side_effect = RuntimeError("rpc failure")
+        client.eth.contract.return_value = locked
+
+        check_large_cooldowns(client)
+
+        mock_send_alert.assert_called_once()
+        self.assertIn("Cooldown Scan Failed", mock_send_alert.call_args.args[0].message)
+
+        # The failure flag is the only thing written; last-block must not advance.
+        cache_writes = {call.args[0] for call in mock_set_cache.call_args_list}
+        self.assertIn(CACHE_KEY_COOLDOWN_FETCH_FAILED, cache_writes)
+        self.assertNotIn("YVUSD_LAST_BLOCK", cache_writes)
+
+    @patch("yearn.yvusd.set_cache_value")
+    @patch("yearn.yvusd.get_cache_value", return_value=1)  # failure flag already set
+    @patch("yearn.yvusd.send_alert")
+    def test_does_not_realert_while_failure_flag_set(
+        self, mock_send_alert: MagicMock, _mock_get_cache: MagicMock, _mock_set_cache: MagicMock
+    ):
+        client = MagicMock()
+        client.eth.block_number = 200
+        locked = MagicMock()
+        locked.events.CooldownStarted.get_logs.side_effect = RuntimeError("still failing")
+        client.eth.contract.return_value = locked
+
+        check_large_cooldowns(client)
+
+        mock_send_alert.assert_not_called()
+
+
+class TestYvUsdNegativeAprDebounce(unittest.TestCase):
+    NEG_STRATEGY = {
+        "address": "0xAbCdEf0000000000000000000000000000000001",
+        "debt": "1000000000000",
+        "apr_raw": "-50000000000000000",
+        "meta": {"name": "Losing Money Strategy", "type": "default"},
+    }
+
+    @patch("yearn.yvusd.set_cache_value")
+    @patch("yearn.yvusd.get_cache_value", return_value=0)
+    @patch("yearn.yvusd.send_alert")
+    def test_alerts_once_then_sets_dedup_flag(
+        self, mock_send_alert: MagicMock, _mock_get_cache: MagicMock, mock_set_cache: MagicMock
+    ):
+        _check_negative_strategy_apr({"meta": {"strategies": [self.NEG_STRATEGY]}})
+
+        mock_send_alert.assert_called_once()
+        self.assertIn("Negative Strategy APR", mock_send_alert.call_args.args[0].message)
+
+        expected_key = f"{CACHE_KEY_NEG_APR_PREFIX}{self.NEG_STRATEGY['address'].lower()}"
+        mock_set_cache.assert_called_once_with(expected_key, 1)
+
+    @patch("yearn.yvusd.set_cache_value")
+    @patch("yearn.yvusd.get_cache_value", return_value=1)  # already-alerted
+    @patch("yearn.yvusd.send_alert")
+    def test_skips_when_already_alerted(
+        self, mock_send_alert: MagicMock, _mock_get_cache: MagicMock, mock_set_cache: MagicMock
+    ):
+        _check_negative_strategy_apr({"meta": {"strategies": [self.NEG_STRATEGY]}})
+
+        mock_send_alert.assert_not_called()
+        mock_set_cache.assert_not_called()
+
+    @patch("yearn.yvusd.set_cache_value")
+    @patch("yearn.yvusd.get_cache_value", return_value=1)
+    @patch("yearn.yvusd.send_alert")
+    def test_clears_flag_on_recovery(
+        self, mock_send_alert: MagicMock, _mock_get_cache: MagicMock, mock_set_cache: MagicMock
+    ):
+        recovered = {**self.NEG_STRATEGY, "apr_raw": "10000000000000000"}
+        _check_negative_strategy_apr({"meta": {"strategies": [recovered]}})
+
+        mock_send_alert.assert_not_called()
+        expected_key = f"{CACHE_KEY_NEG_APR_PREFIX}{recovered['address'].lower()}"
+        mock_set_cache.assert_called_once_with(expected_key, 0)
+
+
+class TestYvUsdFlashloanDebounce(unittest.TestCase):
+    POSITION_STRATEGY = {
+        "address": "0x2F56D106C6Df739bdbb777C2feE79FFaED88D179",
+        "debt": "50000000000000",
+        "meta": {
+            "name": "Arbitrum syrupUSDC/USDC Morpho Looper",
+            "type": "cross-chain",
+            "remote_chain_id": Chain.ARBITRUM.chain_id,
+            "remote_vault": "0xBCf08997C34183d1b7B0f99e13aCeACFBA88E453",
+            "remote_vault_type": "morpho-looper",
+            "remote_meta": {"market_id": "0xf86f3edd6f16cd8211f4d206866dc4ecd41be6211063ac11f8508e1b7112ef40"},
+        },
+    }
+
+    def _arb_client_with_shortfall(self) -> MagicMock:
+        # Same numbers as TestYvUsdFlashloanLiquidity: ~50M borrow vs 1M market + 100k Balancer.
+        market = (10_000_000 * 10**6, 10_000_000 * 10**6, 9_000_000 * 10**6, 9_000_000 * 10**6, 0, 0)
+        position = (0, 50_000_000 * 10**6, 0)
+        balancer_balance = 100_000 * 10**6
+        client = MagicMock()
+        client.batch_requests.return_value.__enter__.return_value = MagicMock()
+        client.batch_requests.return_value.__exit__.return_value = False
+        client.execute_batch.return_value = [market, position, balancer_balance]
+        return client
+
+    @patch("yearn.yvusd.set_cache_value")
+    @patch("yearn.yvusd.get_cache_value", return_value=1)  # already-alerted flag set
+    @patch("yearn.yvusd._has_configured_rpc", return_value=True)
+    @patch("yearn.yvusd.send_alert")
+    @patch("yearn.yvusd.ChainManager.get_client")
+    def test_skips_when_flashloan_dedup_flag_set(
+        self,
+        mock_get_client: MagicMock,
+        mock_send_alert: MagicMock,
+        _mock_has_rpc: MagicMock,
+        _mock_get_cache: MagicMock,
+        mock_set_cache: MagicMock,
+    ):
+        mock_get_client.return_value = self._arb_client_with_shortfall()
+        api_data = {YVUSD_VAULT: {"meta": {"strategies": [self.POSITION_STRATEGY]}}}
+
+        check_flashloan_liquidity(api_data)
+
+        mock_send_alert.assert_not_called()
+        mock_set_cache.assert_not_called()
+
+    @patch("yearn.yvusd.set_cache_value")
+    @patch("yearn.yvusd.get_cache_value", return_value=0)
+    @patch("yearn.yvusd._has_configured_rpc", return_value=True)
+    @patch("yearn.yvusd.send_alert")
+    @patch("yearn.yvusd.ChainManager.get_client")
+    def test_alerts_once_then_writes_flashloan_dedup_flag(
+        self,
+        mock_get_client: MagicMock,
+        mock_send_alert: MagicMock,
+        _mock_has_rpc: MagicMock,
+        _mock_get_cache: MagicMock,
+        mock_set_cache: MagicMock,
+    ):
+        mock_get_client.return_value = self._arb_client_with_shortfall()
+        api_data = {YVUSD_VAULT: {"meta": {"strategies": [self.POSITION_STRATEGY]}}}
+
+        check_flashloan_liquidity(api_data)
+
+        mock_send_alert.assert_called_once()
+        # Dedup flag is keyed by chain.name + lowercase borrower address.
+        expected_key = (
+            f"{CACHE_KEY_FLASHLOAN_PREFIX}{Chain.ARBITRUM.name}_"
+            f"{self.POSITION_STRATEGY['meta']['remote_vault'].lower()}"
+        )
+        mock_set_cache.assert_called_once_with(expected_key, 1)
 
 
 if __name__ == "__main__":

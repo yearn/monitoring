@@ -8,6 +8,7 @@ Monitors:
 - Large cooldown requests: significant LockedyvUSD cooldown events
 """
 
+import os
 import time
 from dataclasses import dataclass
 
@@ -23,7 +24,7 @@ from utils.web3_wrapper import ChainManager, Web3Client
 PROTOCOL = "yearn"
 logger = get_logger("yvusd")
 
-CACHE_FILENAME = "cache-id.txt"
+CACHE_FILENAME = "cache-yvusd.txt"
 
 # --- ABIs ---
 ABI_VAULT = load_abi("yearn/abi/YearnV3Vault.json")
@@ -64,6 +65,11 @@ ONE_USDC = 10**USDC_DECIMALS
 CACHE_KEY_APY_INVERSION_START = "YVUSD_APY_INVERSION_START"
 CACHE_KEY_APY_INVERSION_ALERTED = "YVUSD_APY_INVERSION_ALERTED"
 CACHE_KEY_LAST_BLOCK = "YVUSD_LAST_BLOCK"
+CACHE_KEY_COOLDOWN_FETCH_FAILED = "YVUSD_COOLDOWN_FETCH_FAILED"
+# Per-condition dedup keys are suffixed with a stable identifier (lowercased address or chain/borrower pair).
+CACHE_KEY_NEG_APR_PREFIX = "YVUSD_NEG_APR_ALERTED_"
+CACHE_KEY_FLASHLOAN_PREFIX = "YVUSD_FLASHLOAN_ALERTED_"
+CACHE_KEY_RPC_MISSING_PREFIX = "YVUSD_RPC_MISSING_ALERTED_"
 
 # Number of blocks to scan per run (~1 hour at 12s/block)
 BLOCKS_PER_HOUR = 300
@@ -130,6 +136,14 @@ def set_cache_value(key: str, value: float) -> None:
     write_last_value_to_file(CACHE_FILENAME, key, value)
 
 
+def _has_configured_rpc(chain: Chain) -> bool:
+    """Return True if at least one PROVIDER_URL_{CHAIN}[_N] env var is set."""
+    base = f"PROVIDER_URL_{chain.name.upper()}"
+    if os.getenv(base):
+        return True
+    return any(os.getenv(f"{base}_{i}") for i in range(1, 4))
+
+
 def check_apy_anomalies(api_data: dict) -> None:
     """Check for APY anomalies using the yvUSD API.
 
@@ -188,7 +202,11 @@ def _check_apy_inversion(unlocked_apy: float, locked_apy: float) -> None:
 
 
 def _check_negative_strategy_apr(yvusd_data: dict) -> None:
-    """Alert if any active strategy has a negative APR."""
+    """Alert if any active strategy has a negative APR.
+
+    Debounced per-strategy so a sustained negative APR doesn't spam alerts every
+    hourly run. The dedup flag resets once the strategy returns to non-negative.
+    """
     strategies = yvusd_data.get("meta", {}).get("strategies", [])
 
     for strategy in strategies:
@@ -196,8 +214,12 @@ def _check_negative_strategy_apr(yvusd_data: dict) -> None:
         debt = int(strategy.get("debt", "0"))
         name = strategy.get("meta", {}).get("name", strategy.get("address", "unknown"))
         address = strategy.get("address", "unknown")
+        cache_key = f"{CACHE_KEY_NEG_APR_PREFIX}{address.lower()}"
+        already_alerted = get_cache_value(cache_key) == 1
 
         if debt > 0 and apr_raw < 0:
+            if already_alerted:
+                continue
             apr_pct = apr_raw / 1e18 * 100
             debt_usd = debt / ONE_USDC
             message = (
@@ -208,6 +230,11 @@ def _check_negative_strategy_apr(yvusd_data: dict) -> None:
                 f"[Strategy](https://etherscan.io/address/{address})"
             )
             send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
+            set_cache_value(cache_key, 1)
+        elif already_alerted:
+            # Recovered — clear the dedup flag so a new dip will alert again.
+            set_cache_value(cache_key, 0)
+            logger.info("Negative APR resolved for %s", name)
 
 
 def check_strategy_staleness(client: Web3Client, api_data: dict) -> None:
@@ -261,6 +288,10 @@ def check_strategy_staleness(client: Web3Client, api_data: dict) -> None:
             )
             continue
 
+        if not _has_configured_rpc(remote_chain):
+            _alert_missing_rpc_once(remote_chain, name, kind="CCTP staleness")
+            continue
+
         remote_state = _fetch_remote_strategy_state(remote_chain, remote_vault, name)
         if remote_state is None:
             continue
@@ -298,6 +329,34 @@ def check_strategy_staleness(client: Web3Client, api_data: dict) -> None:
                 f"[Strategy](https://etherscan.io/address/{address})"
             )
             send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
+
+
+def _alert_missing_rpc_once(chain: Chain, name: str, *, kind: str) -> None:
+    """Send a one-shot MEDIUM alert when a remote chain has no PROVIDER_URL configured.
+
+    Without this, ChainManager.get_client() would raise on every hourly run for
+    chains like Katana when PROVIDER_URL_KATANA isn't set, which would either
+    spam the failure path or be silently skipped depending on call site.
+    """
+    cache_key = f"{CACHE_KEY_RPC_MISSING_PREFIX}{chain.name}"
+    if get_cache_value(cache_key) == 1:
+        logger.info("Skipping %s for %s on %s: no PROVIDER_URL configured (already alerted)", kind, name, chain.name)
+        return
+
+    logger.warning("No PROVIDER_URL_%s configured; cannot run %s for %s", chain.name.upper(), kind, name)
+    send_alert(
+        Alert(
+            AlertSeverity.MEDIUM,
+            (
+                f"*yvUSD: missing RPC for {chain.network_name}*\n"
+                f"PROVIDER_URL_{chain.name.upper()} is not set — {kind} cannot run "
+                f"for cross-chain strategies on {chain.network_name} (e.g. {name}).\n"
+                f"Configure the env var to re-enable this check."
+            ),
+            PROTOCOL,
+        )
+    )
+    set_cache_value(cache_key, 1)
 
 
 def _fetch_remote_strategy_state(remote_chain: Chain, remote_vault: str, name: str) -> tuple[int, int] | None:
@@ -368,7 +427,7 @@ def _build_cctp_alert_lines(
     return [
         name,
         *problems,
-        f"Mainnet last report: {local_hours_since:.1f}h ago, debt: {format_usd(local_debt / ONE_USDC)}",
+        f"{local_chain.network_name.title()} last report: {local_hours_since:.1f}h ago, debt: {format_usd(local_debt / ONE_USDC)}",
         f"{remote_chain.network_name.title()} last report: {remote_hours_since:.1f}h ago, debt: {format_usd(remote_debt / ONE_USDC)}",
         "Bridge accounting may be delayed or unsynced",
     ]
@@ -486,6 +545,11 @@ def check_flashloan_liquidity(api_data: dict) -> None:
             )
             continue
 
+        if chain != Chain.MAINNET and not _has_configured_rpc(chain):
+            names = ", ".join(p.name for p in chain_positions)
+            _alert_missing_rpc_once(chain, names, kind="flashloan liquidity check")
+            continue
+
         try:
             _check_chain_flashloan_liquidity(chain, chain_positions, config)
         except Exception as e:
@@ -549,12 +613,20 @@ def _check_chain_flashloan_liquidity(chain: Chain, positions: list[LooperPositio
             format_usd(market_liquidity),
         )
 
+        # Debounce alerts per (chain, borrower) so a persistent shortfall doesn't refire hourly.
+        dedup_key = f"{CACHE_KEY_FLASHLOAN_PREFIX}{chain.name}_{p.borrower.lower()}"
+        already_alerted = get_cache_value(dedup_key) == 1
+
         if borrow_assets == 0:
+            if already_alerted:
+                set_cache_value(dedup_key, 0)
             continue
 
         # Strategy needs to flashloan approximately borrow_assets to unwind.
         # Alert if neither Balancer vault nor Morpho market has sufficient liquidity.
         if balancer_usdc < borrow_usd and market_liquidity < borrow_usd:
+            if already_alerted:
+                continue
             links = [f"[Strategy](https://etherscan.io/address/{p.mainnet_strategy})"]
             if p.chain != Chain.MAINNET:
                 links.append(f"[Borrower on {p.chain.network_name}]({explorer}/address/{p.borrower})")
@@ -567,6 +639,11 @@ def _check_chain_flashloan_liquidity(chain: Chain, positions: list[LooperPositio
                 f"Insufficient flashloan liquidity for strategy unwinding\n" + " | ".join(links)
             )
             send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
+            set_cache_value(dedup_key, 1)
+        elif already_alerted:
+            # Recovered — clear the dedup flag so the next shortfall alerts again.
+            set_cache_value(dedup_key, 0)
+            logger.info("[%s] Flashloan liquidity recovered for %s", chain.name, p.name)
 
 
 def check_large_cooldowns(client: Web3Client) -> None:
@@ -600,7 +677,25 @@ def check_large_cooldowns(client: Web3Client) -> None:
         events = locked.events.CooldownStarted.get_logs(from_block=from_block, to_block=current_block)
     except Exception as e:
         logger.warning("Could not fetch CooldownStarted events: %s", e)
+        if get_cache_value(CACHE_KEY_COOLDOWN_FETCH_FAILED) == 0:
+            send_alert(
+                Alert(
+                    AlertSeverity.MEDIUM,
+                    (
+                        f"*yvUSD Cooldown Scan Failed*\n"
+                        f"Could not fetch CooldownStarted events: {e}\n"
+                        f"Large cooldown monitoring is paused until RPC recovers; "
+                        f"cache is not advanced so missed events will be picked up on recovery."
+                    ),
+                    PROTOCOL,
+                )
+            )
+            set_cache_value(CACHE_KEY_COOLDOWN_FETCH_FAILED, 1)
         return
+
+    # Successful fetch — clear any previously-set failure flag.
+    if get_cache_value(CACHE_KEY_COOLDOWN_FETCH_FAILED) == 1:
+        set_cache_value(CACHE_KEY_COOLDOWN_FETCH_FAILED, 0)
 
     large_count = 0
     for event in events:
