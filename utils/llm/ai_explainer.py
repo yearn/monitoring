@@ -162,6 +162,7 @@ def _build_prompt(
     label: str = "",
     proxy_upgrade_info: str = "",
     source_contexts: list[SourceContext] | None = None,
+    context_note: str = "",
 ) -> str:
     """Build the full prompt for the LLM."""
     parts: list[str] = [SYSTEM_PROMPT, ""]
@@ -173,6 +174,9 @@ def _build_prompt(
     parts.append(f"Target: {target}")
     if value > 0:
         parts.append(f"ETH Value: {value / 1e18:.6f} ETH")
+
+    if context_note:
+        parts.append(f"\n--- Execution Context ---\n{context_note}")
 
     parts.append(f"\n--- Decoded Calldata ---\n{_format_decoded_calls(decoded_calls)}")
 
@@ -248,6 +252,8 @@ def explain_transaction(
     protocol: str = "",
     label: str = "",
     from_address: str = "0x0000000000000000000000000000000000000000",
+    skip_simulation: bool = False,
+    context_note: str = "",
 ) -> Explanation | None:
     """Generate an AI explanation for a governance transaction.
 
@@ -262,6 +268,12 @@ def explain_transaction(
         protocol: Protocol name for context (e.g. "AAVE").
         label: Human-readable label for the contract.
         from_address: Sender address for simulation.
+        skip_simulation: If True, do not call Tenderly. Use when the caller knows
+            our plain-CALL simulator can't model the real execution (e.g. Safe
+            DELEGATECALL into MultiSendCallOnly).
+        context_note: Optional preamble injected into the prompt to give the LLM
+            context that isn't in the calldata (e.g. "this is delegated from
+            a Safe; msg.sender of inner calls is the Safe itself").
 
     Returns:
         Explanation with summary and detail, or None on failure.
@@ -278,17 +290,19 @@ def explain_transaction(
     proxy_upgrade_info = _get_proxy_upgrade_info(calldata, target, chain_id)
     source_contexts = _collect_source_contexts([(target, decoded)], chain_id)
 
-    simulation = simulate_transaction(
-        target=target,
-        calldata=calldata,
-        chain_id=chain_id,
-        value=value,
-        from_address=from_address,
-    )
-    if simulation:
-        logger.info("Simulation completed: success=%s gas=%s", simulation.success, simulation.gas_used)
-    else:
-        logger.info("Simulation unavailable, proceeding with decoded calldata only")
+    simulation: SimulationResult | None = None
+    if not skip_simulation:
+        simulation = simulate_transaction(
+            target=target,
+            calldata=calldata,
+            chain_id=chain_id,
+            value=value,
+            from_address=from_address,
+        )
+        if simulation:
+            logger.info("Simulation completed: success=%s gas=%s", simulation.success, simulation.gas_used)
+        else:
+            logger.info("Simulation unavailable, proceeding with decoded calldata only")
 
     prompt = _build_prompt(
         target=target,
@@ -299,6 +313,7 @@ def explain_transaction(
         label=label,
         proxy_upgrade_info=proxy_upgrade_info,
         source_contexts=source_contexts,
+        context_note=context_note,
     )
     logger.info("Full AI context for %s:\n%s", target, prompt)
 
@@ -321,6 +336,8 @@ def explain_batch_transaction(
     protocol: str = "",
     label: str = "",
     from_address: str = "0x0000000000000000000000000000000000000000",
+    skip_simulation: bool = False,
+    context_note: str = "",
 ) -> Explanation | None:
     """Generate an AI explanation for a batch/multicall governance transaction.
 
@@ -330,6 +347,11 @@ def explain_batch_transaction(
         protocol: Protocol name for context.
         label: Human-readable label for the timelock/safe.
         from_address: Sender address for simulations.
+        skip_simulation: If True, do not call Tenderly. Useful for Safe multisend
+            batches where independent per-call simulation would break state-
+            dependent flows (approve+transferFrom, swapOwner+swapOwner, etc).
+        context_note: Optional preamble describing the execution context (e.g.
+            DELEGATECALL semantics) that the LLM can't infer from calldata alone.
 
     Returns:
         Explanation with summary and detail, or None on failure.
@@ -351,22 +373,21 @@ def explain_batch_transaction(
             decoded_calls.append(decoded)
             decoded_with_target.append((target, decoded))
 
-        sim = simulate_transaction(
-            target=target,
-            calldata=data,
-            chain_id=chain_id,
-            value=value,
-            from_address=from_address,
-        )
-        simulations.append(sim)
+        if not skip_simulation:
+            sim = simulate_transaction(
+                target=target,
+                calldata=data,
+                chain_id=chain_id,
+                value=value,
+                from_address=from_address,
+            )
+            simulations.append(sim)
 
     if not decoded_calls:
         return None
 
-    # Use the first successful simulation for context, or None
     simulation = next((s for s in simulations if s is not None), None)
 
-    # Detect proxy upgrades across all calls
     upgrade_parts: list[str] = []
     for call in calls:
         info = _get_proxy_upgrade_info(call.get("data", "0x"), call.get("target", ""), chain_id)
@@ -376,7 +397,6 @@ def explain_batch_transaction(
 
     source_contexts = _collect_source_contexts(decoded_with_target, chain_id)
 
-    # For batch, show all targets
     targets = ", ".join(c.get("target", "?") for c in calls)
     total_value = sum(int(c.get("value", "0")) for c in calls)
 
@@ -389,6 +409,7 @@ def explain_batch_transaction(
         label=label,
         proxy_upgrade_info=proxy_upgrade_info,
         source_contexts=source_contexts,
+        context_note=context_note,
     )
     logger.info("Full AI context for batch (%s calls):\n%s", len(calls), prompt)
 

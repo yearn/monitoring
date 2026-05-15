@@ -175,6 +175,89 @@ class TestBuildPromptWithSourceContext(unittest.TestCase):
         self.assertIn("Do NOT assume the semantic meaning", result)
         self.assertIn("source context", result.lower())
 
+    def test_context_note_appears_in_prompt(self) -> None:
+        calls = [DecodedCall(function_name="swapOwner", signature="swapOwner(address,address,address)")]
+        result = _build_prompt(
+            target="0xT",
+            value=0,
+            decoded_calls=calls,
+            simulation=None,
+            context_note="Outer call is DELEGATECALL from the Safe.",
+        )
+        self.assertIn("--- Execution Context ---", result)
+        self.assertIn("DELEGATECALL from the Safe", result)
+
+
+class TestSkipSimulation(unittest.TestCase):
+    """Tests for skip_simulation flag."""
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction")
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    def test_explain_transaction_skips_tenderly_when_flag_set(
+        self,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
+        mock_provider = MagicMock()
+        mock_provider.complete.return_value = "TLDR: paused"
+        mock_provider.model_name = "test-model"
+        mock_get_provider.return_value = mock_provider
+
+        explain_transaction(
+            target="0xT",
+            calldata="0x8456cb59",
+            chain_id=1,
+            skip_simulation=True,
+            context_note="delegated",
+        )
+
+        mock_simulate.assert_not_called()
+        prompt = mock_provider.complete.call_args[0][0]
+        self.assertIn("--- Execution Context ---", prompt)
+        self.assertIn("delegated", prompt)
+        self.assertNotIn("--- Simulation Results ---", prompt)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction")
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    def test_explain_batch_transaction_skips_tenderly_when_flag_set(
+        self,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        mock_decode.return_value = DecodedCall(
+            function_name="swapOwner", signature="swapOwner(address,address,address)"
+        )
+        mock_provider = MagicMock()
+        mock_provider.complete.return_value = "TLDR: swap"
+        mock_provider.model_name = "test-model"
+        mock_get_provider.return_value = mock_provider
+
+        from utils.llm.ai_explainer import explain_batch_transaction
+
+        explain_batch_transaction(
+            calls=[
+                {"target": "0xSafe", "data": "0xe318b52b" + "00" * 96, "value": "0"},
+                {"target": "0xSafe", "data": "0xe318b52b" + "11" * 96, "value": "0"},
+            ],
+            chain_id=1,
+            skip_simulation=True,
+            context_note="delegated batch",
+        )
+
+        mock_simulate.assert_not_called()
+        prompt = mock_provider.complete.call_args[0][0]
+        self.assertIn("delegated batch", prompt)
+        self.assertNotIn("--- Simulation Results ---", prompt)
+
 
 class TestExplainTransaction(unittest.TestCase):
     """Tests for explain_transaction."""
