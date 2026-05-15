@@ -10,6 +10,7 @@ from utils.llm.ai_explainer import (
     _format_decoded_calls,
     _format_simulation_context,
     _parse_explanation,
+    _refine_explanation,
     explain_transaction,
     format_explanation_line,
 )
@@ -494,6 +495,103 @@ class TestFormatExplanationLine(unittest.TestCase):
         self.assertIn("AI Summary", result)
         self.assertIn("This pauses the protocol.", result)
         self.assertNotIn("Full details", result)
+
+
+class TestRefineExplanation(unittest.TestCase):
+    """Tests for _refine_explanation."""
+
+    def test_pass_keeps_draft_unchanged(self) -> None:
+        draft = Explanation(summary="Lowers fee 30→25 bps. LOW.", detail="bla")
+        provider = MagicMock()
+        provider.complete.return_value = "PASS"
+        result = _refine_explanation("orig prompt", draft, provider)
+        self.assertIs(result, draft)
+        provider.complete.assert_called_once()
+
+    def test_pass_with_trailing_whitespace_still_keeps_draft(self) -> None:
+        draft = Explanation(summary="x", detail="y")
+        provider = MagicMock()
+        provider.complete.return_value = "  PASS  \n"
+        self.assertIs(_refine_explanation("p", draft, provider), draft)
+
+    def test_revision_replaces_draft(self) -> None:
+        draft = Explanation(summary="This transaction does X. LOW.", detail="bla")
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: Does X. LOW.\n\nDETAIL:\nrefined detail."
+        result = _refine_explanation("orig", draft, provider)
+        self.assertEqual(result.summary, "Does X. LOW.")
+        self.assertEqual(result.detail, "refined detail.")
+
+    def test_llm_error_falls_back_to_draft(self) -> None:
+        draft = Explanation(summary="x", detail="y")
+        provider = MagicMock()
+        provider.complete.side_effect = LLMError("rate limit")
+        self.assertIs(_refine_explanation("p", draft, provider), draft)
+
+    def test_empty_response_falls_back_to_draft(self) -> None:
+        draft = Explanation(summary="x", detail="y")
+        provider = MagicMock()
+        provider.complete.return_value = ""
+        self.assertIs(_refine_explanation("p", draft, provider), draft)
+
+    def test_revision_with_empty_summary_falls_back(self) -> None:
+        draft = Explanation(summary="x", detail="y")
+        provider = MagicMock()
+        # Reply parses to empty summary (no TLDR marker, no body)
+        provider.complete.return_value = ""
+        self.assertIs(_refine_explanation("p", draft, provider), draft)
+
+
+class TestRefineFlagInExplainTransaction(unittest.TestCase):
+    """Tests that the refine flag triggers a second LLM call."""
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer._collect_state_reads", return_value=[])
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    def test_refine_off_makes_one_call(
+        self,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_state: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: Pauses. LOW."
+        provider.model_name = "test-model"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target="0xT", calldata="0x8456cb59", chain_id=1)
+        self.assertEqual(provider.complete.call_count, 1)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer._collect_state_reads", return_value=[])
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    def test_refine_on_makes_two_calls(
+        self,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_state: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
+        provider = MagicMock()
+        provider.complete.side_effect = ["TLDR: Pauses. LOW.", "PASS"]
+        provider.model_name = "test-model"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target="0xT", calldata="0x8456cb59", chain_id=1, refine=True)
+        self.assertEqual(provider.complete.call_count, 2)
+        # Second call should contain the critique task
+        second_call_prompt = provider.complete.call_args_list[1][0][0]
+        self.assertIn("Critique Task", second_call_prompt)
+        self.assertIn("Your Previous Draft", second_call_prompt)
 
 
 if __name__ == "__main__":
