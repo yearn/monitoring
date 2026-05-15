@@ -275,6 +275,7 @@ def _explain_safe_tx(
             from_address=safe_address,
             skip_simulation=True,
             context_note=context_note,
+            refine=True,
         )
 
     # Non-multisend DELEGATECALLs (rare): skip sim but still try to explain.
@@ -291,6 +292,7 @@ def _explain_safe_tx(
         from_address=safe_address,
         skip_simulation=skip_sim,
         context_note=context_note,
+        refine=True,
     )
 
 

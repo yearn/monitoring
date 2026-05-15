@@ -264,6 +264,7 @@ def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain
                 protocol=timelock_info.protocol,
                 label=timelock_info.label,
                 from_address=timelock_info.address,
+                refine=True,
             )
 
         # Batch transaction
@@ -274,6 +275,7 @@ def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain
             protocol=timelock_info.protocol,
             label=timelock_info.label,
             from_address=timelock_info.address,
+            refine=True,
         )
     except Exception:
         _logger.warning("AI explanation failed", exc_info=True)
