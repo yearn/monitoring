@@ -31,9 +31,14 @@ _source_cache: dict[tuple[int, str], tuple[str, str] | None] = {}
 _NATSPEC_LINE = r"(?:[ \t]*///.*\n|[ \t]*\*[^/].*\n|[ \t]*/\*\*[\s\S]*?\*/[ \t]*\n)"
 _NATSPEC_BLOCK = rf"(?:(?:{_NATSPEC_LINE})+)?"
 
-# Statement-leading `<name> = ` (excludes `==` and typed locals like `uint256 x = 1`,
-# which would have a type identifier before x on the same line).
-_ASSIGNMENT_RE = re.compile(r"(?:^|[;{}\n])\s*([a-zA-Z_]\w*)\s*=(?!=)", re.MULTILINE)
+# Statement-leading LHS of an assignment. Captures the var name from:
+#   `x = v` / `x[k] = v` / `obj.x = v` / `getStorage().x[k] = v` (diamond pattern).
+# Excludes `==` and typed locals like `uint256 x = 1` (those have a type identifier
+# directly before x with no `.` separator, so the optional prefix won't match).
+_ASSIGNMENT_RE = re.compile(
+    r"(?:^|[;{}\n])\s*(?:\w+(?:\(\))?\.)?([a-zA-Z_]\w*)(?:\[[^\]]*\]|\.\w+)*\s*=(?!=)",
+    re.MULTILINE,
+)
 
 _CONTROL_KEYWORDS = frozenset({"if", "for", "while", "require", "revert", "return", "emit", "assembly", "unchecked"})
 

@@ -11,6 +11,7 @@ from utils.calldata.decoder import DecodedCall, decode_calldata
 from utils.llm import get_llm_provider
 from utils.llm.base import LLMError
 from utils.logging import get_logger
+from utils.on_chain_state import StateRead, format_state_reads, read_before_state
 from utils.paste import upload_to_paste
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
 from utils.source_context import SourceContext, format_source_context, get_source_context
@@ -19,29 +20,32 @@ from utils.tenderly.simulation import SimulationResult, simulate_transaction
 
 logger = get_logger("utils.llm.ai_explainer")
 
-SYSTEM_PROMPT = """You are a DeFi risk analyst explaining governance transactions to a monitoring team.
-Given the decoded calldata and simulation results, provide two sections:
+SYSTEM_PROMPT = """You are a DeFi risk analyst writing alerts for a monitoring team. Output two sections.
 
-TLDR: A short summary in 1-3 sentences. Focus on what the transaction does and any risk implications.
+TLDR: ≤25 words. Start with a verb describing the effect. Do NOT open with
+"This transaction", "The proposal", or similar — the reader already knows
+what kind of tx this is. End with a risk tag in caps: LOW / MEDIUM / HIGH / CRITICAL.
 
-DETAIL: A thorough analysis covering:
+Good example: "Lowers swap fee 30→25 bps on USDC/USDT pool. Marginal LP revenue cut. LOW."
+Bad example:  "This governance transaction adjusts the swap fee parameter on the USDC/USDT pool from 30 basis points to 25 basis points, which slightly reduces revenue for liquidity providers. Risk is LOW."
+
+DETAIL: thorough analysis covering:
 - What each call does and why
-- Parameter values and their significance
+- Parameter values and their significance (use Current State section if present to compute deltas)
 - Asset/token flow changes
 - State changes and their impact
-- Risk assessment (LOW/MEDIUM/HIGH/CRITICAL)
+- Risk assessment with explicit reasoning
 - Any concerns or notable observations
 
 Critical rules for parameter interpretation:
 - Do NOT assume the semantic meaning of a parameter from its function name. DeFi protocols
-  use inverted or non-standard conventions. For example, a "maxSlippage" value may represent
-  a minimum-output ratio (where 0.99e18 means tight 1% protection), not a maximum tolerated
-  deviation. A "fee" may be scaled to 1e4, 1e6, or 1e18.
-- Whenever a Contract Source Context section is provided below, trust the natspec comments
-  there over your prior assumptions about the function name.
-- If source context is NOT provided and the unit/meaning is ambiguous, say so explicitly
-  ("the unit cannot be confirmed without source context") rather than guessing. Quote the
-  raw value and its 1e18-normalized form.
+  use inverted or non-standard conventions (a "maxSlippage" may be a min-output ratio;
+  a "fee" may be scaled to 1e4, 1e6, or 1e18).
+- When a Contract Source Context section is provided, trust the natspec over your prior
+  assumptions about the function name.
+- When a Current State section is provided, quote concrete before→after deltas.
+- If a unit is ambiguous and no source context resolves it, say so explicitly rather than
+  guessing. Quote the raw value plus its 1e18-normalized form.
 - Never assign HIGH/CRITICAL risk on the basis of a guessed unit interpretation."""
 
 FORMAT_REMINDER = """
@@ -58,6 +62,60 @@ class Explanation:
 
     summary: str
     detail: str
+
+
+def _collect_state_reads(
+    targets_and_calls: list[tuple[str, DecodedCall]],
+    chain_id: int,
+) -> list[tuple[str, list[StateRead]]]:
+    """Best-effort: read current on-chain values for state vars each call will write.
+
+    Returns a list of (target, reads) tuples in the same order as the input. Empty
+    reads are still returned (so callers can show per-call ordering); the formatter
+    skips them.
+    """
+    out: list[tuple[str, list[StateRead]]] = []
+    seen: set[tuple[str, str]] = set()
+    for target, decoded in targets_and_calls:
+        if not target:
+            continue
+        key = (target.lower(), decoded.function_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            reads = read_before_state(chain_id, target, decoded)
+        except Exception as e:  # noqa: BLE001
+            logger.info("State read failed for %s.%s: %s", target, decoded.function_name, e)
+            reads = []
+        if reads:
+            out.append((target, reads))
+    return out
+
+
+def _format_batch_param_constants(decoded_calls: list[DecodedCall]) -> str:
+    """For batch txs, surface arg positions that hold the same value across all calls.
+
+    Helps the LLM notice things like "all 4 setCoverageCap calls share market_id X".
+    Returns "" if there's nothing notable (single call, or no position is uniform).
+    """
+    if len(decoded_calls) < 2:
+        return ""
+
+    # Only meaningful when all calls share the same signature
+    sigs = {c.signature for c in decoded_calls}
+    if len(sigs) != 1:
+        return ""
+
+    first = decoded_calls[0]
+    if not first.params:
+        return ""
+
+    notes: list[str] = []
+    for i, (type_str, value) in enumerate(first.params):
+        if all(c.params[i][1] == value for c in decoded_calls[1:]):
+            notes.append(f"  arg[{i}] ({type_str}) is identical across all {len(decoded_calls)} calls: {value!r}")
+    return "\n".join(notes)
 
 
 def _collect_source_contexts(
@@ -163,6 +221,7 @@ def _build_prompt(
     proxy_upgrade_info: str = "",
     source_contexts: list[SourceContext] | None = None,
     context_note: str = "",
+    state_reads: list[tuple[str, list[StateRead]]] | None = None,
 ) -> str:
     """Build the full prompt for the LLM."""
     parts: list[str] = [SYSTEM_PROMPT, ""]
@@ -180,9 +239,20 @@ def _build_prompt(
 
     parts.append(f"\n--- Decoded Calldata ---\n{_format_decoded_calls(decoded_calls)}")
 
+    constants_note = _format_batch_param_constants(decoded_calls)
+    if constants_note:
+        parts.append(f"\n--- Shared Across Batch ---\n{constants_note}")
+
     if source_contexts:
         rendered = "\n\n".join(format_source_context(ctx) for ctx in source_contexts)
         parts.append(f"\n--- Contract Source Context ---\n{rendered}")
+
+    if state_reads:
+        rendered_state: list[str] = []
+        for tgt, reads in state_reads:
+            rendered_state.append(f"On {tgt}:")
+            rendered_state.append(format_state_reads(reads))
+        parts.append("\n--- Current State (before this call) ---\n" + "\n".join(rendered_state))
 
     if proxy_upgrade_info:
         parts.append(f"\n--- Proxy Upgrade ---\n{proxy_upgrade_info}")
@@ -289,6 +359,7 @@ def explain_transaction(
     decoded_calls = [decoded]
     proxy_upgrade_info = _get_proxy_upgrade_info(calldata, target, chain_id)
     source_contexts = _collect_source_contexts([(target, decoded)], chain_id)
+    state_reads = _collect_state_reads([(target, decoded)], chain_id)
 
     simulation: SimulationResult | None = None
     if not skip_simulation:
@@ -314,6 +385,7 @@ def explain_transaction(
         proxy_upgrade_info=proxy_upgrade_info,
         source_contexts=source_contexts,
         context_note=context_note,
+        state_reads=state_reads,
     )
     logger.info("Full AI context for %s:\n%s", target, prompt)
 
@@ -396,6 +468,7 @@ def explain_batch_transaction(
     proxy_upgrade_info = "\n".join(upgrade_parts)
 
     source_contexts = _collect_source_contexts(decoded_with_target, chain_id)
+    state_reads = _collect_state_reads(decoded_with_target, chain_id)
 
     targets = ", ".join(c.get("target", "?") for c in calls)
     total_value = sum(int(c.get("value", "0")) for c in calls)
@@ -410,6 +483,7 @@ def explain_batch_transaction(
         proxy_upgrade_info=proxy_upgrade_info,
         source_contexts=source_contexts,
         context_note=context_note,
+        state_reads=state_reads,
     )
     logger.info("Full AI context for batch (%s calls):\n%s", len(calls), prompt)
 
