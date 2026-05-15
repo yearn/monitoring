@@ -188,6 +188,54 @@ class TestBuildPromptWithSourceContext(unittest.TestCase):
         self.assertIn("DELEGATECALL from the Safe", result)
 
 
+class TestBatchParamConstants(unittest.TestCase):
+    """Tests for the 'Shared Across Batch' section."""
+
+    def test_surfaces_duplicate_arg(self) -> None:
+        market = b"\x01" * 32
+        calls = [
+            DecodedCall(
+                function_name="setCreditLines",
+                signature="setCreditLines(bytes32,address,uint256)",
+                params=[("bytes32", market), ("address", "0xA"), ("uint256", 100)],
+            ),
+            DecodedCall(
+                function_name="setCreditLines",
+                signature="setCreditLines(bytes32,address,uint256)",
+                params=[("bytes32", market), ("address", "0xB"), ("uint256", 200)],
+            ),
+        ]
+        result = _build_prompt(target="0xT", value=0, decoded_calls=calls, simulation=None)
+        self.assertIn("--- Shared Across Batch ---", result)
+        self.assertIn("arg[0]", result)
+        self.assertNotIn("arg[1]", result)  # different across calls
+        self.assertNotIn("arg[2]", result)
+
+    def test_single_call_no_section(self) -> None:
+        calls = [DecodedCall(function_name="pause", signature="pause()", params=[])]
+        result = _build_prompt(target="0xT", value=0, decoded_calls=calls, simulation=None)
+        self.assertNotIn("--- Shared Across Batch ---", result)
+
+    def test_mixed_signatures_no_section(self) -> None:
+        calls = [
+            DecodedCall(function_name="pause", signature="pause()"),
+            DecodedCall(function_name="unpause", signature="unpause()"),
+        ]
+        result = _build_prompt(target="0xT", value=0, decoded_calls=calls, simulation=None)
+        self.assertNotIn("--- Shared Across Batch ---", result)
+
+
+class TestSystemPromptBrevity(unittest.TestCase):
+    """Verify the system prompt enforces brevity rules."""
+
+    def test_includes_word_cap_and_no_preamble_rules(self) -> None:
+        calls = [DecodedCall(function_name="pause", signature="pause()")]
+        result = _build_prompt(target="0xT", value=0, decoded_calls=calls, simulation=None)
+        self.assertIn("≤25 words", result)
+        self.assertIn('"This transaction"', result)
+        self.assertIn("risk tag in caps", result)
+
+
 class TestSkipSimulation(unittest.TestCase):
     """Tests for skip_simulation flag."""
 
