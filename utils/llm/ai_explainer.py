@@ -55,6 +55,41 @@ TLDR: <your short summary>
 DETAIL:
 <your detailed analysis>"""
 
+REFINE_TASK = """--- Critique Task ---
+Check the draft above against this checklist. Each item is a yes/no question:
+
+1. Does the TLDR start with a verb (NOT "This transaction" / "The proposal" /
+   "The transaction" / "This governance")?
+2. Is the TLDR ≤25 words?
+3. Does the TLDR end with a risk tag in CAPS (LOW / MEDIUM / HIGH / CRITICAL)?
+4. Are all numeric magnitudes/units in the draft supported by either the
+   Contract Source Context section or the Current State section above? Or
+   does the draft explicitly say the unit cannot be confirmed?
+5. If a Current State section showed before→after values, does the DETAIL
+   quote the concrete delta (e.g., "10× relaxation", "20% reduction")?
+6. Does the risk verdict match the magnitude of change shown in Current State?
+   (A 10× change to a critical parameter is rarely LOW; a no-op is rarely HIGH.)
+
+Hard rules for the revision (if you choose to revise):
+- Do NOT introduce a unit/scale assumption that wasn't in the draft. If the draft
+  says "raw values 1e15–8e15", do NOT rewrite as "<0.008 ETH". You don't know the
+  decimals unless the source context or state reads tell you.
+- Do NOT escalate a justifiable LOW out of caution.
+- Do NOT remove an explicit hedge ("unit cannot be confirmed", "without source
+  context", etc.).
+- Do NOT polish for style alone. Only edit if there's a concrete, specific issue
+  from items 1-6.
+
+If every check is satisfied AND no hard rule would be violated by the draft as-is,
+output exactly:
+PASS
+
+Otherwise output the revised explanation in the same format:
+TLDR: <revised>
+
+DETAIL:
+<revised>"""
+
 
 @dataclass(frozen=True)
 class Explanation:
@@ -314,6 +349,38 @@ def _parse_explanation(raw: str) -> Explanation:
     return Explanation(summary=raw.strip(), detail="")
 
 
+def _refine_explanation(original_prompt: str, draft: Explanation, provider) -> Explanation:
+    """Self-critique then revise. Returns the draft unchanged on PASS or any error."""
+    refine_prompt = (
+        f"{original_prompt}\n\n"
+        f"--- Your Previous Draft ---\n"
+        f"TLDR: {draft.summary}\n\n"
+        f"DETAIL:\n{draft.detail}\n\n"
+        f"{REFINE_TASK}"
+    )
+
+    try:
+        raw = provider.complete(refine_prompt)
+    except LLMError as e:
+        logger.warning("Refine pass failed (%s); keeping draft", e)
+        return draft
+
+    if not raw or not raw.strip():
+        return draft
+
+    if raw.strip().upper().startswith("PASS"):
+        logger.info("Refine pass: PASS (no changes)")
+        return draft
+
+    revised = _parse_explanation(raw)
+    if not revised.summary:
+        logger.warning("Refine pass returned empty summary; keeping draft")
+        return draft
+
+    logger.info("Refine pass produced a revision (TLDR %d→%d chars)", len(draft.summary), len(revised.summary))
+    return revised
+
+
 def explain_transaction(
     target: str,
     calldata: str,
@@ -324,6 +391,7 @@ def explain_transaction(
     from_address: str = "0x0000000000000000000000000000000000000000",
     skip_simulation: bool = False,
     context_note: str = "",
+    refine: bool = False,
 ) -> Explanation | None:
     """Generate an AI explanation for a governance transaction.
 
@@ -344,6 +412,8 @@ def explain_transaction(
         context_note: Optional preamble injected into the prompt to give the LLM
             context that isn't in the calldata (e.g. "this is delegated from
             a Safe; msg.sender of inner calls is the Safe itself").
+        refine: If True, runs a second LLM call that critiques the draft against
+            a checklist and revises only if it finds concrete issues. ~2× cost.
 
     Returns:
         Explanation with summary and detail, or None on failure.
@@ -393,6 +463,8 @@ def explain_transaction(
         provider = get_llm_provider()
         raw = provider.complete(prompt)
         explanation = _parse_explanation(raw)
+        if refine:
+            explanation = _refine_explanation(prompt, explanation, provider)
         logger.info("AI summary using %s:\n%s", provider.model_name, explanation.summary)
         if explanation.detail:
             logger.info("AI detail:\n%s", explanation.detail)
@@ -410,6 +482,7 @@ def explain_batch_transaction(
     from_address: str = "0x0000000000000000000000000000000000000000",
     skip_simulation: bool = False,
     context_note: str = "",
+    refine: bool = False,
 ) -> Explanation | None:
     """Generate an AI explanation for a batch/multicall governance transaction.
 
@@ -424,6 +497,8 @@ def explain_batch_transaction(
             dependent flows (approve+transferFrom, swapOwner+swapOwner, etc).
         context_note: Optional preamble describing the execution context (e.g.
             DELEGATECALL semantics) that the LLM can't infer from calldata alone.
+        refine: If True, runs a second LLM call that critiques the draft against
+            a checklist and revises only if it finds concrete issues. ~2× cost.
 
     Returns:
         Explanation with summary and detail, or None on failure.
@@ -491,6 +566,8 @@ def explain_batch_transaction(
         provider = get_llm_provider()
         raw = provider.complete(prompt)
         explanation = _parse_explanation(raw)
+        if refine:
+            explanation = _refine_explanation(prompt, explanation, provider)
         logger.info("Batch AI summary using %s:\n%s", provider.model_name, explanation.summary)
         if explanation.detail:
             logger.info("Batch AI detail:\n%s", explanation.detail)
