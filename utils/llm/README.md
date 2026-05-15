@@ -1,59 +1,85 @@
 # AI Transaction Explainer
 
-Generates human-readable explanations for queued governance transactions (timelocks and Safe multisigs) by combining calldata decoding, Tenderly simulation, and LLM inference.
+Generates human-readable explanations for queued governance transactions (timelocks and Safe multisigs) by combining calldata decoding, on-chain state reads, verified-source natspec, Tenderly simulation, and LLM inference.
 
 ## Architecture
 
 ```
-                     ┌─────────────────────┐
-                     │  Governance Alert    │
-                     │  (timelock / safe)   │
-                     └──────────┬──────────┘
-                                │ calldata (hex)
-                                ▼
-                     ┌─────────────────────┐
-                     │  Calldata Decoder    │
-                     │  (4byte + eth_abi)   │
-                     └──────────┬──────────┘
-                                │ DecodedCall(s)
-                    ┌───────────┼───────────┐
-                    │           │           │
-                    ▼           ▼           ▼
-          ┌──────────────┐ ┌──────────┐ ┌────────────────┐
-          │   Tenderly   │ │  Proxy   │ │  LLM Provider  │
-          │  Simulation  │ │ Detect   │ │  (factory)     │
-          └──────┬───────┘ └────┬─────┘ └───────┬────────┘
-                 │              │                │
-                 └──────────────┼────────────────┘
-                                │
-                                ▼
-                     ┌─────────────────────┐
-                     │  _build_prompt()     │
-                     │  → LLM.complete()    │
-                     └──────────┬──────────┘
-                                │
-                                ▼
-                     ┌─────────────────────┐
-                     │  Telegram Alert      │
-                     │  🤖 AI Summary: ... │
-                     └─────────────────────┘
+                       ┌─────────────────────┐
+                       │  Governance Alert    │
+                       │  (timelock / safe)   │
+                       └──────────┬──────────┘
+                                  │ calldata (hex)
+                                  ▼
+                       ┌─────────────────────┐
+                       │  Calldata Decoder    │
+                       │  (4byte + eth_abi)   │
+                       └──────────┬──────────┘
+                                  │ DecodedCall(s)
+            ┌────────────┬────────┼────────┬────────────┐
+            │            │        │        │            │
+            ▼            ▼        ▼        ▼            ▼
+   ┌────────────┐ ┌────────────┐ ┌────┐ ┌─────────┐ ┌──────────────┐
+   │  Etherscan │ │  On-chain  │ │Prox│ │Tenderly │ │  LLM Provider │
+   │   source   │ │ state read │ │detec│ │   sim   │ │  (factory)    │
+   │  + natspec │ │ (getters)  │ │tion │ │         │ │               │
+   └─────┬──────┘ └──────┬─────┘ └─┬──┘ └────┬────┘ └──────┬────────┘
+         │               │         │        │              │
+         └───────────────┴─────────┴────────┴──────────────┘
+                                  │
+                                  ▼
+                       ┌─────────────────────┐
+                       │  _build_prompt()    │
+                       │  → LLM.complete()   │
+                       │  → (optional)        │
+                       │     refine pass     │
+                       └──────────┬──────────┘
+                                  │
+                                  ▼
+                       ┌─────────────────────┐
+                       │  Telegram Alert      │
+                       │  🤖 AI Summary: ... │
+                       └─────────────────────┘
 ```
 
 ## Pipeline Steps
 
-### 1. Calldata Decoding (`timelock/calldata_decoder.py`)
+### 1. Calldata Decoding (`utils/calldata/decoder.py`)
 
 Converts raw hex calldata into a structured `DecodedCall`:
 
 1. Extract the 4-byte function selector (first 4 bytes after `0x`)
-2. Look up the selector in `timelock/known_selectors.py` (local table)
+2. Look up the selector in `utils/calldata/known_selectors.py` (local table)
 3. If not found, query the [Sourcify 4byte API](https://api.4byte.sourcify.dev)
 4. Parse the function signature to extract parameter types
 5. Decode parameters using `eth_abi.decode()`
 
 Result: `DecodedCall(function_name="upgradeTo", signature="upgradeTo(address)", params=[("address", "0x...")])`
 
-### 2. Tenderly Simulation (`utils/tenderly/simulation.py`)
+### 2. Verified Source Context (`utils/source_context.py`)
+
+For each `(target, function)` pair, fetches the verified Solidity source via the Etherscan v2 multichain API and extracts:
+
+- The function's preceding natspec block + signature line
+- Declarations + natspec for state variables the function writes
+
+If the function isn't found in the target's source (e.g., the target is an `ERC1967Proxy` / `TransparentUpgradeableProxy`), follows the EIP-1967 implementation slot and retries against the impl source. Caches per `(chain_id, address)` for the workflow run.
+
+Requires `ETHERSCAN_TOKEN`. Failures degrade gracefully — no `--- Contract Source Context ---` section is added.
+
+### 3. On-chain Before-State (`utils/on_chain_state.py`)
+
+For setter-style calls, reads the *current* on-chain value of state variables the function will write so the LLM can quote concrete before→after deltas instead of guessing scale.
+
+Handles:
+
+- **Simple public state vars** (uint*/int*/address/bool/bytes*/string) via the auto-generated no-arg getter.
+- **Single-key mappings** where setter args include the mapping key type (e.g., `mapping(address => uint256) public coverageCap` paired with `setCoverageCap(address, uint256)`).
+- **Diamond-storage / non-public-var setters** via a speculative getter-guess from the setter signature (last arg = value type, leading args = key types). If wrong, the eth_call reverts and is skipped gracefully.
+
+Follows EIP-1967 proxies to locate the function source, but issues `eth_call`s against the original storage-holder address.
+
+### 4. Tenderly Simulation (`utils/tenderly/simulation.py`)
 
 Simulates the transaction against current on-chain state to get:
 
@@ -62,9 +88,11 @@ Simulates the transaction against current on-chain state to get:
 - **State changes** (storage slot diffs)
 - **Emitted events** (decoded log entries)
 
-Requires `TENDERLY_API_KEY` env var. Simulation failure is non-blocking -- the pipeline continues with decoded calldata only.
+Requires `TENDERLY_API_KEY`. Simulation failure is non-blocking — the pipeline continues with the decoded calldata only.
 
-### 3. Proxy Upgrade Detection (`utils/proxy.py`)
+Callers can pass `skip_simulation=True` to bypass Tenderly entirely. Used for Safe transactions with `operation=DELEGATECALL` (typically multiSend batches), where our plain-CALL simulator can't model the real execution and would produce a spurious "revert" verdict.
+
+### 5. Proxy Upgrade Detection (`utils/proxy.py`)
 
 If the calldata matches `upgradeTo(address)` or `upgradeToAndCall(address,bytes)`:
 
@@ -74,20 +102,44 @@ If the calldata matches `upgradeTo(address)` or `upgradeToAndCall(address,bytes)
 
 This context is added to the LLM prompt so it can explain what changed in the upgrade.
 
-### 4. LLM Prompt & Completion (`utils/llm/ai_explainer.py`)
+### 6. LLM Prompt & Completion (`utils/llm/ai_explainer.py`)
 
-The prompt is built from all available context:
+The prompt is built from all available context. The system prompt enforces brevity:
+
+- TLDR ≤25 words, starts with a verb, no "This transaction…" preamble
+- Trailing risk tag in caps (LOW / MEDIUM / HIGH / CRITICAL)
+- Refuses to assume parameter units from function name alone
+- Trusts source-context natspec over prior assumptions
+- Quotes concrete before→after deltas when state reads are available
+
+Example assembled prompt:
 
 ```
-System: You are a DeFi risk analyst explaining governance transactions...
+System: You are a DeFi risk analyst writing alerts for a monitoring team...
+        (brevity rules, unit-interpretation rules)
 
 Protocol: AAVE
 Contract: Aave Governance V3
 Target: 0x...
 
+--- Execution Context ---             (optional, e.g. for DELEGATECALL via MultiSendCallOnly)
+Outer call is DELEGATECALL from the Safe (0x...) into ...
+
 --- Decoded Calldata ---
 Call 1: upgradeTo(address)
   address: 0xNewImpl
+
+--- Shared Across Batch ---           (optional, for batch txs with uniform args)
+  arg[0] (address) is identical across all 4 calls: '0x...'
+
+--- Contract Source Context ---       (Etherscan natspec)
+Contract: PoolAddressesProvider
+/// @notice Updates the impl of pool...
+function upgradeTo(address newImpl) external onlyAdmin { ... }
+
+--- Current State (before this call) ---
+On 0x...:
+  poolImpl = 0xOldImpl  // current value, type: address
 
 --- Proxy Upgrade ---
 Current implementation: 0xOldImpl
@@ -97,43 +149,47 @@ Diff: https://etherscan.io/contractdiffchecker?a1=...&a2=...
 --- Simulation Results ---
 Simulation: SUCCESS
 Gas used: 50,000
-State changes (2 total, showing 2):
-  ...
+...
 ```
 
-The full prompt is logged at INFO level for debugging. When running in GitHub Actions, the Telegram alert includes a "Full details" link to the CI logs.
+The full prompt is logged at INFO level for debugging.
 
-### 5. Dual-Output Parsing
+### 7. Optional Refine Pass
 
-The LLM is asked to return two sections in a single response:
+When `refine=True` is passed to `explain_transaction` / `explain_batch_transaction`, a second LLM call critiques the draft against a checklist (verb-leading TLDR, ≤25 words, supported units, risk-magnitude consistency) and revises only if it finds concrete issues. Hard rules forbid introducing new unit assumptions, removing hedges, escalating LOW out of caution, or style-only churn. Falls back to the draft on `PASS`, on any `LLMError`, or on an empty revision.
+
+Cost: ~2× LLM calls per alert when enabled. Default is **off**.
+
+### 8. Dual-Output Parsing
+
+The LLM is asked to return two sections:
 
 ```
-TLDR: Upgrades the AAVE pool implementation to 0xNew...
+TLDR: Upgrades AAVE pool impl 0xOld → 0xNew. Verify audited. MEDIUM.
 
 DETAIL:
-This transaction calls upgradeTo(address) on the AAVE pool proxy...
+Calls upgradeTo(address) on the AAVE pool proxy...
 Current implementation: 0xOld...
 New implementation: 0xNew...
-Risk: MEDIUM — verify new implementation is audited.
 ```
 
 `_parse_explanation()` splits this into an `Explanation` dataclass:
 - `summary` (from TLDR) — short, goes to Telegram
-- `detail` (from DETAIL) — thorough analysis, logged at INFO level (visible in GH Actions)
+- `detail` (from DETAIL) — thorough analysis, uploaded to a paste service and linked from the Telegram message
 
 If the LLM doesn't follow the format, the full response is used as the summary (backward compatible).
 
-### 6. Output Formatting
+### 9. Output Formatting
 
 `format_explanation_line()` uses only the summary for the Telegram message:
 
 ```
 🤖 *AI Summary:*
-Upgrades the AAVE pool implementation to 0xNew...
-[Full details](https://github.com/.../actions/runs/123)
+Upgrades AAVE pool impl 0xOld → 0xNew. Verify audited. MEDIUM.
+[Full details](https://dpaste.org/abc123)
 ```
 
-The "Full details" link points to GitHub Actions logs where the detailed analysis, full prompt, and simulation data are all logged.
+The "Full details" link points to a dpaste.org upload with the detailed analysis.
 
 ## Configuration
 
@@ -143,8 +199,9 @@ All configuration is via environment variables:
 |---|---|---|
 | `LLM_PROVIDER` | `venice` | Provider name: `venice`, `groq`, `openai`, `anthropic`, or custom |
 | `LLM_API_KEY` | *(required)* | API key for the LLM provider |
-| `LLM_MODEL` | `grok-41-fast` | Model identifier |
+| `LLM_MODEL` | `deepseek-v4-flash` | Model identifier |
 | `LLM_BASE_URL` | *(per provider)* | API base URL (not needed for anthropic) |
+| `ETHERSCAN_TOKEN` | *(optional)* | Etherscan v2 multichain API key for source context |
 | `TENDERLY_API_KEY` | *(optional)* | Tenderly API key for simulation |
 | `TENDERLY_ACCOUNT` | `yearn` | Tenderly account slug |
 | `TENDERLY_PROJECT` | `sam` | Tenderly project slug |
@@ -153,7 +210,7 @@ All configuration is via environment variables:
 
 | Provider | Base URL | Default Model | Package |
 |---|---|---|---|
-| Venice.ai | `https://api.venice.ai/api/v1` | `grok-41-fast` | `openai` |
+| Venice.ai | `https://api.venice.ai/api/v1` | `deepseek-v4-flash` | `openai` |
 | Groq | `https://api.groq.com/openai/v1` | `openai/gpt-oss-safeguard-20b` | `openai` |
 | OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` | `openai` |
 | Anthropic | *(native API)* | `claude-haiku-4-5-20251001` | `anthropic` |
@@ -170,16 +227,24 @@ uv pip install 'monitoring-scripts-py[ai]'
 ```
 utils/llm/
 ├── __init__.py              # Exports: LLMProvider, get_llm_provider
-├── ai_explainer.py          # Orchestrator: decode → simulate → prompt → explain
+├── ai_explainer.py          # Orchestrator: decode → fetch context → prompt → explain
 ├── anthropic_provider.py    # Anthropic (Claude) native API provider
 ├── base.py                  # Abstract LLMProvider base class + LLMError
 ├── factory.py               # Provider factory with env-based config + singleton
 ├── openai_compat.py         # OpenAI-compatible provider (Venice, OpenAI, etc.)
 └── README.md                # This file
+
+utils/source_context.py      # Etherscan v2 source fetch + natspec extractor + proxy follow
+utils/on_chain_state.py      # Before-state reader (auto-generated getters, mappings, diamond storage)
+utils/proxy.py               # EIP-1967 impl slot read + proxy-upgrade detection
+utils/tenderly/simulation.py # Tenderly Simulation API client
+utils/calldata/              # Selector resolver + ABI decoder
+safe/multisend.py            # Safe MultiSendCallOnly inner-call extractor + DELEGATECALL context note
 ```
 
 ## Integration Points
 
-- **Timelock alerts** (`timelock/timelock_alerts.py`): Calls `explain_transaction()` or `explain_batch_transaction()` for each scheduled operation
-- **Safe alerts** (`safe/main.py`): Calls `explain_transaction()` for each pending Safe multisig transaction
-- Both use `format_explanation_line()` to append the AI summary to Telegram messages
+- **Timelock alerts** (`timelock/timelock_alerts.py`): Calls `explain_transaction()` or `explain_batch_transaction()` for each scheduled operation.
+- **Safe alerts** (`safe/main.py`): Routes through `_explain_safe_tx()`, which detects `operation=DELEGATECALL` multisend batches and dispatches to `explain_batch_transaction()` with `skip_simulation=True` and a DELEGATECALL context note. Plain CALL Safe txs use `explain_transaction()` as before.
+- Both call sites use `format_explanation_line()` to append the AI summary to Telegram messages.
+- Both call sites can opt into the refine pass per-protocol by passing `refine=True` to the explainer.
