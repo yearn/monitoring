@@ -12,6 +12,8 @@ concurrency:
 jobs:
   hourly:
     uses: ./.github/workflows/_run-monitoring.yml
+    permissions:
+      contents: read
     secrets: inherit
     with:
       cache_file: cache-id.txt
@@ -41,6 +43,8 @@ jobs:
 
   yearn-stuck-triggers:
     uses: ./.github/workflows/_run-monitoring.yml
+    permissions:
+      contents: read
     secrets: inherit
     with:
       cache_file: tks-trigger-cache.json
