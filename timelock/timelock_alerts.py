@@ -62,12 +62,12 @@ TIMELOCK_LIST: list[TimelockConfig] = [
     # Chain 8453 - Base
     TimelockConfig("0xf817cb3092179083c48c014688d98b72fb61464f", 8453, "LRT", "superOETH Timelock"),
     # Yearn Timelock (0x88Ba032be87d5EF1fbE87336B7090767F367BF73) - all chains
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 1, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 8453, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 42161, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 137, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 747474, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 10, "YEARN", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 1, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 8453, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 42161, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 137, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 747474, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 10, "YEARN_TIMELOCK", "Yearn TimelockController"),
 ]
 
 # Lookup by (lowercase address, chain_id) to support same address on multiple chains
