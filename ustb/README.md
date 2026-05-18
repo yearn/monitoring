@@ -25,10 +25,6 @@ Monitors the [Superstate Short Duration US Government Securities Fund (USTB)](ht
 - **NAV decrease**: CRITICAL alert if the latest oracle checkpoint NAV is lower than the previous one — indicates fund losses.
 - **Oracle divergence**: HIGH alert if the Continuous Price Oracle and Chainlink feed differ by more than **0.5%**.
 
-### RedemptionIdle
-
-- **Low USDC balance**: HIGH alert if the RedemptionIdle contract holds less than **$500K** USDC (reduced redemption capacity).
-
 ### Supply Changes
 
 - **Large supply change**: HIGH alert if USTB total supply changes by more than **+/-10%** compared to the previous hourly run.

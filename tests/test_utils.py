@@ -361,8 +361,9 @@ class TestDispatch(unittest.TestCase):
         self.assertEqual(payload["event_type"], "emergency_withdrawal")
         self.assertEqual(payload["client_payload"]["protocol"], "infinifi")
         self.assertEqual(payload["client_payload"]["severity"], "HIGH")
-        # Payload should only contain protocol and severity (no markets/vault/chain)
-        self.assertEqual(set(payload["client_payload"].keys()), {"protocol", "severity"})
+        self.assertEqual(payload["client_payload"]["message"], "Reserves low")
+        # Payload should only contain protocol, severity, and message (no markets/vault/chain)
+        self.assertEqual(set(payload["client_payload"].keys()), {"protocol", "severity", "message"})
 
         # Verify auth header
         headers = call_kwargs["headers"]

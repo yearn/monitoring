@@ -16,12 +16,16 @@ Monitors:
 - Unrealized losses — alerts when >= 0.5% of pool total assets
 """
 
+import time
 from datetime import datetime, timezone
+from typing import Any
 
 import requests
 
 from utils.alert import Alert, AlertSeverity, send_alert
+from utils.config import Config
 from utils.formatting import format_usd
+from utils.http import request_with_retry
 from utils.logging import get_logger
 
 PROTOCOL = "maple"
@@ -97,6 +101,96 @@ COLLATERAL_QUERY = """
 """ % (SYRUP_USDC_POOL_ID, SYRUP_USDT_POOL_ID)
 
 
+def _format_graphql_errors(errors: Any) -> str:
+    if not isinstance(errors, list):
+        return str(errors)
+
+    error_lines = []
+    for error in errors:
+        if not isinstance(error, dict):
+            error_lines.append(str(error))
+            continue
+
+        message = error.get("message", "unknown error")
+        path = error.get("path") or []
+        code = (error.get("extensions") or {}).get("code")
+
+        details = str(message)
+        if path:
+            details += f" at {'.'.join(str(part) for part in path)}"
+        if code:
+            details += f" ({code})"
+        error_lines.append(details)
+
+    return "; ".join(error_lines)
+
+
+def _is_retryable_graphql_error(errors: Any) -> bool:
+    if not isinstance(errors, list):
+        return False
+
+    for error in errors:
+        if not isinstance(error, dict):
+            continue
+
+        message = str(error.get("message", "")).lower()
+        code = (error.get("extensions") or {}).get("code")
+        if code == "INTERNAL_SERVER_ERROR" or "database unavailable" in message or "store error" in message:
+            return True
+
+    return False
+
+
+def _post_maple_graphql(query: str, query_name: str) -> dict:
+    retries = Config.get_retry_count()
+    backoff_factor = Config.get_backoff_factor()
+
+    for attempt in range(retries + 1):
+        response = request_with_retry(
+            "post",
+            MAPLE_GRAPHQL_URL,
+            json={"query": query},
+            timeout=30,
+        )
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError(f"Maple GraphQL {query_name} response is not a JSON object")
+
+        errors = data.get("errors")
+        if not errors:
+            return data
+
+        if _is_retryable_graphql_error(errors) and attempt < retries:
+            wait_time = backoff_factor * (2**attempt)
+            logger.warning(
+                "Maple GraphQL %s returned retryable errors (attempt %d/%d): %s. Retrying in %.1fs...",
+                query_name,
+                attempt + 1,
+                retries + 1,
+                _format_graphql_errors(errors),
+                wait_time,
+            )
+            time.sleep(wait_time)
+            continue
+
+        raise ValueError(f"Maple GraphQL {query_name} errors: {_format_graphql_errors(errors)}")
+
+    raise ValueError(f"Maple GraphQL {query_name} errors: retry attempts exhausted")
+
+
+def _alert_maple_graphql_skip(check_name: str, error: Exception) -> None:
+    logger.warning("Skipping Maple %s check: %s", check_name, error)
+    send_alert(
+        Alert(
+            AlertSeverity.MEDIUM,
+            f"Maple GraphQL unavailable; skipping {check_name} check for this run.\nError: {error}",
+            PROTOCOL,
+        ),
+        silent=True,
+        plain_text=True,
+    )
+
+
 def fetch_collateral_data() -> tuple[list[dict], list[dict]]:
     """Fetch collateral and pool data for both syrupUSDC and syrupUSDT from Maple GraphQL API.
 
@@ -110,16 +204,7 @@ def fetch_collateral_data() -> tuple[list[dict], list[dict]]:
         ValueError: If the API response is malformed or pools not found.
         requests.RequestException: If the API request fails.
     """
-    response = requests.post(
-        MAPLE_GRAPHQL_URL,
-        json={"query": COLLATERAL_QUERY},
-        timeout=30,
-    )
-    response.raise_for_status()
-
-    data = response.json()
-    if "errors" in data:
-        raise ValueError(f"Maple GraphQL errors: {data['errors']}")
+    data = _post_maple_graphql(COLLATERAL_QUERY, "collateral")
 
     # Log subgraph sync status
     meta = data.get("data", {}).get("_meta", {})
@@ -184,16 +269,7 @@ def fetch_syrup_globals() -> dict:
         ValueError: If the API response is malformed.
         requests.RequestException: If the API request fails.
     """
-    response = requests.post(
-        MAPLE_GRAPHQL_URL,
-        json={"query": SYRUP_GLOBALS_QUERY},
-        timeout=30,
-    )
-    response.raise_for_status()
-
-    data = response.json()
-    if "errors" in data:
-        raise ValueError(f"Maple GraphQL errors: {data['errors']}")
+    data = _post_maple_graphql(SYRUP_GLOBALS_QUERY, "syrupGlobals")
 
     globals_data = data.get("data", {}).get("syrupGlobals")
     if not globals_data:
@@ -316,7 +392,11 @@ def check_unrealized_losses(pools_data: list[dict]) -> None:
 
 def check_collateral_risk() -> None:
     """Check loan collateral risk and alert if weighted risk score exceeds threshold."""
-    collaterals, pools_data = fetch_collateral_data()
+    try:
+        collaterals, pools_data = fetch_collateral_data()
+    except (requests.RequestException, ValueError) as e:
+        _alert_maple_graphql_skip("collateral risk", e)
+        return
 
     # Log per-pool subgraph data
     for pool_data in pools_data:
@@ -330,7 +410,10 @@ def check_collateral_risk() -> None:
         )
 
     # Check combined collateralization ratio via syrupGlobals
-    check_collateralization_ratio()
+    try:
+        check_collateralization_ratio()
+    except (requests.RequestException, ValueError) as e:
+        _alert_maple_graphql_skip("collateralization ratio", e)
 
     # Check unrealized losses vs pool size
     check_unrealized_losses(pools_data)

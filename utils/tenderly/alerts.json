@@ -1,69 +1,6 @@
 {
   "alerts": [
     {
-      "id": "287fff5c-a2aa-4320-9893-1957ef389c7c",
-      "project_id": "6932cbec-2970-425a-a734-cb8374d95744",
-      "name": "thBILL oracle price changed > 1%",
-      "description": "Redstone thBILL_FUNDAMENTAL price changed on Arbitrum more than 1%: https://app.redstone.finance/app/token/thBILL_FUNDAMENTAL/",
-      "enabled": true,
-      "color": "#eeeeee",
-      "severity": "default",
-      "created_at": "2025-09-16T08:33:16.279198Z",
-      "delivery_channels": [
-        {
-          "delivery_channel_id": "324eac53-e4e9-4bd6-9c80-abe612ff1ff9",
-          "delivery_channel": {
-            "id": "324eac53-e4e9-4bd6-9c80-abe612ff1ff9",
-            "type": "telegram",
-            "owner_id": "1f750734-c720-4fde-9d60-d7edd0c04d91",
-            "project_id": null,
-            "label": "Renzo Alerts SAM",
-            "reference_id": "38bb1f0c-bf15-40a0-9117-9917679d37da",
-            "enabled": true,
-            "created_at": "2024-10-13T21:45:04.627275Z",
-            "information": {
-              "chat_id": -4591087023
-            }
-          },
-          "enabled": true,
-          "created_at": "2025-09-16T08:34:21.628288Z"
-        }
-      ],
-      "is_editable": true,
-      "updated_at": "2025-09-16T08:34:21.631893Z",
-      "expressions": [
-        {
-          "type": "contract_address",
-          "expression": {
-            "address": "0x8e66f244f05277aae16e1b5a586d742df932f157",
-            "transaction_type": null
-          }
-        },
-        {
-          "type": "network",
-          "expression": {
-            "network_id": "42161"
-          }
-        },
-        {
-          "type": "view_function",
-          "expression": {
-            "address": "0x8e66f244f05277aae16e1b5a586d742df932f157",
-            "input": "0xa035b1fe",
-            "parameter_condition": {
-              "parameter_name": "price",
-              "operator": ">=",
-              "parameter_type": "uint",
-              "nested_parameter_type": "",
-              "comparison_value": "1",
-              "compare_percentage": true
-            },
-            "network_id": "42161"
-          }
-        }
-      ]
-    },
-    {
       "id": "316f440e-457b-4cfa-a69e-f7f54230bf44",
       "project_id": "6932cbec-2970-425a-a734-cb8374d95744",
       "name": "cUSD fundamental oracle value is below threshold",

@@ -88,6 +88,7 @@ def dispatch_emergency_withdrawal(alert: Alert) -> None:
         "client_payload": {
             "protocol": alert.protocol,
             "severity": alert.severity.value,
+            "message": alert.message,
         },
     }
 

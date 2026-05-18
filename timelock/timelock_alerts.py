@@ -11,6 +11,7 @@ import urllib.request
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
+from eth_utils import to_checksum_address
 
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.calldata.decoder import format_call_lines
@@ -61,12 +62,12 @@ TIMELOCK_LIST: list[TimelockConfig] = [
     # Chain 8453 - Base
     TimelockConfig("0xf817cb3092179083c48c014688d98b72fb61464f", 8453, "LRT", "superOETH Timelock"),
     # Yearn Timelock (0x88Ba032be87d5EF1fbE87336B7090767F367BF73) - all chains
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 1, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 8453, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 42161, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 137, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 747474, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 10, "YEARN", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 1, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 8453, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 42161, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 137, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 747474, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 10, "YEARN_TIMELOCK", "Yearn TimelockController"),
 ]
 
 # Lookup by (lowercase address, chain_id) to support same address on multiple chains
@@ -132,7 +133,18 @@ def format_delay(seconds: int) -> str:
 def load_events(limit: int, since_ts: int, timelocks: list[TimelockConfig] | None = None) -> dict | None:
     """Fetch TimelockEvent events from the Envio GraphQL API."""
     source = timelocks if timelocks is not None else TIMELOCK_LIST
-    addresses = [t.address for t in source]
+    # Some Envio deployments store timelockAddress checksummed; include both
+    # representations to avoid case-sensitive misses.
+    addresses = sorted(
+        {
+            addr
+            for t in source
+            for addr in (
+                t.address,
+                to_checksum_address(t.address),
+            )
+        }
+    )
     _logger.info("load_events limit=%s since_ts=%s addresses=%s", limit, since_ts, len(addresses))
     query = """
     query GetTimelockEvents($limit: Int!, $sinceTs: Int!, $addresses: [String!]!) {
@@ -252,6 +264,7 @@ def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain
                 protocol=timelock_info.protocol,
                 label=timelock_info.label,
                 from_address=timelock_info.address,
+                refine=True,
             )
 
         # Batch transaction
@@ -262,6 +275,7 @@ def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain
             protocol=timelock_info.protocol,
             label=timelock_info.label,
             from_address=timelock_info.address,
+            refine=True,
         )
     except Exception:
         _logger.warning("AI explanation failed", exc_info=True)

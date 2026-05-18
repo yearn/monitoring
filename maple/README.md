@@ -7,7 +7,7 @@
 - **Unrealized Losses (on-chain):** Batched `unrealizedLosses()` on FixedTermLoanManager and OpenTermLoanManager. Alerts on any non-zero total (HIGH).
 - **Unrealized Losses vs Pool Size (subgraph):** Maple GraphQL `poolV2S` per syrupUSDC and syrupUSDT. Alerts when unrealized losses are **≥0.5%** of that pool's `totalAssets` (HIGH).
 - **Strategy AUM:** Logs `assetsUnderManagement()` on Aave and Sky strategies (visibility). Same figures define “liquid funds” for the withdrawal-queue ratio below.
-- **Withdrawal Queue vs Liquid Funds:** Pending withdrawal exit value (`totalShares` → `convertToExitAssets`) vs Aave + Sky AUM. Alerts when pending **>** **80%** of that liquid total (MEDIUM).
+- **Withdrawal Queue vs TVL:** Pending withdrawal exit value (`totalShares` → `convertToExitAssets`) vs pool TVL. Alerts when pending **>** **1%** of TVL (LOW). Aave + Sky AUM logged for context.
 - **Pool Liquidity:** USDC `balanceOf` the pool vs pending withdrawal exit value (`totalShares` → `convertToExitAssets`). Alerts when pending withdrawals **>** pool cash, i.e. the delegate cannot satisfy the queue from idle cash (MEDIUM). Queue depth is fetched only when alerting and included as context.
 - **Loan Collateral Risk:** GraphQL collateral merged across both pools; USD-weighted risk from `ASSET_RISK_SCORES` in [`maple/collateral.py`](./collateral.py). Alerts when weighted average is **>** **1.5** (MEDIUM), or when a collateral symbol is missing from the map (MEDIUM; unknowns use default score 5 for weighting).
 - **Collateralization Ratio:** [`syrupGlobals`](https://docs.maple.finance/integrate/technical-resources/collateral-and-yield-disclosure) combined ratio (OC loans only; strategies excluded). Alerts when `collateralRatio` **<** **140%** (MEDIUM).
@@ -36,7 +36,7 @@ Severities match `AlertSeverity` in code (`utils.alert`): **CRITICAL** / **HIGH*
 | TVL change | ≥15% absolute change vs prior run (`totalAssets`) | HIGH |
 | Unrealized losses (on-chain) | Any non-zero on FixedTerm + OpenTerm loan managers | HIGH |
 | Unrealized losses vs pool | ≥0.5% of `totalAssets` per pool (subgraph; syrupUSDC + syrupUSDT) | HIGH |
-| Withdrawal queue vs liquid | Pending withdrawal exit value **>** 80% of Aave + Sky AUM | MEDIUM |
+| Withdrawal queue vs TVL | Pending withdrawal exit value **>** 1% of pool TVL (`totalAssets`) | LOW |
 | Pending withdrawals vs cash | Pending withdrawal exit value **>** pool cash | MEDIUM |
 | Collateral risk score | Weighted average **>** 1.5 (USD-weighted over collateral) | MEDIUM |
 | Unknown collateral asset | Collateral asset not in `ASSET_RISK_SCORES` | MEDIUM |

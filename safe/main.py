@@ -5,13 +5,14 @@ import time
 import requests
 from dotenv import load_dotenv
 
+from safe.multisend import build_context_note, extract_inner_calls, safe_utility_label
 from safe.specific import handle_pendle
 from utils.cache import (
     get_last_executed_nonce_from_file,
     write_last_executed_nonce_to_file,
 )
 from utils.chains import safe_network_to_chain_id
-from utils.llm.ai_explainer import explain_transaction, format_explanation_line
+from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
 from utils.logging import get_logger
 from utils.telegram import send_telegram_message
 
@@ -57,9 +58,6 @@ PROXY_UPGRADE_SIGNATURES = [
 
 # combined addresses, add more addresses if needed, last item is optional for additional info message
 ALL_SAFE_ADDRESSES = [
-    ["SILO", "mainnet", "0xE8e8041cB5E3158A0829A19E014CA1cf91098554"],
-    # ["SILO", "optimism-main", "0x468CD12aa9e9fe4301DB146B0f7037831B52382d"],
-    ["SILO", "arbitrum-main", "0x865A1DA42d512d8854c7b0599c962F67F5A5A9d9"],
     [
         "LIDO",
         "mainnet",
@@ -111,18 +109,6 @@ ALL_SAFE_ADDRESSES = [
     #     "0x92A19381444A001d62cE67BaFF066fA1111d7202",
     #     "Origin admin multisig. Markets used on Base",
     # ],  # origin admin
-    [
-        "LRT",
-        "mainnet",
-        "0x94877640dD9E6F1e3Cb56Bf7b5665b7152601295",
-        "thBILL & tULTRA owner multisig. Markets used on Morpho Arbitrum",
-    ],  # thBILL & tULTRA owner multisig
-    [
-        "LRT",
-        "mainnet",
-        "0x2536f2Ef78B0DF34299CaD6e59300F8f83fE1Ec4",
-        "thBILL minter role. Markets used on Morpho Arbitrum",
-    ],  # thBILL minter role
     [
         "LRT",
         "mainnet",
@@ -258,6 +244,58 @@ def get_safe_url(safe_address: str, network_name: str) -> str:
     return f"{SAFE_WEBSITE_URL}{safe_address_network_prefix[network_name]}:{safe_address}"
 
 
+def _explain_safe_tx(
+    tx: dict,
+    target: str,
+    hex_data: str,
+    chain_id: int,
+    protocol: str,
+    safe_address: str,
+    additional_info: str | None,
+):
+    """Pick the right AI explainer path for a Safe transaction.
+
+    Safe txs with operation=DELEGATECALL into a multisend utility can't be
+    modeled by our plain-CALL Tenderly simulator. Route them to the batch
+    explainer (one call per inner tx) with simulation skipped, and feed the
+    LLM a context note describing the delegated-execution semantics.
+    """
+    operation = int(tx.get("operation", 0) or 0)
+    inner_calls = extract_inner_calls(tx) if operation == 1 else []
+
+    if inner_calls:
+        context_note = build_context_note(tx, safe_address)
+        utility_label = safe_utility_label(target)
+        label = utility_label or (additional_info or "")
+        return explain_batch_transaction(
+            calls=inner_calls,
+            chain_id=chain_id,
+            protocol=protocol,
+            label=label,
+            from_address=safe_address,
+            skip_simulation=True,
+            context_note=context_note,
+            refine=True,
+        )
+
+    # Non-multisend DELEGATECALLs (rare): skip sim but still try to explain.
+    # Plain CALL txs: behave exactly as before.
+    skip_sim = operation == 1
+    context_note = build_context_note(tx, safe_address) if skip_sim else ""
+    return explain_transaction(
+        target=target,
+        calldata=hex_data,
+        chain_id=chain_id,
+        value=int(tx.get("value", 0)),
+        protocol=protocol,
+        label=additional_info or "",
+        from_address=safe_address,
+        skip_simulation=skip_sim,
+        context_note=context_note,
+        refine=True,
+    )
+
+
 def check_for_pending_transactions(safe_address: str, network_name: str, protocol: str) -> None:
     pending_transactions = get_pending_transactions(safe_address, network_name)
 
@@ -313,14 +351,14 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
             if hex_data and len(hex_data) >= 10:
                 chain_id = safe_network_to_chain_id(network_name)
                 try:
-                    explanation = explain_transaction(
+                    explanation = _explain_safe_tx(
+                        tx=tx,
                         target=target_contract,
-                        calldata=hex_data,
+                        hex_data=hex_data,
                         chain_id=chain_id,
-                        value=int(tx.get("value", 0)),
                         protocol=protocol,
-                        label=additional_info or "",
-                        from_address=safe_address,
+                        safe_address=safe_address,
+                        additional_info=additional_info,
                     )
                     if explanation:
                         message += format_explanation_line(explanation)
