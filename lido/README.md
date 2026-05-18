@@ -15,6 +15,8 @@ Monitor Safe multisig for [Emergency Brakes functions](https://docs.lido.fi/mult
 - Emergency Brakes: Ethereum used to disable deposits & withdrawals for wstETH bridging to other chains (Arbitrum, Optimism, Base, Scroll, Mantle, ZKSync, Binance Smart Chain, Mode) in case of an emergency on Ethereum mainnet or the counterpart chain, and can pause Easy Track pipeline.
 - GateSeal Committee - can trigger GateSeal to pause WithdrawalQueueERC721. Expires on 1 April 2025.
 
+[Internal timelock monitoring](../timelock/README.md) for StartVote events on the [Lido Timelock](https://etherscan.io/address/0x2e59a20f205bb85a89c53f1936454680651e618e) on Mainnet.
+
 Not monitoring [Easy track voting](https://docs.lido.fi/guides/easy-track-guide/) because it cannot trigger crucial changes. Responsible only for:
 
 - Node Operators increasing staking limits

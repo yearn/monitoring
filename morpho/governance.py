@@ -8,6 +8,7 @@ from utils.cache import (
     write_last_executed_morpho_to_file,
 )
 from utils.chains import Chain
+from utils.formatting import format_token_amount, format_with_suffix
 from utils.http import request_with_retry
 from utils.logging import get_logger
 from utils.telegram import send_telegram_message
@@ -32,29 +33,22 @@ VAULTS_BY_CHAIN = {
         ["Gauntlet USDT Prime", "0x8CB3649114051cA5119141a34C200D65dc0Faa73"],
         ["Gauntlet WETH Core", "0x4881Ef0BF6d2365D3dd6499ccd7532bcdBCE0658"],
         ["Gauntlet USDC Core", "0x8eB67A509616cd6A7c1B3c8C21D48FF57df3d458"],
-        ["Gauntlet DAI Core", "0x500331c9fF24D9d11aee6B07734Aa72343EA74a5"],
         ["VaultBridge USDC", "0xBEefb9f61CC44895d8AEc381373555a64191A9c4"],
         ["VaultBridge USDT", "0xc54b4E08C1Dcc199fdd35c6b5Ab589ffD3428a8d"],
         ["VaultBridge WETH", "0x31A5684983EeE865d943A696AAC155363bA024f9"],
         ["VaultBridge WBTC", "0x812B2C6Ab3f4471c0E43D4BB61098a9211017427"],
-        # ["Gauntlet WBTC Core", "0x443df5eEE3196e9b2Dd77CaBd3eA76C3dee8f9b2"],
-        # ["Gauntlet LRT Core", "0x7Db8c75A903d66D669b2002870975cc5aA842b6D"],
-        # ["MEV Capital USDC", "0xd63070114470f685b75B74D60EEc7c1113d33a3D"],
+        ["Sentora PYUSD", "0x19b3cD7032B8C062E8d44EaCad661a0970DD8c55"],
+        ["Sentora RLUSD", "0x71cb2F8038B2C5D65ddc740B2F3268890CD2A89C"],
+        ["Yearn OG WETH", "0xE89371eAaAC6D46d4C3ED23453241987916224FC"],
+        ["Yearn OG USDC", "0xF9bdDd4A9b3A45f980e11fDDE96e16364dDBEc49"],
+        ["Yearn USDT", "0x0963232eB842BAF53E8e517691f81745C1F228a0"],
+        ["Yearn WBTC", "0x2bB005127069A0F0325Fb7370967E8A2b64FB77E"],
+        ["Yearn USDC", "0x68Aea7b82Df6CcdF76235D46445Ed83f85F845A3"],
     ],
     Chain.BASE: [
         ["Moonwell Flagship USDC", "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca"],
-        # NOTE: no funds in vaults below
-        # ["Moonwell Flagship ETH", "0xa0E430870c4604CcfC7B38Ca7845B1FF653D0ff1"],
-        # ["Moonwell Flagship EURC", "0xf24608E0CCb972b0b0f4A6446a0BBf58c701a026"],
-        # ["Moonwell Frontier cbBTC", "0x543257eF2161176D7C8cD90BA65C2d4CaEF5a796"],
-        # ["Seamless/Gauntlet USDC", "0x616a4E1db48e22028f6bbf20444Cd3b8e3273738"],
-        # ["Seamless/Gauntlet WETH", "0x27D8c7273fd3fcC6956a0B370cE5Fd4A7fc65c18"],
-        # ["Seamless/Gauntlet cbBTC", "0x5a47C803488FE2BB0A0EAaf346b420e4dF22F3C7"],
-    ],
-    Chain.POLYGON: [
-        ["Compound WETH", "0xF5C81d25ee174d83f1FD202cA94AE6070d073cCF"],
-        ["Compound USDC", "0x781FB7F6d845E3bE129289833b04d43Aa8558c42"],
-        ["Compound USDT", "0xfD06859A671C21497a2EB8C5E3fEA48De924D6c8"],
+        ["Yearn OG USDC", "0xef417a2512C5a41f69AE4e021648b69a7CdE5D03"],
+        ["Yearn OG WETH", "0x1D795E29044A62Da42D927c4b179269139A28A6B"],
     ],
     Chain.KATANA: [
         ["Gauntlet WBTC", "0xf243523996ADbb273F0B237B53f30017C4364bBC"],
@@ -63,6 +57,10 @@ VAULTS_BY_CHAIN = {
         ["Gauntlet WETH", "0xC5e7AB07030305fc925175b25B93b285d40dCdFf"],
         ["Steakhouse Prime USDC", "0x61D4F9D3797BA4dA152238c53a6f93Fb665C3c1d"],
         ["Steakhouse High Yield USDC", "0x1445A01a57D7B7663CfD7B4EE0a8Ec03B379aabD"],
+        ["Yearn OG WETH", "0xFaDe0C546f44e33C134c4036207B314AC643dc2E"],
+        ["Yearn OG USDC", "0xCE2b8e464Fc7b5E58710C24b7e5EBFB6027f29D7"],
+        ["Yearn OG USDT", "0x8ED68f91AfbE5871dCE31ae007a936ebE8511d47"],
+        ["Yearn OG WBTC", "0xe107cCdeb8e20E499545C813f98Cc90619b29859"],
     ],
 }
 
@@ -95,10 +93,64 @@ def get_vault_url_by_name(vault_name, chain: Chain):
     return None
 
 
-def fetch_market_name(market_id: str, chain: Chain) -> str:
-    """Fetch market name from Morpho GraphQL API.
+def fetch_pending_cap_market_ids(vault_address: str, chain: Chain) -> list[str]:
+    """Fetch market unique keys with pending cap submissions for a vault from Morpho GraphQL API.
 
-    Returns a human-readable name like 'WBTC/USDC (86.00%)' or falls back to the market ID.
+    Catches brand-new markets where submitCap has been called but acceptCap has not run yet —
+    those markets are not yet in supplyQueue or withdrawQueue, so the on-chain queue iteration
+    misses them.
+
+    Returns a list of hex-encoded market IDs, or an empty list on failure.
+    """
+    query = """
+    query GetVaultPendingCaps($address: String!, $chainId: Int!) {
+        vaultByAddress(address: $address, chainId: $chainId) {
+            state {
+                pendingConfigs {
+                    items {
+                        functionName
+                        decodedData {
+                            __typename
+                            ... on VaultSetCapPendingData {
+                                market { marketId }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    """
+    try:
+        response = request_with_retry(
+            "post",
+            API_URL,
+            json={"query": query, "variables": {"address": vault_address, "chainId": chain.chain_id}},
+        )
+        data = response.json()
+        items = (
+            (((data.get("data") or {}).get("vaultByAddress") or {}).get("state") or {}).get("pendingConfigs") or {}
+        ).get("items") or []
+        market_ids = []
+        for item in items:
+            if item.get("functionName") != "SetCap":
+                continue
+            decoded = item.get("decodedData") or {}
+            market = decoded.get("market") or {}
+            marketId = market.get("marketId")
+            if marketId:
+                market_ids.append(marketId)
+        return market_ids
+    except Exception as e:
+        logger.warning("Failed to fetch pending caps for vault %s: %s", vault_address, e)
+        return []
+
+
+def fetch_market_info(market_id: str, chain: Chain) -> tuple[str, int | None]:
+    """Fetch market name and loan asset decimals from Morpho GraphQL API.
+
+    Returns a tuple of (name, decimals) where name is a human-readable label like
+    'WBTC/USDC (86.00%)'. On failure returns (market_id, None).
     """
     query = """
     query GetMarket($uniqueKey: String!, $chainId: Int!) {
@@ -118,12 +170,24 @@ def fetch_market_name(market_id: str, chain: Chain) -> str:
         data = response.json()
         market = data["data"]["marketByUniqueKey"]
         collateral_symbol = market["collateralAsset"]["symbol"] if market.get("collateralAsset") else "idle"
-        loan_symbol = market["loanAsset"]["symbol"]
+        loan_asset = market["loanAsset"]
+        loan_symbol = loan_asset["symbol"]
+        decimals = int(loan_asset["decimals"])
         lltv_pct = int(market["lltv"]) / 1e18 * 100
-        return f"{collateral_symbol}/{loan_symbol} ({lltv_pct:.2f}%)"
+        return f"{collateral_symbol}/{loan_symbol} ({lltv_pct:.2f}%)", decimals
     except Exception as e:
-        logger.warning("Failed to fetch market name for %s: %s", market_id, e)
-        return market_id
+        logger.warning("Failed to fetch market info for %s: %s", market_id, e)
+        return market_id, None
+
+
+def format_cap(cap: int, decimals: int | None) -> str:
+    """Format a raw supply cap as a human-readable amount with K/M/B suffix.
+
+    Falls back to comma-separated raw if decimals are unknown.
+    """
+    if decimals is None or decimals <= 0:
+        return f"{cap:,}"
+    return format_with_suffix(format_token_amount(cap, decimals))
 
 
 def check_markets_pending_cap(name, morpho_contract, chain, w3):
@@ -155,7 +219,13 @@ def check_markets_pending_cap(name, morpho_contract, chain, w3):
                 len(market_responses),
             )
 
-    markets = list(set(market_responses))
+    # supplyQueue/withdrawQueue only contain markets that have been accepted at least once.
+    # Brand-new markets with a pending cap (submitCap called, acceptCap not yet run) are not
+    # in any queue, so the GraphQL pendingCaps lookup is needed to catch them.
+    pending_cap_market_ids = {
+        bytes.fromhex(market_id.removeprefix("0x")) for market_id in fetch_pending_cap_market_ids(vault_address, chain)
+    }
+    markets = list(set(market_responses) | pending_cap_market_ids)
 
     with w3.batch_requests() as batch:
         for market in markets:
@@ -188,27 +258,33 @@ def check_markets_pending_cap(name, morpho_contract, chain, w3):
         vault_url = get_vault_url_by_name(name, chain)
 
         # pending_cap check
+        # Don't skip past timestamps: a pending cap whose timelock has expired but hasn't been
+        # accepted yet is still pending action, and may have been missed by earlier runs (e.g.,
+        # if the market was brand-new and not yet visible to the on-chain queue iteration).
+        # The cache check below dedupes so we only alert once per unique timestamp.
         if pending_cap_timestamp > 0:
-            current_time = int(datetime.now().timestamp())
-            if pending_cap_timestamp <= current_time:
-                # skip if the pending cap is already in the past
-                continue
-
             last_executed_morpho = get_last_executed_morpho_from_file(vault_address, market, PENDING_CAP_TYPE)
 
             if pending_cap_timestamp > last_executed_morpho:
-                difference_in_percentage = ((pending_cap_value - current_cap) / current_cap) * 100
                 time = datetime.fromtimestamp(pending_cap_timestamp).strftime("%Y-%m-%d %H:%M:%S")
-                market_name = fetch_market_name(market, chain)
-                send_telegram_message(
-                    (
-                        f"Updating cap to new cap {pending_cap_value}, current cap {current_cap}, "
+                market_name, decimals = fetch_market_info(market, chain)
+                pending_cap_str = format_cap(pending_cap_value, decimals)
+                if current_cap == 0:
+                    message = (
+                        f"Adding new market [{market_name}]({market_url}) with cap {pending_cap_str} "
+                        f"to vault [{name}]({vault_url}) on {chain.name}. "
+                        f"Queued for {time}"
+                    )
+                else:
+                    difference_in_percentage = ((pending_cap_value - current_cap) / current_cap) * 100
+                    current_cap_str = format_cap(current_cap, decimals)
+                    message = (
+                        f"Updating cap to new cap {pending_cap_str}, current cap {current_cap_str}, "
                         f"difference: {difference_in_percentage:.2f}%. \n"
                         f"For vault [{name}]({vault_url}) for market: [{market_name}]({market_url}) on {chain.name}. "
                         f"Queued for {time}"
-                    ),
-                    PROTOCOL,
-                )
+                    )
+                send_telegram_message(message, PROTOCOL)
                 write_last_executed_morpho_to_file(vault_address, market, PENDING_CAP_TYPE, pending_cap_timestamp)
             else:
                 logger.info(
@@ -223,7 +299,7 @@ def check_markets_pending_cap(name, morpho_contract, chain, w3):
         if removable_at > 0:
             if removable_at > get_last_executed_morpho_from_file(vault_address, market, REMOVABLE_AT_TYPE):
                 time = datetime.fromtimestamp(removable_at).strftime("%Y-%m-%d %H:%M:%S")
-                market_name = fetch_market_name(market, chain)
+                market_name, _ = fetch_market_info(market, chain)
                 send_telegram_message(
                     f"Vault [{name}]({vault_url}) queued to remove market: [{market_name}]({market_url}) at {time}",
                     PROTOCOL,
@@ -279,7 +355,6 @@ def get_data_for_chain(chain: Chain):
 
 def main():
     get_data_for_chain(Chain.MAINNET)
-    get_data_for_chain(Chain.POLYGON)
     get_data_for_chain(Chain.KATANA)
     get_data_for_chain(Chain.BASE)
 

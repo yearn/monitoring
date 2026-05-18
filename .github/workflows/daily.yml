@@ -12,15 +12,20 @@ concurrency:
 jobs:
   daily:
     uses: ./.github/workflows/_run-monitoring.yml
+    permissions:
+      contents: read
     secrets: inherit
     with:
       cache_file: cache-id-daily.txt
       cache_key_prefix: cache-id-daily-v1
-      extra_env: "MORPHO_FILENAME=cache-id-daily.txt"
+      extra_env: |
+        CACHE_FILENAME=cache-id-daily.txt
+        MORPHO_FILENAME=cache-id-daily.txt
       scripts: |
         morpho/governance.py
         ethena/ethena.py
+        strata/main.py
         cap/liquidity.py
         utils/tenderly/tenderly.py
-        yearn/check_shadow_debt.py
+        # yearn/check_shadow_debt.py
         compound/main.py

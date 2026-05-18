@@ -23,6 +23,9 @@ on:
         default: ""
         description: "Extra env vars as KEY=VALUE lines, written to $GITHUB_ENV before scripts run"
 
+permissions:
+  contents: read
+
 # ──────────────────────────────────────────────────────────────
 # Superset of all env vars used across workflows.
 # Adding an env var here for a secret that doesn't exist is harmless (empty string).
@@ -47,6 +50,7 @@ env:
 
   # ── Telegram Bot Tokens ──
   TELEGRAM_BOT_TOKEN_DEFAULT: ${{ secrets.TELEGRAM_BOT_TOKEN_DEFAULT }}
+  TELEGRAM_BOT_TOKEN_3JANE: ${{ secrets.TELEGRAM_BOT_TOKEN_3JANE }}
   TELEGRAM_BOT_TOKEN_AAVE: ${{ secrets.TELEGRAM_BOT_TOKEN_AAVE }}
   TELEGRAM_BOT_TOKEN_COMP: ${{ secrets.TELEGRAM_BOT_TOKEN_COMP }}
   TELEGRAM_BOT_TOKEN_EULER: ${{ secrets.TELEGRAM_BOT_TOKEN_EULER }}
@@ -60,6 +64,7 @@ env:
   TELEGRAM_BOT_TOKEN_STARGATE: ${{ secrets.TELEGRAM_BOT_TOKEN_STARGATE }}
 
   # ── Telegram Chat IDs ──
+  TELEGRAM_CHAT_ID_3JANE: ${{ secrets.TELEGRAM_CHAT_ID_3JANE }}
   TELEGRAM_CHAT_ID_AAVE: ${{ secrets.TELEGRAM_CHAT_ID_AAVE }}
   TELEGRAM_CHAT_ID_CAP: ${{ secrets.TELEGRAM_CHAT_ID_CAP }}
   TELEGRAM_CHAT_ID_COMP: ${{ secrets.TELEGRAM_CHAT_ID_COMP }}
@@ -85,6 +90,31 @@ env:
   TELEGRAM_CHAT_ID_USDAI: ${{ secrets.TELEGRAM_CHAT_ID_USDAI }}
   TELEGRAM_CHAT_ID_YEARN: ${{ secrets.TELEGRAM_CHAT_ID_YEARN }}
 
+  # ── Telegram Topics (forum-style group routing) ──
+  # These are non-sensitive config, so they use repo variables (vars.*) instead of secrets.
+  TELEGRAM_CHAT_ID_TOPICS: ${{ vars.TELEGRAM_CHAT_ID_TOPICS }}
+  TELEGRAM_TOPIC_ID_3JANE: ${{ vars.TELEGRAM_TOPIC_ID_3JANE }}
+  TELEGRAM_TOPIC_ID_AAVE: ${{ vars.TELEGRAM_TOPIC_ID_AAVE }}
+  TELEGRAM_TOPIC_ID_CAP: ${{ vars.TELEGRAM_TOPIC_ID_CAP }}
+  TELEGRAM_TOPIC_ID_COMP: ${{ vars.TELEGRAM_TOPIC_ID_COMP }}
+  TELEGRAM_TOPIC_ID_ETHENA: ${{ vars.TELEGRAM_TOPIC_ID_ETHENA }}
+  TELEGRAM_TOPIC_ID_EULER: ${{ vars.TELEGRAM_TOPIC_ID_EULER }}
+  TELEGRAM_TOPIC_ID_FLUID: ${{ vars.TELEGRAM_TOPIC_ID_FLUID }}
+  TELEGRAM_TOPIC_ID_INFINIFI: ${{ vars.TELEGRAM_TOPIC_ID_INFINIFI }}
+  TELEGRAM_TOPIC_ID_LIDO: ${{ vars.TELEGRAM_TOPIC_ID_LIDO }}
+  TELEGRAM_TOPIC_ID_LRT: ${{ vars.TELEGRAM_TOPIC_ID_LRT }}
+  TELEGRAM_TOPIC_ID_MAKER: ${{ vars.TELEGRAM_TOPIC_ID_MAKER }}
+  TELEGRAM_TOPIC_ID_MAPLE: ${{ vars.TELEGRAM_TOPIC_ID_MAPLE }}
+  TELEGRAM_TOPIC_ID_MORPHO: ${{ vars.TELEGRAM_TOPIC_ID_MORPHO }}
+  TELEGRAM_TOPIC_ID_PENDLE: ${{ vars.TELEGRAM_TOPIC_ID_PENDLE }}
+  TELEGRAM_TOPIC_ID_RTOKEN: ${{ vars.TELEGRAM_TOPIC_ID_RTOKEN }}
+  TELEGRAM_TOPIC_ID_SILO: ${{ vars.TELEGRAM_TOPIC_ID_SILO }}
+  TELEGRAM_TOPIC_ID_STRATA: ${{ vars.TELEGRAM_TOPIC_ID_STRATA }}
+  TELEGRAM_TOPIC_ID_USTB: ${{ vars.TELEGRAM_TOPIC_ID_USTB }}
+  TELEGRAM_TOPIC_ID_USDAI: ${{ vars.TELEGRAM_TOPIC_ID_USDAI }}
+  TELEGRAM_TOPIC_ID_YEARN: ${{ vars.TELEGRAM_TOPIC_ID_YEARN }}
+  TELEGRAM_TOPIC_ID_YEARN_TIMELOCK: ${{ vars.TELEGRAM_TOPIC_ID_YEARN_TIMELOCK }}
+
   # ── GitHub PAT (dispatch) ──
   PAT_DISPATCH: ${{ secrets.PAT_DISPATCH }}
 
@@ -99,6 +129,7 @@ env:
   COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
   TENDERLY_API_KEY: ${{ secrets.TENDERLY_API_KEY }}
   SAFE_API_KEY: ${{ secrets.SAFE_API_KEY }}
+  SAFE_API_KEY_2: ${{ secrets.SAFE_API_KEY_2 }}
   LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
   LLM_MODEL: ${{ secrets.LLM_MODEL }}
   LLM_PROVIDER: ${{ secrets.LLM_PROVIDER }}
@@ -122,7 +153,17 @@ jobs:
 
       - name: Set extra environment variables
         if: inputs.extra_env != ''
-        run: echo "${{ inputs.extra_env }}" >> $GITHUB_ENV
+        env:
+          EXTRA_ENV: ${{ inputs.extra_env }}
+        run: |
+          while IFS= read -r line; do
+            [[ -z "$line" || "$line" == \#* ]] && continue
+            if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+              echo "Invalid environment assignment: $line" >&2
+              exit 1
+            fi
+            printf '%s\n' "$line" >> "$GITHUB_ENV"
+          done <<< "$EXTRA_ENV"
 
       - name: Restore cache
         if: inputs.cache_file != ''
@@ -137,24 +178,32 @@ jobs:
       - name: Get initial cache hash
         if: inputs.cache_file != ''
         id: initial-hash
-        run: echo "hash=${{ hashFiles(inputs.cache_file) }}" >> $GITHUB_OUTPUT
+        env:
+          CACHE_HASH: ${{ hashFiles(inputs.cache_file) }}
+        run: echo "hash=$CACHE_HASH" >> "$GITHUB_OUTPUT"
 
       - name: Run monitoring scripts
+        env:
+          SCRIPTS: ${{ inputs.scripts }}
         run: |
           while IFS= read -r script; do
             script=$(echo "$script" | xargs)
             [[ -z "$script" || "$script" == \#* ]] && continue
+            if [[ ! "$script" =~ ^[A-Za-z0-9_./-]+$ ]]; then
+              echo "Invalid script path: $script" >&2
+              exit 1
+            fi
             echo "::group::Running: $script"
-            uv run $script
+            uv run "$script"
             echo "::endgroup::"
-          done <<'EOF'
-          ${{ inputs.scripts }}
-          EOF
+          done <<< "$SCRIPTS"
 
       - name: Get final cache hash
         if: inputs.cache_file != ''
         id: final-hash
-        run: echo "hash=${{ hashFiles(inputs.cache_file) }}" >> $GITHUB_OUTPUT
+        env:
+          CACHE_HASH: ${{ hashFiles(inputs.cache_file) }}
+        run: echo "hash=$CACHE_HASH" >> "$GITHUB_OUTPUT"
 
       - name: Save cache
         if: always() && inputs.cache_file != '' && steps.initial-hash.outputs.hash != steps.final-hash.outputs.hash

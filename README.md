@@ -1,8 +1,8 @@
-# SAM Tools
+# Monitoring Tools
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/yearn/monitoring-scripts-py) [![Hourly Monitoring Scripts](https://github.com/yearn/monitoring-scripts-py/actions/workflows/hourly.yml/badge.svg)](https://github.com/yearn/monitoring-scripts-py/actions/workflows/hourly.yml) [![Daily Monitoring Scripts](https://github.com/yearn/monitoring-scripts-py/actions/workflows/daily.yml/badge.svg)](https://github.com/yearn/monitoring-scripts-py/actions/workflows/daily.yml) [![Safe Multisigs](https://github.com/yearn/monitoring-scripts-py/actions/workflows/multisig-checker.yml/badge.svg)](https://github.com/yearn/monitoring-scripts-py/actions/workflows/multisig-checker.yml)
 
-Monitoring scripts for DeFi protocols to track key metrics and send alerts.
+Monitoring scripts for DeFi protocols to track key metrics and send alerts. Join the Telegram group to receive alerts: `@yearn_curation_alerts`
 
 ## Supported Protocols
 
@@ -11,7 +11,7 @@ Monitoring scripts for DeFi protocols to track key metrics and send alerts.
 - [Cap](./cap/README.md)
 - [Compound V3](./compound/README.md)
 - [Ethena](./ethena/README.md)
-- [Euler](./euler/README.md)
+- [Euler](./euler/README.md) — _monitoring disabled_
 - [Fluid](./fluid/README.md)
 - [Infinifi](./infinifi/README.md)
 - [Lido](./lido/README.md)
@@ -21,13 +21,15 @@ Monitoring scripts for DeFi protocols to track key metrics and send alerts.
 - [Moonwell](./moonwell/README.md)
 - [Morpho](./morpho/README.md)
 - [Pendle](./pendle/README.md)
-- [Resolv](./resolv/README.md)
+- [Resolv](./resolv/README.md) — _monitoring disabled_
 - [RTokens - ETH+](./rtoken/README.md)
-- [Silo](./silo/README.md)
+- [Silo](./silo/README.md) — _monitoring disabled_
 - [Spark](./spark/README.md)
-- [Stargate](./stargate/README.md)
+- [Strata](./strata/README.md)
+- [Stargate](./stargate/README.md) — _monitoring disabled_
 - [USD0 - Usual Money](./usd0/README.md)
 - [USDAI](./usdai/README.md)
+- [USTB - Superstate](./ustb/README.md)
 - [Yearn](./yearn/README.md)
 
 ## Cross-Protocol Monitoring

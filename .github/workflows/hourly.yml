@@ -12,11 +12,14 @@ concurrency:
 jobs:
   hourly:
     uses: ./.github/workflows/_run-monitoring.yml
+    permissions:
+      contents: read
     secrets: inherit
     with:
       cache_file: cache-id.txt
       cache_key_prefix: cache-id-v4
       scripts: |
+        3jane/main.py
         morpho/markets.py
         aave/main.py
         lido/steth/main.py
@@ -27,19 +30,22 @@ jobs:
         prices/main.py
         # euler/markets.py
         infinifi/main.py
-        silo/ur_sniff.py
         usdai/main.py
+        usdai/large_mints.py
         yearn/alert_large_flows.py
         maple/main.py
         timelock/timelock_alerts.py
         # always run proposals after timelock alerts
         aave/proposals.py
+        ustb/main.py
         compound/proposals.py
         fluid/proposals.py
         maker/proposals.py
 
   yearn-stuck-triggers:
     uses: ./.github/workflows/_run-monitoring.yml
+    permissions:
+      contents: read
     secrets: inherit
     with:
       cache_file: tks-trigger-cache.json

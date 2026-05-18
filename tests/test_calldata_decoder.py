@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import patch
 
-from timelock.calldata_decoder import (
+from utils.calldata.decoder import (
     DecodedCall,
     _format_param_value,
     _parse_param_types,
@@ -12,7 +12,7 @@ from timelock.calldata_decoder import (
     format_call_lines,
     resolve_selector,
 )
-from timelock.known_selectors import KNOWN_SELECTORS
+from utils.calldata.known_selectors import KNOWN_SELECTORS
 
 # A selector guaranteed NOT to be in the local table, for testing API fallback.
 _UNKNOWN_SELECTOR = "0x11223344"
@@ -93,7 +93,7 @@ class TestResolveSelector(unittest.TestCase):
 
     def test_known_selector_no_api_call(self):
         """Selectors in the local table should resolve without any API call."""
-        with patch("timelock.calldata_decoder.fetch_json") as mock_fetch:
+        with patch("utils.calldata.decoder.fetch_json") as mock_fetch:
             result = resolve_selector("0xa9059cbb")
             self.assertEqual(result, "transfer(address,uint256)")
             mock_fetch.assert_not_called()
@@ -103,7 +103,7 @@ class TestResolveSelector(unittest.TestCase):
         result = resolve_selector("0xA9059CBB")
         self.assertEqual(result, "transfer(address,uint256)")
 
-    @patch("timelock.calldata_decoder.fetch_json")
+    @patch("utils.calldata.decoder.fetch_json")
     def test_api_fallback_for_unknown_selector(self, mock_fetch):
         """Selectors not in the local table should fall through to the API."""
         mock_fetch.return_value = {
@@ -117,7 +117,7 @@ class TestResolveSelector(unittest.TestCase):
         self.assertEqual(result, "someRareFunction(uint256)")
         mock_fetch.assert_called_once()
 
-    @patch("timelock.calldata_decoder.fetch_json")
+    @patch("utils.calldata.decoder.fetch_json")
     def test_runtime_cache_hit(self, mock_fetch):
         """Previously resolved selectors should be served from runtime cache."""
         _selector_cache[_UNKNOWN_SELECTOR] = "cachedFunc(address)"
@@ -125,7 +125,7 @@ class TestResolveSelector(unittest.TestCase):
         self.assertEqual(result, "cachedFunc(address)")
         mock_fetch.assert_not_called()
 
-    @patch("timelock.calldata_decoder.fetch_json")
+    @patch("utils.calldata.decoder.fetch_json")
     def test_runtime_cache_hit_none(self, mock_fetch):
         """Cached None (previously failed lookup) should return None without API call."""
         _selector_cache[_UNKNOWN_SELECTOR] = None
@@ -133,7 +133,7 @@ class TestResolveSelector(unittest.TestCase):
         self.assertIsNone(result)
         mock_fetch.assert_not_called()
 
-    @patch("timelock.calldata_decoder.fetch_json")
+    @patch("utils.calldata.decoder.fetch_json")
     def test_api_returns_none(self, mock_fetch):
         mock_fetch.return_value = None
         result = resolve_selector(_UNKNOWN_SELECTOR)
@@ -141,7 +141,7 @@ class TestResolveSelector(unittest.TestCase):
         # Should be cached as None
         self.assertIsNone(_selector_cache[_UNKNOWN_SELECTOR])
 
-    @patch("timelock.calldata_decoder.fetch_json")
+    @patch("utils.calldata.decoder.fetch_json")
     def test_no_match(self, mock_fetch):
         mock_fetch.return_value = {"result": {"function": {_UNKNOWN_SELECTOR: []}}}
         result = resolve_selector(_UNKNOWN_SELECTOR)
@@ -180,7 +180,7 @@ class TestDecodeCalldata(unittest.TestCase):
     def setUp(self):
         _selector_cache.clear()
 
-    @patch("timelock.calldata_decoder.resolve_selector")
+    @patch("utils.calldata.decoder.resolve_selector")
     def test_successful_decode(self, mock_resolve):
         mock_resolve.return_value = "transfer(address,uint256)"
         result = decode_calldata(TRANSFER_CALLDATA)
@@ -194,7 +194,7 @@ class TestDecodeCalldata(unittest.TestCase):
         self.assertEqual(result.params[1][0], "uint256")
         self.assertEqual(result.params[1][1], 1000)
 
-    @patch("timelock.calldata_decoder.resolve_selector")
+    @patch("utils.calldata.decoder.resolve_selector")
     def test_no_params_function(self, mock_resolve):
         mock_resolve.return_value = "pause()"
         # selector only, no param data
@@ -205,7 +205,7 @@ class TestDecodeCalldata(unittest.TestCase):
         self.assertEqual(result.signature, "pause()")
         self.assertEqual(result.params, [])
 
-    @patch("timelock.calldata_decoder.resolve_selector")
+    @patch("utils.calldata.decoder.resolve_selector")
     def test_selector_not_resolved(self, mock_resolve):
         mock_resolve.return_value = None
         result = decode_calldata("0xdeadbeef00112233")
@@ -216,7 +216,7 @@ class TestDecodeCalldata(unittest.TestCase):
         self.assertIsNone(decode_calldata(""))
         self.assertIsNone(decode_calldata(None))
 
-    @patch("timelock.calldata_decoder.resolve_selector")
+    @patch("utils.calldata.decoder.resolve_selector")
     def test_malformed_param_data_still_returns(self, mock_resolve):
         """If param decoding fails, should still return DecodedCall with empty params."""
         mock_resolve.return_value = "transfer(address,uint256)"
@@ -234,7 +234,7 @@ class TestFormatCallLines(unittest.TestCase):
     def setUp(self):
         _selector_cache.clear()
 
-    @patch("timelock.calldata_decoder.resolve_selector")
+    @patch("utils.calldata.decoder.resolve_selector")
     def test_successful_format(self, mock_resolve):
         mock_resolve.return_value = "transfer(address,uint256)"
         lines = format_call_lines(TRANSFER_CALLDATA)
@@ -248,7 +248,7 @@ class TestFormatCallLines(unittest.TestCase):
         self.assertIn("uint256", lines[2])
         self.assertIn("1000", lines[2])
 
-    @patch("timelock.calldata_decoder.resolve_selector")
+    @patch("utils.calldata.decoder.resolve_selector")
     def test_fallback_raw_selector(self, mock_resolve):
         mock_resolve.return_value = None
         lines = format_call_lines("0xdeadbeef00112233")
@@ -261,7 +261,7 @@ class TestFormatCallLines(unittest.TestCase):
         self.assertEqual(format_call_lines(""), [])
         self.assertEqual(format_call_lines(None), [])
 
-    @patch("timelock.calldata_decoder.resolve_selector")
+    @patch("utils.calldata.decoder.resolve_selector")
     def test_no_params_format(self, mock_resolve):
         mock_resolve.return_value = "pause()"
         lines = format_call_lines("0xabcd1234")

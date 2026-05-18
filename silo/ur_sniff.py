@@ -1,11 +1,10 @@
 from utils.abi import load_abi
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import Chain
 from utils.logging import get_logger
-from utils.telegram import send_telegram_message
 from utils.web3_wrapper import ChainManager
 
 THRESHOLD_UR = 0.98
-THRESHOLD_UR_NOTIFICATION = 0.99
 PROTOCOL = "silo"
 logger = get_logger(PROTOCOL)
 
@@ -28,11 +27,8 @@ ABI_SILO_LENS = load_abi("silo/abi/SiloLens.json")
 
 def print_stuff(chain_name, token_name, ur):
     if ur > THRESHOLD_UR:
-        message = (
-            f"🚨 **BEEP BOP** 🚨\n💎 Market asset: {token_name}\n📊 Utilization rate: {ur:.2%}\n🌐 Chain: {chain_name}"
-        )
-        disable_notification = ur <= THRESHOLD_UR_NOTIFICATION
-        send_telegram_message(message, PROTOCOL, disable_notification)
+        message = f"**BEEP BOP**\n💎 Market asset: {token_name}\n📊 Utilization rate: {ur:.2%}\n🌐 Chain: {chain_name}"
+        send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
 
 
 def process_assets(chain: Chain):

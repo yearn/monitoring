@@ -11,7 +11,7 @@ from typing import Any
 from eth_abi import decode
 from eth_utils import to_checksum_address
 
-from timelock.known_selectors import KNOWN_SELECTORS
+from utils.calldata.known_selectors import KNOWN_SELECTORS
 from utils.http import fetch_json
 from utils.logging import get_logger
 
@@ -173,10 +173,10 @@ def format_call_lines(data_hex: str) -> list[str]:
 
     result = decode_calldata(data_hex)
     if not result:
-        return [f"📝 Function: `{data_hex[:10]}`"]
+        return [f"\U0001f4dd Function: `{data_hex[:10]}`"]
 
-    lines = [f"📝 Function: `{result.signature}`"]
+    lines = [f"\U0001f4dd Function: `{result.signature}`"]
     for type_str, value in result.params:
         formatted = _format_param_value(type_str, value)
-        lines.append(f"    ├ {type_str}: `{formatted}`")
+        lines.append(f"    \u251c {type_str}: `{formatted}`")
     return lines

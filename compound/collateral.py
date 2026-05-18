@@ -45,7 +45,7 @@ MARKETS_BY_CHAIN: dict[Chain, list[tuple[str, str, int]]] = {
     Chain.MAINNET: [
         ("0xc3d688B66703497DAA19211EEdff47f25384cdc3", "cUSDCv3", 1),
         ("0x3Afdc9BCA9213A35503b077a6072F3D0d5AB0840", "cUSDTv3", 2),
-        ("0xA17581A9E3356d9A858b789D68B4d866e593aE94", "cWETHv3", 1),
+        ("0xA17581A9E3356d9A858b789D68B4d866e593aE94", "cWETHv3", 2),
         ("0x5D409e56D886231aDAf00c8775665AD0f9897b56", "cUSDSv3", 1),
     ],
 }
@@ -66,8 +66,13 @@ class CollateralAsset:
     price_raw: int
 
     @property
-    def usd_value(self) -> float:
-        """Calculate USD value of total collateral supplied."""
+    def base_value(self) -> float:
+        """Calculate value of total collateral supplied in base-asset terms.
+
+        For USD-based markets (cUSDCv3, cUSDTv3) this is USD.
+        For non-USD markets (cWETHv3) this is in the base asset (e.g. ETH).
+        Multiply by MarketData.base_usd_price to get actual USD value.
+        """
         return self.total_supply_raw * self.price_raw / (self.scale * PRICE_SCALE)
 
 
@@ -98,8 +103,13 @@ class MarketData:
         return self.reserves_raw * self.base_price_raw / (self.base_scale * PRICE_SCALE)
 
     @property
+    def base_usd_price(self) -> float:
+        """USD price of the base asset (e.g. ~1.0 for USDC, ~1800 for ETH)."""
+        return self.base_price_raw / PRICE_SCALE
+
+    @property
     def total_collateral_usd(self) -> float:
-        return sum(c.usd_value for c in self.collaterals)
+        return sum(c.base_value for c in self.collaterals) * self.base_usd_price
 
 
 def _fetch_single_market(client: Web3Client, address: str, name: str, risk_level: int) -> MarketData:
@@ -202,8 +212,10 @@ def _analyze_market(market: MarketData) -> list[str]:
     """Analyze a single market's collateral risk. Returns list of alert messages."""
     alerts: list[str] = []
     total_collateral_usd = market.total_collateral_usd
+    base_usd_price = market.base_usd_price
+    total_collateral_base = sum(c.base_value for c in market.collaterals)
 
-    if total_collateral_usd == 0:
+    if total_collateral_base == 0:
         logger.info("Market %s has no collateral", market.name)
         return alerts
 
@@ -217,15 +229,16 @@ def _analyze_market(market: MarketData) -> list[str]:
     total_risk_level = 0.0
     unknown_assets: list[str] = []
 
-    for c in sorted(market.collaterals, key=lambda x: x.usd_value, reverse=True):
-        if c.usd_value == 0:
+    for c in sorted(market.collaterals, key=lambda x: x.base_value, reverse=True):
+        if c.base_value == 0:
             continue
 
+        c_usd = c.base_value * base_usd_price
         asset_risk_tier: int = int(SUPPLY_ASSETS_DICT.get(c.symbol, 5))  # type: ignore[call-overload]
         if c.symbol not in SUPPLY_ASSETS_DICT:
             unknown_assets.append(c.symbol)
 
-        allocation_ratio = c.usd_value / total_collateral_usd
+        allocation_ratio = c.base_value / total_collateral_base
         allocation_threshold = get_market_allocation_threshold(asset_risk_tier, market.risk_level)
 
         if allocation_ratio > allocation_threshold:
@@ -233,12 +246,12 @@ def _analyze_market(market: MarketData) -> list[str]:
                 f"🔺 High allocation detected for {c.symbol} in market {market.name}\n"
                 f"💹 Current allocation: {allocation_ratio:.1%}\n"
                 f"📊 Max acceptable allocation: {allocation_threshold:.1%}\n"
-                f"💰 Supply amount: {format_usd(c.usd_value)}"
+                f"💰 Supply amount: {format_usd(c_usd)}"
             )
 
         risk_multiplier = asset_risk_tier
         total_risk_level += risk_multiplier * allocation_ratio
-        logger.debug("%s | %s | %s", c.symbol, format_usd(c.usd_value), f"{allocation_ratio:.1%}")
+        logger.debug("%s | %s | %s", c.symbol, format_usd(c_usd), f"{allocation_ratio:.1%}")
 
     # Check total risk level
     max_risk = MAX_RISK_THRESHOLDS.get(market.risk_level, MAX_RISK_THRESHOLDS[max(ALLOCATION_TIERS.keys())])

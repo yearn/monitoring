@@ -1,6 +1,5 @@
 import datetime
 
-import requests
 from web3 import Web3
 
 from utils.abi import load_abi
@@ -15,13 +14,38 @@ from utils.web3_wrapper import ChainManager
 PROTOCOL = "usdai"
 logger = get_logger(PROTOCOL)
 
-VAULT_ADDR = Web3.to_checksum_address("0x0A1a1A107E45b7Ced86833863f482BC5f4ed82EF")
-WM_TOKEN = Web3.to_checksum_address("0x437cc33344a0b27a429f795ff6b469c72698b291")
+USDAI_VAULT_ADDR = Web3.to_checksum_address("0x0A1a1A107E45b7Ced86833863f482BC5f4ed82EF")
+PYUSD_TOKEN_ADDR = Web3.to_checksum_address("0x46850aD61C2B7d64d08c9C754F45254596696984")
+# ERC20 decimals/symbol at USDAI_VAULT_ADDR and PYUSD_TOKEN_ADDR on Arbitrum (verified on-chain).
+USDAI_DECIMALS = 18
+PYUSD_DECIMALS = 6
+PYUSD_SYMBOL = "PYUSD"
 SUSDAI_ADDR = Web3.to_checksum_address("0x0B2b2B2076d95dda7817e785989fE353fe955ef9")
-GRAPHQL_URL = "https://protocol-api.m0.org/graphql"
-
-
 LOAN_ROUTER_ADDR = Web3.to_checksum_address("0x0C2ED170F2bB1DF1a44292Ad621B577b3C9597D1")
+USDAI_INVARIANT_BREACH_THRESHOLD_RAW = Config.get_env_int("USDAI_INVARIANT_BREACH_THRESHOLD_RAW", 100 * 10**18)
+
+USDAI_PROXY_READ_ABI = [
+    {
+        "inputs": [],
+        "name": "bridgedSupply",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
+
+
+def send_breach_alert_once(cache_key, alert_message, severity=AlertSeverity.HIGH):
+    last_state = int(get_last_value_for_key_from_file(cache_filename, cache_key))
+    if last_state == 0:
+        send_alert(Alert(severity, alert_message, PROTOCOL))
+        write_last_value_to_file(cache_filename, cache_key, 1)
+
+
+def clear_breach_state(cache_key):
+    last_state = int(get_last_value_for_key_from_file(cache_filename, cache_key))
+    if last_state == 1:
+        write_last_value_to_file(cache_filename, cache_key, 0)
 
 
 def get_loan_details(client, owner_addr):
@@ -71,71 +95,55 @@ def main():
     # Common ABI
     erc20_abi = load_abi("common-abi/ERC20.json")
 
-    wm = client.get_contract(WM_TOKEN, erc20_abi)
+    usdai = client.get_contract(USDAI_VAULT_ADDR, erc20_abi)
+    usdai_read = client.get_contract(USDAI_VAULT_ADDR, USDAI_PROXY_READ_ABI)
+    pyusd = client.get_contract(PYUSD_TOKEN_ADDR, erc20_abi)
 
     try:
-        # --- On-Chain Supply ---
-        # USDai Supply (wM held by Vault)
-        vault_shares = wm.functions.balanceOf(VAULT_ADDR).call()
-        # Decimals will always be the same = 6
-        wm_decimals = 6
-        usdai_supply_fmt = vault_shares / (10**wm_decimals)
+        # --- 1) USDai Invariant Inputs ---
+        with client.batch_requests() as batch:
+            batch.add(usdai.functions.totalSupply())
+            batch.add(usdai_read.functions.bridgedSupply())
+            batch.add(pyusd.functions.balanceOf(USDAI_VAULT_ADDR))
+            usdai_supply_raw, bridged_supply_raw, pyusd_assets_raw = client.execute_batch(batch)
 
-        # 2. Get Mint Ratio via API
-        query = """
-        query {
-          mintRatio: protocolConfigs(
-            where: {key: "mint_ratio"}
-            orderBy: blockTimestamp
-            orderDirection: desc
-            first: 1
-          ) {
-            value
-            blockTimestamp
-          }
-        }
-        """
-
-        mint_ratio = 10000  # Default to 1:1 (scaled 1e4 for bps) if not found
-
-        try:
-            res = requests.post(GRAPHQL_URL, json={"query": query}, timeout=Config.get_request_timeout())
-            if res.status_code == 200:
-                data = res.json().get("data", {})
-
-                # --- Mint Ratio ---
-                configs = data.get("mintRatio", [])
-                if configs:
-                    # Mint ratio is scaled by 1e4 (e.g. 9950 = 99.5%)
-                    mint_ratio_raw = int(configs[0].get("value", 10000))
-                    mint_ratio = mint_ratio_raw
-
-        except Exception as e:
-            logger.error("API Error: %s", e)
-
-        # Derived Collateral from Mint Ratio
-        # Scaling: mint_ratio is in bps (1e4).
-        # So mint_ratio_fmt = mint_ratio / 10000.
-        mint_ratio_fmt = mint_ratio / 10000
-
-        # Avoid division by zero
-        required_collateral = 0
-        if mint_ratio_fmt > 0:
-            required_collateral = usdai_supply_fmt / mint_ratio_fmt
+        usdai_supply_fmt = usdai_supply_raw / (10**USDAI_DECIMALS)
+        bridged_supply_fmt = bridged_supply_raw / (10**USDAI_DECIMALS)
+        pyusd_assets_fmt = pyusd_assets_raw / (10**PYUSD_DECIMALS)
+        pyusd_assets_18_raw = pyusd_assets_raw * (10 ** max(USDAI_DECIMALS - PYUSD_DECIMALS, 0))
 
         logger.info("--- USDai Stats ---")
         logger.info("USDai Supply:    $%s", f"{usdai_supply_fmt:,.2f}")
-        logger.info("Mint Ratio:      %s", f"{mint_ratio_fmt:.4f}")
+        logger.info("USDai Bridged:   $%s", f"{bridged_supply_fmt:,.2f}")
+        logger.info("%s Assets:    $%s", PYUSD_SYMBOL, f"{pyusd_assets_fmt:,.2f}")
 
-        collateral_metric = required_collateral
-        # Buffer = Collateral - Supply
-        buffer = collateral_metric - usdai_supply_fmt
+        # Invariant:
+        # totalSupply + bridgedSupply <= pyUSD.balanceOf(USDai)  (all in 1e18 scale)
+        required_backing_raw = usdai_supply_raw + bridged_supply_raw
+        invariant_gap_raw = required_backing_raw - pyusd_assets_18_raw
+        invariant_gap_fmt = invariant_gap_raw / (10**USDAI_DECIMALS)
+        required_backing_fmt = required_backing_raw / (10**USDAI_DECIMALS)
 
-        logger.info("Collateral:      $%s", f"{collateral_metric:,.2f}")
-        logger.info("Buffer:          $%s", f"{buffer:,.2f}")
+        logger.info("Required Backing: $%s (supply + bridged)", f"{required_backing_fmt:,.2f}")
+        logger.info("Invariant Gap:    $%s (required - pyUSD assets)", f"{invariant_gap_fmt:,.2f}")
+
+        cache_key_invariant_breach = f"{PROTOCOL}_backing_invariant_breach"
+        if invariant_gap_raw >= USDAI_INVARIANT_BREACH_THRESHOLD_RAW:
+            send_breach_alert_once(
+                cache_key=cache_key_invariant_breach,
+                severity=AlertSeverity.HIGH,
+                alert_message=(
+                    "*USDai Backing Invariant Breach*\n\n"
+                    f"Invariant violated by at least {USDAI_INVARIANT_BREACH_THRESHOLD_RAW / 1e18:,.0f} USDai.\n"
+                    f"totalSupply + bridgedSupply: ${required_backing_fmt:,.2f}\n"
+                    f"{PYUSD_SYMBOL} balance in USDai contract: ${pyusd_assets_fmt:,.2f}\n"
+                    f"Excess (required - assets): ${invariant_gap_fmt:,.2f}"
+                ),
+            )
+        else:
+            clear_breach_state(cache_key_invariant_breach)
 
         # --- Loan Monitoring (GPU Loans) ---
-
         all_loans = get_loan_details(client, SUSDAI_ADDR)
 
         # --- Manual Adjustment for Legacy Loan ---
@@ -190,7 +198,7 @@ def main():
                 )
 
                 msg = (
-                    f"*sUSDai Loan Activity*\n\n"
+                    "*sUSDai Loan Activity*\n\n"
                     f"Total Verified Principal has {change_type}.\n"
                     f"Change: ${diff:,.2f} ({percent_change:.2f}% of Total Loans)\n"
                     f"Old Total: ${last_principal:,.2f}\n"
@@ -201,38 +209,6 @@ def main():
 
             # Update cache
             write_last_value_to_file(cache_filename, cache_key_principal, total_verified_principal)
-
-        if collateral_metric > 0:
-            # 1. Check for Mint Ratio Change (Critical)
-            cache_key_ratio = f"{PROTOCOL}_mint_ratio"
-            last_ratio = int(get_last_value_for_key_from_file(cache_filename, cache_key_ratio))
-
-            if last_ratio != 0 and last_ratio != mint_ratio:
-                msg = f"*USDai Mint Ratio Changed*\n\nOld: {last_ratio / 10000:.4f}\nNew: {mint_ratio / 10000:.4f}"
-                send_alert(Alert(AlertSeverity.HIGH, msg, PROTOCOL))
-
-            # Always update ratio cache
-            write_last_value_to_file(cache_filename, cache_key_ratio, mint_ratio)
-
-            # 2. Check for Low Buffer (ignore withdrawals)
-            cache_key_buffer = f"{PROTOCOL}_buffer"
-            last_buffer = float(get_last_value_for_key_from_file(cache_filename, cache_key_buffer))
-
-            # Only alert when buffer drops below $1,000,000
-            buffer_alert_threshold = 1_000_000
-            if last_buffer != 0:
-                crossed_below = last_buffer >= buffer_alert_threshold and buffer < buffer_alert_threshold
-                if crossed_below:
-                    msg = (
-                        "*USDai Low Buffer Alert*\n\n"
-                        f"Buffer dropped below ${buffer_alert_threshold:,.0f}.\n"
-                        f"Old Buffer: ${last_buffer:,.2f}\n"
-                        f"New Buffer: ${buffer:,.2f}\n"
-                        f"(Collateral: ${collateral_metric:,.2f})"
-                    )
-                    send_alert(Alert(AlertSeverity.HIGH, msg, PROTOCOL))
-
-            write_last_value_to_file(cache_filename, cache_key_buffer, buffer)
 
     except Exception as e:
         logger.error("Error: %s", e)

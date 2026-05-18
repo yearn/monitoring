@@ -6,7 +6,7 @@ to compare old vs new implementation source code on Etherscan.
 
 from eth_utils import to_checksum_address
 
-from timelock.calldata_decoder import decode_calldata
+from utils.calldata.decoder import decode_calldata
 from utils.chains import EXPLORER_URLS, Chain
 from utils.logging import get_logger
 

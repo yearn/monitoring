@@ -6,9 +6,9 @@ when thresholds are exceeded.
 """
 
 from utils.abi import load_abi
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import Chain
 from utils.logging import get_logger
-from utils.telegram import send_telegram_message
 from utils.web3_wrapper import ChainManager
 
 PROTOCOL = "aave"
@@ -49,16 +49,12 @@ ADDRESSES_BY_CHAIN = {
 }
 
 THRESHOLD_UR = 0.99
-THRESHOLD_UR_NOTIFICATION = 0.99
 
 
 def print_stuff(chain_name: str, token_name: str, ur: float) -> None:
     if ur > THRESHOLD_UR:
-        message = (
-            f"🚨 **BEEP BOP** 🚨\n💎 Market asset: {token_name}\n📊 Utilization rate: {ur:.2%}\n🌐 Chain: {chain_name}"
-        )
-        disable_notification = ur <= THRESHOLD_UR_NOTIFICATION
-        send_telegram_message(message, PROTOCOL, disable_notification)
+        message = f"**BEEP BOP**\n💎 Market asset: {token_name}\n📊 Utilization rate: {ur:.2%}\n🌐 Chain: {chain_name}"
+        send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
 
 
 def process_assets(chain: Chain) -> None:

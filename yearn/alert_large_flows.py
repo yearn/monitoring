@@ -9,12 +9,12 @@ import urllib.error
 import urllib.request
 from decimal import Decimal, getcontext
 
-from defillama_sdk import DefiLlama
 from dotenv import load_dotenv
 
 from utils.abi import load_abi
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import EXPLORER_URLS, Chain
+from utils.defillama import fetch_prices
 from utils.telegram import send_telegram_message
 from utils.web3_wrapper import ChainManager
 
@@ -174,7 +174,6 @@ DEFILLAMA_CHAIN = {
 STABLES = {"USDC", "USDT", "DAI", "USDS", "CRVUSD"}
 
 _price_cache: dict[tuple[int, str], tuple[float, Decimal]] = {}
-_dl_client = DefiLlama()
 _logger = logging.getLogger("alert_large_flows")
 
 
@@ -218,21 +217,6 @@ def format_units(value: str, decimals: int) -> Decimal:
     return Decimal(value) / (Decimal(10) ** Decimal(decimals))
 
 
-def _defillama_fetch_prices(token_keys: list[str]) -> dict[str, Decimal]:
-    """Fetch current prices for multiple tokens from DeFiLlama in a single call.
-
-    Args:
-        token_keys: List of tokens in "chain:address" format.
-
-    Returns:
-        Mapping of token key to price as Decimal.
-    """
-    _logger.info("defillama price request tokens=%s", token_keys)
-    result = _dl_client.prices.getCurrentPrices(token_keys)
-    coins = result.get("coins", {})
-    return {key: Decimal(str(data["price"])) for key, data in coins.items() if "price" in data}
-
-
 def prefetch_prices(events: list[dict]) -> None:
     """Pre-fetch all non-stable token prices in a single DeFiLlama batch call.
 
@@ -268,7 +252,7 @@ def prefetch_prices(events: list[dict]) -> None:
         return
 
     try:
-        prices = _defillama_fetch_prices(token_keys)
+        prices = fetch_prices(token_keys)
         fetched_now = time.time()
         for token_key, price in prices.items():
             cache_key = key_to_cache_key.get(token_key)
@@ -303,7 +287,7 @@ def get_token_price_usd(chain_id: int, token_address: str, symbol: str) -> Decim
         raise RuntimeError(f"Unsupported chain for pricing: {chain_id}")
     token_key = f"{chain}:{token_address.lower()}"
 
-    prices = _defillama_fetch_prices([token_key])
+    prices = fetch_prices([token_key])
     price = prices.get(token_key)
     if price is None:
         raise RuntimeError(f"Missing price for {token_key}")

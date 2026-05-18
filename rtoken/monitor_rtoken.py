@@ -47,7 +47,7 @@ def get_rtoken_config(chain: Chain) -> RTokenConfig:
             rtoken_address="0xE72B141DF173b999AE7c1aDcbF60Cc9833Ce56a8",
             strsr_address="0xffa151Ad0A0e2e40F39f9e5E9F87cF9E45e819dd",
             coverage_threshold=1.05,
-            redemption_threshold=3500 * 10**18,
+            redemption_threshold=1000 * 10**18,
         )
     elif chain == Chain.BASE:
         # https://app.reserve.org/base/token/0xCb327b99fF831bF8223cCEd12B1338FF3aA322Ff/overview

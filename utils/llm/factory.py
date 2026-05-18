@@ -7,7 +7,8 @@ Environment variables:
     LLM_MODEL: Model identifier to use.
 
 Provider defaults:
-    venice: base_url=https://api.venice.ai/api/v1, model=llama-3.3-70b
+    venice: base_url=https://api.venice.ai/api/v1, model=deepseek-v4-flash
+    groq: base_url=https://api.groq.com/openai/v1, model=openai/gpt-oss-safeguard-20b
     openai: base_url=https://api.openai.com/v1, model=gpt-4o-mini
     anthropic: model=claude-haiku-4-5-20251001 (uses native Anthropic API)
     Custom: Set LLM_BASE_URL and LLM_MODEL explicitly.
@@ -24,7 +25,11 @@ logger = get_logger("utils.llm.factory")
 _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
     "venice": {
         "base_url": "https://api.venice.ai/api/v1",
-        "model": "grok-41-fast",
+        "model": "deepseek-v4-flash",
+    },
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "model": "openai/gpt-oss-safeguard-20b",
     },
     "openai": {
         "base_url": "https://api.openai.com/v1",
@@ -79,14 +84,14 @@ def get_llm_provider() -> LLMProvider:
     if _instance is not None:
         return _instance
 
-    provider_name = os.getenv("LLM_PROVIDER", "venice").lower()
+    provider_name = (os.getenv("LLM_PROVIDER") or "venice").lower()
     api_key = os.getenv("LLM_API_KEY")
     if not api_key:
         raise LLMError("LLM_API_KEY environment variable is not set")
 
     defaults = _PROVIDER_DEFAULTS.get(provider_name, {})
-    model = os.getenv("LLM_MODEL", defaults.get("model", ""))
-    base_url = os.getenv("LLM_BASE_URL", defaults.get("base_url", ""))
+    model = os.getenv("LLM_MODEL") or defaults.get("model", "")
+    base_url = os.getenv("LLM_BASE_URL") or defaults.get("base_url", "")
 
     if not model:
         raise LLMError(

@@ -1,16 +1,18 @@
+import itertools
 import os
 import time
 
 import requests
 from dotenv import load_dotenv
 
+from safe.multisend import build_context_note, extract_inner_calls, safe_utility_label
 from safe.specific import handle_pendle
 from utils.cache import (
     get_last_executed_nonce_from_file,
     write_last_executed_nonce_to_file,
 )
 from utils.chains import safe_network_to_chain_id
-from utils.llm.ai_explainer import explain_transaction, format_explanation_line
+from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
 from utils.logging import get_logger
 from utils.telegram import send_telegram_message
 
@@ -20,6 +22,12 @@ logger = get_logger("safe")
 SAFE_WEBSITE_URL = "https://app.safe.global/transactions/queue?safe="
 provider_url_mainnet = os.getenv("PROVIDER_URL_MAINNET")
 provider_url_arb = os.getenv("PROVIDER_URL_ARBITRUM")
+
+# Round-robin iterator over available Safe API keys.
+_api_keys: list[str] = [k for k in [os.getenv("SAFE_API_KEY"), os.getenv("SAFE_API_KEY_2")] if k]
+if not _api_keys:
+    raise ValueError("At least one SAFE_API_KEY must be set.")
+_api_key_cycle = itertools.cycle(_api_keys)
 
 safe_address_network_prefix = {
     "mainnet": "eth",
@@ -50,9 +58,6 @@ PROXY_UPGRADE_SIGNATURES = [
 
 # combined addresses, add more addresses if needed, last item is optional for additional info message
 ALL_SAFE_ADDRESSES = [
-    ["SILO", "mainnet", "0xE8e8041cB5E3158A0829A19E014CA1cf91098554"],
-    # ["SILO", "optimism-main", "0x468CD12aa9e9fe4301DB146B0f7037831B52382d"],
-    ["SILO", "arbitrum-main", "0x865A1DA42d512d8854c7b0599c962F67F5A5A9d9"],
     [
         "LIDO",
         "mainnet",
@@ -107,15 +112,9 @@ ALL_SAFE_ADDRESSES = [
     [
         "LRT",
         "mainnet",
-        "0x94877640dD9E6F1e3Cb56Bf7b5665b7152601295",
-        "thBILL & tULTRA owner multisig. Markets used on Morpho Arbitrum",
-    ],  # thBILL & tULTRA owner multisig
-    [
-        "LRT",
-        "mainnet",
-        "0x2536f2Ef78B0DF34299CaD6e59300F8f83fE1Ec4",
-        "thBILL minter role. Markets used on Morpho Arbitrum",
-    ],  # thBILL minter role
+        "0x9F6e831c8F8939DC0C830C6e492e7cEf4f9C2F5f",
+        "tBTC bridge owner multisig. aka, Council Multisig",
+    ],  # tBTC bridge owner multisig (Council Multisig)
     [
         "USDAI",
         "arbitrum-main",
@@ -139,6 +138,12 @@ ALL_SAFE_ADDRESSES = [
         "mainnet",
         "0xd6d4Bcde6c816F17889f1Dd3000aF0261B03a196",
         "Maple DAO Multisig (syrupUSDC)",
+    ],
+    [
+        "STRATA",
+        "mainnet",
+        "0xA27cA9292268ee0f0258B749f1D5740c9Bb68B50",
+        "Strata Admin Multisig (3/4)",
     ],
     # NOTE: Moonwell multisig monitoring is disabled for now
     # [
@@ -188,9 +193,7 @@ def get_safe_transactions(
     if executed is not None:
         params["executed"] = str(executed).lower()
 
-    api_key = os.getenv("SAFE_API_KEY")
-    if not api_key:
-        raise ValueError("SAFE_API_KEY environment variable not set.")
+    api_key = next(_api_key_cycle)
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -230,36 +233,75 @@ def get_safe_transactions(
     return []
 
 
-def get_last_executed_nonce(safe_address: str, network_name: str) -> int:
-    executed_txs = get_safe_transactions(safe_address, network_name, executed=True, limit=1)
-    if executed_txs:
-        return int(executed_txs[0]["nonce"])
-    return -1  # Return -1 if no executed transactions found
-
-
-def get_pending_transactions_after_last_executed(safe_address: str, network_name: str) -> list[dict]:
-    last_executed_nonce = get_last_executed_nonce(safe_address, network_name)
+def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]:
+    """Fetch pending transactions with nonce higher than the last cached nonce."""
+    last_cached_nonce = get_last_executed_nonce_from_file(safe_address)
     pending_txs = get_safe_transactions(safe_address, network_name, executed=False)
-
-    if pending_txs:
-        return [tx for tx in pending_txs if int(tx["nonce"]) > last_executed_nonce]
-    return []
+    return [tx for tx in pending_txs if int(tx["nonce"]) > last_cached_nonce]
 
 
 def get_safe_url(safe_address: str, network_name: str) -> str:
     return f"{SAFE_WEBSITE_URL}{safe_address_network_prefix[network_name]}:{safe_address}"
 
 
+def _explain_safe_tx(
+    tx: dict,
+    target: str,
+    hex_data: str,
+    chain_id: int,
+    protocol: str,
+    safe_address: str,
+    additional_info: str | None,
+):
+    """Pick the right AI explainer path for a Safe transaction.
+
+    Safe txs with operation=DELEGATECALL into a multisend utility can't be
+    modeled by our plain-CALL Tenderly simulator. Route them to the batch
+    explainer (one call per inner tx) with simulation skipped, and feed the
+    LLM a context note describing the delegated-execution semantics.
+    """
+    operation = int(tx.get("operation", 0) or 0)
+    inner_calls = extract_inner_calls(tx) if operation == 1 else []
+
+    if inner_calls:
+        context_note = build_context_note(tx, safe_address)
+        utility_label = safe_utility_label(target)
+        label = utility_label or (additional_info or "")
+        return explain_batch_transaction(
+            calls=inner_calls,
+            chain_id=chain_id,
+            protocol=protocol,
+            label=label,
+            from_address=safe_address,
+            skip_simulation=True,
+            context_note=context_note,
+            refine=True,
+        )
+
+    # Non-multisend DELEGATECALLs (rare): skip sim but still try to explain.
+    # Plain CALL txs: behave exactly as before.
+    skip_sim = operation == 1
+    context_note = build_context_note(tx, safe_address) if skip_sim else ""
+    return explain_transaction(
+        target=target,
+        calldata=hex_data,
+        chain_id=chain_id,
+        value=int(tx.get("value", 0)),
+        protocol=protocol,
+        label=additional_info or "",
+        from_address=safe_address,
+        skip_simulation=skip_sim,
+        context_note=context_note,
+        refine=True,
+    )
+
+
 def check_for_pending_transactions(safe_address: str, network_name: str, protocol: str) -> None:
-    pending_transactions = get_pending_transactions_after_last_executed(safe_address, network_name)
+    pending_transactions = get_pending_transactions(safe_address, network_name)
 
     if pending_transactions:
         for tx in pending_transactions:
             nonce = int(tx["nonce"])
-            # skip tx if the nonce is already processed
-            if nonce <= get_last_executed_nonce_from_file(safe_address):
-                logger.info("Skipping tx with nonce %s as it is already processed.", nonce)
-                continue
 
             target_contract = tx["to"]
 
@@ -309,14 +351,14 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
             if hex_data and len(hex_data) >= 10:
                 chain_id = safe_network_to_chain_id(network_name)
                 try:
-                    explanation = explain_transaction(
+                    explanation = _explain_safe_tx(
+                        tx=tx,
                         target=target_contract,
-                        calldata=hex_data,
+                        hex_data=hex_data,
                         chain_id=chain_id,
-                        value=int(tx.get("value", 0)),
                         protocol=protocol,
-                        label=additional_info or "",
-                        from_address=safe_address,
+                        safe_address=safe_address,
+                        additional_info=additional_info,
                     )
                     if explanation:
                         message += format_explanation_line(explanation)
@@ -355,7 +397,7 @@ def main():
         logger.info("Running for %s on %s", safe[0], safe[1])
         last_api_call_time, request_counter = check_api_limit(last_api_call_time, request_counter)
         run_for_network(safe[1], safe[2], safe[0])
-        request_counter += 2
+        request_counter += 1
 
 
 if __name__ == "__main__":

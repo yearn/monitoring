@@ -12,9 +12,12 @@ concurrency:
 jobs:
   multisig:
     uses: ./.github/workflows/_run-monitoring.yml
+    permissions:
+      contents: read
     secrets: inherit
     with:
       cache_file: nonces.txt
       cache_key_prefix: nonces-v3
       scripts: |
         safe/main.py
+        stables/main.py

@@ -27,11 +27,11 @@ SUPPLY_ASSETS: list[list] = [
         "weETH",
         1,
     ],  # Rate weeth/WETH and chainlink WETH/USD https://www.llamarisk.com/research/risk-collateral-risk-assessment-wrapped-etherfi-eth-weeth
+    # Risk Tier 2
     [
         "ezETH",
-        1,  # Risk 1 is fine for ezETH/WETH market
+        2,  # Risk 1 is fine for ezETH/WETH market
     ],  # Rate ezETH/WETH and chainlink WETH/USD https://www.llamarisk.com/research/risk-collateral-risk-assessment-renzo-restaked-eth-ezeth
-    # Risk Tier 2
     [
         "ETHx",
         2,

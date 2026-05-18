@@ -1,8 +1,8 @@
 import json
 
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import Chain
 from utils.logging import get_logger
-from utils.telegram import send_telegram_message
 from utils.web3_wrapper import ChainManager
 
 PROTOCOL = "spark"
@@ -60,19 +60,13 @@ mainnet_addresses = [
 
 # TODO: Add different threshold UR's for each asset
 THRESHOLD_UR = 0.99
-THRESHOLD_UR_NOTIFICATION = 0.99
 
 
 def print_stuff(chain_name, token_name, ur):
     logger.info("Chain: %s, Token: %s, UR: %s", chain_name, token_name, ur)
     if ur > THRESHOLD_UR:
-        message = (
-            f"🚨 **BEEP BOP** 🚨\n💎 Market asset: {token_name}\n📊 Utilization rate: {ur:.2%}\n🌐 Chain: {chain_name}"
-        )
-        disable_notification = True
-        if ur > THRESHOLD_UR_NOTIFICATION:
-            disable_notification = False
-        send_telegram_message(message, PROTOCOL, disable_notification)
+        message = f"**BEEP BOP**\n💎 Market asset: {token_name}\n📊 Utilization rate: {ur:.2%}\n🌐 Chain: {chain_name}"
+        send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
 
 
 # Function to process assets for a specific network

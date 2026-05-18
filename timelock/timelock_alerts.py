@@ -11,9 +11,10 @@ import urllib.request
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
+from eth_utils import to_checksum_address
 
-from timelock.calldata_decoder import format_call_lines
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
+from utils.calldata.decoder import format_call_lines
 from utils.chains import EXPLORER_URLS, Chain
 from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
 from utils.logging import get_logger
@@ -23,7 +24,7 @@ from utils.telegram import MAX_MESSAGE_LENGTH, send_telegram_message
 load_dotenv()
 
 ENVIO_GRAPHQL_URL = os.getenv("ENVIO_GRAPHQL_URL")
-DEFAULT_LOG_LEVEL = os.getenv("TIMELOCK_ALERTS_LOG_LEVEL", "WARNING")
+DEFAULT_LOG_LEVEL = os.getenv("TIMELOCK_ALERTS_LOG_LEVEL", "INFO")
 CACHE_KEY = "TIMELOCK_LAST_TS"
 
 
@@ -55,15 +56,18 @@ TIMELOCK_LIST: list[TimelockConfig] = [
     TimelockConfig("0x3c28b7c7ba1a1f55c9ce66b263b33b204f2126ea", 1, "LRT", "Puffer Timelock"),
     TimelockConfig("0x2e59a20f205bb85a89c53f1936454680651e618e", 1, "LIDO", "Lido Timelock"),
     TimelockConfig("0x2efff88747eb5a3ff00d4d8d0f0800e306c0426b", 1, "MAPLE", "Maple GovernorTimelock"),
+    TimelockConfig("0xb2a3cf69c97afd4de7882e5fee120e4efc77b706", 1, "STRATA", "Strata 48h Timelock"),
+    TimelockConfig("0x4f2682b78f37910704fb1aff29358a1da07e022d", 1, "STRATA", "Strata 24h Timelock"),
+    TimelockConfig("0x1dccd4628d48a50c1a7adea3848bcc869f08f8c2", 1, "3JANE", "3Jane TimelockController"),
     # Chain 8453 - Base
     TimelockConfig("0xf817cb3092179083c48c014688d98b72fb61464f", 8453, "LRT", "superOETH Timelock"),
     # Yearn Timelock (0x88Ba032be87d5EF1fbE87336B7090767F367BF73) - all chains
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 1, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 8453, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 42161, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 137, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 747474, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 10, "YEARN", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 1, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 8453, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 42161, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 137, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 747474, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 10, "YEARN_TIMELOCK", "Yearn TimelockController"),
 ]
 
 # Lookup by (lowercase address, chain_id) to support same address on multiple chains
@@ -129,7 +133,18 @@ def format_delay(seconds: int) -> str:
 def load_events(limit: int, since_ts: int, timelocks: list[TimelockConfig] | None = None) -> dict | None:
     """Fetch TimelockEvent events from the Envio GraphQL API."""
     source = timelocks if timelocks is not None else TIMELOCK_LIST
-    addresses = [t.address for t in source]
+    # Some Envio deployments store timelockAddress checksummed; include both
+    # representations to avoid case-sensitive misses.
+    addresses = sorted(
+        {
+            addr
+            for t in source
+            for addr in (
+                t.address,
+                to_checksum_address(t.address),
+            )
+        }
+    )
     _logger.info("load_events limit=%s since_ts=%s addresses=%s", limit, since_ts, len(addresses))
     query = """
     query GetTimelockEvents($limit: Int!, $sinceTs: Int!, $addresses: [String!]!) {
@@ -249,6 +264,7 @@ def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain
                 protocol=timelock_info.protocol,
                 label=timelock_info.label,
                 from_address=timelock_info.address,
+                refine=True,
             )
 
         # Batch transaction
@@ -259,14 +275,19 @@ def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain
             protocol=timelock_info.protocol,
             label=timelock_info.label,
             from_address=timelock_info.address,
+            refine=True,
         )
     except Exception:
-        _logger.debug("AI explanation failed", exc_info=True)
+        _logger.warning("AI explanation failed", exc_info=True)
         return None
 
 
 def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> str:
-    """Build a Telegram alert message for a group of TimelockEvent events (same operationId)."""
+    """Build a Telegram alert message for a group of TimelockEvent events (same operationId).
+
+    Priority order when message exceeds Telegram limit:
+    header > AI summary > footer > call details (truncated first).
+    """
     first = events[0]
     chain_id = int(first["chainId"])
     try:
@@ -278,8 +299,8 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
     tx_hash = first["transactionHash"]
     timelock_type = first.get("timelockType", "Unknown")
 
-    # Header
-    lines: list[str] = [
+    # Header (always included)
+    header_lines: list[str] = [
         "⏰ *TIMELOCK: New Operation Scheduled*",
         f"🅿️ Protocol: {timelock_info.protocol}",
         _format_address(first["timelockAddress"], explorer, f"📋 {timelock_info.label}: "),
@@ -289,50 +310,71 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
     # Delay (if applicable)
     delay_line = _format_delay_info(first.get("delay"), timelock_type)
     if delay_line:
-        lines.append(delay_line)
+        header_lines.append(delay_line)
 
-    # Type-specific content
+    # Type-specific call details (truncated first when message is too long)
+    call_lines: list[str] = []
     if timelock_type == "Aave":
         votes_for = first.get("votesFor")
         votes_against = first.get("votesAgainst")
         if votes_for is not None:
-            lines.append(f"✅ Votes For: {votes_for}")
+            call_lines.append(f"✅ Votes For: {votes_for}")
         if votes_against is not None:
-            lines.append(f"❌ Votes Against: {votes_against}")
-        lines.append(f"🆔 Proposal: {first.get('operationId') or ''}")
+            call_lines.append(f"❌ Votes Against: {votes_against}")
+        call_lines.append(f"🆔 Proposal: {first.get('operationId') or ''}")
 
     elif timelock_type == "Lido":
         creator = first.get("creator")
         if creator:
-            lines.append(_format_address(creator, explorer, "👤 Creator: "))
+            call_lines.append(_format_address(creator, explorer, "👤 Creator: "))
         metadata = first.get("metadata")
         if metadata:
-            lines.append(f"📄 Metadata: {metadata}")
-        lines.append(f"🆔 Vote: {first.get('operationId') or ''}")
+            call_lines.append(f"📄 Metadata: {metadata}")
+        call_lines.append(f"🆔 Vote: {first.get('operationId') or ''}")
 
     elif timelock_type == "Maple":
-        lines.append(f"🆔 Proposal: {first.get('operationId') or ''}")
+        call_lines.append(f"🆔 Proposal: {first.get('operationId') or ''}")
 
     elif timelock_type in ("TimelockController", "Compound", "Puffer"):
         for event in events:
-            lines.extend(_build_call_info(event, explorer, len(events) > 1, chain_id))
+            call_lines.extend(_build_call_info(event, explorer, len(events) > 1, chain_id))
 
     else:
         # Unknown type - show operationId at minimum
-        lines.append(f"🆔 Operation: {first.get('operationId') or ''}")
+        call_lines.append(f"🆔 Operation: {first.get('operationId') or ''}")
 
     # AI explanation (best-effort, non-blocking)
+    ai_line = ""
     explanation = _get_ai_explanation(events, timelock_info, chain_id)
     if explanation:
-        lines.append(format_explanation_line(explanation))
+        ai_line = format_explanation_line(explanation)
 
-    # Footer
+    # Footer (always included)
     if explorer:
-        lines.append(f"🔗 Tx: [{tx_hash}]({explorer}/tx/{tx_hash})")
+        footer = f"🔗 Tx: [{tx_hash}]({explorer}/tx/{tx_hash})"
     else:
-        lines.append(f"🔗 Tx: {tx_hash}")
+        footer = f"🔗 Tx: {tx_hash}"
 
-    return "\n".join(lines)
+    # Assemble with priority: header > AI summary > footer > call details
+    header_text = "\n".join(header_lines)
+    fixed_len = len(header_text) + len(ai_line) + len(footer) + 3  # +3 for joining newlines between parts
+    budget = MAX_MESSAGE_LENGTH - fixed_len
+
+    if budget > 0:
+        call_text = "\n".join(call_lines)
+        if len(call_text) > budget:
+            call_text = call_text[: budget - 3] + "..."
+    else:
+        call_text = ""
+
+    parts = [header_text]
+    if call_text:
+        parts.append(call_text)
+    if ai_line:
+        parts.append(ai_line)
+    parts.append(footer)
+
+    return "\n".join(parts)
 
 
 def process_events(events: list[dict], use_cache: bool) -> None:

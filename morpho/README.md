@@ -34,6 +34,10 @@ Additional insights on Morpho vault risks are available at [Llama Risk blog](htt
 
 The overall risk level of a Morpho Vault is determined by the risk levels of its markets. For more details, refer to the comments in [markets.py#L36](./markets.py#L36). Markets and vaults are categorized by their risk level and blockchain, with Level 1 representing the safest configuration.
 
+### Oracle validation
+
+When adding or checking market rows in [markets.py](./markets.py), use [morpho-oracle-validation.md](./morpho-oracle-validation.md): resolve `uniqueKey` and `oracle.address` via the Morpho GraphQL API, validate feeds on-chain (typically `MorphoChainlinkOracleV2` getters and `description()`), then classify feeds (Chainlink, RedStone, Chronicle, API3, or unknown) using on-chain hints plus official listings — [Chainlink](https://docs.chain.link/data-feeds/price-feeds/addresses) / [data.chain.link](https://data.chain.link), [RedStone](https://docs.redstone.finance/), [Chronicle Oracles](https://chroniclelabs.org/dashboard/oracles), [Api3 Market](https://market.api3.org/) (see §4 in that doc).
+
 ### How to Add a New Vault
 
 To monitor a new Morpho vault, add its address to the `VAULTS_BY_CHAIN` variable in [markets.py#L13](./markets.py#L13). This ensures that both the vault's overall metrics and its individual markets are monitored.
@@ -126,4 +130,4 @@ If any market's allocation exceeds its adjusted threshold, an alert is triggered
 
 ## API Docs
 
-Morpho GraphQL API wizard is available at [https://api.morpho.org/graphql](https://api.morpho.org/graphql). GraphQL schema is available in [morpho_ql_schema.txt](./morpho_ql_schema.txt) file.
+Morpho GraphQL API wizard is available at [https://api.morpho.org/graphql](https://api.morpho.org/graphql). GraphQL schema is available in [morpho_ql_schema.txt](./morpho_ql_schema.txt) file. For fetching a market oracle and validating it against RPC (including Chainlink, RedStone, Chronicle, API3), see [morpho-oracle-validation.md](./morpho-oracle-validation.md).

@@ -5,7 +5,6 @@ import requests
 
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
-from utils.defillama import check_stablecoin_prices
 from utils.logging import get_logger
 from utils.web3_wrapper import Chain, ChainManager
 
@@ -23,12 +22,6 @@ USDE_ADDRESS = "0x4c9EDD5852cd905f086C759E8383e09bff1E68B3"
 SUSDE_ADDRESS = "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497"
 
 ABI_ERC20 = load_abi("common-abi/ERC20.json")
-
-# --- Stablecoin price monitoring ---
-STABLECOIN_TOKENS: list[tuple[str, str]] = [
-    ("USDe", "ethereum:0x4c9EDD5852cd905f086C759E8383e09bff1E68B3"),
-    ("sUSDe", "ethereum:0x9D39A5DE30e57443BfF2A8307A4256c8797A3497"),
-]
 
 # Alert thresholds
 COLLATERAL_RATIO_TRIGGER = 1.005  # must be overcollateralized by at least 0.5%
@@ -402,7 +395,6 @@ def chaos_labs_check():
 
 
 if __name__ == "__main__":
-    check_stablecoin_prices(STABLECOIN_TOKENS, PROTOCOL)
     # NOTE: skip using LlamaRisk data because it is not reliable
     # llama_risk_check()
     chaos_labs_check()

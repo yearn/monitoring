@@ -3,6 +3,7 @@ import os
 import requests
 from dotenv import load_dotenv
 
+from utils.http import request_with_retry
 from utils.logging import get_logger
 from utils.telegram import send_telegram_message
 
@@ -68,12 +69,22 @@ def check_positions():
             "operationName": "QueryPositions",
         }
 
-        response = requests.post(
-            f"https://gateway-arbitrum.network.thegraph.com/api/{api_key}/subgraphs/id/2ufoztRpybsgogPVW6j9NTn1JmBWFYPKbP7pAabizADU",
-            json=json_data,
-        )
+        try:
+            response = request_with_retry(
+                "post",
+                f"https://gateway-arbitrum.network.thegraph.com/api/{api_key}/subgraphs/id/2ufoztRpybsgogPVW6j9NTn1JmBWFYPKbP7pAabizADU",
+                json=json_data,
+            )
+        except requests.RequestException as e:
+            logger.error("Graph API query failed after retries: %s", e)
+            send_telegram_message(f"Graph API query failed after retries: {e}", PROTOCOL, True)
+            return
 
         response_data = response.json()
+        if "errors" in response_data:
+            logger.error("GraphQL error in response: %s", response_data["errors"])
+            send_telegram_message(f"GraphQL error in response: {response_data['errors']}", PROTOCOL, True)
+            return
 
         # Check if there are any positions returned
         positions = response_data["data"]["siloPositions"]

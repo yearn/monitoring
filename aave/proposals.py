@@ -4,6 +4,7 @@ from datetime import datetime
 import requests
 
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
+from utils.http import request_with_retry
 from utils.logging import get_logger
 from utils.telegram import send_telegram_message
 
@@ -11,17 +12,35 @@ PROTOCOL = "aave"
 logger = get_logger(PROTOCOL)
 
 
-def run_query(query, variables):
+def run_query(query: str, variables: dict) -> dict | None:
+    """Run a GraphQL query against The Graph API with retry logic.
+
+    Args:
+        query: The GraphQL query string.
+        variables: Variables for the GraphQL query.
+
+    Returns:
+        Parsed JSON response dict, or None on failure.
+    """
     api_key = os.getenv("GRAPH_API_KEY")
     subgraph_id = "A7QMszgomC9cnnfpAcqZVLr2DffvkGNfimD8iUSMiurK"
     url = f"https://gateway-arbitrum.network.thegraph.com/api/{api_key}/subgraphs/id/{subgraph_id}"
-    headers = {"Content-Type": "application/json"}
     request_body = {"query": query, "variables": variables}
-    response = requests.post(url, json=request_body, headers=headers)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        raise Exception(f"Query failed with status code {response.status_code}: {response.text}")
+
+    try:
+        response = request_with_retry("post", url, json=request_body)
+    except requests.RequestException as e:
+        logger.error("Graph API query failed after retries: %s", e)
+        send_telegram_message(f"Graph API query failed after retries: {e}", PROTOCOL, True)
+        return None
+
+    data = response.json()
+    if "errors" in data:
+        logger.error("GraphQL error in response: %s", data["errors"])
+        send_telegram_message(f"GraphQL error in response: {data['errors']}", PROTOCOL, True)
+        return None
+
+    return data
 
 
 def fetch_queued_proposals(last_reported_id: int):
@@ -46,9 +65,7 @@ def fetch_queued_proposals(last_reported_id: int):
     # get only last 10 proposals
     variables = {"lastId": last_reported_id}
     response = run_query(query, variables)
-    if "errors" in response:
-        # NOTE: not raising error because the graph is not reliable. We have Tenderly alerts for this also
-        logger.error("Error fetching proposals: %s", response["errors"])
+    if response is None:
         return []
 
     proposals = response["data"]["proposals"]

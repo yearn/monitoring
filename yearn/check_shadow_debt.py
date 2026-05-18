@@ -55,6 +55,7 @@ SHADOW_DEBT_WHITELIST: Dict[int, Dict[str, Set[str]]] = {
             "0xb73a2f9f57aaa125ade3a11a1e661d28a919c66d",  # PT siUSD March 25 Morpho Looper
             "0x2f56d106c6df739bdbb777c2fee79ffaed88d179",  # Arbitrum syrupUSDC/USDC Morpho Looper
             "0x7bf1d269bf2cb79e628f51b93763b342fd059d1d",  # PT stcUSD Jul 23 Morpho Looper
+            "0x4c0e4d3cb62b91afbbf1fe8e830f98a513c7234b",  # USD3 Pendle PT Maxi
         },
     },
 }
