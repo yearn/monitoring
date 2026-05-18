@@ -7,14 +7,16 @@ Centralized depeg monitoring for LRTs and stablecoins. Runs two types of checks:
 
 When DefiLlama returns no price for a configured asset, a MEDIUM alert fires so coverage gaps are visible rather than silently skipped.
 
-LRT alerts route to the `lrt` Telegram channel. Stablecoin alerts route to `stables`. The workflow exports `TELEGRAM_BOT_TOKEN_LRT`, `TELEGRAM_BOT_TOKEN_STABLES`, `TELEGRAM_CHAT_ID_LRT`, and `TELEGRAM_CHAT_ID_STABLES`; bot tokens fall back to `TELEGRAM_BOT_TOKEN_DEFAULT`, but chat IDs have no fallback and must be set.
+Alerts route to the owning protocol's Telegram channel (e.g. `lrt`, `cap`, `stables`). The workflow exports the per-protocol `TELEGRAM_BOT_TOKEN_*` and `TELEGRAM_CHAT_ID_*` pairs; bot tokens fall back to `TELEGRAM_BOT_TOKEN_DEFAULT`, but chat IDs have no fallback and must be set.
+
+> **Fair-value floors rot.** Accruing LRTs' real exchange rate grows over time (e.g. weETH `fair_value=1.07` today may be `1.10+` in 12 months). When the accrued rate outruns the floor, real depegs become invisible — a 2% drop from 1.10 to 1.078 yields `1.078/1.07 ≈ 1.007` and won't fire. Bump LRT `fair_value` entries quarterly against current Redstone fundamentals.
 
 ## Fundamental Oracles
 
-| Asset | Oracle address | Threshold | Tenderly alert |
-|-------|----------------|-----------|----------------|
-| LBTC  | `0xb415eAA355D8440ac7eCB602D3fb67ccC1f0bc81` | 0.998 | `eca272ef-979a-47b3-a7f0-2e67172889bb` (value change between blocks) |
-| cUSD  | `0x9a5a3c3ed0361505cc1d4e824b3854de5724434a` | 0.9998 | `316f440e-457b-4cfa-a69e-f7f54230bf44` (`latestAnswer` < 0.9998) |
+| Asset | Channel | Oracle address | Threshold | Tenderly alert |
+|-------|---------|----------------|-----------|----------------|
+| LBTC  | `lrt`   | `0xb415eAA355D8440ac7eCB602D3fb67ccC1f0bc81` | 0.998 | `eca272ef-979a-47b3-a7f0-2e67172889bb` (value change between blocks) |
+| cUSD  | `cap`   | `0x9a5a3c3ed0361505cc1d4e824b3854de5724434a` | 0.9998 | `316f440e-457b-4cfa-a69e-f7f54230bf44` (`latestAnswer` < 0.9998) |
 
 Both oracles implement AggregatorV3 (`latestRoundData()`, 8 decimals).
 
@@ -44,7 +46,7 @@ Per-asset `fair_value` is a conservative floor under the current Redstone fundam
 | deUSD  | `0x15700B564Ca08D9439C58cA5053166E8317aa138` | 1.00 | 0.98 | |
 | USD0   | `0x73A15FeD60Bf67631dC6cd7Bc5B6e8da8190aCF5` | 1.00 | 0.98 | |
 | USD0++ | `0x35D8949372D46B7a3D5A56006AE77B215fc69bC0` | 1.00 | 0.90 | 4-year bond; legitimately trades at a discount. |
-| USDe   | `0x4c9EDD5852cd905f086C759E8383e09bff1E68B3` | 1.00 | 0.98 | |
+| USDe   | `0x4c9EDD5852cd905f086C759E8383e09bff1E68B3` | 1.00 | 0.98 | Also covered in `stables/main.py` at threshold 0.97 — intentional overlap; this module trips first. |
 
 ## Tenderly Alert Coverage
 
