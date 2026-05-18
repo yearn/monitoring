@@ -37,11 +37,18 @@ from morpho.markets import (
     MARKETS_RISK_2,
     MARKETS_RISK_3,
     MARKETS_RISK_4,
+    MARKETS_RISK_5,
     MAX_RISK_THRESHOLDS,
     VAULTS_BY_CHAIN,
     get_market_allocation_threshold,
 )
 from utils.abi import load_abi
+from utils.cache import (
+    get_last_value_for_key_from_file,
+    morpho_filename,
+    morpho_key,
+    write_last_value_to_file,
+)
 from utils.chains import Chain
 from utils.http import request_with_retry
 from utils.logging import get_logger
@@ -58,6 +65,10 @@ ABI_VAULT_ADAPTER = load_abi("morpho/abi/morpho_vault_v1_adapter.json")
 ADAPTER_KIND_MARKET = "MorphoMarketV1AdapterV2"
 ADAPTER_KIND_VAULT = "MorphoVaultV1Adapter"
 ADAPTER_KIND_UNKNOWN = "Unknown"
+
+# Cache tag for "this wrapped v1 vault has already been flagged as unmonitored" —
+# without this, every hourly run would re-spam the channel.
+VAULT_ADAPTER_SEEN_TYPE = "v2_vault_adapter_seen"
 
 
 @dataclass
@@ -187,7 +198,11 @@ def discover_v2_vaults_by_chain() -> Dict[Chain, List[V2Vault]]:
 def list_adapters(client: Web3Client, vault_address: str) -> List[str]:
     """Return the list of adapter addresses currently registered on a V2 vault."""
     vault = client.get_contract(vault_address, ABI_VAULT_V2)
-    length = vault.functions.adaptersLength().call()
+    try:
+        length = vault.functions.adaptersLength().call()
+    except Exception as e:
+        logger.warning("adaptersLength() reverted for %s: %s", vault_address, e)
+        return []
     if length == 0:
         return []
     with client.batch_requests() as batch:
@@ -253,6 +268,7 @@ def _market_risk_level(market_id: str, chain: Chain) -> int:
         (2, MARKETS_RISK_2),
         (3, MARKETS_RISK_3),
         (4, MARKETS_RISK_4),
+        (5, MARKETS_RISK_5),
     ):
         if mid in (m.lower() for m in table.get(chain, [])):
             return tier
@@ -278,7 +294,7 @@ def score_market_allocations(
     # is wired through more than one adapter.
     underlying_per_market: dict[str, int] = {}
     for adapter in market_adapters:
-        for market_id, expected_assets in zip(adapter.market_ids, adapter.expected_supply_assets):
+        for market_id, expected_assets in zip(adapter.market_ids, adapter.expected_supply_assets, strict=True):
             mid = market_id.lower()
             underlying_per_market[mid] = underlying_per_market.get(mid, 0) + int(expected_assets)
 
@@ -374,14 +390,23 @@ def analyze_vault_adapter(vault: V2Vault, adapter: AdapterInfo) -> None:
     if adapter.wrapped_v1_vault is None:
         return
     monitored = {str(entry[1]).lower() for entry in VAULTS_BY_CHAIN.get(vault.chain, [])}
-    if adapter.wrapped_v1_vault.lower() not in monitored:
-        vault_url = get_vault_url(vault.address, vault.chain)
-        send_telegram_message(
-            f"ℹ️ V2 [{vault.name}]({vault_url}) on {vault.chain.name} wraps unmonitored v1 vault "
-            f"`{adapter.wrapped_v1_vault}` — consider adding it to "
-            f"morpho/markets.py:VAULTS_BY_CHAIN.",
-            PROTOCOL,
-        )
+    wrapped_lc = adapter.wrapped_v1_vault.lower()
+    if wrapped_lc in monitored:
+        return
+
+    # Dedup across hourly runs — alert once per (parent vault, wrapped v1 vault).
+    cache_key = morpho_key(vault.address.lower(), wrapped_lc, VAULT_ADAPTER_SEEN_TYPE)
+    if str(get_last_value_for_key_from_file(morpho_filename, cache_key)) == "1":
+        return
+
+    vault_url = get_vault_url(vault.address, vault.chain)
+    send_telegram_message(
+        f"ℹ️ V2 [{vault.name}]({vault_url}) on {vault.chain.name} wraps unmonitored v1 vault "
+        f"`{adapter.wrapped_v1_vault}` — consider adding it to "
+        f"morpho/markets.py:VAULTS_BY_CHAIN.",
+        PROTOCOL,
+    )
+    write_last_value_to_file(morpho_filename, cache_key, 1)
 
 
 def analyze_v2_vault(client: Web3Client, vault: V2Vault) -> None:
@@ -422,8 +447,8 @@ def main() -> None:
         for vault in vaults:
             try:
                 analyze_v2_vault(client, vault)
-            except Exception as e:
-                logger.exception("Failed to analyze V2 vault %s on %s: %s", vault.address, chain.name, e)
+            except Exception:
+                logger.exception("Failed to analyze V2 vault %s on %s", vault.address, chain.name)
 
 
 # TODO: phase 2 — implement liquidity monitoring once we have real V2 vaults to

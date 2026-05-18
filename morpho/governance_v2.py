@@ -26,6 +26,7 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 import requests
+from web3 import Web3
 
 from morpho._shared import API_URL, SUPPORTED_CHAINS, VAULTS_V2_BY_CHAIN, get_vault_url
 from morpho.v2_decoders import decode_submit, submit_data_key
@@ -127,8 +128,6 @@ def _hex_to_bytes(value: str) -> bytes:
 def _checksum_or_empty(value: str) -> str:
     if not value:
         return ""
-    from web3 import Web3
-
     return Web3.to_checksum_address(value)
 
 
@@ -370,9 +369,6 @@ def _diff_set(snapshot: V2GovernanceSnapshot, set_name: str, current: List[str])
     removed = last_set - current_set
     # Only alert if we have a baseline — first run seeds the cache silently.
     if last_str and (added or removed):
-        # Re-checksum addresses for display.
-        from web3 import Web3
-
         added_cs: set[str] = {str(Web3.to_checksum_address(a)) for a in added}
         removed_cs: set[str] = {str(Web3.to_checksum_address(a)) for a in removed}
         _alert_set_diff(snapshot, set_name, added_cs, removed_cs)
@@ -408,8 +404,8 @@ def main() -> None:
         for vault in vaults:
             try:
                 diff_and_alert(vault)
-            except Exception as e:
-                logger.exception("Failed to process governance for %s on %s: %s", vault.address, chain.name, e)
+            except Exception:
+                logger.exception("Failed to process governance for %s on %s", vault.address, chain.name)
 
 
 if __name__ == "__main__":
