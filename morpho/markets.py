@@ -39,6 +39,7 @@ VAULTS_BY_CHAIN = {
         ["Yearn WBTC", "0x2bB005127069A0F0325Fb7370967E8A2b64FB77E", 1],
         ["Yearn OG WETH", "0xE89371eAaAC6D46d4C3ED23453241987916224FC", 2],
         ["Yearn OG USDC", "0xF9bdDd4A9b3A45f980e11fDDE96e16364dDBEc49", 2],
+        ["OUSD", "0x5B8b9FA8e4145eE06025F642cAdB1B47e5F39F04", 2],
         # these vaults are not used by yVaults
         # ["Gauntlet WBTC Core", "0x443df5eEE3196e9b2Dd77CaBd3eA76C3dee8f9b2", 3],
         # ["Gauntlet WETH Core", "0x4881Ef0BF6d2365D3dd6499ccd7532bcdBCE0658", 3],
@@ -56,6 +57,7 @@ VAULTS_BY_CHAIN = {
         ["Moonwell Flagship USDC", "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca", 1],
         ["Yearn OG USDC", "0xef417a2512C5a41f69AE4e021648b69a7CdE5D03", 2],
         ["Yearn OG WETH", "0x1D795E29044A62Da42D927c4b179269139A28A6B", 2],
+        ["OUSD", "0x581Cc9a73Ec7431723A4a80699B8f801205841F1", 2],
         # ["GauntletUSDC Prime", "0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61", 1],
         # ["Gauntlet USDT Prime", "0x585867B44914942578149766B305496374E33682", 1],
         # ["SteakhousePrime USDC", "0xBEEFE94c8aD530842bfE7d8B397938fFc1cb83b2", 1],
@@ -201,6 +203,7 @@ MARKETS_RISK_1 = {
         "0xa6ce59291d90ae348b2fa956cc66f31df605a3304a9325e494c94e2cf5b0485a",  # weETH/vbUSDT -> lltv 77%, oracle: RedStone weETH/ETH fundamental price, Chainlink ETH/USD and Chainlink USDT/USD.
         "0x76e311d4b0e2e6ae88ad9bab18063452a6d39837d7104c430ff62457b91cb2cb",  # weETH/vbUSDC -> lltv 77%, oracle: RedStone weETH/ETH fundamental price, Chainlink ETH/USD and Chainlink USDC/USD.
         "0xbb4fb94ca819744df6a8f3932fffad47d31e8d76d3c48216878295c4cf588caf",  # weETH/vbUSDT -> lltv 86%, oracle: RedStone weETH/ETH fundamental price, Chainlink ETH/USD and Chainlink USDT/USD.
+        "0x80e60fe453223b0f84a567724f88190bef708420d24397157067d424429783e9",  # avKAT/KAT -> llt 77%, oracle ERC4626 avKAT/KAT vault rate
     ],
 }
 
@@ -252,6 +255,7 @@ MARKETS_RISK_2 = {
         "0xd4a903dc6d949519060c7707f9604fdc9772c046e05c2e3a8fce0bd7196e4109",  # cbXRP/USDC -> lltv 62.5%, oracle: Chainlink XRP/USD
         "0x9125d0fa03c3137166df68bcc72283477830de2a4a5536512374c573ad4583c3",  # cbLTC/USDC -> lltv 62.5%, oracle: Chainlink LTC/USD
         "0x30767836635facec1282e6ef4a5981406ed4e72727b3a63a3a72c74e8279a8d7",  # LBTC/cbBTC -> lltv 94.5%, oracle: RedStone Price Feed for LBTC_FUNDAMENTAL: https://app.redstone.finance/app/feeds/base/lbtc_fundamental/
+        "0x0b2df036bb06b49d893a8f5578cb5a31619f46d7a79cbf11783838204cfdf9e3",  # YFI/USDC -> lltv 77%, oracle: Chainlink YFI/USD and Chainlink USDC/USD.
     ],
     Chain.KATANA: [
         "0xfe6cb1b88d8830a884f2459962f4b96ae6e38416af086b8ae49f5d0f7f9fc0cd",  # POL/vbUSDC -> lltv 77%, oracle: Chainlink POL/USD and Chainlink USDC/USD
@@ -259,6 +263,8 @@ MARKETS_RISK_2 = {
         "0x0e9d558490ed0cd523681a8c51d171fd5568b04311d0906fec47d668fb55f5d9",  # BTCK/vbUSDC -> lltv 77%, oracle: Redstone BTC/USD
         "0x913c787d438ca1dab5f5485c2d2d6e2aa2dfee47a5f02edd11331ad25b219dcf",  # KAT/vbUSDC -> lltv 62.5%, oracle: Chainlink KAT/USD and Chainlink USDC/USD.
         "0x24e50037bacb39950700c00851d5260e61975fb79f252ae2adbf7fdbd8db7290",  # KAT/vbUSDT -> lltv 62.5%, oracle: Chainlink KAT/USD and Chainlink USDT/USD.
+        "0x95f193f8f999718f3ce043249f12bfaea07458aae5343fc8d6355792cc17fa6c",  # avKAT/vbUSDT -> lltv 62.5%, oracle: Custom oracle ERC4626 avKAT*exit-fee/KAT, Chainlink KAT/USD and Chainlink USDT/USD.
+        "0xbd48214a2f12e951da20ad0b8fd83b611c693b5bbaa280b68ba4075678f2a138",  # avKAT/vbUSDC -> lltv 62.5%, oracle: Custom oracle ERC4626 avKAT*exit-fee/KAT, Chainlink KAT/USD and Chainlink USDC/USD.
         "0x071ed2047610c7b33e1540e49fcc0a6852cb783cca0dd7dc428f32fd791a020f",  # wstETH/AUSD -> lltv 86%, oracle: RedStone Price Feed for wstETH. USD=AUSD.
         "0xa7cd449cc319d65be3d0926d6b6f599a8c3434bd95ba3e91bbf1ee5e80e72b56",  # LBTC/vbUSDC -> lltv 86%, oracle: RedStone Price Feed for LBTC_FUNDAMENTAL and RedStone BTC/USD. USD=vbUSDC.
         "0x2c4f26c76b4de51d3c9260c15a796cd2a35efab17786d0aa78ca2e638b0f8ba8",  # yvvbUSDC/vbETH -> lltv 77%, oracle: yearn vault exchange rate. Chainlink ETH/USD and Chainlink USDC/USD.

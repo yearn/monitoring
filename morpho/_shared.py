@@ -22,10 +22,9 @@ logger = get_logger("morpho.shared")
 VAULTS_V2_BY_CHAIN: Dict[Chain, List[List[Any]]] = {
     Chain.MAINNET: [
         # name, address, risk level
-        ["Yearn OG USDC", "0xB885F6d448dA7E2C642Ec31190B629E40E87B069", 3],
+        ["Yearn USDC", "0xaA8d9E2aBa210639cE6C7cE21385e7c673ACa6f3", 1],
+        ["Yearn OG USDC", "0xB885F6d448dA7E2C642Ec31190B629E40E87B069", 2],
         ["Yearn OG WETH V2", "0xbe518068EB6135117207256F8C9aFf81B4382DB1", 2],
-        ["Yearn USDC", "0xaA8d9E2aBa210639cE6C7cE21385e7c673ACa6f3", 2],
-        ["OUSD Vault V2", "0xFB154c729A16802c4ad1E8f7FF539a8b9f49c960", 2],
     ],
     Chain.BASE: [
         ["Yearn OG USDC V2", "0xe7D0DBE3493830e2Ab62619211A2BfF0Fc60dB42", 2],
@@ -37,8 +36,7 @@ VAULTS_V2_BY_CHAIN: Dict[Chain, List[List[Any]]] = {
         ["Yearn OG USDT", "0x4284d4F9f4d61eA57B8F0943547c7C19C5B9B249", 1],
         ["Yearn OG WBTC", "0x22c01834e1A261F8BebCa7D7B459db2F389785FF", 1],
         ["Yearn OG ETH", "0x5920A6FC553af799542EDA628AdfCc9eA52e141C", 1],
-        ["Yearn KAT", "0x9b1aE9548E4B46cEB6650f6CEc702bAf5CF2b8CC", 3],
-        ["d3nity dUSD V2", "0xf71da79a6eD40F894e883874dCE3f54B1493d930", 3],
+        ["Yearn KAT", "0x9b1aE9548E4B46cEB6650f6CEc702bAf5CF2b8CC", 1],
     ],
 }
 
