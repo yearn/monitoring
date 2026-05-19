@@ -24,7 +24,7 @@ from utils.web3_wrapper import ChainManager, Web3Client
 PROTOCOL = "yearn"
 logger = get_logger("yvusd")
 
-CACHE_FILENAME = "cache-yvusd.txt"
+CACHE_FILENAME = "cache-id.txt"
 
 # --- ABIs ---
 ABI_VAULT = load_abi("yearn/abi/YearnV3Vault.json")
