@@ -141,6 +141,7 @@ MARKETS_RISK_1 = {
     Chain.MAINNET: [
         "0x3a85e619751152991742810df6ec69ce473daef99e28a64ab2340d7b7ccfee49",  # WBTC/USDC -> lltv 86%, oracle: chainlink WBTC/BTC, chainlink BTC/USD and chainlink USDC/USD
         "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",  # wstETH/USDC -> lltv 86%, oracle: compound oracle wstETH/ETH, chainlink ETH/USD and chainlink USDC/USD
+        "0x7e585a933ffe8443c371b4f8cfeb4430f5f6a14c2f32a898c26662c67a1cb8b8",  # wstETH/USDC -> lltv 86%, oracle: MorphoChainlinkOracleV2 — Compound WstETHPriceFeed (Chainlink STETH/ETH feed + Lido wstETH wrapper) + Chainlink ETH/USD; no quote feed (USDC = $1).
         "0x94b823e6bd8ea533b4e33fbc307faea0b307301bc48763acc4d4aa4def7636cd",  # WETH/USDC -> lltv 86%, oracle: MorphoChainlinkOracleV2, Chainlink ETH/USD; no quote feed (USDC = $1).
         "0x64d65c9a2d91c36d56fbc42d69e979335320169b3df63bf92789e2c8883fcc64",  # cbBTC/USDC -> lltv 86%, oracle: chainlink BTC/USD and chainlink USDC/USD
         "0xb8fc70e82bc5bb53e773626fcc6a23f7eefa036918d7ef216ecfb1950a94a85e",  # wstETH/WETH -> lltv 96.5%, oracle: lido exchange rate
