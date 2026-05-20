@@ -230,6 +230,11 @@ def _build_call_info(event: dict, explorer: str | None, show_index: bool, chain_
     if len(data_hex) >= 10:
         upgrade = detect_proxy_upgrade(data_hex, target)
         if upgrade and chain_id:
+            # For ProxyAdmin-routed upgrades, `target` is the ProxyAdmin contract;
+            # the proxy being upgraded is inside the calldata. Surface it explicitly
+            # so recipients know which contract is changing.
+            if upgrade.proxy_address.lower() != target.lower():
+                lines.append(f"🅿️ Proxy: `{upgrade.proxy_address}`")
             old_impl = get_current_implementation(upgrade.proxy_address, chain_id)
             new_impl = upgrade.new_implementation
             if old_impl:

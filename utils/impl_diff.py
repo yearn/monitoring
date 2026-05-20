@@ -286,32 +286,103 @@ def _diff_functions(
     return added, removed, changed
 
 
+# An OZ-style trailing storage gap: `uintN[K] __gap;` (or `_gap`, `gap`).
+# Reserved for future upgrades; consuming part of it is the canonical safe
+# pattern, so we detach the trailing gap before comparing layouts.
+_STORAGE_GAP_TYPE_RE = re.compile(r"^u?int\d*\s*\[\s*(\d+)\s*\]$")
+
+
+def _gap_size(v: StateVarDecl) -> int | None:
+    """If `v` looks like an OZ trailing storage gap, return its size. Else None."""
+    if not v.name.lower().endswith("gap"):
+        return None
+    m = _STORAGE_GAP_TYPE_RE.match(v.type_str.replace(" ", ""))
+    return int(m.group(1)) if m else None
+
+
+def _detach_trailing_gap(slots: list[StateVarDecl]) -> tuple[list[StateVarDecl], int | None]:
+    """Strip the trailing storage gap (if any) and return (slots_before_gap, gap_size)."""
+    if not slots:
+        return slots, None
+    size = _gap_size(slots[-1])
+    if size is None:
+        return slots, None
+    return slots[:-1], size
+
+
 def _storage_layout(
     old_vars: list[StateVarDecl], new_vars: list[StateVarDecl]
 ) -> tuple[bool, list[str], list[StateVarDecl], list[StateVarDecl]]:
     """Return (safe, layout_changes, net_added, net_removed).
 
-    Safe ⇔ the new layout starts with the old layout in the same order (append-only).
-    Comparison key is (name, type) since rename or type change both shift bytecode-level layout.
+    Safe upgrade patterns:
+      1. Append-only: new layout begins with the old layout (in the same order).
+      2. OZ storage-gap consumption: trailing `uintN[K] __gap` shrinks by exactly
+         the number of new vars inserted before it. Old contracts often reserve
+         a gap so future upgrades can claim slots without shifting parent
+         storage. Mis-handling this would produce false "unsafe" warnings for
+         most real OpenZeppelin upgradeable contracts.
+
+    Comparison key is (name, type) since rename or type change both shift the
+    bytecode-level storage layout.
     """
     # Filter out immutable/constant — they don't occupy a storage slot
     old_slots = [v for v in old_vars if not v.immutable]
     new_slots = [v for v in new_vars if not v.immutable]
 
+    # Detach trailing gaps so we can analyze gap consumption separately.
+    old_core, old_gap = _detach_trailing_gap(old_slots)
+    new_core, new_gap = _detach_trailing_gap(new_slots)
+
     changes: list[str] = []
-    n_common = min(len(old_slots), len(new_slots))
+
+    # Compare positions both contracts share. Any mismatch here is unsafe.
+    n_common = min(len(old_core), len(new_core))
     for i in range(n_common):
-        o, n = old_slots[i], new_slots[i]
+        o, n = old_core[i], new_core[i]
         if (o.name, o.type_str) != (n.name, n.type_str):
             changes.append(f"slot {i}: {o.type_str} {o.name} → {n.type_str} {n.name}")
 
-    if len(new_slots) < len(old_slots):
-        for i in range(n_common, len(old_slots)):
-            v = old_slots[i]
-            changes.append(f"slot {i}: removed {v.type_str} {v.name}")
+    consumed = len(new_core) - len(old_core)
+    added_at_end: list[StateVarDecl] = []
+    removed_off_end: list[StateVarDecl] = []
 
-    added_at_end = [v for v in new_slots[n_common:]] if len(new_slots) > len(old_slots) else []
-    removed_off_end = [v for v in old_slots[n_common:]] if len(old_slots) > len(new_slots) else []
+    if consumed > 0:
+        added_at_end = list(new_core[len(old_core) :])
+        # New vars appended after the old core.
+        if old_gap is not None:
+            # Old contract reserved a gap; the new vars must come out of it.
+            expected_new_gap = old_gap - consumed
+            if expected_new_gap < 0:
+                changes.append(
+                    f"consumed {consumed} new slot(s) but old gap was only {old_gap}; layout overflows reserved space"
+                )
+            elif expected_new_gap == 0:
+                if new_gap is not None:
+                    changes.append(f"old gap of {old_gap} fully consumed but new contract still has gap of {new_gap}")
+            else:  # expected_new_gap > 0
+                if new_gap is None:
+                    changes.append(
+                        f"old gap of {old_gap} not preserved (expected new gap of {expected_new_gap}, got none)"
+                    )
+                elif new_gap != expected_new_gap:
+                    changes.append(
+                        f"gap mismatch: consumed {consumed} slot(s); expected new gap of {expected_new_gap}, got {new_gap}"
+                    )
+        # If old had no gap, appending at the end is still safe (no shift).
+    elif consumed < 0:
+        # New contract is shorter than old: old vars were removed off the end.
+        removed_off_end = list(old_core[len(new_core) :])
+        for i, v in enumerate(removed_off_end, start=len(new_core)):
+            changes.append(f"slot {i}: removed {v.type_str} {v.name}")
+    else:
+        # Same length cores. If gaps don't agree, flag.
+        if old_gap is not None and new_gap is None:
+            changes.append(f"old gap of size {old_gap} removed in new layout")
+        elif old_gap is None and new_gap is not None:
+            changes.append(f"new layout introduces gap of size {new_gap} not present in old")
+        elif old_gap != new_gap:
+            changes.append(f"gap size changed from {old_gap} to {new_gap} without slot consumption")
 
     safe = not changes
     return safe, changes, added_at_end, removed_off_end

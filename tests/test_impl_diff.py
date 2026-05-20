@@ -201,6 +201,52 @@ class TestStorageLayout(unittest.TestCase):
         self.assertFalse(safe)
         self.assertTrue(any("slot 0" in c for c in changes))
 
+    def test_consuming_one_gap_slot_is_safe(self) -> None:
+        """Canonical OZ pattern: append a new state var by shrinking the trailing gap."""
+        old = _extract_state_vars("contract C { uint256 a; uint256[50] __gap; }")
+        new = _extract_state_vars("contract C { uint256 a; uint256 b; uint256[49] __gap; }")
+        safe, changes, added, _ = _storage_layout(old, new)
+        self.assertTrue(safe, f"expected safe gap consumption, got changes={changes}")
+        self.assertEqual([v.name for v in added], ["b"])
+
+    def test_consuming_multiple_gap_slots_is_safe(self) -> None:
+        old = _extract_state_vars("contract C { uint256 a; uint256[50] __gap; }")
+        new = _extract_state_vars("contract C { uint256 a; uint256 b; address c; uint48 d; uint256[47] __gap; }")
+        safe, changes, _, _ = _storage_layout(old, new)
+        self.assertTrue(safe, f"expected safe multi-slot consumption, got changes={changes}")
+
+    def test_gap_size_underflow_is_unsafe(self) -> None:
+        """If the new contract consumes MORE slots than the old gap reserved."""
+        old = _extract_state_vars("contract C { uint256 a; uint256[2] __gap; }")
+        new = _extract_state_vars("contract C { uint256 a; uint256 b; uint256 c; uint256 d; }")
+        safe, changes, _, _ = _storage_layout(old, new)
+        self.assertFalse(safe)
+        self.assertTrue(any("overflow" in c for c in changes))
+
+    def test_gap_not_shrunk_correctly_is_unsafe(self) -> None:
+        """Consumed 1 slot but gap kept its original size — slots[2..] now shifted."""
+        old = _extract_state_vars("contract C { uint256 a; uint256[50] __gap; }")
+        new = _extract_state_vars("contract C { uint256 a; uint256 b; uint256[50] __gap; }")
+        safe, changes, _, _ = _storage_layout(old, new)
+        self.assertFalse(safe)
+        self.assertTrue(any("gap mismatch" in c for c in changes))
+
+    def test_fully_consumed_gap_removed_is_safe(self) -> None:
+        """Old had a 1-slot gap; new fills it and removes the gap entirely."""
+        old = _extract_state_vars("contract C { uint256 a; uint256[1] __gap; }")
+        new = _extract_state_vars("contract C { uint256 a; uint256 b; }")
+        safe, changes, _, _ = _storage_layout(old, new)
+        self.assertTrue(safe, f"expected safe full consumption, got changes={changes}")
+
+    def test_gap_removed_without_consumption_is_unsafe(self) -> None:
+        """Removing a gap without filling it changes the slot count and is unsafe
+        if any inheriting contract assumed it would still be there."""
+        old = _extract_state_vars("contract C { uint256 a; uint256[5] __gap; }")
+        new = _extract_state_vars("contract C { uint256 a; }")
+        safe, changes, _, _ = _storage_layout(old, new)
+        self.assertFalse(safe)
+        self.assertTrue(any("gap" in c for c in changes))
+
 
 class TestNamespacedStorage(unittest.TestCase):
     def test_detected(self) -> None:
