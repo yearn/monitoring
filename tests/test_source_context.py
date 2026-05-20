@@ -4,13 +4,11 @@ import unittest
 from unittest.mock import patch
 
 from utils.source_context import (
-    SourceContext,
     _concat_sources,
     _extract_function_body,
     _extract_function_snippet,
     extract_state_var_snippet,
     find_state_var_writes,
-    format_source_context,
     get_source_context,
     reset_cache,
 )
@@ -237,29 +235,6 @@ class TestGetSourceContext(unittest.TestCase):
         self.assertIsNone(ctx)
         # Should only fetch once (the target), not retry for impl
         self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]
-
-
-class TestFormatSourceContext(unittest.TestCase):
-    def test_includes_contract_name_and_snippets(self) -> None:
-        ctx = SourceContext(
-            contract_name="Farm",
-            function_snippet="/// @notice foo\nfunction setMaxSlippage(uint256) external;",
-            state_var_snippets=["/// @notice slippage\nuint256 public maxSlippage;"],
-        )
-        result = format_source_context(ctx)
-        self.assertIn("Contract: Farm", result)
-        self.assertIn("setMaxSlippage", result)
-        self.assertIn("Relevant state variables:", result)
-        self.assertIn("maxSlippage", result)
-
-    def test_omits_state_var_section_when_empty(self) -> None:
-        ctx = SourceContext(
-            contract_name="Foo",
-            function_snippet="function pause() external;",
-            state_var_snippets=[],
-        )
-        result = format_source_context(ctx)
-        self.assertNotIn("Relevant state variables", result)
 
 
 if __name__ == "__main__":
