@@ -473,5 +473,162 @@ class TestRefineFlagInExplainTransaction(unittest.TestCase):
         self.assertIn("Your Previous Draft", second_call_prompt)
 
 
+class TestAddressLabels(unittest.TestCase):
+    """Tests for address-argument annotation in the LLM prompt."""
+
+    REGISTRY = "0xF5f2718708F471e43968271956cC01Aaa8C46119"
+    FARM = "0xac21b22b5aeb11bc32de4ecf59e4538fca48b694"
+    FARM_CKS = "0xAc21B22B5aEb11bc32De4ecF59E4538fCa48b694"
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    @patch("utils.llm.ai_explainer.get_contract_label")
+    def test_address_array_arg_is_labeled(
+        self,
+        mock_label: MagicMock,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        mock_decode.return_value = DecodedCall(
+            function_name="addFarms",
+            signature="addFarms(uint256,address[])",
+            params=[("uint256", 1), ("address[]", (self.FARM,))],
+        )
+        mock_label.return_value = "MorphoFarm"
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: adds farm. LOW."
+        provider.model_name = "test-model"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target=self.REGISTRY, calldata="0xabcdef10" + "00" * 64, chain_id=1)
+
+        prompt = provider.complete.call_args[0][0]
+        self.assertIn("MorphoFarm", prompt)
+        self.assertIn(self.FARM_CKS, prompt)
+        # Address goes on its own line, bulleted, under the type label.
+        self.assertIn("address[]:", prompt)
+        self.assertIn(f"- {self.FARM_CKS} (MorphoFarm)", prompt)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    @patch("utils.llm.ai_explainer.get_contract_label")
+    def test_scalar_address_arg_is_labeled(
+        self,
+        mock_label: MagicMock,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        mock_decode.return_value = DecodedCall(
+            function_name="setOracle",
+            signature="setOracle(address)",
+            params=[("address", self.FARM)],
+        )
+        mock_label.return_value = "ChainlinkOracle"
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: rewires oracle. MEDIUM."
+        provider.model_name = "test-model"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target=self.REGISTRY, calldata="0x7adbf973" + "00" * 32, chain_id=1)
+
+        prompt = provider.complete.call_args[0][0]
+        self.assertIn(f"address: {self.FARM_CKS} (ChainlinkOracle)", prompt)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    @patch("utils.llm.ai_explainer.get_contract_label")
+    def test_target_address_is_not_relabeled(
+        self,
+        mock_label: MagicMock,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        # The target appears as its own argument — should be skipped so we don't
+        # double up with the Contract Source Context block.
+        mock_decode.return_value = DecodedCall(
+            function_name="selfWire",
+            signature="selfWire(address)",
+            params=[("address", self.REGISTRY.lower())],
+        )
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: wires self. LOW."
+        provider.model_name = "test-model"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target=self.REGISTRY, calldata="0xdeadbeef" + "00" * 32, chain_id=1)
+
+        mock_label.assert_not_called()
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    @patch("utils.llm.ai_explainer.get_contract_label")
+    def test_unverified_address_left_unannotated(
+        self,
+        mock_label: MagicMock,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        mock_decode.return_value = DecodedCall(
+            function_name="setOracle",
+            signature="setOracle(address)",
+            params=[("address", self.FARM)],
+        )
+        mock_label.return_value = ""  # unverified / EOA / no API key
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: rewires. MEDIUM."
+        provider.model_name = "test-model"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target=self.REGISTRY, calldata="0x7adbf973" + "00" * 32, chain_id=1)
+
+        prompt = provider.complete.call_args[0][0]
+        # Address shows up, but with no `(Label)` suffix.
+        self.assertIn(self.FARM_CKS, prompt)
+        self.assertNotIn(f"{self.FARM_CKS} (", prompt)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    @patch("utils.llm.ai_explainer.get_contract_label")
+    def test_zero_address_not_queried(
+        self,
+        mock_label: MagicMock,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        zero = "0x" + "00" * 20
+        mock_decode.return_value = DecodedCall(
+            function_name="setOracle",
+            signature="setOracle(address)",
+            params=[("address", zero)],
+        )
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: unsets oracle. LOW."
+        provider.model_name = "test-model"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target=self.REGISTRY, calldata="0x7adbf973" + "00" * 32, chain_id=1)
+        mock_label.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

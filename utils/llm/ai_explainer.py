@@ -7,6 +7,8 @@ transactions (timelocks and Safe multisigs).
 
 from dataclasses import dataclass
 
+from eth_utils import to_checksum_address
+
 from utils.calldata.decoder import DecodedCall, decode_calldata
 from utils.impl_diff import diff_implementations, format_impl_diff
 from utils.llm import get_llm_provider
@@ -15,7 +17,7 @@ from utils.logging import get_logger
 from utils.on_chain_state import StateRead, format_state_reads, read_before_state
 from utils.paste import upload_to_paste
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
-from utils.source_context import SourceContext, format_source_context, get_source_context
+from utils.source_context import SourceContext, format_source_context, get_contract_label, get_source_context
 from utils.telegram import escape_markdown
 from utils.tenderly.simulation import SimulationResult, simulate_transaction
 
@@ -209,13 +211,98 @@ def _get_proxy_upgrade_info(calldata: str, target: str, chain_id: int) -> str:
     return info
 
 
-def _format_decoded_calls(calls: list[DecodedCall]) -> str:
-    """Format decoded calls into a readable string for the LLM prompt."""
+def _checksum_or_none(addr: str) -> str | None:
+    """Return checksummed address or None if `addr` isn't a parseable hex address."""
+    if not isinstance(addr, str) or not addr.startswith("0x"):
+        return None
+    try:
+        return to_checksum_address(addr)
+    except ValueError:
+        return None
+
+
+def _annotate_address(addr: str, labels: dict[str, str]) -> str:
+    """Render a single address with an optional `(ContractName)` suffix."""
+    checksum = _checksum_or_none(addr)
+    if checksum is None:
+        return str(addr)
+    label = labels.get(checksum)
+    return f"{checksum} ({label})" if label else checksum
+
+
+def _extract_address_args(decoded: DecodedCall) -> list[str]:
+    """All address-typed argument values (scalars and arrays) for one decoded call."""
+    out: list[str] = []
+    for type_str, value in decoded.params:
+        if type_str == "address" and isinstance(value, str):
+            out.append(value)
+        elif type_str.startswith("address[") and isinstance(value, (list, tuple)):
+            out.extend(v for v in value if isinstance(v, str))
+    return out
+
+
+def _collect_address_labels(
+    targets_and_calls: list[tuple[str, DecodedCall]],
+    chain_id: int,
+) -> dict[str, str]:
+    """Look up `{checksum_address: contract_name}` for every address-typed argument.
+
+    Skips each call's own target — its name is already surfaced via Contract
+    Source Context. Best-effort: any lookup failure is silently dropped.
+    """
+    target_lower = {tgt.lower() for tgt, _ in targets_and_calls if tgt}
+    seen: set[str] = set()
+    labels: dict[str, str] = {}
+
+    for _, decoded in targets_and_calls:
+        for raw in _extract_address_args(decoded):
+            addr_lower = raw.lower()
+            if addr_lower in seen:
+                continue
+            seen.add(addr_lower)
+            if addr_lower in target_lower:
+                continue
+            # Skip malformed / zero addresses — no point asking Etherscan.
+            if len(addr_lower) != 42 or int(addr_lower, 16) == 0:
+                continue
+            checksum = _checksum_or_none(raw)
+            if checksum is None:
+                continue
+            try:
+                label = get_contract_label(chain_id, checksum)
+            except Exception as e:  # noqa: BLE001 - best-effort enrichment
+                logger.info("Contract label fetch failed for %s: %s", checksum, e)
+                continue
+            if label:
+                labels[checksum] = label
+    return labels
+
+
+def _format_decoded_calls(
+    calls: list[DecodedCall],
+    address_labels: dict[str, str] | None = None,
+) -> str:
+    """Format decoded calls into a readable string for the LLM prompt.
+
+    When ``address_labels`` is provided, address arguments (including elements
+    of ``address[]``) are annotated with their contract name so the LLM can
+    refer to "MorphoFarm" instead of "0xac21...".
+    """
+    labels = address_labels or {}
     parts: list[str] = []
     for i, call in enumerate(calls):
         lines = [f"Call {i + 1}: {call.signature}"]
         for type_str, value in call.params:
-            lines.append(f"  {type_str}: {value}")
+            if type_str == "address":
+                lines.append(f"  {type_str}: {_annotate_address(value, labels)}")
+            elif type_str.startswith("address[") and isinstance(value, (list, tuple)):
+                if not value:
+                    lines.append(f"  {type_str}: []")
+                else:
+                    lines.append(f"  {type_str}:")
+                    lines.extend(f"    - {_annotate_address(v, labels)}" for v in value)
+            else:
+                lines.append(f"  {type_str}: {value}")
         parts.append("\n".join(lines))
     return "\n\n".join(parts)
 
@@ -266,6 +353,7 @@ def _build_prompt(
     source_contexts: list[SourceContext] | None = None,
     context_note: str = "",
     state_reads: list[tuple[str, list[StateRead]]] | None = None,
+    address_labels: dict[str, str] | None = None,
 ) -> str:
     """Build the full prompt for the LLM."""
     parts: list[str] = [SYSTEM_PROMPT, ""]
@@ -281,7 +369,7 @@ def _build_prompt(
     if context_note:
         parts.append(f"\n--- Execution Context ---\n{context_note}")
 
-    parts.append(f"\n--- Decoded Calldata ---\n{_format_decoded_calls(decoded_calls)}")
+    parts.append(f"\n--- Decoded Calldata ---\n{_format_decoded_calls(decoded_calls, address_labels)}")
 
     constants_note = _format_batch_param_constants(decoded_calls)
     if constants_note:
@@ -439,6 +527,7 @@ def explain_transaction(
     proxy_upgrade_info = _get_proxy_upgrade_info(calldata, target, chain_id)
     source_contexts = _collect_source_contexts([(target, decoded)], chain_id)
     state_reads = _collect_state_reads([(target, decoded)], chain_id)
+    address_labels = _collect_address_labels([(target, decoded)], chain_id)
 
     simulation: SimulationResult | None = None
     if not skip_simulation:
@@ -465,6 +554,7 @@ def explain_transaction(
         source_contexts=source_contexts,
         context_note=context_note,
         state_reads=state_reads,
+        address_labels=address_labels,
     )
     logger.info("Full AI context for %s:\n%s", target, prompt)
 
@@ -553,6 +643,7 @@ def explain_batch_transaction(
 
     source_contexts = _collect_source_contexts(decoded_with_target, chain_id)
     state_reads = _collect_state_reads(decoded_with_target, chain_id)
+    address_labels = _collect_address_labels(decoded_with_target, chain_id)
 
     targets = ", ".join(c.get("target", "?") for c in calls)
     total_value = sum(int(c.get("value", "0")) for c in calls)
@@ -568,6 +659,7 @@ def explain_batch_transaction(
         source_contexts=source_contexts,
         context_note=context_note,
         state_reads=state_reads,
+        address_labels=address_labels,
     )
     logger.info("Full AI context for batch (%s calls):\n%s", len(calls), prompt)
 
