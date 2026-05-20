@@ -8,8 +8,8 @@ from utils.source_context import (
     _concat_sources,
     _extract_function_body,
     _extract_function_snippet,
-    _extract_state_var_snippet,
-    _find_state_var_writes,
+    extract_state_var_snippet,
+    find_state_var_writes,
     format_source_context,
     get_source_context,
     reset_cache,
@@ -77,7 +77,7 @@ class TestExtractFunctionBody(unittest.TestCase):
 
 class TestFindStateVarWrites(unittest.TestCase):
     def test_finds_assignment(self) -> None:
-        writes = _find_state_var_writes(INFINIFI_FARM_SOURCE, "setMaxSlippage")
+        writes = find_state_var_writes(INFINIFI_FARM_SOURCE, "setMaxSlippage")
         self.assertIn("maxSlippage", writes)
 
     def test_ignores_local_and_keyword_assignments(self) -> None:
@@ -88,7 +88,7 @@ class TestFindStateVarWrites(unittest.TestCase):
             _underscoreVar = 5;
         }
         """
-        writes = _find_state_var_writes(source, "f")
+        writes = find_state_var_writes(source, "f")
         self.assertIn("storedVar", writes)
         self.assertNotIn("local", writes)  # locals can't be distinguished, but this test documents the heuristic limit
         self.assertNotIn("_underscoreVar", writes)
@@ -97,12 +97,12 @@ class TestFindStateVarWrites(unittest.TestCase):
 
 class TestExtractStateVarSnippet(unittest.TestCase):
     def test_extracts_natspec_and_declaration(self) -> None:
-        snippet = _extract_state_var_snippet(INFINIFI_FARM_SOURCE, "maxSlippage")
+        snippet = extract_state_var_snippet(INFINIFI_FARM_SOURCE, "maxSlippage")
         self.assertIn("so actually 1 - slippage", snippet)
         self.assertIn("uint256 public maxSlippage", snippet)
 
     def test_missing_var_returns_empty(self) -> None:
-        snippet = _extract_state_var_snippet(INFINIFI_FARM_SOURCE, "doesNotExist")
+        snippet = extract_state_var_snippet(INFINIFI_FARM_SOURCE, "doesNotExist")
         self.assertEqual(snippet, "")
 
     def test_skips_local_vars_without_visibility(self) -> None:
@@ -112,7 +112,7 @@ class TestExtractStateVarSnippet(unittest.TestCase):
         }
         """
         # Should not match — no public/private/internal/external modifier
-        snippet = _extract_state_var_snippet(source, "plainLocal")
+        snippet = extract_state_var_snippet(source, "plainLocal")
         self.assertEqual(snippet, "")
 
 

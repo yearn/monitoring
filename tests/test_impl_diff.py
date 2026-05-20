@@ -257,7 +257,7 @@ class TestNamespacedStorage(unittest.TestCase):
 
 
 class TestDiffImplementations(unittest.TestCase):
-    @patch("utils.impl_diff._fetch_source")
+    @patch("utils.impl_diff.fetch_source")
     def test_end_to_end(self, mock_fetch) -> None:
         mock_fetch.side_effect = [("Vault", CONTRACT_OLD), ("Vault", CONTRACT_NEW)]
         diff = diff_implementations("0xOld", "0xNew", 1)
@@ -268,7 +268,7 @@ class TestDiffImplementations(unittest.TestCase):
         self.assertEqual(diff.added_functions[0].name, "setMaxDeposit")
         self.assertEqual(len(diff.changed_functions), 1)
 
-    @patch("utils.impl_diff._fetch_source", return_value=None)
+    @patch("utils.impl_diff.fetch_source", return_value=None)
     def test_returns_none_on_unverified(self, mock_fetch) -> None:
         self.assertIsNone(diff_implementations("0xOld", "0xNew", 1))
 
