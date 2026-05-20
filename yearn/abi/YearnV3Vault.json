@@ -1,0 +1,21 @@
+[
+    {
+        "name": "strategies",
+        "type": "function",
+        "inputs": [{"name": "strategy", "type": "address"}],
+        "outputs": [
+            {"name": "activation", "type": "uint256"},
+            {"name": "last_report", "type": "uint256"},
+            {"name": "current_debt", "type": "uint256"},
+            {"name": "max_debt", "type": "uint256"}
+        ],
+        "stateMutability": "view"
+    },
+    {
+        "name": "totalAssets",
+        "type": "function",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view"
+    }
+]
