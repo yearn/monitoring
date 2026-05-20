@@ -123,7 +123,7 @@ class TestMatchKeyValueFromParams(unittest.TestCase):
 
 class TestReadBeforeState(unittest.TestCase):
     @patch("utils.on_chain_state.ChainManager")
-    @patch("utils.on_chain_state._fetch_source")
+    @patch("utils.on_chain_state.fetch_source")
     def test_reads_simple_uint(self, mock_fetch: MagicMock, mock_chain: MagicMock) -> None:
         source = """
         uint256 public maxSlippage;
@@ -152,7 +152,7 @@ class TestReadBeforeState(unittest.TestCase):
         self.assertEqual(reads[0].key_args, ())
 
     @patch("utils.on_chain_state.ChainManager")
-    @patch("utils.on_chain_state._fetch_source")
+    @patch("utils.on_chain_state.fetch_source")
     def test_reads_address_keyed_mapping(self, mock_fetch: MagicMock, mock_chain: MagicMock) -> None:
         source = """
         mapping(address => uint256) public coverageCap;
@@ -180,12 +180,12 @@ class TestReadBeforeState(unittest.TestCase):
         self.assertEqual(reads[0].value, 5000000000000000)
         self.assertEqual(reads[0].key_args, (agent,))
 
-    @patch("utils.on_chain_state._fetch_source", return_value=None)
+    @patch("utils.on_chain_state.fetch_source", return_value=None)
     def test_no_source_returns_empty(self, mock_fetch: MagicMock) -> None:
         call = DecodedCall(function_name="setX", signature="setX(uint256)", params=[("uint256", 1)])
         self.assertEqual(read_before_state(1, "0xT", call), [])
 
-    @patch("utils.on_chain_state._fetch_source")
+    @patch("utils.on_chain_state.fetch_source")
     def test_struct_mapping_returns_empty(self, mock_fetch: MagicMock) -> None:
         source = """
         mapping(address => CreditLine) public creditLines;

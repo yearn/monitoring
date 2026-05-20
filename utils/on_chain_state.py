@@ -23,9 +23,9 @@ from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
 from utils.logging import get_logger
 from utils.source_context import (
-    _extract_state_var_snippet,
-    _fetch_source,
-    _find_state_var_writes,
+    extract_state_var_snippet,
+    fetch_source,
+    find_state_var_writes,
 )
 from utils.web3_wrapper import ChainManager
 
@@ -193,8 +193,8 @@ def _guess_getter_from_setter(decoded_call: DecodedCall) -> tuple[str, list[str]
 
 def _resolve_source_for_function(chain_id: int, target: str, function_name: str) -> str | None:
     """Return the source where `function_name` is defined, following the proxy if needed."""
-    fetched = _fetch_source(chain_id, target)
-    if fetched and _find_state_var_writes(fetched[1], function_name):
+    fetched = fetch_source(chain_id, target)
+    if fetched and find_state_var_writes(fetched[1], function_name):
         return fetched[1]
 
     from utils.proxy import get_current_implementation
@@ -203,7 +203,7 @@ def _resolve_source_for_function(chain_id: int, target: str, function_name: str)
     if not impl or impl.lower() == target.lower():
         return fetched[1] if fetched else None
 
-    fetched_impl = _fetch_source(chain_id, impl)
+    fetched_impl = fetch_source(chain_id, impl)
     return fetched_impl[1] if fetched_impl else (fetched[1] if fetched else None)
 
 
@@ -226,13 +226,13 @@ def read_before_state(
     if not source:
         return []
 
-    var_names = _find_state_var_writes(source, decoded_call.function_name)
+    var_names = find_state_var_writes(source, decoded_call.function_name)
     if not var_names:
         return []
 
     reads: list[StateRead] = []
     for var_name in var_names:
-        snippet = _extract_state_var_snippet(source, var_name)
+        snippet = extract_state_var_snippet(source, var_name)
         parsed = _parse_var_declaration(snippet, var_name) if snippet else None
 
         key_values: list[Any] = []

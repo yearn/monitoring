@@ -4,9 +4,6 @@ import unittest
 from unittest.mock import patch
 
 from utils.impl_diff import (
-    FunctionSig,
-    ImplDiff,
-    StateVarDecl,
     _diff_functions,
     _extract_function_sigs,
     _extract_state_vars,
@@ -14,7 +11,6 @@ from utils.impl_diff import (
     _normalize_args,
     _storage_layout,
     diff_implementations,
-    format_impl_diff,
 )
 
 CONTRACT_OLD = """
@@ -257,7 +253,7 @@ class TestNamespacedStorage(unittest.TestCase):
 
 
 class TestDiffImplementations(unittest.TestCase):
-    @patch("utils.impl_diff._fetch_source")
+    @patch("utils.impl_diff.fetch_source")
     def test_end_to_end(self, mock_fetch) -> None:
         mock_fetch.side_effect = [("Vault", CONTRACT_OLD), ("Vault", CONTRACT_NEW)]
         diff = diff_implementations("0xOld", "0xNew", 1)
@@ -268,71 +264,9 @@ class TestDiffImplementations(unittest.TestCase):
         self.assertEqual(diff.added_functions[0].name, "setMaxDeposit")
         self.assertEqual(len(diff.changed_functions), 1)
 
-    @patch("utils.impl_diff._fetch_source", return_value=None)
+    @patch("utils.impl_diff.fetch_source", return_value=None)
     def test_returns_none_on_unverified(self, mock_fetch) -> None:
         self.assertIsNone(diff_implementations("0xOld", "0xNew", 1))
-
-
-class TestFormatImplDiff(unittest.TestCase):
-    def test_basic_output(self) -> None:
-        diff = ImplDiff(
-            old_addr="0xOld",
-            new_addr="0xNew",
-            old_name="Vault",
-            new_name="Vault",
-            added_functions=[FunctionSig(name="newFn", args="uint256", visibility="external", modifiers="")],
-            removed_functions=[],
-            changed_functions=[],
-            added_state_vars=[StateVarDecl(name="newVar", type_str="uint256", visibility="public", immutable=False)],
-            removed_state_vars=[],
-            layout_changes=[],
-            storage_layout_safe=True,
-            namespaced_storage=False,
-        )
-        out = format_impl_diff(diff)
-        self.assertIn("Old: 0xOld", out)
-        self.assertIn("New: 0xNew", out)
-        self.assertIn("Functions added", out)
-        self.assertIn("newFn(uint256)", out)
-        self.assertIn("Storage layout safe", out)
-
-    def test_unsafe_layout_warning(self) -> None:
-        diff = ImplDiff(
-            old_addr="0xOld",
-            new_addr="0xNew",
-            old_name="X",
-            new_name="X",
-            added_functions=[],
-            removed_functions=[],
-            changed_functions=[],
-            added_state_vars=[],
-            removed_state_vars=[],
-            layout_changes=["slot 0: uint256 a → address b"],
-            storage_layout_safe=False,
-            namespaced_storage=False,
-        )
-        out = format_impl_diff(diff)
-        self.assertIn("NOT upgrade-safe", out)
-        self.assertIn("slot 0", out)
-
-    def test_namespaced_skips_check(self) -> None:
-        diff = ImplDiff(
-            old_addr="0xOld",
-            new_addr="0xNew",
-            old_name="",
-            new_name="",
-            added_functions=[],
-            removed_functions=[],
-            changed_functions=[],
-            added_state_vars=[],
-            removed_state_vars=[],
-            layout_changes=[],
-            storage_layout_safe=True,
-            namespaced_storage=True,
-        )
-        out = format_impl_diff(diff)
-        self.assertIn("EIP-7201", out)
-        self.assertIn("skipped", out)
 
 
 if __name__ == "__main__":

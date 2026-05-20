@@ -4,13 +4,11 @@ import unittest
 from unittest.mock import patch
 
 from utils.source_context import (
-    SourceContext,
     _concat_sources,
     _extract_function_body,
     _extract_function_snippet,
-    _extract_state_var_snippet,
-    _find_state_var_writes,
-    format_source_context,
+    extract_state_var_snippet,
+    find_state_var_writes,
     get_source_context,
     reset_cache,
 )
@@ -77,7 +75,7 @@ class TestExtractFunctionBody(unittest.TestCase):
 
 class TestFindStateVarWrites(unittest.TestCase):
     def test_finds_assignment(self) -> None:
-        writes = _find_state_var_writes(INFINIFI_FARM_SOURCE, "setMaxSlippage")
+        writes = find_state_var_writes(INFINIFI_FARM_SOURCE, "setMaxSlippage")
         self.assertIn("maxSlippage", writes)
 
     def test_ignores_local_and_keyword_assignments(self) -> None:
@@ -88,7 +86,7 @@ class TestFindStateVarWrites(unittest.TestCase):
             _underscoreVar = 5;
         }
         """
-        writes = _find_state_var_writes(source, "f")
+        writes = find_state_var_writes(source, "f")
         self.assertIn("storedVar", writes)
         self.assertNotIn("local", writes)  # locals can't be distinguished, but this test documents the heuristic limit
         self.assertNotIn("_underscoreVar", writes)
@@ -97,12 +95,12 @@ class TestFindStateVarWrites(unittest.TestCase):
 
 class TestExtractStateVarSnippet(unittest.TestCase):
     def test_extracts_natspec_and_declaration(self) -> None:
-        snippet = _extract_state_var_snippet(INFINIFI_FARM_SOURCE, "maxSlippage")
+        snippet = extract_state_var_snippet(INFINIFI_FARM_SOURCE, "maxSlippage")
         self.assertIn("so actually 1 - slippage", snippet)
         self.assertIn("uint256 public maxSlippage", snippet)
 
     def test_missing_var_returns_empty(self) -> None:
-        snippet = _extract_state_var_snippet(INFINIFI_FARM_SOURCE, "doesNotExist")
+        snippet = extract_state_var_snippet(INFINIFI_FARM_SOURCE, "doesNotExist")
         self.assertEqual(snippet, "")
 
     def test_skips_local_vars_without_visibility(self) -> None:
@@ -112,7 +110,7 @@ class TestExtractStateVarSnippet(unittest.TestCase):
         }
         """
         # Should not match — no public/private/internal/external modifier
-        snippet = _extract_state_var_snippet(source, "plainLocal")
+        snippet = extract_state_var_snippet(source, "plainLocal")
         self.assertEqual(snippet, "")
 
 
@@ -237,29 +235,6 @@ class TestGetSourceContext(unittest.TestCase):
         self.assertIsNone(ctx)
         # Should only fetch once (the target), not retry for impl
         self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]
-
-
-class TestFormatSourceContext(unittest.TestCase):
-    def test_includes_contract_name_and_snippets(self) -> None:
-        ctx = SourceContext(
-            contract_name="Farm",
-            function_snippet="/// @notice foo\nfunction setMaxSlippage(uint256) external;",
-            state_var_snippets=["/// @notice slippage\nuint256 public maxSlippage;"],
-        )
-        result = format_source_context(ctx)
-        self.assertIn("Contract: Farm", result)
-        self.assertIn("setMaxSlippage", result)
-        self.assertIn("Relevant state variables:", result)
-        self.assertIn("maxSlippage", result)
-
-    def test_omits_state_var_section_when_empty(self) -> None:
-        ctx = SourceContext(
-            contract_name="Foo",
-            function_snippet="function pause() external;",
-            state_var_snippets=[],
-        )
-        result = format_source_context(ctx)
-        self.assertNotIn("Relevant state variables", result)
 
 
 if __name__ == "__main__":

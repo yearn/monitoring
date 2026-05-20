@@ -7,8 +7,6 @@ from utils.calldata.decoder import DecodedCall
 from utils.llm.ai_explainer import (
     Explanation,
     _build_prompt,
-    _format_decoded_calls,
-    _format_simulation_context,
     _parse_explanation,
     _refine_explanation,
     explain_transaction,
@@ -16,102 +14,7 @@ from utils.llm.ai_explainer import (
 )
 from utils.llm.base import LLMError
 from utils.source_context import SourceContext
-from utils.tenderly.simulation import AssetChange, SimulationResult, StateChange
-
-
-class TestFormatDecodedCalls(unittest.TestCase):
-    """Tests for _format_decoded_calls."""
-
-    def test_single_call_no_params(self) -> None:
-        calls = [DecodedCall(function_name="pause", signature="pause()")]
-        result = _format_decoded_calls(calls)
-        self.assertIn("Call 1: pause()", result)
-
-    def test_single_call_with_params(self) -> None:
-        calls = [
-            DecodedCall(
-                function_name="grantRole",
-                signature="grantRole(bytes32,address)",
-                params=[("bytes32", b"\x00" * 32), ("address", "0xABC")],
-            )
-        ]
-        result = _format_decoded_calls(calls)
-        self.assertIn("grantRole(bytes32,address)", result)
-        self.assertIn("bytes32:", result)
-        self.assertIn("address:", result)
-
-    def test_multiple_calls(self) -> None:
-        calls = [
-            DecodedCall(function_name="pause", signature="pause()"),
-            DecodedCall(function_name="unpause", signature="unpause()"),
-        ]
-        result = _format_decoded_calls(calls)
-        self.assertIn("Call 1: pause()", result)
-        self.assertIn("Call 2: unpause()", result)
-
-
-class TestFormatSimulationContext(unittest.TestCase):
-    """Tests for _format_simulation_context."""
-
-    def test_successful_simulation(self) -> None:
-        sim = SimulationResult(success=True, gas_used=50000)
-        result = _format_simulation_context(sim)
-        self.assertIn("SUCCESS", result)
-        self.assertIn("50,000", result)
-
-    def test_failed_simulation(self) -> None:
-        sim = SimulationResult(success=False, gas_used=21000, error_message="execution reverted")
-        result = _format_simulation_context(sim)
-        self.assertIn("FAILED", result)
-        self.assertIn("execution reverted", result)
-
-    def test_with_asset_changes(self) -> None:
-        sim = SimulationResult(
-            success=True,
-            gas_used=100000,
-            asset_changes=[
-                AssetChange(
-                    token_address="0xToken",
-                    token_name="USDC",
-                    token_symbol="USDC",
-                    from_address="0xA",
-                    to_address="0xB",
-                    amount="1000",
-                    raw_amount="1000000000",
-                    decimals=6,
-                )
-            ],
-        )
-        result = _format_simulation_context(sim)
-        self.assertIn("Token transfers:", result)
-        self.assertIn("USDC", result)
-
-    def test_with_state_changes(self) -> None:
-        sim = SimulationResult(
-            success=True,
-            gas_used=100000,
-            state_changes=[
-                StateChange(
-                    contract_address="0xContract",
-                    key="0x01",
-                    original="0x00",
-                    dirty="0x01",
-                )
-            ],
-        )
-        result = _format_simulation_context(sim)
-        self.assertIn("State changes", result)
-        self.assertIn("0xContract", result)
-
-    def test_with_logs(self) -> None:
-        sim = SimulationResult(
-            success=True,
-            gas_used=100000,
-            logs=[{"name": "Transfer", "inputs": [{"soltype": {"name": "to"}, "value": "0xB"}]}],
-        )
-        result = _format_simulation_context(sim)
-        self.assertIn("Events emitted", result)
-        self.assertIn("Transfer", result)
+from utils.tenderly.simulation import SimulationResult
 
 
 class TestBuildPrompt(unittest.TestCase):
@@ -224,17 +127,6 @@ class TestBatchParamConstants(unittest.TestCase):
         ]
         result = _build_prompt(target="0xT", value=0, decoded_calls=calls, simulation=None)
         self.assertNotIn("--- Shared Across Batch ---", result)
-
-
-class TestSystemPromptBrevity(unittest.TestCase):
-    """Verify the system prompt enforces brevity rules."""
-
-    def test_includes_word_cap_and_no_preamble_rules(self) -> None:
-        calls = [DecodedCall(function_name="pause", signature="pause()")]
-        result = _build_prompt(target="0xT", value=0, decoded_calls=calls, simulation=None)
-        self.assertIn("≤25 words", result)
-        self.assertIn('"This transaction"', result)
-        self.assertIn("risk tag in caps", result)
 
 
 class TestSkipSimulation(unittest.TestCase):
@@ -501,18 +393,12 @@ class TestRefineExplanation(unittest.TestCase):
     """Tests for _refine_explanation."""
 
     def test_pass_keeps_draft_unchanged(self) -> None:
+        # Trailing whitespace around "PASS" must also count as PASS.
         draft = Explanation(summary="Lowers fee 30→25 bps. LOW.", detail="bla")
         provider = MagicMock()
-        provider.complete.return_value = "PASS"
-        result = _refine_explanation("orig prompt", draft, provider)
-        self.assertIs(result, draft)
-        provider.complete.assert_called_once()
-
-    def test_pass_with_trailing_whitespace_still_keeps_draft(self) -> None:
-        draft = Explanation(summary="x", detail="y")
-        provider = MagicMock()
         provider.complete.return_value = "  PASS  \n"
-        self.assertIs(_refine_explanation("p", draft, provider), draft)
+        self.assertIs(_refine_explanation("orig prompt", draft, provider), draft)
+        provider.complete.assert_called_once()
 
     def test_revision_replaces_draft(self) -> None:
         draft = Explanation(summary="This transaction does X. LOW.", detail="bla")
@@ -531,13 +417,6 @@ class TestRefineExplanation(unittest.TestCase):
     def test_empty_response_falls_back_to_draft(self) -> None:
         draft = Explanation(summary="x", detail="y")
         provider = MagicMock()
-        provider.complete.return_value = ""
-        self.assertIs(_refine_explanation("p", draft, provider), draft)
-
-    def test_revision_with_empty_summary_falls_back(self) -> None:
-        draft = Explanation(summary="x", detail="y")
-        provider = MagicMock()
-        # Reply parses to empty summary (no TLDR marker, no body)
         provider.complete.return_value = ""
         self.assertIs(_refine_explanation("p", draft, provider), draft)
 

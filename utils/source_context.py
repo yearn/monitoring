@@ -52,7 +52,7 @@ class SourceContext:
     state_var_snippets: list[str]  # natspec + declaration for each mutated state var
 
 
-def _fetch_source(chain_id: int, address: str) -> tuple[str, str] | None:
+def fetch_source(chain_id: int, address: str) -> tuple[str, str] | None:
     """Fetch (contract_name, concatenated_source) for a verified contract.
 
     Returns None if the API key is missing, the contract is unverified, or the
@@ -123,7 +123,7 @@ def _extract_function_snippet(source: str, function_name: str) -> str:
     return f"{natspec.rstrip()}\n{match.group(2).strip()}".strip()
 
 
-def _find_state_var_writes(source: str, function_name: str) -> list[str]:
+def find_state_var_writes(source: str, function_name: str) -> list[str]:
     """State variable names assigned inside the function body, deduped, in order."""
     body = _extract_function_body(source, function_name)
     if not body:
@@ -161,7 +161,7 @@ def _extract_function_body(source: str, function_name: str) -> str:
     return source[start : i - 1]
 
 
-def _extract_state_var_snippet(source: str, var_name: str) -> str:
+def extract_state_var_snippet(source: str, var_name: str) -> str:
     """Find a state variable declaration with any preceding natspec.
 
     Requires a visibility modifier so local declarations inside function bodies
@@ -190,11 +190,11 @@ def _build_context(contract_name: str, source: str, function_name: str) -> Sourc
     if not func_snippet:
         return None
 
-    var_names = _find_state_var_writes(source, function_name)
+    var_names = find_state_var_writes(source, function_name)
     var_snippets: list[str] = []
     total = len(func_snippet)
     for name in var_names:
-        snippet = _extract_state_var_snippet(source, name)
+        snippet = extract_state_var_snippet(source, name)
         if not snippet:
             continue
         if total + len(snippet) > MAX_SNIPPET_CHARS:
@@ -216,7 +216,7 @@ def get_source_context(chain_id: int, address: str, function_name: str) -> Sourc
     EIP-1967 proxy slot (if any) and retry against the implementation source.
     Best-effort: returns None on any failure (unverified, missing key, no match).
     """
-    fetched = _fetch_source(chain_id, address)
+    fetched = fetch_source(chain_id, address)
     if fetched:
         ctx = _build_context(fetched[0], fetched[1], function_name)
         if ctx:
@@ -229,7 +229,7 @@ def get_source_context(chain_id: int, address: str, function_name: str) -> Sourc
     if not impl or impl.lower() == address.lower():
         return None
 
-    fetched_impl = _fetch_source(chain_id, impl)
+    fetched_impl = fetch_source(chain_id, impl)
     if not fetched_impl:
         return None
     return _build_context(fetched_impl[0], fetched_impl[1], function_name)

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from utils.logging import get_logger
-from utils.source_context import _fetch_source
+from utils.source_context import fetch_source
 
 logger = get_logger("utils.impl_diff")
 
@@ -157,27 +157,18 @@ def _extract_function_sigs(source: str) -> list[FunctionSig]:
     return sigs
 
 
-def _strip_solidity_noise(source: str) -> str:
-    """Remove comments and string literals so brace counting / regex can't trip on them.
+_SOLIDITY_NOISE_RE = re.compile(
+    r'/\*[\s\S]*?\*/|//[^\n]*|"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\'',
+)
 
-    Replaces stripped content with same-length spaces to preserve byte offsets,
-    which keeps the brace-depth array indexable against the original source.
+
+def _strip_solidity_noise(source: str) -> str:
+    """Replace comments and string literals with same-length whitespace.
+
+    Preserving byte offsets keeps the brace-depth array indexable against the
+    original source. Newlines are preserved so line numbers stay stable.
     """
-    out = list(source)
-    # Block comments /* ... */
-    for m in re.finditer(r"/\*[\s\S]*?\*/", source):
-        for i in range(m.start(), m.end()):
-            out[i] = " " if source[i] != "\n" else "\n"
-    # Line comments //...
-    for m in re.finditer(r"//[^\n]*", "".join(out)):
-        for i in range(m.start(), m.end()):
-            out[i] = " "
-    # String literals "..." and '...'
-    for pat in (r'"(?:[^"\\\n]|\\.)*"', r"'(?:[^'\\\n]|\\.)*'"):
-        for m in re.finditer(pat, "".join(out)):
-            for i in range(m.start(), m.end()):
-                out[i] = " "
-    return "".join(out)
+    return _SOLIDITY_NOISE_RE.sub(lambda m: "".join("\n" if c == "\n" else " " for c in m.group(0)), source)
 
 
 def _brace_depths(cleaned: str) -> list[int]:
@@ -344,54 +335,55 @@ def _storage_layout(
             changes.append(f"slot {i}: {o.type_str} {o.name} → {n.type_str} {n.name}")
 
     consumed = len(new_core) - len(old_core)
-    added_at_end: list[StateVarDecl] = []
-    removed_off_end: list[StateVarDecl] = []
+    added_at_end = list(new_core[len(old_core) :]) if consumed > 0 else []
+    removed_off_end = list(old_core[len(new_core) :]) if consumed < 0 else []
 
     if consumed > 0:
-        added_at_end = list(new_core[len(old_core) :])
-        # New vars appended after the old core.
-        if old_gap is not None:
-            # Old contract reserved a gap; the new vars must come out of it.
-            expected_new_gap = old_gap - consumed
-            if expected_new_gap < 0:
-                changes.append(
-                    f"consumed {consumed} new slot(s) but old gap was only {old_gap}; layout overflows reserved space"
-                )
-            elif expected_new_gap == 0:
-                if new_gap is not None:
-                    changes.append(f"old gap of {old_gap} fully consumed but new contract still has gap of {new_gap}")
-            else:  # expected_new_gap > 0
-                if new_gap is None:
-                    changes.append(
-                        f"old gap of {old_gap} not preserved (expected new gap of {expected_new_gap}, got none)"
-                    )
-                elif new_gap != expected_new_gap:
-                    changes.append(
-                        f"gap mismatch: consumed {consumed} slot(s); expected new gap of {expected_new_gap}, got {new_gap}"
-                    )
-        # If old had no gap, appending at the end is still safe (no shift).
+        changes.extend(_check_gap_consumption(consumed, old_gap, new_gap))
     elif consumed < 0:
-        # New contract is shorter than old: old vars were removed off the end.
-        removed_off_end = list(old_core[len(new_core) :])
         for i, v in enumerate(removed_off_end, start=len(new_core)):
             changes.append(f"slot {i}: removed {v.type_str} {v.name}")
     else:
-        # Same length cores. If gaps don't agree, flag.
-        if old_gap is not None and new_gap is None:
-            changes.append(f"old gap of size {old_gap} removed in new layout")
-        elif old_gap is None and new_gap is not None:
-            changes.append(f"new layout introduces gap of size {new_gap} not present in old")
-        elif old_gap != new_gap:
-            changes.append(f"gap size changed from {old_gap} to {new_gap} without slot consumption")
+        changes.extend(_check_gap_only_change(old_gap, new_gap))
 
     safe = not changes
     return safe, changes, added_at_end, removed_off_end
 
 
+def _check_gap_consumption(consumed: int, old_gap: int | None, new_gap: int | None) -> list[str]:
+    """Validate that `consumed` new vars correspond to a matching gap shrink.
+
+    If the old contract had no gap, appending at the end is still safe (no shift).
+    """
+    if old_gap is None:
+        return []
+    expected_new_gap = old_gap - consumed
+    if expected_new_gap < 0:
+        return [f"consumed {consumed} new slot(s) but old gap was only {old_gap}; layout overflows reserved space"]
+    if expected_new_gap == 0 and new_gap is not None:
+        return [f"old gap of {old_gap} fully consumed but new contract still has gap of {new_gap}"]
+    if expected_new_gap > 0 and new_gap is None:
+        return [f"old gap of {old_gap} not preserved (expected new gap of {expected_new_gap}, got none)"]
+    if expected_new_gap > 0 and new_gap != expected_new_gap:
+        return [f"gap mismatch: consumed {consumed} slot(s); expected new gap of {expected_new_gap}, got {new_gap}"]
+    return []
+
+
+def _check_gap_only_change(old_gap: int | None, new_gap: int | None) -> list[str]:
+    """Flag gap presence/size disagreements when the non-gap layout is unchanged."""
+    if old_gap is not None and new_gap is None:
+        return [f"old gap of size {old_gap} removed in new layout"]
+    if old_gap is None and new_gap is not None:
+        return [f"new layout introduces gap of size {new_gap} not present in old"]
+    if old_gap != new_gap:
+        return [f"gap size changed from {old_gap} to {new_gap} without slot consumption"]
+    return []
+
+
 def diff_implementations(old_addr: str, new_addr: str, chain_id: int) -> ImplDiff | None:
     """Fetch both verified impls and produce a structural diff. None on any failure."""
-    old = _fetch_source(chain_id, old_addr)
-    new = _fetch_source(chain_id, new_addr)
+    old = fetch_source(chain_id, old_addr)
+    new = fetch_source(chain_id, new_addr)
     if not old or not new:
         return None
 
