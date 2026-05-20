@@ -97,6 +97,20 @@ class TestDetectProxyUpgrade(unittest.TestCase):
                     assert result is not None
                     self.assertEqual(result.new_implementation, NEW_IMPL)
 
+    def test_non_upgrade_short_circuits_before_decode(self) -> None:
+        """Perf regression guard: a non-upgrade selector must NOT trigger a
+        Sourcify lookup. Without the early-return guard, every alert call
+        could wait on a 30s timeout for unknown selectors."""
+        from unittest.mock import patch
+
+        # Random non-upgrade selector + arbitrary bytes — looks like unknown data
+        data = "0xdeadbeef" + "00" * 32
+        with patch("utils.calldata.decoder.fetch_json") as mock_fetch:
+            mock_fetch.side_effect = AssertionError("Sourcify lookup triggered on non-upgrade selector")
+            result = detect_proxy_upgrade(data, PROXY_ADDR)
+        self.assertIsNone(result)
+        mock_fetch.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

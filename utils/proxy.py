@@ -55,6 +55,11 @@ def detect_proxy_upgrade(data_hex: str, target: str = "") -> ProxyUpgrade | None
         return None
 
     selector = data_hex[:10].lower()
+    # Short-circuit before decoding: the vast majority of calls are not proxy
+    # upgrades, and a `decode_calldata` miss can wait on a 30s Sourcify lookup.
+    if selector not in _PROXY_DIRECT_SELECTORS and selector != _PROXY_ADMIN_SELECTOR:
+        return None
+
     decoded = decode_calldata(data_hex)
     if not decoded or not decoded.params:
         return None
