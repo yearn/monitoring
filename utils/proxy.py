@@ -4,6 +4,8 @@ Detects proxy upgrade transactions (EIP-1967) and generates diff links
 to compare old vs new implementation source code on Etherscan.
 """
 
+from dataclasses import dataclass
+
 from eth_utils import to_checksum_address
 
 from utils.calldata.decoder import decode_calldata
@@ -16,35 +18,65 @@ logger = get_logger("utils.proxy")
 # bytes32(uint256(keccak256("eip1967.proxy.implementation")) - 1)
 EIP1967_IMPL_SLOT = 0x360894A13BA1A3210667C828492DB98DCA3E2076CC3735A920A3CA505D382BBC
 
-# Selectors that indicate a proxy upgrade
-_UPGRADE_SELECTORS = frozenset({"0x3659cfe6", "0x4f1ef286"})
+# Selectors that indicate a proxy upgrade.
+# - upgradeTo(address)                       — called on the proxy itself
+# - upgradeToAndCall(address,bytes)          — called on the proxy itself
+# - upgradeAndCall(address,address,bytes)    — called on a ProxyAdmin (proxy = arg 0)
+_PROXY_DIRECT_SELECTORS = frozenset({"0x3659cfe6", "0x4f1ef286"})
+_PROXY_ADMIN_SELECTOR = "0x9623609d"
 
 
-def detect_proxy_upgrade(data_hex: str) -> str | None:
-    """Check if calldata is a proxy upgrade and return the new implementation address.
+@dataclass(frozen=True)
+class ProxyUpgrade:
+    """Result of detecting a proxy upgrade in calldata."""
+
+    proxy_address: str  # the proxy whose impl is being changed (may differ from tx target)
+    new_implementation: str
+
+
+def detect_proxy_upgrade(data_hex: str, target: str = "") -> ProxyUpgrade | None:
+    """Check if calldata is a proxy upgrade and return proxy + new impl.
 
     Supports:
-        - upgradeTo(address)          selector 0x3659cfe6
-        - upgradeToAndCall(address,bytes)  selector 0x4f1ef286
+        - upgradeTo(address)                       (called on the proxy itself)
+        - upgradeToAndCall(address,bytes)          (called on the proxy itself)
+        - upgradeAndCall(address,address,bytes)    (called on ProxyAdmin; proxy is arg 0)
+
+    Args:
+        data_hex: calldata hex with 0x prefix
+        target: the tx's target address — used as the proxy address for the
+            "called on the proxy itself" variants. For the ProxyAdmin variant
+            the proxy address comes from the calldata.
 
     Returns:
-        New implementation address (checksummed), or None if not a proxy upgrade.
+        ProxyUpgrade(proxy_address, new_implementation) or None.
     """
     if not data_hex or len(data_hex) < 10:
         return None
 
     selector = data_hex[:10].lower()
-    if selector not in _UPGRADE_SELECTORS:
-        return None
-
     decoded = decode_calldata(data_hex)
     if not decoded or not decoded.params:
         return None
 
-    # First param is always the new implementation address
-    type_str, value = decoded.params[0]
-    if type_str == "address":
-        return to_checksum_address(value)
+    if selector in _PROXY_DIRECT_SELECTORS:
+        type_str, value = decoded.params[0]
+        if type_str != "address" or not target:
+            return None
+        return ProxyUpgrade(
+            proxy_address=to_checksum_address(target),
+            new_implementation=to_checksum_address(value),
+        )
+
+    if selector == _PROXY_ADMIN_SELECTOR and len(decoded.params) >= 2:
+        proxy_type, proxy_addr = decoded.params[0]
+        impl_type, impl_addr = decoded.params[1]
+        if proxy_type != "address" or impl_type != "address":
+            return None
+        return ProxyUpgrade(
+            proxy_address=to_checksum_address(proxy_addr),
+            new_implementation=to_checksum_address(impl_addr),
+        )
 
     return None
 

@@ -24,6 +24,7 @@ KNOWN_SELECTORS: dict[str, str] = {
     # Proxy / upgrades
     "0x3659cfe6": "upgradeTo(address)",
     "0x4f1ef286": "upgradeToAndCall(address,bytes)",
+    "0x9623609d": "upgradeAndCall(address,address,bytes)",  # OpenZeppelin ProxyAdmin
     # Ownable
     "0xf2fde38b": "transferOwnership(address)",
     # Pausable

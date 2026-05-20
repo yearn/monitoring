@@ -228,9 +228,10 @@ def _build_call_info(event: dict, explorer: str | None, show_index: bool, chain_
 
     # Proxy upgrade detection: show diff link between old and new implementation
     if len(data_hex) >= 10:
-        new_impl = detect_proxy_upgrade(data_hex)
-        if new_impl and chain_id:
-            old_impl = get_current_implementation(target, chain_id)
+        upgrade = detect_proxy_upgrade(data_hex, target)
+        if upgrade and chain_id:
+            old_impl = get_current_implementation(upgrade.proxy_address, chain_id)
+            new_impl = upgrade.new_implementation
             if old_impl:
                 lines.append(f"🔄 Upgrade: `{old_impl}` → `{new_impl}`")
                 diff_url = build_diff_url(old_impl, new_impl, chain_id)
