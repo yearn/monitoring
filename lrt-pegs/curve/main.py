@@ -14,7 +14,6 @@ THRESHOLD_RATIO = 90.0
 # Pool configurations
 POOL_CONFIGS = [
     # name, pool address, index of lrt, index of other asset, peg threshold, protocol
-    ("pufETH-wstETH Curve Pool", "0xEEda34A377dD0ca676b9511EE1324974fA8d980D", 0, 1, THRESHOLD_RATIO, "puffer"),
     ("ETH+/WETH Curve Pool", "0x2c683fAd51da2cd17793219CC86439C1875c353e", 0, 1, THRESHOLD_RATIO, "ethplus"),
     ("OETH/ETH Curve Pool", "0xcc7d5785AD5755B6164e21495E07aDb0Ff11C2A8", 0, 1, THRESHOLD_RATIO, "origin"),
     # NOTE: bool is unbalanced, whole liquidity is moved to univ3: https://app.uniswap.org/explore/pools/ethereum/0x202a6012894ae5c288ea824cbc8a9bfb26a49b93

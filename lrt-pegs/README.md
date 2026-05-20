@@ -2,13 +2,12 @@
 
 ## Exchange rates
 
-Checks the main liquidity pools of LRTs to detect depegging, such as the  pools in Balancer and pufETH-wstETH, ETH+/WETH, ETH+/ETH pools in Curve. The bot monitors pool balances and sends a message if they become massively unbalanced.
+Checks the main liquidity pools of LRTs to detect depegging, such as ETH+/WETH and ETH+/ETH pools in Curve. The bot monitors pool balances and sends a message if they become massively unbalanced.
 
 ### Curve pools
 
 Curve pools that are checked are:
 
-- pufETH-wstETH
 - ETH+/WETH
 - weETH-WETH
 - frxETH-WETH
@@ -47,14 +46,6 @@ This check runs hourly.
 ### Kelp DAO (rsETH)
 
 [rsETH](https://etherscan.io/address/0xA1290d69c65A6Fe4DF752f95823fae25cB99e5A7#code) contract is upgradable proxy. Owner of the contrat [Timelock](https://etherscan.io/address/0x49bd9989e31ad35b0a62c20be86335196a3135b1), address: 0x49bd9989e31ad35b0a62c20be86335196a3135b1 with min delay set to [10 days](https://etherscan.io/address/0x49bd9989e31ad35b0a62c20be86335196a3135b1#readContract#F6). [Tenderly alert](https://dashboard.tenderly.co/yearn/sam/alerts/rules/c8108fff-b1f4-4cb0-abd3-c37ad541e6aa) and [internal timelock monitoring](../timelock/README.md) for CallScheduled events.
-
-### Renzo (ezETH)
-
-[ezETH](https://etherscan.io/address/0xbf5495Efe5DB9ce00f80364C8B423567e58d2110#code) contract is upgradable proxy. The default admin role is set to the [Timelock](https://etherscan.io/address/0x4994EFc62101A9e3F885d872514c2dC7b3235849#readProxyContract#F17), address: 0x81f6e9914136da1a1d3b1efd14f7e0761c3d4cc7. [Tenderly alert](https://dashboard.tenderly.co/yearn/sam/alerts/rules/65153e56-1f79-45a2-8453-b61beeeab411) and [internal timelock monitoring](../timelock/README.md) for CallScheduled events.
-
-### Puffer Finance (pufETH)
-
-[pufETH](https://etherscan.io/address/0xD9A442856C234a39a81a089C06451EBAa4306a72#readProxyContract) contract is upgradable proxy. Contract [authority](https://etherscan.io/address/0xD9A442856C234a39a81a089C06451EBAa4306a72#readProxyContract#F7) is [AccessManager](https://etherscan.io/address/0x8c1686069474410E6243425f4a10177a94EBEE11#code) which admin is set to [Timelock contract](https://etherscan.io/address/0x3C28B7c7Ba1A1f55c9Ce66b263B33B204f2126eA). [Tenderly alert](https://dashboard.tenderly.co/yearn/sam/alerts/rules/f6654146-08d0-4a83-917a-23233be2314e) and [internal timelock monitoring](../timelock/README.md) for queueTransaction events.
 
 ### Lombard Finance (LBTC)
 
