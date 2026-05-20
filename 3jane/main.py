@@ -11,7 +11,11 @@ Monitors:
 - Junior tranche buffer — alerts when sUSD3 coverage drops below threshold
 - Vault shutdown status — alerts once if either vault enters emergency shutdown
 - Debt cap changes — alerts when ProtocolConfig debt cap is modified
+- Nominal sUSD3 backing floor — alerts on change and when floor > sUSD3 backing
+- Protocol-wide pause — alerts once when ProtocolConfig IS_PAUSED flips to true
 """
+
+from web3 import Web3
 
 from utils.abi import load_abi
 from utils.cache import get_last_value_for_key_from_file, write_last_value_to_file
@@ -47,6 +51,13 @@ CACHE_KEY_SUSD3_TVL = "3JANE_SUSD3_TVL"
 CACHE_KEY_SHUTDOWN_USD3 = "3JANE_SHUTDOWN_USD3"
 CACHE_KEY_SHUTDOWN_SUSD3 = "3JANE_SHUTDOWN_SUSD3"
 CACHE_KEY_DEBT_CAP = "3JANE_DEBT_CAP"
+CACHE_KEY_NOMINAL_FLOOR = "3JANE_NOMINAL_FLOOR"
+CACHE_KEY_FLOOR_BREACH = "3JANE_FLOOR_BREACH"
+CACHE_KEY_IS_PAUSED = "3JANE_IS_PAUSED"
+
+# --- ProtocolConfig keys (keccak256 of the string label) ---
+CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR = Web3.keccak(text="SUSD3_NOMINAL_BACKING_FLOOR")
+CFG_KEY_IS_PAUSED = Web3.keccak(text="IS_PAUSED")
 
 # --- Thresholds ---
 TVL_CHANGE_THRESHOLD = 0.15  # 15% TVL change alert
@@ -279,6 +290,86 @@ def check_debt_cap(client) -> None:  # type: ignore[no-untyped-def]
         set_cache_value(CACHE_KEY_DEBT_CAP, debt_cap)
 
 
+def check_nominal_backing_floor(nominal_floor: float, susd3_tvl: float) -> None:
+    """Check ProtocolConfig SUSD3_NOMINAL_BACKING_FLOOR.
+
+    The nominal floor is an absolute USDC amount of sUSD3 backing the protocol
+    requires (in addition to the ratio-based floor). When set above current
+    sUSD3 totalAssets, sUSD3 redemptions can be blocked.
+
+    Sends two distinct alerts:
+    - Any change to the floor value (governance lever).
+    - Transition from "floor <= backing" to "floor > backing" (active breach).
+
+    Args:
+        nominal_floor: Current SUSD3_NOMINAL_BACKING_FLOOR in USDC.
+        susd3_tvl: Current sUSD3 totalAssets in USDC.
+    """
+    # --- Alert on any change (treat first-run as a non-alert init) ---
+    raw_previous = get_last_value_for_key_from_file(CACHE_FILENAME, CACHE_KEY_NOMINAL_FLOOR)
+    first_run = not isinstance(raw_previous, str)
+    previous_floor = float(raw_previous) if isinstance(raw_previous, str) else 0.0
+
+    logger.info(
+        "sUSD3 nominal backing floor: %s (previous: %s)",
+        format_usd(nominal_floor),
+        format_usd(previous_floor),
+    )
+
+    if not first_run and nominal_floor != previous_floor:
+        direction = "increased" if nominal_floor > previous_floor else "decreased"
+        message = (
+            f"⚠️ *3Jane sUSD3 Nominal Backing Floor Change*\n"
+            f"📊 Floor {direction}\n"
+            f"💰 {format_usd(previous_floor)} → {format_usd(nominal_floor)}\n"
+            f"ℹ️ Withdrawals blocked while sUSD3 backing < floor\n"
+            f"🔗 [ProtocolConfig](https://etherscan.io/address/{PROTOCOL_CONFIG_ADDRESS})"
+        )
+        send_telegram_message(message, PROTOCOL)
+
+    if nominal_floor != previous_floor or first_run:
+        set_cache_value(CACHE_KEY_NOMINAL_FLOOR, nominal_floor)
+
+    # --- Alert-once on breach transition (floor > backing) ---
+    breach = nominal_floor > susd3_tvl and nominal_floor > 0
+    previous_breach = get_cache_value(CACHE_KEY_FLOOR_BREACH)
+    if breach and previous_breach == 0:
+        shortfall = nominal_floor - susd3_tvl
+        message = (
+            f"🚨 *3Jane sUSD3 Backing Below Nominal Floor*\n"
+            f"📊 Floor: {format_usd(nominal_floor)} | sUSD3 backing: {format_usd(susd3_tvl)}\n"
+            f"💰 Shortfall: {format_usd(shortfall)}\n"
+            f"⚠️ sUSD3 redemptions may be blocked until backing recovers\n"
+            f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
+        )
+        send_telegram_message(message, PROTOCOL)
+    if float(breach) != previous_breach:
+        set_cache_value(CACHE_KEY_FLOOR_BREACH, float(breach))
+
+
+def check_protocol_paused(is_paused: bool) -> None:
+    """Check ProtocolConfig IS_PAUSED flag.
+
+    Separate from per-vault isShutdown(). A protocol-wide pause stops the
+    underlying credit market regardless of vault shutdown state.
+
+    Args:
+        is_paused: Current IS_PAUSED value from ProtocolConfig.
+    """
+    logger.info("Protocol IS_PAUSED: %s", is_paused)
+
+    previous_paused = get_cache_value(CACHE_KEY_IS_PAUSED)
+    if is_paused and previous_paused == 0:
+        message = (
+            f"🚨 *3Jane Protocol PAUSED*\n"
+            f"⚠️ ProtocolConfig IS_PAUSED flipped to true\n"
+            f"🔗 [ProtocolConfig](https://etherscan.io/address/{PROTOCOL_CONFIG_ADDRESS})"
+        )
+        send_telegram_message(message, PROTOCOL)
+    if float(is_paused) != previous_paused:
+        set_cache_value(CACHE_KEY_IS_PAUSED, float(is_paused))
+
+
 def main() -> None:
     """Run all 3Jane monitoring checks."""
     logger.info("Starting 3Jane monitoring...")
@@ -286,6 +377,7 @@ def main() -> None:
     client = ChainManager.get_client(Chain.MAINNET)
     usd3_vault = client.eth.contract(address=USD3_ADDRESS, abi=ABI_VAULT)
     susd3_vault = client.eth.contract(address=SUSD3_ADDRESS, abi=ABI_VAULT)
+    protocol_config = client.eth.contract(address=PROTOCOL_CONFIG_ADDRESS, abi=ABI_PROTOCOL_CONFIG)
 
     try:
         # Batch all core vault reads in a single RPC call
@@ -296,9 +388,11 @@ def main() -> None:
             batch.add(susd3_vault.functions.totalAssets())
             batch.add(susd3_vault.functions.totalSupply())
             batch.add(susd3_vault.functions.convertToAssets(ONE_SHARE))
+            batch.add(protocol_config.functions.config(CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR))
+            batch.add(protocol_config.functions.config(CFG_KEY_IS_PAUSED))
             responses = client.execute_batch(batch)
-            if len(responses) != 6:
-                raise ValueError(f"Expected 6 responses, got {len(responses)}")
+            if len(responses) != 8:
+                raise ValueError(f"Expected 8 responses, got {len(responses)}")
 
         usd3_total_assets = responses[0]
         usd3_total_supply = responses[1]
@@ -306,6 +400,8 @@ def main() -> None:
         susd3_total_assets = responses[3]
         susd3_total_supply = responses[4]
         susd3_pps_raw = responses[5]
+        nominal_floor_raw = responses[6]
+        is_paused = bool(responses[7])
 
         # Convert to human-readable floats
         usd3_tvl = usd3_total_assets / ONE_SHARE
@@ -314,6 +410,7 @@ def main() -> None:
         susd3_tvl = susd3_total_assets / ONE_SHARE
         susd3_supply = susd3_total_supply / ONE_SHARE
         susd3_pps = susd3_pps_raw / ONE_SHARE
+        nominal_floor = nominal_floor_raw / ONE_SHARE
 
         logger.info(
             "USD3 — TVL: %s, Supply: %s, PPS: %.8f",
@@ -334,6 +431,8 @@ def main() -> None:
         check_junior_buffer(usd3_tvl, susd3_tvl, susd3_pps)
         check_vault_shutdown(client, usd3_vault, susd3_vault)
         check_debt_cap(client)
+        check_nominal_backing_floor(nominal_floor, susd3_tvl)
+        check_protocol_paused(is_paused)
 
         logger.info(
             "Monitoring complete — USD3 PPS: %.8f, TVL: %s | sUSD3 PPS: %.8f, TVL: %s",
