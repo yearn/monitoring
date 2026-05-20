@@ -8,6 +8,7 @@ transactions (timelocks and Safe multisigs).
 from dataclasses import dataclass
 
 from utils.calldata.decoder import DecodedCall, decode_calldata
+from utils.impl_diff import diff_implementations, format_impl_diff
 from utils.llm import get_llm_provider
 from utils.llm.base import LLMError
 from utils.logging import get_logger
@@ -182,22 +183,30 @@ def _collect_source_contexts(
 
 
 def _get_proxy_upgrade_info(calldata: str, target: str, chain_id: int) -> str:
-    """Detect proxy upgrade and return context string for the LLM prompt."""
-    new_impl = detect_proxy_upgrade(calldata)
-    if not new_impl:
+    """Detect proxy upgrade, fetch impl diff, and return context string for the prompt."""
+    upgrade = detect_proxy_upgrade(calldata, target)
+    if not upgrade:
         return ""
 
-    old_impl = get_current_implementation(target, chain_id)
-    if old_impl:
-        info = (
-            f"This is a PROXY UPGRADE on {target}.\nCurrent implementation: {old_impl}\nNew implementation: {new_impl}"
-        )
-        diff_url = build_diff_url(old_impl, new_impl, chain_id)
-        if diff_url:
-            info += f"\nDiff: {diff_url}"
-        return info
+    proxy = upgrade.proxy_address
+    new_impl = upgrade.new_implementation
+    old_impl = get_current_implementation(proxy, chain_id)
+    if not old_impl:
+        return f"This is a PROXY UPGRADE on {proxy}.\nNew implementation: {new_impl}"
 
-    return f"This is a PROXY UPGRADE on {target}.\nNew implementation: {new_impl}"
+    info = f"This is a PROXY UPGRADE on {proxy}.\nCurrent implementation: {old_impl}\nNew implementation: {new_impl}"
+    diff_url = build_diff_url(old_impl, new_impl, chain_id)
+    if diff_url:
+        info += f"\nDiff: {diff_url}"
+
+    try:
+        impl_diff = diff_implementations(old_impl, new_impl, chain_id)
+        if impl_diff:
+            info += "\n\n" + format_impl_diff(impl_diff)
+    except Exception as e:  # noqa: BLE001 - best-effort enrichment
+        logger.info("Impl diff failed for %s → %s: %s", old_impl, new_impl, e)
+
+    return info
 
 
 def _format_decoded_calls(calls: list[DecodedCall]) -> str:
