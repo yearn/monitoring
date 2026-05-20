@@ -9,6 +9,8 @@
 - **Junior Buffer Ratio:** sUSD3 TVL as a percentage of USD3 TVL. Alerts when sUSD3 buffer drops below **15%** of USD3 TVL — thin first-loss coverage puts senior tranche at risk.
 - **Vault Shutdown:** `isShutdown()` on both vaults. Alert-once when either vault enters emergency shutdown.
 - **Debt Cap:** `ProtocolConfig.getDebtCap()` vs cached prior. Alerts on any change — signals governance scaling the protocol up or down.
+- **Nominal sUSD3 Backing Floor:** `ProtocolConfig.config(keccak256("SUSD3_NOMINAL_BACKING_FLOOR"))` vs cached prior. Alerts on any change (governance lever). Separate alert-once when floor exceeds sUSD3 `totalAssets()` — sUSD3 redemptions can be blocked while floor > backing.
+- **Protocol Pause:** `ProtocolConfig.config(keccak256("IS_PAUSED"))`. Alert-once on transition to true. Distinct from per-vault `isShutdown()` — pauses the underlying credit market.
 
 ## Key Contracts
 
@@ -16,7 +18,7 @@
 |----------|---------|---------|
 | USD3 Vault | [`0x056B269Eb1f75477a8666ae8C7fE01b64dD55eCc`](https://etherscan.io/address/0x056B269Eb1f75477a8666ae8C7fE01b64dD55eCc) | Senior tranche ERC-4626 vault |
 | sUSD3 Vault | [`0xf689555121e529Ff0463e191F9Bd9d1E496164a7`](https://etherscan.io/address/0xf689555121e529Ff0463e191F9Bd9d1E496164a7) | Junior (first-loss) tranche |
-| ProtocolConfig | [`0x6b276A2A7dd8b629adBA8A06AD6573d01C84f34E`](https://etherscan.io/address/0x6b276A2A7dd8b629adBA8A06AD6573d01C84f34E) | Debt cap governance |
+| ProtocolConfig | [`0x6b276A2A7dd8b629adBA8A06AD6573d01C84f34E`](https://etherscan.io/address/0x6b276A2A7dd8b629adBA8A06AD6573d01C84f34E) | Governance config: debt cap, pause, sUSD3 floor |
 
 ## Alert Thresholds
 
@@ -27,6 +29,9 @@
 | Junior buffer ratio | sUSD3 < 15% of USD3 TVL | MEDIUM |
 | Vault shutdown | `isShutdown()` transitions to true (alert-once) | HIGH |
 | Debt cap change | Any change to `getDebtCap()` | MEDIUM |
+| Nominal backing floor change | Any change to `SUSD3_NOMINAL_BACKING_FLOOR` | MEDIUM |
+| Nominal floor breach | Floor > sUSD3 `totalAssets()` (alert-once) | HIGH |
+| Protocol paused | `IS_PAUSED` transitions to true (alert-once) | HIGH |
 | Monitoring run failure | Uncaught exception in `main()` | LOW |
 
 ## Governance
