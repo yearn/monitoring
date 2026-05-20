@@ -33,19 +33,42 @@ _FUNCTION_DEF_RE = re.compile(
     re.MULTILINE,
 )
 
-# State variable declaration: <type> <visibility> [modifiers] <name> [= value];
-# Type can be a simple ident, mapping(...), or an array type. We avoid matching
-# function-local declarations by requiring a visibility modifier.
+# State variable declaration: <type> [visibility] [modifiers] <name> [= value];
+# Visibility is OPTIONAL — Solidity defaults state vars to internal, so plain
+# `uint256 cap;` is a valid storage declaration. To avoid matching function-local
+# declarations like `uint256 x = 1;`, the caller filters matches by brace depth
+# (only depth==1, inside a contract body but outside any function).
 _STATE_VAR_RE = re.compile(
-    r"(?:^|\n)\s*"
-    r"((?:mapping\s*\([^)]+(?:\([^)]*\)[^)]*)*\))|(?:[A-Za-z_]\w*(?:\[[^\]]*\])?))"
+    r"((?:mapping\s*\([^)]+(?:\([^)]*\)[^)]*)*\))|(?:[A-Za-z_]\w*(?:\[[^\]]*\])?))"  # type
+    r"((?:\s+(?:public|private|internal|external|immutable|constant|override(?:\s*\([^)]*\))?|virtual))*)"  # modifiers
     r"\s+"
-    r"(public|private|internal|external)"
-    r"((?:\s+(?:immutable|constant|override(?:\s*\([^)]*\))?|virtual))*)"
-    r"\s+"
-    r"([A-Za-z_]\w*)"
+    r"([A-Za-z_]\w*)"  # name
     r"\s*(?:=|;)",
-    re.MULTILINE,
+)
+
+# Solidity keywords that look like types but introduce non-state-var declarations
+# at depth 1 (function/struct/enum/etc. headers). Skip these as "types".
+_NON_TYPE_KEYWORDS = frozenset(
+    {
+        "function",
+        "modifier",
+        "constructor",
+        "receive",
+        "fallback",
+        "struct",
+        "enum",
+        "event",
+        "error",
+        "using",
+        "contract",
+        "library",
+        "interface",
+        "abstract",
+        "pragma",
+        "import",
+        "type",  # `type Foo is uint256;` user-defined value types — not a storage slot
+        "return",
+    }
 )
 
 _VISIBILITIES = frozenset({"public", "private", "internal", "external"})
@@ -134,15 +157,85 @@ def _extract_function_sigs(source: str) -> list[FunctionSig]:
     return sigs
 
 
+def _strip_solidity_noise(source: str) -> str:
+    """Remove comments and string literals so brace counting / regex can't trip on them.
+
+    Replaces stripped content with same-length spaces to preserve byte offsets,
+    which keeps the brace-depth array indexable against the original source.
+    """
+    out = list(source)
+    # Block comments /* ... */
+    for m in re.finditer(r"/\*[\s\S]*?\*/", source):
+        for i in range(m.start(), m.end()):
+            out[i] = " " if source[i] != "\n" else "\n"
+    # Line comments //...
+    for m in re.finditer(r"//[^\n]*", "".join(out)):
+        for i in range(m.start(), m.end()):
+            out[i] = " "
+    # String literals "..." and '...'
+    for pat in (r'"(?:[^"\\\n]|\\.)*"', r"'(?:[^'\\\n]|\\.)*'"):
+        for m in re.finditer(pat, "".join(out)):
+            for i in range(m.start(), m.end()):
+                out[i] = " "
+    return "".join(out)
+
+
+def _brace_depths(cleaned: str) -> list[int]:
+    """Return a per-character array of brace nesting depth (post-character).
+
+    Depth at index i is the brace depth *after* processing cleaned[i]. So a
+    state var declaration matched at start position p has its lexical depth
+    equal to depths[p - 1] (or 0 if p == 0).
+    """
+    depths = [0] * len(cleaned)
+    depth = 0
+    for i, c in enumerate(cleaned):
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+        depths[i] = depth
+    return depths
+
+
 def _extract_state_vars(source: str) -> list[StateVarDecl]:
-    """Find every state-var declaration in source order. Excludes function-local vars."""
+    """Find every state-var declaration in source order.
+
+    Captures default-internal vars (no visibility modifier) as well as explicit
+    ones. Uses brace-depth tracking to exclude function-local declarations.
+    """
+    cleaned = _strip_solidity_noise(source)
+    depths = _brace_depths(cleaned)
+
     vars_out: list[StateVarDecl] = []
-    seen: set[tuple[str, str]] = set()  # (name, type) — dedup repeated decls across inheritance
-    for m in _STATE_VAR_RE.finditer(source):
-        type_str = " ".join(m.group(1).split())  # collapse whitespace
-        visibility = m.group(2)
-        modifier_block = m.group(3) or ""
-        name = m.group(4)
+    seen: set[tuple[str, str]] = set()
+    for m in _STATE_VAR_RE.finditer(cleaned):
+        # Determine the brace depth at the START of the match. State vars live
+        # at depth == 1 (inside a contract/library/interface body, outside any
+        # function/modifier/constructor body).
+        start = m.start()
+        depth_before = depths[start - 1] if start > 0 else 0
+        if depth_before != 1:
+            continue
+
+        type_str = " ".join(m.group(1).split())
+        modifier_block = m.group(2) or ""
+        name = m.group(3)
+
+        # Reject false positives where the regex matched a non-state-var keyword
+        # as the "type" (e.g., `event Foo(...)` or `function bar(...)` if it
+        # somehow slipped through). Most are blocked by the `(=|;)` terminator,
+        # but `using X for Y;` and similar edge cases get filtered here.
+        if type_str.split()[0] in _NON_TYPE_KEYWORDS:
+            continue
+
+        # Visibility token if present in the modifier block
+        visibility = ""
+        for tok in modifier_block.split():
+            if tok in _VISIBILITIES:
+                visibility = tok
+                break
+
         immutable = "immutable" in modifier_block or "constant" in modifier_block
 
         key = (name, type_str)

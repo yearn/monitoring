@@ -59,6 +59,44 @@ class TestDetectProxyUpgrade(unittest.TestCase):
         data = encode_call("upgradeTo(address)", ["address"], [NEW_IMPL])
         self.assertIsNone(detect_proxy_upgrade(data, ""))
 
+    def test_works_offline_for_all_proxy_selectors(self) -> None:
+        """Regression: detect_proxy_upgrade must not depend on the Sourcify 4byte
+        lookup for proxy upgrade selectors — those are in KNOWN_SELECTORS so the
+        decode resolves locally even when the network is unreachable."""
+        from unittest.mock import patch
+
+        cases = [
+            (
+                "upgradeTo(address)",
+                ["address"],
+                [NEW_IMPL],
+                PROXY_ADDR,
+            ),
+            (
+                "upgradeToAndCall(address,bytes)",
+                ["address", "bytes"],
+                [NEW_IMPL, b""],
+                PROXY_ADDR,
+            ),
+            (
+                "upgradeAndCall(address,address,bytes)",
+                ["address", "address", "bytes"],
+                [PROXY_ADDR, NEW_IMPL, b""],
+                _cs("0xecda55c32966b00592ed3922e386063e1bc752c2"),
+            ),
+        ]
+        # Patch the 4byte lookup so any call to it would raise — proving we
+        # never hit the network.
+        with patch("utils.calldata.decoder.fetch_json") as mock_fetch:
+            mock_fetch.side_effect = AssertionError("4byte fetch must not be called for known proxy selectors")
+            for sig, types, vals, tx_target in cases:
+                with self.subTest(sig=sig):
+                    data = encode_call(sig, types, vals)
+                    result = detect_proxy_upgrade(data, tx_target)
+                    self.assertIsNotNone(result, f"detection failed offline for {sig}")
+                    assert result is not None
+                    self.assertEqual(result.new_implementation, NEW_IMPL)
+
 
 if __name__ == "__main__":
     unittest.main()

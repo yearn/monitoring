@@ -100,6 +100,75 @@ class TestExtractStateVars(unittest.TestCase):
         self.assertTrue(vars_["FEE_BPS"].immutable)
         self.assertFalse(vars_["minDeposit"].immutable)
 
+    def test_default_internal_state_vars_captured(self) -> None:
+        """Regression: Solidity defaults state-var visibility to internal.
+        Declarations like `uint256 cap;` were previously skipped because the
+        regex required an explicit modifier — that produced a false-safe verdict
+        when an upgrade removed or reordered such vars."""
+        src = """
+        contract C {
+            uint256 explicitPublic;  // wait, no — explicit visibility test below
+            uint256 cap;             // default internal, NO visibility
+            address admin;           // default internal, NO visibility
+            mapping(address => uint256) balances;  // default internal mapping
+        }
+        """
+        vars_ = _extract_state_vars(src)
+        names = [v.name for v in vars_]
+        self.assertEqual(names, ["explicitPublic", "cap", "admin", "balances"])
+        # The default-visibility ones should record visibility as ""
+        by_name = {v.name: v for v in vars_}
+        self.assertEqual(by_name["cap"].visibility, "")
+        self.assertEqual(by_name["admin"].visibility, "")
+        self.assertEqual(by_name["balances"].visibility, "")
+
+    def test_function_locals_not_captured_after_visibility_fix(self) -> None:
+        """Even with visibility now optional, locals inside function bodies must
+        be excluded via the brace-depth check."""
+        src = """
+        contract C {
+            uint256 stateVar;
+            function f() external {
+                uint256 localUint = 1;
+                address localAddr;
+                if (true) {
+                    uint256 deeper = 2;
+                }
+            }
+        }
+        """
+        names = [v.name for v in _extract_state_vars(src)]
+        self.assertEqual(names, ["stateVar"])
+        self.assertNotIn("localUint", names)
+        self.assertNotIn("localAddr", names)
+        self.assertNotIn("deeper", names)
+
+    def test_struct_members_not_captured(self) -> None:
+        """Struct members are at brace depth 2 inside the struct, not state vars."""
+        src = """
+        contract C {
+            struct Cfg { uint256 fee; address admin; }
+            uint256 stateVar;
+        }
+        """
+        names = [v.name for v in _extract_state_vars(src)]
+        self.assertNotIn("fee", names)
+        self.assertNotIn("admin", names)
+        self.assertIn("stateVar", names)
+
+    def test_removing_default_internal_var_now_detected_as_unsafe(self) -> None:
+        """End-to-end: an upgrade that removes a default-internal var must be
+        flagged as unsafe, not silently treated as no-change."""
+        old = "contract C { uint256 a; uint256 b; uint256 c; }"
+        new = "contract C { uint256 a; uint256 c; }"  # b removed, c shifts up
+        old_vars = _extract_state_vars(old)
+        new_vars = _extract_state_vars(new)
+        from utils.impl_diff import _storage_layout
+
+        safe, changes, _, _ = _storage_layout(old_vars, new_vars)
+        self.assertFalse(safe)
+        self.assertTrue(changes, "expected concrete layout changes")
+
 
 class TestDiffFunctions(unittest.TestCase):
     def test_detects_added_and_changed(self) -> None:
