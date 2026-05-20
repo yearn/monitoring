@@ -92,15 +92,30 @@ Requires `TENDERLY_API_KEY`. Simulation failure is non-blocking — the pipeline
 
 Callers can pass `skip_simulation=True` to bypass Tenderly entirely. Used for Safe transactions with `operation=DELEGATECALL` (typically multiSend batches), where our plain-CALL simulator can't model the real execution and would produce a spurious "revert" verdict.
 
-### 5. Proxy Upgrade Detection (`utils/proxy.py`)
+### 5. Proxy Upgrade Detection & Implementation Diff (`utils/proxy.py`, `utils/impl_diff.py`)
 
-If the calldata matches `upgradeTo(address)` or `upgradeToAndCall(address,bytes)`:
+`detect_proxy_upgrade(data_hex, target)` recognizes three patterns and returns a `ProxyUpgrade(proxy_address, new_implementation)` dataclass:
 
-1. Extract the **new implementation** address from decoded params
-2. Read the **current implementation** from the EIP-1967 storage slot (`0x360894a...`)
-3. Build an Etherscan diff URL: `etherscan.io/contractdiffchecker?a1=old&a2=new`
+| Selector | Function | Proxy address source |
+|---|---|---|
+| `0x3659cfe6` | `upgradeTo(address)` | tx target |
+| `0x4f1ef286` | `upgradeToAndCall(address,bytes)` | tx target |
+| `0x9623609d` | `upgradeAndCall(address,address,bytes)` (OZ ProxyAdmin) | first calldata arg |
 
-This context is added to the LLM prompt so it can explain what changed in the upgrade.
+For the ProxyAdmin pattern, the tx target is the ProxyAdmin and the actual proxy is inside the calldata — the Telegram alert surfaces both. Detection short-circuits on the selector check *before* calldata decoding, so non-upgrade calls don't trigger the Sourcify 4byte lookup.
+
+When an upgrade is detected the pipeline:
+
+1. Reads the **current implementation** from the EIP-1967 storage slot (`0x360894a...`) of the proxy.
+2. Builds an Etherscan diff URL: `etherscan.io/contractdiffchecker?a1=old&a2=new`.
+3. Fetches the verified source of **both** implementations and runs a structural diff (`utils/impl_diff.py`):
+   - **Functions added / removed / changed visibility or modifiers**, identified by name + arg types so overloads are distinct.
+   - **Storage layout safety check** — slot-by-slot comparison. Safe iff the new layout begins with the old layout in the same order (append-only) OR an OZ trailing `uintN[K] __gap` array is consumed: any new vars inserted before the gap must be matched by an equal reduction in the gap's size. Gap underflow, no-shrink, and gap removal without consumption are flagged.
+   - **EIP-7201 namespaced storage** is detected (`_getXxxStorage() returns (XxxStorage storage $)`) and the positional layout check is skipped — namespaced storage lives at a constant slot, not slot 0+.
+   - Immutable/`constant` state vars are excluded from the layout check (they don't occupy a storage slot).
+   - State vars without an explicit visibility modifier (default-internal) ARE included — function locals are excluded by brace-depth tracking rather than by requiring a visibility keyword.
+
+The structural diff is injected into the prompt under `--- Implementation Diff ---`. Best-effort: if either impl is unverified or extraction fails, the diff section is silently omitted but the rest of the upgrade context still renders.
 
 ### 6. LLM Prompt & Completion (`utils/llm/ai_explainer.py`)
 
@@ -142,9 +157,20 @@ On 0x...:
   poolImpl = 0xOldImpl  // current value, type: address
 
 --- Proxy Upgrade ---
+This is a PROXY UPGRADE on 0xProxy.
 Current implementation: 0xOldImpl
 New implementation: 0xNewImpl
 Diff: https://etherscan.io/contractdiffchecker?a1=...&a2=...
+
+Old: 0xOldImpl (PoolImplV1)
+New: 0xNewImpl (PoolImplV2)
+
+Functions added (2):
+  + emergencyPause() external onlyOwner
+  + setOracle(address) external onlyOwner
+
+Storage layout safe (append-only). New state vars at end:
+  + address public oracle
 
 --- Simulation Results ---
 Simulation: SUCCESS
@@ -236,7 +262,8 @@ utils/llm/
 
 utils/source_context.py      # Etherscan v2 source fetch + natspec extractor + proxy follow
 utils/on_chain_state.py      # Before-state reader (auto-generated getters, mappings, diamond storage)
-utils/proxy.py               # EIP-1967 impl slot read + proxy-upgrade detection
+utils/proxy.py               # EIP-1967 impl slot read + proxy-upgrade detection (3 selectors)
+utils/impl_diff.py           # Structural old-vs-new impl diff (functions, storage layout, gap-aware)
 utils/tenderly/simulation.py # Tenderly Simulation API client
 utils/calldata/              # Selector resolver + ABI decoder
 safe/multisend.py            # Safe MultiSendCallOnly inner-call extractor + DELEGATECALL context note
