@@ -44,8 +44,6 @@ TIMELOCK_LIST: list[TimelockConfig] = [
     TimelockConfig("0xd8236031d8279d82e615af2bfab5fc0127a329ab", 1, "CAP", "CAP TimelockController"),
     TimelockConfig("0x5d8a7dc9405f08f14541ba918c1bf7eb2dace556", 1, "RTOKEN", "ETH+ Timelock"),
     TimelockConfig("0x055e84e7fe8955e2781010b866f10ef6e1e77e59", 1, "LRT", "Lombard TimeLock"),
-    TimelockConfig("0xe1f03b7b0ebf84e9b9f62a1db40f1efb8faa7d22", 1, "SILO", "Silo TimelockController"),
-    TimelockConfig("0x81f6e9914136da1a1d3b1efd14f7e0761c3d4cc7", 1, "LRT", "Renzo(ezETH) TimelockController"),
     TimelockConfig("0x9f26d4c958fd811a1f59b01b86be7dffc9d20761", 1, "LRT", "EtherFi Timelock"),
     TimelockConfig("0x49bd9989e31ad35b0a62c20be86335196a3135b1", 1, "LRT", "KelpDAO(rsETH) Timelock"),
     TimelockConfig("0x3d18480cc32b6ab3b833dcabd80e76cfd41c48a9", 1, "INFINIFI", "Infinifi Longtimelock"),
@@ -53,7 +51,6 @@ TIMELOCK_LIST: list[TimelockConfig] = [
     TimelockConfig("0x9aee0b04504cef83a65ac3f0e838d0593bcb2bc7", 1, "AAVE", "Aave Governance V3"),
     TimelockConfig("0x6d903f6003cca6255d85cca4d3b5e5146dc33925", 1, "COMP", "Compound Timelock"),
     TimelockConfig("0x2386dc45added673317ef068992f19421b481f4c", 1, "FLUID", "Fluid Timelock"),
-    TimelockConfig("0x3c28b7c7ba1a1f55c9ce66b263b33b204f2126ea", 1, "LRT", "Puffer Timelock"),
     TimelockConfig("0x2e59a20f205bb85a89c53f1936454680651e618e", 1, "LIDO", "Lido Timelock"),
     TimelockConfig("0x2efff88747eb5a3ff00d4d8d0f0800e306c0426b", 1, "MAPLE", "Maple GovernorTimelock"),
     TimelockConfig("0xb2a3cf69c97afd4de7882e5fee120e4efc77b706", 1, "STRATA", "Strata 48h Timelock"),
@@ -196,7 +193,7 @@ def _format_delay_info(delay: int | None, timelock_type: str) -> str | None:
         return None
 
     delay_val = int(delay)
-    if timelock_type in ("Compound", "Puffer", "Maple"):
+    if timelock_type in ("Compound", "Maple"):
         # Absolute timestamp
         relative = delay_val - int(time.time())
         if relative > 0:
@@ -207,7 +204,7 @@ def _format_delay_info(delay: int | None, timelock_type: str) -> str | None:
 
 
 def _build_call_info(event: dict, explorer: str | None, show_index: bool, chain_id: int = 0) -> list[str]:
-    """Build call info lines for TimelockController/Compound/Puffer events."""
+    """Build call info lines for TimelockController/Compound events."""
     lines: list[str] = []
     target = event.get("target")
     if not target:
@@ -245,7 +242,6 @@ def _build_call_info(event: dict, explorer: str | None, show_index: bool, chain_
             else:
                 lines.append(f"🔄 New impl: `{new_impl}`")
 
-    # Value only for types that have it (not Puffer)
     value = event.get("value")
     if value and int(value) > 0:
         lines.append(f"💰 Value: {int(value) / 1e18:.4f} ETH")
@@ -341,7 +337,7 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
     elif timelock_type == "Maple":
         call_lines.append(f"🆔 Proposal: {first.get('operationId') or ''}")
 
-    elif timelock_type in ("TimelockController", "Compound", "Puffer"):
+    elif timelock_type in ("TimelockController", "Compound"):
         for event in events:
             call_lines.extend(_build_call_info(event, explorer, len(events) > 1, chain_id))
 

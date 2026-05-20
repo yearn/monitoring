@@ -91,12 +91,6 @@ ALL_SAFE_ADDRESSES = [
         "0x84258B3C495d8e9b10D0d4A7867392F149Da4274",
         "Morpho eUSDe predeposit vault owner",
     ],  # eUSDe predeposit vault owner, token used by DAI vault on morpho
-    # [
-    #     "RESOLV",
-    #     "mainnet",
-    #     "0xD6889F307BE1b83Bb355d5DA7d4478FB0d2Af547",
-    #     "RESOLV contract",
-    # ],
     [
         "LRT",
         "mainnet",
@@ -145,30 +139,12 @@ ALL_SAFE_ADDRESSES = [
         "0xA27cA9292268ee0f0258B749f1D5740c9Bb68B50",
         "Strata Admin Multisig (3/4)",
     ],
-    # NOTE: Moonwell multisig monitoring is disabled for now
-    # [
-    #     "MOONWELL",
-    #     "base-main",
-    #     "0x446342AF4F3bCD374276891C6bb3411bf2F8779E",
-    #     "Moonwell Admin of timelock controller",
-    # ],  # admin of timelock controller
-    # [
-    #     "MOONWELL",
-    #     "base-main",
-    #     "0xB9d4acf113a423Bc4A64110B8738a52E51C2AB38",
-    #     "Moonwell Pause guardian of comptroller contract",
-    # ],  # pause guardian of comptroller contract
     # [
     #     "INFINIFI",
     #     "mainnet",
     #     "0x80608f852D152024c0a2087b16939235fEc2400c",
     #     "Infinifi Team Multisig",
     # ],
-    # [
-    #     "USD0",
-    #     "mainnet",
-    #     "0x6e9d65eC80D69b1f508560Bc7aeA5003db1f7FB7",
-    # ],  # USD0 protocol governance
     # no active stargate strategies
     # ["STARGATE", "mainnet", "0x65bb797c2B9830d891D87288F029ed8dACc19705"],
     # ["STARGATE", "polygon-main", "0x47290DE56E71DC6f46C26e50776fe86cc8b21656"],

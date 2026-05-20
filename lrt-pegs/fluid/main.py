@@ -29,13 +29,6 @@ POOL_CONFIGS = [
         THRESHOLD_RATIO,
     ),
     (
-        "ezETH/ETH FLUID Pool",
-        "0xDD72157A021804141817d46D9852A97addfB9F59",
-        0,
-        1,
-        THRESHOLD_RATIO,
-    ),
-    (
         "weETH / ETH FLUID Pool",
         "0x86f874212335Af27C41cDb855C2255543d1499cE",
         0,
