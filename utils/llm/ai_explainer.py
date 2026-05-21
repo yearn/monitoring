@@ -543,6 +543,13 @@ def explain_transaction(
         )
         if simulation:
             logger.info("Simulation completed: success=%s gas=%s", simulation.success, simulation.gas_used)
+            if not simulation.success:
+                # Tenderly often misreports legitimate governance calls as reverting
+                # (wrong msg.sender, missing storage overrides). Including a failed
+                # sim in the prompt biases the LLM toward "this tx will revert"
+                # and inflates risk — drop it so the LLM works from calldata only.
+                logger.warning("Simulation reported failure (%s); omitting from prompt", simulation.error_message)
+                simulation = None
         else:
             logger.info("Simulation unavailable, proceeding with decoded calldata only")
 
@@ -635,7 +642,12 @@ def explain_batch_transaction(
     if not decoded_calls:
         return None
 
-    simulation = next((s for s in simulations if s is not None), None)
+    # Prefer a successful sim; if every inner call failed in Tenderly, drop the
+    # sim section entirely rather than feeding the LLM "FAILED" + a misleading
+    # revert reason from a sim that probably just couldn't model the real call.
+    simulation = next((s for s in simulations if s is not None and s.success), None)
+    if simulation is None and any(s is not None and not s.success for s in simulations):
+        logger.warning("All batch simulations reported failure; omitting from prompt")
 
     upgrade_parts: list[str] = []
     for call in calls:

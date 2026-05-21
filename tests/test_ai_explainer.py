@@ -473,6 +473,72 @@ class TestRefineFlagInExplainTransaction(unittest.TestCase):
         self.assertIn("Your Previous Draft", second_call_prompt)
 
 
+class TestFailedSimulationDropped(unittest.TestCase):
+    """Failed Tenderly simulations must not leak into the LLM prompt."""
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction")
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    def test_failed_sim_omitted_from_single_prompt(
+        self,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_label: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
+        mock_simulate.return_value = SimulationResult(
+            success=False, gas_used=0, error_message="execution reverted: not authorized"
+        )
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: pauses. LOW."
+        provider.model_name = "test"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target="0xT", calldata="0x8456cb59", chain_id=1)
+        prompt = provider.complete.call_args[0][0]
+
+        self.assertNotIn("--- Simulation Results ---", prompt)
+        self.assertNotIn("FAILED", prompt)
+        self.assertNotIn("execution reverted", prompt)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction")
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    def test_failed_sim_omitted_from_batch_prompt(
+        self,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_label: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        from utils.llm.ai_explainer import explain_batch_transaction
+
+        mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
+        mock_simulate.return_value = SimulationResult(success=False, gas_used=0, error_message="reverted")
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: pauses both. LOW."
+        provider.model_name = "test"
+        mock_get_provider.return_value = provider
+
+        explain_batch_transaction(
+            calls=[
+                {"target": "0xT1", "data": "0x8456cb59", "value": "0"},
+                {"target": "0xT2", "data": "0x8456cb59", "value": "0"},
+            ],
+            chain_id=1,
+        )
+        prompt = provider.complete.call_args[0][0]
+        self.assertNotIn("--- Simulation Results ---", prompt)
+        self.assertNotIn("FAILED", prompt)
+
+
 class TestAddressLabels(unittest.TestCase):
     """Tests for address-argument annotation in the LLM prompt."""
 
