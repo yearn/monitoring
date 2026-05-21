@@ -9,6 +9,7 @@ from utils.source_context import (
     _extract_function_snippet,
     extract_state_var_snippet,
     find_state_var_writes,
+    get_contract_label,
     get_source_context,
     reset_cache,
 )
@@ -235,6 +236,65 @@ class TestGetSourceContext(unittest.TestCase):
         self.assertIsNone(ctx)
         # Should only fetch once (the target), not retry for impl
         self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]
+
+
+class TestGetContractLabel(unittest.TestCase):
+    """Tests for get_contract_label()."""
+
+    def setUp(self) -> None:
+        reset_cache()
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_returns_verified_contract_name(self, mock_fetch: object) -> None:
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "status": "1",
+            "result": [{"SourceCode": "contract Farm { }", "ContractName": "MorphoFarm"}],
+        }
+        label = get_contract_label(1, "0xac21b22b5aeb11bc32de4ecf59e4538fca48b694")
+        self.assertEqual(label, "MorphoFarm")
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_unverified_returns_empty(self, mock_fetch: object) -> None:
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "status": "1",
+            "result": [{"SourceCode": "", "ContractName": ""}],
+        }
+        label = get_contract_label(1, "0xac21b22b5aeb11bc32de4ecf59e4538fca48b694")
+        self.assertEqual(label, "")
+
+    def test_safe_utility_shortcut(self) -> None:
+        # MultiSendCallOnly — no Etherscan call should be needed.
+        label = get_contract_label(1, "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D")
+        self.assertEqual(label, "Safe MultiSendCallOnly")
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.proxy.get_current_implementation")
+    @patch("utils.source_context.fetch_json")
+    def test_follows_proxy_when_name_is_generic(self, mock_fetch: object, mock_impl: object) -> None:
+        mock_fetch.side_effect = [  # type: ignore[attr-defined]
+            {"status": "1", "result": [{"SourceCode": "/* proxy */", "ContractName": "TransparentUpgradeableProxy"}]},
+            {"status": "1", "result": [{"SourceCode": "/* impl */", "ContractName": "InfinifiBorrowingFarm"}]},
+        ]
+        mock_impl.return_value = "0x000000000000000000000000000000000000beef"  # type: ignore[attr-defined]
+        label = get_contract_label(1, "0xac21b22b5aeb11bc32de4ecf59e4538fca48b694")
+        self.assertEqual(label, "InfinifiBorrowingFarm")
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.proxy.get_current_implementation", return_value=None)
+    @patch("utils.source_context.fetch_json")
+    def test_keeps_specific_name_without_proxy_follow(self, mock_fetch: object, mock_impl: object) -> None:
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "status": "1",
+            "result": [{"SourceCode": "/* x */", "ContractName": "FarmRegistry"}],
+        }
+        label = get_contract_label(1, "0xac21b22b5aeb11bc32de4ecf59e4538fca48b694")
+        self.assertEqual(label, "FarmRegistry")
+        mock_impl.assert_not_called()  # type: ignore[attr-defined]
+
+    def test_empty_address_returns_empty(self) -> None:
+        self.assertEqual(get_contract_label(1, ""), "")
 
 
 if __name__ == "__main__":

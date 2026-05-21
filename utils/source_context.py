@@ -42,6 +42,21 @@ _ASSIGNMENT_RE = re.compile(
 
 _CONTROL_KEYWORDS = frozenset({"if", "for", "while", "require", "revert", "return", "emit", "assembly", "unchecked"})
 
+# Proxy contract names that are not informative on their own — when the target is
+# named one of these, prefer the implementation contract's name.
+_GENERIC_PROXY_NAMES = frozenset(
+    {
+        "TransparentUpgradeableProxy",
+        "ERC1967Proxy",
+        "BeaconProxy",
+        "EIP173Proxy",
+        "Proxy",
+        "UpgradeableProxy",
+        "InitializableImmutableAdminUpgradeabilityProxy",
+        "InitializableAdminUpgradeabilityProxy",
+    }
+)
+
 
 @dataclass(frozen=True)
 class SourceContext:
@@ -233,6 +248,48 @@ def get_source_context(chain_id: int, address: str, function_name: str) -> Sourc
     if not fetched_impl:
         return None
     return _build_context(fetched_impl[0], fetched_impl[1], function_name)
+
+
+def get_contract_label(chain_id: int, address: str) -> str:
+    """Best-effort human label for a contract address.
+
+    Resolution order:
+      1. Safe utility registry (no API call) — covers MultiSendCallOnly etc.
+      2. Etherscan ContractName for the address.
+      3. If that name is a generic proxy wrapper, follow EIP-1967 to the impl
+         and use the impl's contract name instead.
+
+    Returns "" for EOAs, unverified contracts, missing API key, or any failure.
+    """
+    if not address:
+        return ""
+
+    # Lazy import to keep utils/source_context.py free of safe/ dependencies at
+    # module load time (and to avoid a cycle if safe ever imports from here).
+    from safe.multisend import safe_utility_label
+
+    cheap = safe_utility_label(address)
+    if cheap:
+        return cheap
+
+    fetched = fetch_source(chain_id, address)
+    if not fetched:
+        return ""
+
+    name = fetched[0]
+    if name and name not in _GENERIC_PROXY_NAMES:
+        return name
+
+    from utils.proxy import get_current_implementation
+
+    impl = get_current_implementation(address, chain_id)
+    if not impl or impl.lower() == address.lower():
+        return name
+
+    impl_fetched = fetch_source(chain_id, impl)
+    if impl_fetched and impl_fetched[0]:
+        return impl_fetched[0]
+    return name
 
 
 def format_source_context(ctx: SourceContext) -> str:

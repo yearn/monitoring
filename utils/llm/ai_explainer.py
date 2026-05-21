@@ -7,6 +7,8 @@ transactions (timelocks and Safe multisigs).
 
 from dataclasses import dataclass
 
+from eth_utils import to_checksum_address
+
 from utils.calldata.decoder import DecodedCall, decode_calldata
 from utils.impl_diff import diff_implementations, format_impl_diff
 from utils.llm import get_llm_provider
@@ -15,7 +17,7 @@ from utils.logging import get_logger
 from utils.on_chain_state import StateRead, format_state_reads, read_before_state
 from utils.paste import upload_to_paste
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
-from utils.source_context import SourceContext, format_source_context, get_source_context
+from utils.source_context import SourceContext, format_source_context, get_contract_label, get_source_context
 from utils.telegram import escape_markdown
 from utils.tenderly.simulation import SimulationResult, simulate_transaction
 
@@ -23,12 +25,14 @@ logger = get_logger("utils.llm.ai_explainer")
 
 SYSTEM_PROMPT = """You are a DeFi risk analyst writing alerts for a monitoring team. Output two sections.
 
-TLDR: ≤25 words. Start with a verb describing the effect. Do NOT open with
-"This transaction", "The proposal", or similar — the reader already knows
-what kind of tx this is. End with a risk tag in caps: LOW / MEDIUM / HIGH / CRITICAL.
+TLDR: 2-4 short sentences. Cover [what changed] · [magnitude or impact] · [risk tag].
+Start with a verb describing the effect. Do NOT open with "This transaction", "The proposal",
+or similar — the reader already knows what kind of tx this is.
+End with a risk tag in caps: LOW / MEDIUM / HIGH / CRITICAL.
 
 Good example: "Lowers swap fee 30→25 bps on USDC/USDT pool. Marginal LP revenue cut. LOW."
-Bad example:  "This governance transaction adjusts the swap fee parameter on the USDC/USDT pool from 30 basis points to 25 basis points, which slightly reduces revenue for liquidity providers. Risk is LOW."
+Bad (too terse, drops impact): "Adds farm. LOW."
+Bad (preamble + run-on): "This governance transaction adjusts the swap fee parameter on the USDC/USDT pool from 30 basis points to 25 basis points, which slightly reduces revenue for liquidity providers. Risk is LOW."
 
 DETAIL: thorough analysis covering:
 - What each call does and why
@@ -61,7 +65,8 @@ Check the draft above against this checklist. Each item is a yes/no question:
 
 1. Does the TLDR start with a verb (NOT "This transaction" / "The proposal" /
    "The transaction" / "This governance")?
-2. Is the TLDR ≤25 words?
+2. Is the TLDR 2-4 short sentences? (Single-sentence TLDRs
+   that omit the impact/magnitude beat are too terse — flag for revision.)
 3. Does the TLDR end with a risk tag in CAPS (LOW / MEDIUM / HIGH / CRITICAL)?
 4. Are all numeric magnitudes/units in the draft supported by either the
    Contract Source Context section or the Current State section above? Or
@@ -209,13 +214,98 @@ def _get_proxy_upgrade_info(calldata: str, target: str, chain_id: int) -> str:
     return info
 
 
-def _format_decoded_calls(calls: list[DecodedCall]) -> str:
-    """Format decoded calls into a readable string for the LLM prompt."""
+def _checksum_or_none(addr: str) -> str | None:
+    """Return checksummed address or None if `addr` isn't a parseable hex address."""
+    if not isinstance(addr, str) or not addr.startswith("0x"):
+        return None
+    try:
+        return to_checksum_address(addr)
+    except ValueError:
+        return None
+
+
+def _annotate_address(addr: str, labels: dict[str, str]) -> str:
+    """Render a single address with an optional `(ContractName)` suffix."""
+    checksum = _checksum_or_none(addr)
+    if checksum is None:
+        return str(addr)
+    label = labels.get(checksum)
+    return f"{checksum} ({label})" if label else checksum
+
+
+def _extract_address_args(decoded: DecodedCall) -> list[str]:
+    """All address-typed argument values (scalars and arrays) for one decoded call."""
+    out: list[str] = []
+    for type_str, value in decoded.params:
+        if type_str == "address" and isinstance(value, str):
+            out.append(value)
+        elif type_str.startswith("address[") and isinstance(value, (list, tuple)):
+            out.extend(v for v in value if isinstance(v, str))
+    return out
+
+
+def _collect_address_labels(
+    targets_and_calls: list[tuple[str, DecodedCall]],
+    chain_id: int,
+) -> dict[str, str]:
+    """Look up `{checksum_address: contract_name}` for every address-typed argument.
+
+    Skips each call's own target — its name is already surfaced via Contract
+    Source Context. Best-effort: any lookup failure is silently dropped.
+    """
+    target_lower = {tgt.lower() for tgt, _ in targets_and_calls if tgt}
+    seen: set[str] = set()
+    labels: dict[str, str] = {}
+
+    for _, decoded in targets_and_calls:
+        for raw in _extract_address_args(decoded):
+            addr_lower = raw.lower()
+            if addr_lower in seen:
+                continue
+            seen.add(addr_lower)
+            if addr_lower in target_lower:
+                continue
+            # Skip malformed / zero addresses — no point asking Etherscan.
+            if len(addr_lower) != 42 or int(addr_lower, 16) == 0:
+                continue
+            checksum = _checksum_or_none(raw)
+            if checksum is None:
+                continue
+            try:
+                label = get_contract_label(chain_id, checksum)
+            except Exception as e:  # noqa: BLE001 - best-effort enrichment
+                logger.info("Contract label fetch failed for %s: %s", checksum, e)
+                continue
+            if label:
+                labels[checksum] = label
+    return labels
+
+
+def _format_decoded_calls(
+    calls: list[DecodedCall],
+    address_labels: dict[str, str] | None = None,
+) -> str:
+    """Format decoded calls into a readable string for the LLM prompt.
+
+    When ``address_labels`` is provided, address arguments (including elements
+    of ``address[]``) are annotated with their contract name so the LLM can
+    refer to "MorphoFarm" instead of "0xac21...".
+    """
+    labels = address_labels or {}
     parts: list[str] = []
     for i, call in enumerate(calls):
         lines = [f"Call {i + 1}: {call.signature}"]
         for type_str, value in call.params:
-            lines.append(f"  {type_str}: {value}")
+            if type_str == "address":
+                lines.append(f"  {type_str}: {_annotate_address(value, labels)}")
+            elif type_str.startswith("address[") and isinstance(value, (list, tuple)):
+                if not value:
+                    lines.append(f"  {type_str}: []")
+                else:
+                    lines.append(f"  {type_str}:")
+                    lines.extend(f"    - {_annotate_address(v, labels)}" for v in value)
+            else:
+                lines.append(f"  {type_str}: {value}")
         parts.append("\n".join(lines))
     return "\n\n".join(parts)
 
@@ -266,6 +356,7 @@ def _build_prompt(
     source_contexts: list[SourceContext] | None = None,
     context_note: str = "",
     state_reads: list[tuple[str, list[StateRead]]] | None = None,
+    address_labels: dict[str, str] | None = None,
 ) -> str:
     """Build the full prompt for the LLM."""
     parts: list[str] = [SYSTEM_PROMPT, ""]
@@ -281,7 +372,7 @@ def _build_prompt(
     if context_note:
         parts.append(f"\n--- Execution Context ---\n{context_note}")
 
-    parts.append(f"\n--- Decoded Calldata ---\n{_format_decoded_calls(decoded_calls)}")
+    parts.append(f"\n--- Decoded Calldata ---\n{_format_decoded_calls(decoded_calls, address_labels)}")
 
     constants_note = _format_batch_param_constants(decoded_calls)
     if constants_note:
@@ -439,6 +530,7 @@ def explain_transaction(
     proxy_upgrade_info = _get_proxy_upgrade_info(calldata, target, chain_id)
     source_contexts = _collect_source_contexts([(target, decoded)], chain_id)
     state_reads = _collect_state_reads([(target, decoded)], chain_id)
+    address_labels = _collect_address_labels([(target, decoded)], chain_id)
 
     simulation: SimulationResult | None = None
     if not skip_simulation:
@@ -451,6 +543,13 @@ def explain_transaction(
         )
         if simulation:
             logger.info("Simulation completed: success=%s gas=%s", simulation.success, simulation.gas_used)
+            if not simulation.success:
+                # Tenderly often misreports legitimate governance calls as reverting
+                # (wrong msg.sender, missing storage overrides). Including a failed
+                # sim in the prompt biases the LLM toward "this tx will revert"
+                # and inflates risk — drop it so the LLM works from calldata only.
+                logger.warning("Simulation reported failure (%s); omitting from prompt", simulation.error_message)
+                simulation = None
         else:
             logger.info("Simulation unavailable, proceeding with decoded calldata only")
 
@@ -465,6 +564,7 @@ def explain_transaction(
         source_contexts=source_contexts,
         context_note=context_note,
         state_reads=state_reads,
+        address_labels=address_labels,
     )
     logger.info("Full AI context for %s:\n%s", target, prompt)
 
@@ -542,7 +642,12 @@ def explain_batch_transaction(
     if not decoded_calls:
         return None
 
-    simulation = next((s for s in simulations if s is not None), None)
+    # Prefer a successful sim; if every inner call failed in Tenderly, drop the
+    # sim section entirely rather than feeding the LLM "FAILED" + a misleading
+    # revert reason from a sim that probably just couldn't model the real call.
+    simulation = next((s for s in simulations if s is not None and s.success), None)
+    if simulation is None and any(s is not None and not s.success for s in simulations):
+        logger.warning("All batch simulations reported failure; omitting from prompt")
 
     upgrade_parts: list[str] = []
     for call in calls:
@@ -553,6 +658,7 @@ def explain_batch_transaction(
 
     source_contexts = _collect_source_contexts(decoded_with_target, chain_id)
     state_reads = _collect_state_reads(decoded_with_target, chain_id)
+    address_labels = _collect_address_labels(decoded_with_target, chain_id)
 
     targets = ", ".join(c.get("target", "?") for c in calls)
     total_value = sum(int(c.get("value", "0")) for c in calls)
@@ -568,6 +674,7 @@ def explain_batch_transaction(
         source_contexts=source_contexts,
         context_note=context_note,
         state_reads=state_reads,
+        address_labels=address_labels,
     )
     logger.info("Full AI context for batch (%s calls):\n%s", len(calls), prompt)
 

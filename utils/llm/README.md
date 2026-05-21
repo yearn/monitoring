@@ -121,7 +121,7 @@ The structural diff is injected into the prompt under `--- Implementation Diff -
 
 The prompt is built from all available context. The system prompt enforces brevity:
 
-- TLDR ≤25 words, starts with a verb, no "This transaction…" preamble
+- Starts with a verb, no "This transaction…" preamble
 - Trailing risk tag in caps (LOW / MEDIUM / HIGH / CRITICAL)
 - Refuses to assume parameter units from function name alone
 - Trusts source-context natspec over prior assumptions
@@ -182,7 +182,7 @@ The full prompt is logged at INFO level for debugging.
 
 ### 7. Optional Refine Pass
 
-When `refine=True` is passed to `explain_transaction` / `explain_batch_transaction`, a second LLM call critiques the draft against a checklist (verb-leading TLDR, ≤25 words, supported units, risk-magnitude consistency) and revises only if it finds concrete issues. Hard rules forbid introducing new unit assumptions, removing hedges, escalating LOW out of caution, or style-only churn. Falls back to the draft on `PASS`, on any `LLMError`, or on an empty revision.
+When `refine=True` is passed to `explain_transaction` / `explain_batch_transaction`, a second LLM call critiques the draft against a checklist (verb-leading TLDR, supported units, risk-magnitude consistency) and revises only if it finds concrete issues. Hard rules forbid introducing new unit assumptions, removing hedges, escalating LOW out of caution, or style-only churn. Falls back to the draft on `PASS`, on any `LLMError`, or on an empty revision.
 
 Cost: ~2× LLM calls per alert when enabled. Default is **off**.
 

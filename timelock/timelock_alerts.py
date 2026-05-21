@@ -14,12 +14,14 @@ from dotenv import load_dotenv
 from eth_utils import to_checksum_address
 
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
-from utils.calldata.decoder import format_call_lines
+from utils.calldata.decoder import decode_calldata, format_call_lines
 from utils.chains import EXPLORER_URLS, Chain
 from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
 from utils.logging import get_logger
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
+from utils.safe_tx import unwrap_safe_exec_transaction
 from utils.telegram import MAX_MESSAGE_LENGTH, send_telegram_message
+from utils.web3_wrapper import ChainManager
 
 load_dotenv()
 
@@ -249,9 +251,78 @@ def _build_call_info(event: dict, explorer: str | None, show_index: bool, chain_
     return lines
 
 
+def _maple_proposal_calls(event: dict, chain_id: int) -> list[dict[str, str]] | None:
+    """Recover the inner (target, data) pairs from a Maple ProposalScheduled event.
+
+    The GovernorTimelock only stores a hash of the proposal calls on-chain, so the
+    ProposalScheduled event itself has no target/data. The actual payload lives in
+    the transaction that emitted the event — typically a Safe execTransaction wrapping
+    a scheduleProposals(address[], bytes[]) call into the GovernorTimelock.
+
+    Returns None if the tx can't be fetched or doesn't match the expected shape.
+    """
+    tx_hash = event.get("transactionHash")
+    if not tx_hash:
+        return None
+
+    try:
+        chain = Chain.from_chain_id(chain_id)
+        client = ChainManager.get_client(chain)
+        tx = client.eth.get_transaction(tx_hash)
+    except Exception as e:  # noqa: BLE001
+        _logger.info("Failed to fetch Maple proposal tx %s: %s", tx_hash, e)
+        return None
+
+    raw_input = tx.get("input")
+    input_hex = raw_input.hex() if isinstance(raw_input, bytes) else str(raw_input or "")
+    if input_hex and not input_hex.startswith("0x"):
+        input_hex = "0x" + input_hex
+
+    # Unwrap one layer of Safe execTransaction if present; otherwise decode directly.
+    inner = unwrap_safe_exec_transaction(input_hex)
+    inner_data = inner.data if inner else input_hex
+    if not inner_data or len(inner_data) < 10:
+        return None
+
+    decoded = decode_calldata(inner_data)
+    if not decoded or len(decoded.params) < 2:
+        return None
+
+    # Expect scheduleProposals(address[] targets, bytes[] data). Some Maple proposal
+    # paths (proposeRoleUpdates etc.) don't carry concrete (target, data) tuples we
+    # can hand to the explainer — bail out cleanly for those.
+    targets_type, targets = decoded.params[0]
+    data_type, datas = decoded.params[1]
+    if targets_type != "address[]" or data_type != "bytes[]" or len(targets) != len(datas):
+        return None
+
+    def _to_hex(d: object) -> str:
+        if isinstance(d, bytes):
+            return "0x" + d.hex()
+        s = str(d)
+        return s if s.startswith("0x") else "0x" + s
+
+    return [{"target": str(t), "data": _to_hex(d), "value": "0"} for t, d in zip(targets, datas)]
+
+
 def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain_id: int) -> str | None:
     """Generate AI explanation for timelock events. Returns None on any failure."""
     try:
+        # Maple's ProposalScheduled event only carries an opaque proposalId — the
+        # targets/data must be recovered from the originating transaction.
+        if events and events[0].get("timelockType") == "Maple":
+            calls = _maple_proposal_calls(events[0], chain_id)
+            if not calls:
+                return None
+            return explain_batch_transaction(
+                calls=calls,
+                chain_id=chain_id,
+                protocol=timelock_info.protocol,
+                label=timelock_info.label,
+                from_address=timelock_info.address,
+                refine=True,
+            )
+
         calls_with_data = [e for e in events if e.get("target") and e.get("data") and len(e.get("data", "")) >= 10]
         if not calls_with_data:
             return None

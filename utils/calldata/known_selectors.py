@@ -38,6 +38,11 @@ KNOWN_SELECTORS: dict[str, str] = {
     "0xddf0b009": "queue(uint256)",
     "0xfe0d94c1": "execute(uint256)",
     "0xbb913f41": "_setImplementation(address)",
+    # Maple GovernorTimelock
+    "0xd9ab9270": "scheduleProposals(address[],bytes[])",
+    "0x2d6e853c": "proposeRoleUpdates(bytes32[],address[],bool[])",
+    # Safe (Gnosis)
+    "0x6a761202": "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)",
     # Compound Comptroller
     "0xa76b3fda": "_supportMarket(address)",
     "0x55ee1fe1": "_setPriceOracle(address)",
