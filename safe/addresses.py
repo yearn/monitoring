@@ -75,12 +75,12 @@ ALL_SAFE_ADDRESSES = [
         "0xb7cB7131FFc18f87eEc66991BECD18f2FF70d2af",
         "LBTC boring vault big boss",
     ],  # LBTC boring vault big boss
-    # [
-    #     "LRT",
-    #     "base-main",
-    #     "0x92A19381444A001d62cE67BaFF066fA1111d7202",
-    #     "Origin admin multisig. Markets used on Base",
-    # ],  # origin admin
+    [
+        "LRT",
+        "base-main",
+        "0x92A19381444A001d62cE67BaFF066fA1111d7202",
+        "Origin admin multisig. Markets used on Base",
+    ],  # origin admin
     [
         "LRT",
         "mainnet",
@@ -123,11 +123,6 @@ ALL_SAFE_ADDRESSES = [
     #     "0x80608f852D152024c0a2087b16939235fEc2400c",
     #     "Infinifi Team Multisig",
     # ],
-    # no active stargate strategies
-    # ["STARGATE", "mainnet", "0x65bb797c2B9830d891D87288F029ed8dACc19705"],
-    # ["STARGATE", "polygon-main", "0x47290DE56E71DC6f46C26e50776fe86cc8b21656"],
-    # ["STARGATE", "optimism-main", "0x392AC17A9028515a3bFA6CCe51F8b70306C6bd43"],
-    # ["STARGATE", "arbitrum-main", "0x9CD50907aeb5D16F29Bddf7e1aBb10018Ee8717d"],
 ]
 
 # Yearn-controlled multisigs. Source:
@@ -141,9 +136,6 @@ YEARN_MULTISIGS: list[list[str]] = [
     ["YEARN_MS", "base-main", "0x01fE3347316b2223961B20689C65eaeA71348e93", "Strategist Multisig (base)"],
     ["YEARN_MS", "katana-main", "0xBe7c7efc1ef3245d37E3157F76A512108D6D7aE6", "Strategist Multisig (katana)"],
     ["YEARN_MS", "mainnet", "0x846e211e8ba920B353FB717631C015cf04061Cc9", "Core Dev Multisig (dev.ychad.eth)"],
-    ["YEARN_MS", "mainnet", "0x33333333D5eFb92f19a5F94a43456b3cec2797AE", "V3 Deployer Multisig (mainnet)"],
-    ["YEARN_MS", "base-main", "0x33333333D5eFb92f19a5F94a43456b3cec2797AE", "V3 Deployer Multisig (base)"],
-    ["YEARN_MS", "katana-main", "0x33333333D5eFb92f19a5F94a43456b3cec2797AE", "V3 Deployer Multisig (katana)"],
     ["YEARN_MS", "mainnet", "0xe5e2Baf96198c56380dDD5E992D7d1ADa0e989c0", "SAM Multisig (mainnet)"],
     ["YEARN_MS", "base-main", "0xFEaE2F855250c36A77b8C68dB07C4dD9711fE36F", "SAM Multisig (base)"],
     ["YEARN_MS", "katana-main", "0x518C21DC88D9780c0A1Be566433c571461A70149", "SAM Multisig (katana)"],
@@ -185,16 +177,6 @@ YEARN_EXPECTED_PROPOSERS: dict[tuple[str, str], set[str]] = {
     ("katana-main", "0xbe7c7efc1ef3245d37e3157f76a512108d6d7ae6"): {
         "0x1b5f15dcb82d25f91c65b53cee151e8b9fbdd271",
     },
-    # V3 Deployer (same address on every chain; per-chain proposer sets vary)
-    ("mainnet", "0x33333333d5efb92f19a5f94a43456b3cec2797ae"): {
-        "0xa05c4256ff0dd38697e63d48df146e6e2fe7fe4a",
-        "0xd7392bcc3d3611adf1793fddaaab4770772ac35a",
-    },
-    ("base-main", "0x33333333d5efb92f19a5f94a43456b3cec2797ae"): {
-        "0x623d4a04e19328244924d1dee48252987c02fc0a",
-        "0xd7392bcc3d3611adf1793fddaaab4770772ac35a",
-    },
-    # V3 Deployer katana: insufficient historic proposer data — no filter.
     # SAM Multisig (same bot every chain)
     ("mainnet", "0xe5e2baf96198c56380ddd5e992d7d1ada0e989c0"): {
         "0x80a3887ba60f76acab48ee4aead0a71a0774a8b2",
