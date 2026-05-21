@@ -40,7 +40,6 @@ DEFAULT_LARGE_TRANSFER_THRESHOLD = 5_000_000.0
 TOKEN_ROUTE: dict[tuple[str, str], tuple[str, str]] = {
     ("ethereum", "0xcccc62962d17b8914c62d74ffb843d73b2a3cccc"): ("cUSD", "cap"),
     ("ethereum", "0x48f9e38f3070ad8945dfeae3fa70987722e3d89c"): ("iUSD", "infinifi"),
-    ("arbitrum", "0x0a1a1a107e45b7ced86833863f482bc5f4ed82ef"): ("USDai", "usdai"),
 }
 
 CHAIN_TX_EXPLORER: dict[str, str] = {
@@ -89,6 +88,17 @@ def _build_row_line(row: dict[str, Any]) -> str:
     tx_hash = _as_str(row.get("tx_hash"))
     link = _tx_link(chain, tx_hash)
     return f"- {symbol} on {chain}: amount={amount}, amount_usd={amount_usd}, tx={link}"
+
+
+def _build_protocol_lines(protocol_rows: list[dict[str, Any]], query_id: int) -> list[str]:
+    included_rows = protocol_rows[:MAX_ROWS_PER_PROTOCOL_ALERT]
+    lines = [_build_row_line(row) for row in included_rows]
+
+    omitted_count = len(protocol_rows) - len(included_rows)
+    if omitted_count > 0:
+        lines.append(f"- +{omitted_count} more not shown -- see Dune query {query_id} directly")
+
+    return lines
 
 
 def _group_rows_by_protocol(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -184,13 +194,12 @@ def main() -> None:
         if route is None:
             continue
         first_symbol, _ = route
-        included_rows = protocol_rows[:MAX_ROWS_PER_PROTOCOL_ALERT]
-        lines = [_build_row_line(row) for row in included_rows]
+        lines = _build_protocol_lines(protocol_rows, query_id)
         message = (
             f"*Dune Large Transfer Alert ({first_symbol}/{protocol})*\n\n"
             f"Query ID: {query_id}\n"
             f"Matched rows: {total_rows}\n"
-            f"Included in this alert: {len(included_rows)}\n\n" + "\n".join(lines)
+            f"Included in this alert: {min(len(protocol_rows), MAX_ROWS_PER_PROTOCOL_ALERT)}\n\n" + "\n".join(lines)
         )
         send_alert(Alert(AlertSeverity.HIGH, message, protocol), plain_text=True)
 

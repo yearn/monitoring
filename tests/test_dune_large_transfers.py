@@ -18,7 +18,7 @@ def _row(**overrides):
 
 
 def test_row_key_excludes_colon_timestamp_from_cache_value():
-    key = monitor._row_key(_row(block_time="2026-05-12 14:30:00.000 UTC"))
+    key = monitor._row_key(_row(block_time="2026-05-12 14:30:00.000 UTC", log_index=None))
 
     assert ":" not in key
     assert key == "0xabc|0xcccc62962d17b8914c62d74ffb843d73b2a3cccc"
@@ -36,6 +36,16 @@ def test_route_for_row_returns_protocol_for_known_token():
 
 def test_route_for_row_skips_unknown_token_instead_of_stables_fallback():
     row = _row(contract_address="0x0000000000000000000000000000000000000000")
+
+    assert monitor._route_for_row(row) is None
+
+
+def test_route_for_row_skips_usdai():
+    row = _row(
+        blockchain="arbitrum",
+        contract_address="0x0a1a1a107e45b7ced86833863f482bc5f4ed82ef",
+        symbol="USDai",
+    )
 
     assert monitor._route_for_row(row) is None
 
@@ -61,3 +71,12 @@ def test_sort_rows_newest_first_defends_dedup_order():
     older = _row(tx_hash="0xold", block_time="2026-05-12 14:00:00.000 UTC")
 
     assert monitor._sort_rows_newest_first([older, newest]) == [newest, older]
+
+
+def test_build_protocol_lines_appends_truncation_notice():
+    rows = [_row(tx_hash=f"0x{i}") for i in range(monitor.MAX_ROWS_PER_PROTOCOL_ALERT + 2)]
+
+    lines = monitor._build_protocol_lines(rows, query_id=1234567)
+
+    assert len(lines) == monitor.MAX_ROWS_PER_PROTOCOL_ALERT + 1
+    assert lines[-1] == "- +2 more not shown -- see Dune query 1234567 directly"
