@@ -5,6 +5,13 @@ import time
 import requests
 from dotenv import load_dotenv
 
+from safe.addresses import (
+    ALL_SAFE_ADDRESSES,
+    PROXY_UPGRADE_SIGNATURES,
+    YEARN_EXPECTED_PROPOSERS,
+    safe_address_network_prefix,
+    safe_apis,
+)
 from safe.multisend import build_context_note, extract_inner_calls, safe_utility_label
 from safe.specific import handle_pendle
 from utils.cache import (
@@ -28,130 +35,6 @@ _api_keys: list[str] = [k for k in [os.getenv("SAFE_API_KEY"), os.getenv("SAFE_A
 if not _api_keys:
     raise ValueError("At least one SAFE_API_KEY must be set.")
 _api_key_cycle = itertools.cycle(_api_keys)
-
-safe_address_network_prefix = {
-    "mainnet": "eth",
-    "arbitrum-main": "arb1",
-    "optimism-main": "oeth",
-    "polygon-main": "matic",
-    "optim-yearn": "oeth",
-    "base-main": "base",
-}
-
-safe_apis = {
-    "mainnet": "https://api.safe.global/tx-service/eth",
-    "arbitrum-main": "https://api.safe.global/tx-service/arb1",
-    "optimism-main": "https://api.safe.global/tx-service/oeth",
-    "polygon-main": "https://api.safe.global/tx-service/pol",
-    "base-main": "https://api.safe.global/tx-service/base",
-    # "optim-yearn": "https://safe-transaction-optimism.safe.global",
-}
-
-PROXY_UPGRADE_SIGNATURES = [
-    # Standard Proxy (OpenZeppelin, UUPS, Transparent)
-    "3659cfe6",  # bytes4(keccak256("upgradeTo(address)"))
-    "4f1ef286",  # upgradeToAndCall(address,bytes)
-    "f2fde38b",  # changeProxyAdmin(address,address)
-    # Diamond Proxy (EIP-2535)
-    "1f931c1c",  # diamondCut((address,uint8,bytes4[])[],address,bytes)
-]
-
-# combined addresses, add more addresses if needed, last item is optional for additional info message
-ALL_SAFE_ADDRESSES = [
-    [
-        "LIDO",
-        "mainnet",
-        "0x73b047fe6337183A454c5217241D780a932777bD",
-    ],  # https://docs.lido.fi/multisigs/emergency-brakes/#12-emergency-brakes-ethereum
-    [
-        "LIDO",
-        "mainnet",
-        "0x8772E3a2D86B9347A2688f9bc1808A6d8917760C",
-    ],  # https://docs.lido.fi/multisigs/emergency-brakes/#11-gateseal-committee -> expires on 1 April 2025.
-    ["PENDLE", "mainnet", "0x8119EC16F0573B7dAc7C0CB94EB504FB32456ee1"],
-    ["PENDLE", "arbitrum-main", "0x7877AdFaDEd756f3248a0EBfe8Ac2E2eF87b75Ac"],
-    ["EULER", "mainnet", "0xcAD001c30E96765aC90307669d578219D4fb1DCe"],
-    [
-        "AAVE",
-        "mainnet",
-        "0x2CFe3ec4d5a6811f4B8067F0DE7e47DfA938Aa30",
-    ],  # aave Protocol Guardian Safe: https://app.aave.com/governance/v3/proposal/?proposalId=184
-    ["AAVE", "polygon-main", "0xCb45E82419baeBCC9bA8b1e5c7858e48A3B26Ea6"],
-    ["AAVE", "arbitrum-main", "0xCb45E82419baeBCC9bA8b1e5c7858e48A3B26Ea6"],
-    [
-        "AAVE",
-        "mainnet",
-        "0xCe52ab41C40575B072A18C9700091Ccbe4A06710",
-    ],  # aave Governance Guardian Safe
-    ["AAVE", "polygon-main", "0x1A0581dd5C7C3DA4Ba1CDa7e0BcA7286afc4973b"],
-    ["AAVE", "arbitrum-main", "0x1A0581dd5C7C3DA4Ba1CDa7e0BcA7286afc4973b"],
-    [
-        "MORPHO",
-        "mainnet",
-        "0x84258B3C495d8e9b10D0d4A7867392F149Da4274",
-        "Morpho eUSDe predeposit vault owner",
-    ],  # eUSDe predeposit vault owner, token used by DAI vault on morpho
-    [
-        "LRT",
-        "mainnet",
-        "0xb7cB7131FFc18f87eEc66991BECD18f2FF70d2af",
-        "LBTC boring vault big boss",
-    ],  # LBTC boring vault big boss
-    # [
-    #     "LRT",
-    #     "base-main",
-    #     "0x92A19381444A001d62cE67BaFF066fA1111d7202",
-    #     "Origin admin multisig. Markets used on Base",
-    # ],  # origin admin
-    [
-        "LRT",
-        "mainnet",
-        "0x9F6e831c8F8939DC0C830C6e492e7cEf4f9C2F5f",
-        "tBTC bridge owner multisig. aka, Council Multisig",
-    ],  # tBTC bridge owner multisig (Council Multisig)
-    [
-        "USDAI",
-        "arbitrum-main",
-        "0xF223F8d92465CfC303B3395fA3A25bfaE02AED51",
-        "USDai Admin Safe",
-    ],
-    [
-        "USDAI",
-        "arbitrum-main",
-        "0x783B08aA21DE056717173f72E04Be0E91328A07b",
-        "sUSDai Admin Safe",
-    ],
-    [
-        "CAP MONEY",
-        "mainnet",
-        "0xb8FC49402dF3ee4f8587268FB89fda4d621a8793",
-        "Cap Money Multisig",
-    ],
-    [
-        "MAPLE",
-        "mainnet",
-        "0xd6d4Bcde6c816F17889f1Dd3000aF0261B03a196",
-        "Maple DAO Multisig (syrupUSDC)",
-    ],
-    [
-        "STRATA",
-        "mainnet",
-        "0xA27cA9292268ee0f0258B749f1D5740c9Bb68B50",
-        "Strata Admin Multisig (3/4)",
-    ],
-    # [
-    #     "INFINIFI",
-    #     "mainnet",
-    #     "0x80608f852D152024c0a2087b16939235fEc2400c",
-    #     "Infinifi Team Multisig",
-    # ],
-    # no active stargate strategies
-    # ["STARGATE", "mainnet", "0x65bb797c2B9830d891D87288F029ed8dACc19705"],
-    # ["STARGATE", "polygon-main", "0x47290DE56E71DC6f46C26e50776fe86cc8b21656"],
-    # ["STARGATE", "optimism-main", "0x392AC17A9028515a3bFA6CCe51F8b70306C6bd43"],
-    # ["STARGATE", "arbitrum-main", "0x9CD50907aeb5D16F29Bddf7e1aBb10018Ee8717d"],
-    # TEST: yearn ms in mainnet 0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52
-]
 
 
 def get_safe_transactions(
@@ -274,6 +157,7 @@ def _explain_safe_tx(
 
 def check_for_pending_transactions(safe_address: str, network_name: str, protocol: str) -> None:
     pending_transactions = get_pending_transactions(safe_address, network_name)
+    expected_proposers = YEARN_EXPECTED_PROPOSERS.get((network_name, safe_address.lower()))
 
     if pending_transactions:
         for tx in pending_transactions:
@@ -284,6 +168,18 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
             if protocol == "EULER" and target_contract != "0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9":
                 # send message for txs that target only vaults that we use in our strategies
                 continue
+
+            if expected_proposers:
+                tx_proposer = (tx.get("proposer") or "").lower()
+                if tx_proposer in expected_proposers:
+                    logger.info(
+                        "Skipping nonce %s on %s — proposed by expected address %s",
+                        nonce,
+                        safe_address,
+                        tx_proposer,
+                    )
+                    write_last_executed_nonce_to_file(safe_address, nonce)
+                    continue
 
             message = (
                 "🚨 QUEUED TX DETECTED 🚨\n"
