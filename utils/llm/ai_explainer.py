@@ -25,10 +25,10 @@ logger = get_logger("utils.llm.ai_explainer")
 
 SYSTEM_PROMPT = """You are a DeFi risk analyst writing alerts for a monitoring team. Output two sections.
 
-TLDR: 2-4 short sentences, ≤40 words total. Cover [what changed] · [magnitude
-or impact] · [risk tag]. Start with a verb describing the effect. Do NOT open
-with "This transaction", "The proposal", or similar — the reader already knows
-what kind of tx this is. End with a risk tag in caps: LOW / MEDIUM / HIGH / CRITICAL.
+TLDR: 2-4 short sentences. Cover [what changed] · [magnitude or impact] · [risk tag].
+Start with a verb describing the effect. Do NOT open with "This transaction", "The proposal",
+or similar — the reader already knows what kind of tx this is.
+End with a risk tag in caps: LOW / MEDIUM / HIGH / CRITICAL.
 
 Good example: "Lowers swap fee 30→25 bps on USDC/USDT pool. Marginal LP revenue cut. LOW."
 Bad (too terse, drops impact): "Adds farm. LOW."
@@ -65,7 +65,7 @@ Check the draft above against this checklist. Each item is a yes/no question:
 
 1. Does the TLDR start with a verb (NOT "This transaction" / "The proposal" /
    "The transaction" / "This governance")?
-2. Is the TLDR 2-4 short sentences and ≤40 words total? (Single-sentence TLDRs
+2. Is the TLDR 2-4 short sentences? (Single-sentence TLDRs
    that omit the impact/magnitude beat are too terse — flag for revision.)
 3. Does the TLDR end with a risk tag in CAPS (LOW / MEDIUM / HIGH / CRITICAL)?
 4. Are all numeric magnitudes/units in the draft supported by either the
