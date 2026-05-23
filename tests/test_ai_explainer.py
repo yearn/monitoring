@@ -539,6 +539,56 @@ class TestFailedSimulationDropped(unittest.TestCase):
         self.assertNotIn("FAILED", prompt)
 
 
+class TestNestedBytesDecoding(unittest.TestCase):
+    """`bytes` arguments that hold inner calldata are recursively decoded."""
+
+    def test_inner_call_rendered_as_nested(self) -> None:
+        from utils.llm.ai_explainer import _format_decoded_calls
+
+        # `0x8456cb59` is pause() — a known selector, always decodes.
+        inner_payload = "0x8456cb59"
+        outer = DecodedCall(
+            function_name="upgradeToAndCall",
+            signature="upgradeToAndCall(address,bytes)",
+            params=[
+                ("address", "0x" + "ab" * 20),
+                ("bytes", inner_payload),
+            ],
+        )
+        result = _format_decoded_calls([outer])
+        self.assertIn("bytes: ↳", result)
+        self.assertIn("pause()", result)
+
+    def test_undecodable_bytes_falls_back_to_raw(self) -> None:
+        from utils.llm.ai_explainer import _format_decoded_calls
+
+        garbage = "0xdeadbeefcafebabe"  # not a known selector, Sourcify miss in test env
+        outer = DecodedCall(
+            function_name="initialize",
+            signature="initialize(bytes)",
+            params=[("bytes", garbage)],
+        )
+        with patch("utils.llm.ai_explainer.decode_calldata", return_value=None):
+            result = _format_decoded_calls([outer])
+        self.assertIn(f"bytes: {garbage}", result)
+
+    def test_recursion_depth_capped(self) -> None:
+        from utils.llm.ai_explainer import _MAX_BYTES_RECURSION_DEPTH, _format_decoded_calls
+
+        # Build a call where decode_calldata always returns a call with one
+        # bytes param pointing back at itself. Without the cap this would
+        # recurse forever.
+        self_referential = DecodedCall(
+            function_name="wrap",
+            signature="wrap(bytes)",
+            params=[("bytes", "0xfeedfacefeedfacefeedfacefeedfacefeedface")],
+        )
+        with patch("utils.llm.ai_explainer.decode_calldata", return_value=self_referential):
+            result = _format_decoded_calls([self_referential])
+        # Should expand exactly _MAX_BYTES_RECURSION_DEPTH times then bail.
+        self.assertEqual(result.count("↳"), _MAX_BYTES_RECURSION_DEPTH)
+
+
 class TestAddressLabels(unittest.TestCase):
     """Tests for address-argument annotation in the LLM prompt."""
 

@@ -281,31 +281,68 @@ def _collect_address_labels(
     return labels
 
 
+_MAX_BYTES_RECURSION_DEPTH = 2
+
+
+def _try_decode_inner_bytes(value: object) -> DecodedCall | None:
+    """If ``value`` looks like calldata for a known function, decode it."""
+    if isinstance(value, bytes):
+        if len(value) < 4:
+            return None
+        hex_str = "0x" + value.hex()
+    elif isinstance(value, str):
+        hex_str = value if value.startswith("0x") else "0x" + value
+        if len(hex_str) < 10:
+            return None
+    else:
+        return None
+    try:
+        return decode_calldata(hex_str)
+    except Exception:  # noqa: BLE001 - any decoder error -> treat as opaque
+        return None
+
+
 def _format_decoded_calls(
     calls: list[DecodedCall],
     address_labels: dict[str, str] | None = None,
+    _depth: int = 0,
+    _indent: str = "  ",
 ) -> str:
     """Format decoded calls into a readable string for the LLM prompt.
 
     When ``address_labels`` is provided, address arguments (including elements
     of ``address[]``) are annotated with their contract name so the LLM can
     refer to "MorphoFarm" instead of "0xac21...".
+
+    ``bytes`` parameters that themselves contain a known function call (e.g.
+    ``upgradeToAndCall``'s init payload, governor ``execute(target,data)``
+    wrappers) are recursively decoded one level deep so the LLM sees the
+    nested call instead of opaque hex. ``_depth`` and ``_indent`` are
+    internal recursion-control parameters; callers should leave them alone.
     """
     labels = address_labels or {}
     parts: list[str] = []
+    nested_indent = _indent + "    "
     for i, call in enumerate(calls):
-        lines = [f"Call {i + 1}: {call.signature}"]
+        lines = [f"{_indent}Call {i + 1}: {call.signature}"] if _depth else [f"Call {i + 1}: {call.signature}"]
         for type_str, value in call.params:
             if type_str == "address":
-                lines.append(f"  {type_str}: {_annotate_address(value, labels)}")
+                lines.append(f"{_indent}  {type_str}: {_annotate_address(value, labels)}")
             elif type_str.startswith("address[") and isinstance(value, (list, tuple)):
                 if not value:
-                    lines.append(f"  {type_str}: []")
+                    lines.append(f"{_indent}  {type_str}: []")
                 else:
-                    lines.append(f"  {type_str}:")
-                    lines.extend(f"    - {_annotate_address(v, labels)}" for v in value)
+                    lines.append(f"{_indent}  {type_str}:")
+                    lines.extend(f"{_indent}    - {_annotate_address(v, labels)}" for v in value)
+            elif type_str == "bytes" and _depth < _MAX_BYTES_RECURSION_DEPTH:
+                inner = _try_decode_inner_bytes(value)
+                if inner:
+                    lines.append(f"{_indent}  {type_str}: ↳")
+                    lines.append(_format_decoded_calls([inner], labels, _depth=_depth + 1, _indent=nested_indent))
+                else:
+                    lines.append(f"{_indent}  {type_str}: {value}")
             else:
-                lines.append(f"  {type_str}: {value}")
+                lines.append(f"{_indent}  {type_str}: {value}")
         parts.append("\n".join(lines))
     return "\n\n".join(parts)
 
