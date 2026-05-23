@@ -7,6 +7,7 @@ Monitoring scripts for DeFi protocols to track key metrics and send alerts. Join
 ## Supported Protocols
 
 - [Aave V3](./aave/README.md)
+- [APYUSD](./apyusd/README.md)
 - [Bad Debt](./bad-debt/)
 - [Cap](./cap/README.md)
 - [Compound V3](./compound/README.md)
