@@ -835,8 +835,10 @@ class TestAddressLabels(unittest.TestCase):
     @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
     @patch("utils.llm.ai_explainer.decode_calldata")
     @patch("utils.llm.ai_explainer.get_contract_label")
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
     def test_address_array_arg_is_labeled(
         self,
+        mock_meta: MagicMock,
         mock_label: MagicMock,
         mock_decode: MagicMock,
         mock_simulate: MagicMock,
@@ -868,8 +870,10 @@ class TestAddressLabels(unittest.TestCase):
     @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
     @patch("utils.llm.ai_explainer.decode_calldata")
     @patch("utils.llm.ai_explainer.get_contract_label")
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
     def test_scalar_address_arg_is_labeled(
         self,
+        mock_meta: MagicMock,
         mock_label: MagicMock,
         mock_decode: MagicMock,
         mock_simulate: MagicMock,
@@ -897,8 +901,10 @@ class TestAddressLabels(unittest.TestCase):
     @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
     @patch("utils.llm.ai_explainer.decode_calldata")
     @patch("utils.llm.ai_explainer.get_contract_label")
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
     def test_target_appearing_as_arg_is_deduped(
         self,
+        mock_meta: MagicMock,
         mock_label: MagicMock,
         mock_decode: MagicMock,
         mock_simulate: MagicMock,
@@ -928,8 +934,10 @@ class TestAddressLabels(unittest.TestCase):
     @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
     @patch("utils.llm.ai_explainer.decode_calldata")
     @patch("utils.llm.ai_explainer.get_contract_label")
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
     def test_unverified_address_left_unannotated(
         self,
+        mock_meta: MagicMock,
         mock_label: MagicMock,
         mock_decode: MagicMock,
         mock_simulate: MagicMock,
@@ -959,8 +967,10 @@ class TestAddressLabels(unittest.TestCase):
     @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
     @patch("utils.llm.ai_explainer.decode_calldata")
     @patch("utils.llm.ai_explainer.get_contract_label")
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
     def test_address_inside_nested_bytes_is_labeled(
         self,
+        mock_meta: MagicMock,
         mock_label: MagicMock,
         mock_decode: MagicMock,
         mock_simulate: MagicMock,
@@ -1002,8 +1012,10 @@ class TestAddressLabels(unittest.TestCase):
     @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
     @patch("utils.llm.ai_explainer.decode_calldata")
     @patch("utils.llm.ai_explainer.get_contract_label")
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
     def test_zero_address_not_queried(
         self,
+        mock_meta: MagicMock,
         mock_label: MagicMock,
         mock_decode: MagicMock,
         mock_simulate: MagicMock,
