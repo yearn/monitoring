@@ -203,12 +203,14 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
 
             if expected_proposers:
                 tx_proposer = (tx.get("proposer") or "").lower()
-                if tx_proposer in expected_proposers:
+                tx_delegate = (tx.get("proposedByDelegate") or "").lower()
+                matched = next((a for a in (tx_proposer, tx_delegate) if a and a in expected_proposers), None)
+                if matched:
                     logger.info(
                         "Skipping nonce %s on %s — proposed by expected address %s",
                         nonce,
                         safe_address,
-                        tx_proposer,
+                        matched,
                     )
                     write_last_executed_nonce_to_file(safe_address, nonce)
                     continue
