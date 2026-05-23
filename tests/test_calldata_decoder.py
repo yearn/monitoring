@@ -306,15 +306,57 @@ class TestPersistentSelectorCache(unittest.TestCase):
         self.assertEqual(reloaded.get(_UNKNOWN_SELECTOR), "doSomething(uint256)")
 
     @patch("utils.calldata.decoder.fetch_json")
-    def test_sourcify_miss_is_persisted(self, mock_fetch: object) -> None:
+    def test_transient_failure_not_persisted(self, mock_fetch: object) -> None:
+        # `fetch_json` returns None on HTTP error / timeout / network failure.
+        # We must NOT persist a __NONE__ entry — that would permanently
+        # blacklist the selector across the shared CI cache after a single
+        # bad request.
         from utils.calldata.decoder import _load_selector_cache
 
-        # No data → negative cache.
         mock_fetch.return_value = None  # type: ignore[attr-defined]
+        self.assertIsNone(resolve_selector(_UNKNOWN_SELECTOR))
+        reloaded = _load_selector_cache()
+        self.assertNotIn(_UNKNOWN_SELECTOR, reloaded)
+        # But the in-memory cache should remember the miss for this run.
+        self.assertIn(_UNKNOWN_SELECTOR, _selector_cache)
+        self.assertIsNone(_selector_cache[_UNKNOWN_SELECTOR])
+
+    @patch("utils.calldata.decoder.fetch_json")
+    def test_malformed_response_not_persisted(self, mock_fetch: object) -> None:
+        # Response doesn't match the {"result": {"function": {...}}} shape —
+        # treat as transient, same as a network error.
+        from utils.calldata.decoder import _load_selector_cache
+
+        mock_fetch.return_value = {"unexpected": "shape"}  # type: ignore[attr-defined]
+        self.assertIsNone(resolve_selector(_UNKNOWN_SELECTOR))
+        self.assertNotIn(_UNKNOWN_SELECTOR, _load_selector_cache())
+
+    @patch("utils.calldata.decoder.fetch_json")
+    def test_explicit_miss_is_persisted(self, mock_fetch: object) -> None:
+        # Well-formed response with an empty result list for this selector —
+        # Sourcify is explicitly saying "we don't know this one". Safe to
+        # persist so future runs skip the lookup.
+        from utils.calldata.decoder import _load_selector_cache
+
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "result": {"function": {_UNKNOWN_SELECTOR: []}}
+        }
         self.assertIsNone(resolve_selector(_UNKNOWN_SELECTOR))
         reloaded = _load_selector_cache()
         self.assertIn(_UNKNOWN_SELECTOR, reloaded)
         self.assertIsNone(reloaded[_UNKNOWN_SELECTOR])
+
+    @patch("utils.calldata.decoder.fetch_json")
+    def test_well_formed_response_with_no_key_persists(self, mock_fetch: object) -> None:
+        # Schema looks right but the selector isn't even in the response
+        # dict. Same semantics as an empty list — definitive miss.
+        from utils.calldata.decoder import _load_selector_cache
+
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "result": {"function": {}}
+        }
+        self.assertIsNone(resolve_selector(_UNKNOWN_SELECTOR))
+        self.assertIn(_UNKNOWN_SELECTOR, _load_selector_cache())
 
     @patch("utils.calldata.decoder.fetch_json")
     def test_persisted_negative_avoids_retry(self, mock_fetch: object) -> None:

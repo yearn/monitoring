@@ -105,23 +105,40 @@ def resolve_selector(selector_hex: str) -> str | None:
     if selector_hex in _selector_cache:
         return _selector_cache[selector_hex]
 
-    # 3. Remote API fallback
+    # 3. Remote API fallback. Persist *only* when the response is structurally
+    # well-formed — a transient Sourcify failure (timeout, 5xx, 429, network
+    # blip) must NOT be written to the on-disk cache, because that file is
+    # shared across every workflow run via actions/cache. A single bad minute
+    # would otherwise blacklist a selector permanently across the CI fleet.
     data = fetch_json(_SELECTOR_LOOKUP_URL, params={"function": selector_hex})
-    if not data:
+    if not isinstance(data, dict):
+        # `fetch_json` returns None on HTTP error / timeout / network failure.
+        # Cache the miss in-memory (so we don't re-query within this run) but
+        # don't persist — let the next run retry.
         _selector_cache[selector_hex] = None
-        _persist_selector(selector_hex, None)
         return None
 
-    try:
-        results = data.get("result", {}).get("function", {}).get(selector_hex)
-        if results and len(results) > 0:
-            sig = results[0].get("name")
+    result_section = data.get("result")
+    function_section = result_section.get("function") if isinstance(result_section, dict) else None
+    if not isinstance(function_section, dict):
+        # Response didn't match Sourcify's documented shape. Treat as transient.
+        _selector_cache[selector_hex] = None
+        return None
+
+    results = function_section.get(selector_hex)
+    if results:
+        try:
+            sig = results[0].get("name") if isinstance(results[0], dict) else None
+        except (IndexError, AttributeError):
+            sig = None
+        if sig:
             _selector_cache[selector_hex] = sig
             _persist_selector(selector_hex, sig)
             return sig
-    except (AttributeError, IndexError, TypeError):
-        pass
 
+    # Well-formed response with no signature for this selector — Sourcify
+    # explicitly says "we don't know this one". Safe to persist so we skip
+    # the lookup on future runs.
     _selector_cache[selector_hex] = None
     _persist_selector(selector_hex, None)
     return None
