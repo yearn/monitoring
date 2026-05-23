@@ -539,6 +539,67 @@ class TestFailedSimulationDropped(unittest.TestCase):
         self.assertNotIn("FAILED", prompt)
 
 
+class TestAbiParamNames(unittest.TestCase):
+    """When the ABI is available, parameters render as `type name: value`."""
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    @patch("utils.llm.ai_explainer.fetch_function_input_names")
+    def test_named_params_appear_in_prompt(
+        self,
+        mock_names: MagicMock,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        mock_decode.return_value = DecodedCall(
+            function_name="setMaxSlippage",
+            signature="setMaxSlippage(uint256)",
+            params=[("uint256", 950000000000000000)],
+        )
+        mock_names.return_value = ["_maxSlippage"]
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: tightens slippage. LOW."
+        provider.model_name = "test"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target="0xT", calldata="0x736defe0" + "00" * 32, chain_id=1)
+        prompt = provider.complete.call_args[0][0]
+        self.assertIn("uint256 _maxSlippage: 950000000000000000", prompt)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    @patch("utils.llm.ai_explainer.fetch_function_input_names", return_value=None)
+    def test_falls_back_to_bare_types_when_abi_missing(
+        self,
+        mock_names: MagicMock,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        mock_decode.return_value = DecodedCall(
+            function_name="setMaxSlippage",
+            signature="setMaxSlippage(uint256)",
+            params=[("uint256", 1)],
+        )
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: tightens slippage. LOW."
+        provider.model_name = "test"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target="0xT", calldata="0x736defe0" + "00" * 32, chain_id=1)
+        prompt = provider.complete.call_args[0][0]
+        # Without ABI names, params render as plain `type: value`.
+        decoded_section = prompt.split("--- Decoded Calldata ---")[1]
+        self.assertIn("uint256: 1", decoded_section)
+
+
 class TestNestedBytesDecoding(unittest.TestCase):
     """`bytes` arguments that hold inner calldata are recursively decoded."""
 

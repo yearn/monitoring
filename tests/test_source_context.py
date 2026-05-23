@@ -8,6 +8,7 @@ from utils.source_context import (
     _extract_function_body,
     _extract_function_snippet,
     extract_state_var_snippet,
+    fetch_function_input_names,
     find_state_var_writes,
     get_contract_label,
     get_source_context,
@@ -329,6 +330,72 @@ class TestGetContractLabel(unittest.TestCase):
         }
         label = get_contract_label(1, "0xac21b22b5aeb11bc32de4ecf59e4538fca48b694")
         self.assertEqual(label, "FarmRegistry")
+
+
+class TestFetchFunctionInputNames(unittest.TestCase):
+    """ABI-driven parameter name extraction."""
+
+    def setUp(self) -> None:
+        reset_cache()
+
+    _SAMPLE_ABI = (
+        '[{"type":"function","name":"setMaxSlippage","inputs":[{"name":"_maxSlippage","type":"uint256"}],'
+        '"outputs":[],"stateMutability":"nonpayable"},'
+        '{"type":"function","name":"anonymousArgs","inputs":[{"name":"","type":"uint256"}],"outputs":[]},'
+        '{"type":"function","name":"noArgs","inputs":[],"outputs":[]}]'
+    )
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_returns_named_inputs(self, mock_fetch: object) -> None:
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "status": "1",
+            "result": [{"SourceCode": "/* x */", "ContractName": "Farm", "ABI": self._SAMPLE_ABI}],
+        }
+        names = fetch_function_input_names(1, "0xabc", "setMaxSlippage")
+        self.assertEqual(names, ["_maxSlippage"])
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_empty_inputs_for_noarg_function(self, mock_fetch: object) -> None:
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "status": "1",
+            "result": [{"SourceCode": "/* x */", "ContractName": "Farm", "ABI": self._SAMPLE_ABI}],
+        }
+        self.assertEqual(fetch_function_input_names(1, "0xabc", "noArgs"), [])
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_returns_none_when_inputs_unnamed(self, mock_fetch: object) -> None:
+        # Mixing named + anonymous params is worse than nothing — return None
+        # so the formatter falls back to bare types for the whole signature.
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "status": "1",
+            "result": [{"SourceCode": "/* x */", "ContractName": "Farm", "ABI": self._SAMPLE_ABI}],
+        }
+        self.assertIsNone(fetch_function_input_names(1, "0xabc", "anonymousArgs"))
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_returns_none_when_function_not_in_abi(self, mock_fetch: object) -> None:
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "status": "1",
+            "result": [{"SourceCode": "/* x */", "ContractName": "Farm", "ABI": self._SAMPLE_ABI}],
+        }
+        self.assertIsNone(fetch_function_input_names(1, "0xabc", "doesNotExist"))
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.proxy.get_current_implementation")
+    @patch("utils.source_context.fetch_json")
+    def test_follows_proxy_to_impl_abi(self, mock_fetch: object, mock_impl: object) -> None:
+        proxy_abi = '[{"type":"function","name":"fallback","inputs":[]}]'
+        mock_fetch.side_effect = [  # type: ignore[attr-defined]
+            {"status": "1", "result": [{"SourceCode": "/* x */", "ContractName": "ERC1967Proxy", "ABI": proxy_abi}]},
+            {"status": "1", "result": [{"SourceCode": "/* x */", "ContractName": "Farm", "ABI": self._SAMPLE_ABI}]},
+        ]
+        mock_impl.return_value = "0x" + "11" * 20  # type: ignore[attr-defined]
+        names = fetch_function_input_names(1, "0xProxy", "setMaxSlippage")
+        self.assertEqual(names, ["_maxSlippage"])
 
 
 if __name__ == "__main__":
