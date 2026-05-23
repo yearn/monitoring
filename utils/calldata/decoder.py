@@ -33,6 +33,17 @@ class DecodedCall:
     params: list[tuple[str, Any]] = field(default_factory=list)
 
 
+def is_selector_resolvable_offline(selector_hex: str) -> bool:
+    """True if this selector is known without making a network call.
+
+    Used by callers that want to attempt decoding only when it's free —
+    e.g. recursive bytes-parameter decoding, where blindly calling the
+    remote 4byte API on every blob would be both slow and likely wrong.
+    """
+    sel = selector_hex.lower()
+    return sel in KNOWN_SELECTORS or _selector_cache.get(sel) is not None
+
+
 def resolve_selector(selector_hex: str) -> str | None:
     """Resolve a 4-byte function selector to its text signature.
 
