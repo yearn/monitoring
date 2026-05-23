@@ -154,28 +154,22 @@ ALL_SAFE_ADDRESSES += YEARN_MULTISIGS
 YEARN_EXPECTED_PROPOSERS: dict[tuple[str, str], set[str]] = {
     # yChad
     ("mainnet", "0xfeb4acf3df3cdea7399794d0869ef76a6efaff52"): {
-        "0x962228a90eac69238c7d1f216d80037e61ea9255",
+        "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5",
     },
     # bChad
-    ("base-main", "0xbfaaba9f56a39b814281d68d2ad949e88d06b02e"): {
-        "0x623d4a04e19328244924d1dee48252987c02fc0a",
-        "0x5fcdc32dfc361a32e9d5ab9a384b890c62d0b8ac",
-    },
+    ("base-main", "0xbfaaba9f56a39b814281d68d2ad949e88d06b02e"): {"0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"},
     # kChad
-    ("katana-main", "0xe6ad5a88f5da0f276c903d9ac2647a937c917162"): {
-        "0x623d4a04e19328244924d1dee48252987c02fc0a",
-        "0xf53d1fb2eed22cf1e8f7e90da7f1cae88344065f",
-    },
+    ("katana-main", "0xe6ad5a88f5da0f276c903d9ac2647a937c917162"): {"0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"},
     # Strategist (non-katana share one bot)
     ("mainnet", "0x16388463d60ffe0661cf7f1f31a7d658ac790ff7"): {
-        "0xd0002c648cca8dee2f2b8d70d542ccde8ad6ec03",
+        "0xce434267f53926d4f6bbb12a5c2a3ef3873db254",
     },
     ("base-main", "0x01fe3347316b2223961b20689c65eaea71348e93"): {
-        "0xd0002c648cca8dee2f2b8d70d542ccde8ad6ec03",
+        "0xce434267f53926d4f6bbb12a5c2a3ef3873db254",
     },
     # Strategist katana uses a different bot
     ("katana-main", "0xbe7c7efc1ef3245d37e3157f76a512108d6d7ae6"): {
-        "0x1b5f15dcb82d25f91c65b53cee151e8b9fbdd271",
+        "0xce434267f53926d4f6bbb12a5c2a3ef3873db254",
     },
     # SAM Multisig (same bot every chain)
     ("mainnet", "0xe5e2baf96198c56380ddd5e992d7d1ada0e989c0"): {

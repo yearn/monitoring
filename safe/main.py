@@ -21,7 +21,7 @@ from utils.cache import (
 from utils.chains import safe_network_to_chain_id
 from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
 from utils.logging import get_logger
-from utils.telegram import send_telegram_message
+from utils.telegram import escape_markdown, send_telegram_message
 
 load_dotenv()
 logger = get_logger("safe")
@@ -183,7 +183,7 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
 
             message = (
                 "🚨 QUEUED TX DETECTED 🚨\n"
-                f"🅿️ Protocol: {protocol}\n"
+                f"🅿️ Protocol: {escape_markdown(protocol)}\n"
                 f"🔐 Safe Address: {safe_address}\n"
                 f"🔗 Safe URL: {get_safe_url(safe_address, network_name)}\n"
                 f"#️⃣ Nonce: {nonce}\n"
@@ -200,7 +200,7 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
                     break  # Found the safe, no need to continue loop
 
             if additional_info:
-                message += f"\nℹ️ Additional Info: {additional_info}"
+                message += f"\nℹ️ Additional Info: {escape_markdown(additional_info)}"
 
             # pendle uses specific owner of the contracts where we need to decode the data
             if protocol == "PENDLE":
