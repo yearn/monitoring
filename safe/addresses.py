@@ -157,13 +157,9 @@ YEARN_EXPECTED_PROPOSERS: dict[tuple[str, str], set[str]] = {
         "0x5E69fb460c9950F5AE90DafFc4C4F32EcafaCaA5",
     },
     # bChad
-    ("base-main", "0xbfaaba9f56a39b814281d68d2ad949e88d06b02e"): {
-        "0x5E69fb460c9950F5AE90DafFc4C4F32EcafaCaA5"
-    },
+    ("base-main", "0xbfaaba9f56a39b814281d68d2ad949e88d06b02e"): {"0x5E69fb460c9950F5AE90DafFc4C4F32EcafaCaA5"},
     # kChad
-    ("katana-main", "0xe6ad5a88f5da0f276c903d9ac2647a937c917162"): {
-        "0x5E69fb460c9950F5AE90DafFc4C4F32EcafaCaA5"
-    },
+    ("katana-main", "0xe6ad5a88f5da0f276c903d9ac2647a937c917162"): {"0x5E69fb460c9950F5AE90DafFc4C4F32EcafaCaA5"},
     # Strategist (non-katana share one bot)
     ("mainnet", "0x16388463d60ffe0661cf7f1f31a7d658ac790ff7"): {
         "0xcE434267F53926d4F6bbB12A5C2a3Ef3873Db254",
