@@ -6,15 +6,26 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _no_live_etherscan_calls(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default ETHERSCAN_TOKEN to empty so tests don't accidentally hit the live API.
+def _no_live_network_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Block accidental live API calls during tests.
 
-    Several tests in test_ai_explainer.py exercise paths that internally call
-    Etherscan (via fetch_source / fetch_function_input_names). When a developer
-    has ETHERSCAN_TOKEN set in their environment, those tests would make real
-    network requests and assertions would depend on live API state. Tests that
-    actually want to exercise the Etherscan path override this via
-    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"}).
+    Strips Etherscan + RPC provider env vars so any test that forgets to mock
+    a network-touching helper fails fast (with a clear "no provider" error)
+    rather than hitting the real Internet and making the test slow / flaky /
+    dependent on live state. Tests that actually want to exercise these
+    paths override via @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "...",
+    "PROVIDER_URL_MAINNET": "..."}).
     """
-    if os.environ.get("ETHERSCAN_TOKEN"):
-        monkeypatch.delenv("ETHERSCAN_TOKEN", raising=False)
+    for key in list(os.environ):
+        if key == "ETHERSCAN_TOKEN" or key.startswith("PROVIDER_URL_"):
+            monkeypatch.delenv(key, raising=False)
+
+    # ChainManager memoizes Web3Client instances. A previous test that ran
+    # with a real provider URL could have cached one — stale singletons
+    # would then make live calls even after we strip env vars above.
+    try:
+        from utils.web3_wrapper import ChainManager
+
+        ChainManager._instances.clear()
+    except Exception:  # noqa: BLE001 - test setup is best-effort
+        pass

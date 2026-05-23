@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from eth_utils import to_checksum_address
 
 from utils.calldata.decoder import DecodedCall, decode_calldata, is_selector_resolvable_offline
+from utils.erc20_metadata import fetch_erc20_metadata
 from utils.impl_diff import diff_implementations, format_impl_diff
 from utils.llm import get_llm_provider
 from utils.llm.base import LLMError
@@ -17,6 +18,8 @@ from utils.logging import get_logger
 from utils.on_chain_state import StateRead, format_state_reads, read_before_state
 from utils.paste import upload_to_paste
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
+from utils.risk_anchors import format_anchors_block
+from utils.risk_anchors import lookup as lookup_risk_anchor
 from utils.source_context import (
     SourceContext,
     fetch_function_input_names,
@@ -57,7 +60,10 @@ Critical rules for parameter interpretation:
 - When a Current State section is provided, quote concrete before→after deltas.
 - If a unit is ambiguous and no source context resolves it, say so explicitly rather than
   guessing. Quote the raw value plus its 1e18-normalized form.
-- Never assign HIGH/CRITICAL risk on the basis of a guessed unit interpretation."""
+- Never assign HIGH/CRITICAL risk on the basis of a guessed unit interpretation.
+- When a Risk Anchors section is provided, treat it as a typical floor/ceiling, not a
+  verdict. Adjust up or down based on the specific parameters (e.g. grantRole of a
+  minor role can be LOW; an upgrade to fresh-bytecode code can be CRITICAL)."""
 
 FORMAT_REMINDER = """
 Format your response exactly as:
@@ -267,6 +273,20 @@ def _checksum_or_none(addr: str) -> str | None:
         return None
 
 
+def _annotate_target_line(target: str, labels: dict[str, str]) -> str:
+    """Annotate the ``Target:`` line — works for single addresses and batch lists.
+
+    Batch entry points pass a comma-joined target string; we annotate each
+    item independently so the LLM sees per-target labels rather than one
+    confusing blob.
+    """
+    if not target:
+        return target
+    if "," not in target:
+        return _annotate_address(target, labels)
+    return ", ".join(_annotate_address(part.strip(), labels) for part in target.split(","))
+
+
 def _annotate_address(addr: str, labels: dict[str, str]) -> str:
     """Render a single address with an optional `(ContractName)` suffix."""
     checksum = _checksum_or_none(addr)
@@ -300,38 +320,54 @@ def _collect_address_labels(
     targets_and_calls: list[tuple[str, DecodedCall]],
     chain_id: int,
 ) -> dict[str, str]:
-    """Look up `{checksum_address: contract_name}` for every address-typed argument.
+    """Look up `{checksum_address: contract_name}` for every relevant address.
 
-    Skips each call's own target — its name is already surfaced via Contract
-    Source Context. Lookups run concurrently so a batch alert with N
-    distinct addresses doesn't pay N × ~3s serially. Best-effort: any
-    lookup failure is silently dropped.
+    Includes each call's own target (so the prompt can annotate the
+    ``Target: …`` line — especially useful when the target is an ERC20
+    and the decimals matter) plus every address-typed argument. Lookups
+    run concurrently so a batch alert with N distinct addresses doesn't
+    pay N × ~3s serially. Best-effort: any lookup failure is silently dropped.
     """
-    target_lower = {tgt.lower() for tgt, _ in targets_and_calls if tgt}
     seen: set[str] = set()
     candidates: list[str] = []  # checksum addresses to look up
-    for _, decoded in targets_and_calls:
+
+    def _consider(raw: str) -> None:
+        addr_lower = raw.lower()
+        if addr_lower in seen:
+            return
+        seen.add(addr_lower)
+        if len(addr_lower) != 42 or int(addr_lower, 16) == 0:
+            return
+        checksum = _checksum_or_none(raw)
+        if checksum is None:
+            return
+        candidates.append(checksum)
+
+    for target, decoded in targets_and_calls:
+        if target:
+            _consider(target)
         for raw in _extract_address_args(decoded):
-            addr_lower = raw.lower()
-            if addr_lower in seen:
-                continue
-            seen.add(addr_lower)
-            if addr_lower in target_lower:
-                continue
-            if len(addr_lower) != 42 or int(addr_lower, 16) == 0:
-                continue
-            checksum = _checksum_or_none(raw)
-            if checksum is None:
-                continue
-            candidates.append(checksum)
+            _consider(raw)
 
     def fetch(checksum: str) -> tuple[str, str] | None:
         try:
-            label = get_contract_label(chain_id, checksum)
+            base = get_contract_label(chain_id, checksum)
         except Exception as e:  # noqa: BLE001 - best-effort enrichment
             logger.info("Contract label fetch failed for %s: %s", checksum, e)
             return None
-        return (checksum, label) if label else None
+        # Augment with ERC20 metadata when applicable. The eth_call is best-effort
+        # and cached — non-token addresses fail fast and produce no annotation.
+        try:
+            meta = fetch_erc20_metadata(chain_id, checksum)
+        except Exception as e:  # noqa: BLE001
+            logger.info("ERC20 metadata fetch failed for %s: %s", checksum, e)
+            meta = None
+        if meta:
+            decorated = (
+                f"{base} ({meta.symbol}, {meta.decimals} dec)" if base else f"{meta.symbol}, {meta.decimals} dec"
+            )
+            return (checksum, decorated)
+        return (checksum, base) if base else None
 
     results = _parallel_map(fetch, candidates)
     return {checksum: label for entry in results if entry for checksum, label in [entry]}
@@ -379,6 +415,33 @@ def _try_decode_inner_bytes(value: object) -> DecodedCall | None:
         return decode_calldata(hex_str)
     except (ValueError, TypeError):
         return None
+
+
+def _collect_risk_anchors(decoded_calls: list[DecodedCall]) -> str:
+    """Build the Risk Anchors prompt section for calls with known anchors.
+
+    Deduped by signature so a 5-call batch of identical setCoverageCap calls
+    surfaces a single line rather than five. Returns "" if no call in the
+    batch has a registered anchor.
+    """
+    seen: set[str] = set()
+    anchored: list[tuple[str, object]] = []
+    for call in decoded_calls:
+        if call.signature in seen:
+            continue
+        # The decoder normalizes signatures to the 4byte-selector text form, so
+        # we re-compute the selector locally rather than carrying it through.
+        from eth_utils import function_signature_to_4byte_selector
+
+        try:
+            sel = "0x" + function_signature_to_4byte_selector(call.signature).hex()
+        except Exception:  # noqa: BLE001 - bad signatures are skipped
+            continue
+        anchor = lookup_risk_anchor(sel)
+        if anchor:
+            anchored.append((call.signature, anchor))
+            seen.add(call.signature)
+    return format_anchors_block(anchored)
 
 
 def _collect_param_names(
@@ -524,7 +587,10 @@ def _build_prompt(
         parts.append(f"Protocol: {protocol}")
     if label:
         parts.append(f"Contract: {label}")
-    parts.append(f"Target: {target}")
+    # Annotate the target with any label we have for it (token symbol/decimals,
+    # protocol name). For batch alerts this is a comma-joined list — we
+    # annotate the individual addresses, not the whole string.
+    parts.append(f"Target: {_annotate_target_line(target, address_labels or {})}")
     if value > 0:
         parts.append(f"ETH Value: {value / 1e18:.6f} ETH")
 
@@ -552,6 +618,10 @@ def _build_prompt(
 
     if proxy_upgrade_info:
         parts.append(f"\n--- Proxy Upgrade ---\n{proxy_upgrade_info}")
+
+    risk_anchors = _collect_risk_anchors(decoded_calls)
+    if risk_anchors:
+        parts.append(f"\n--- Risk Anchors ---\n{risk_anchors}")
 
     if simulation:
         parts.append(f"\n--- Simulation Results ---\n{_format_simulation_context(simulation)}")
