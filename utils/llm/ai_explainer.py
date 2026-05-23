@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from eth_utils import to_checksum_address
 
-from utils.calldata.decoder import DecodedCall, decode_calldata
+from utils.calldata.decoder import DecodedCall, decode_calldata, is_selector_resolvable_offline
 from utils.impl_diff import diff_implementations, format_impl_diff
 from utils.llm import get_llm_provider
 from utils.llm.base import LLMError
@@ -233,14 +233,23 @@ def _annotate_address(addr: str, labels: dict[str, str]) -> str:
     return f"{checksum} ({label})" if label else checksum
 
 
-def _extract_address_args(decoded: DecodedCall) -> list[str]:
-    """All address-typed argument values (scalars and arrays) for one decoded call."""
+def _extract_address_args(decoded: DecodedCall, _depth: int = 0) -> list[str]:
+    """All address-typed argument values (scalars and arrays) for one decoded call.
+
+    Recurses into ``bytes`` parameters that hold nested calldata, capped at
+    ``_MAX_BYTES_RECURSION_DEPTH``, so labels are also collected for inner
+    calls (e.g. addresses passed to an ``upgradeToAndCall`` initializer).
+    """
     out: list[str] = []
     for type_str, value in decoded.params:
         if type_str == "address" and isinstance(value, str):
             out.append(value)
         elif type_str.startswith("address[") and isinstance(value, (list, tuple)):
             out.extend(v for v in value if isinstance(v, str))
+        elif type_str == "bytes" and _depth < _MAX_BYTES_RECURSION_DEPTH:
+            inner = _try_decode_inner_bytes(value)
+            if inner:
+                out.extend(_extract_address_args(inner, _depth + 1))
     return out
 
 
@@ -284,21 +293,44 @@ def _collect_address_labels(
 _MAX_BYTES_RECURSION_DEPTH = 2
 
 
+def _looks_like_calldata(byte_len: int) -> bool:
+    """True if a `bytes` blob's length matches the calldata shape (selector + ABI words).
+
+    Real calldata is either a bare 4-byte selector (e.g. `pause()`) or
+    selector + N 32-byte words. Anything else — packed Safe `signatures`
+    blobs, EIP-712 hashes, Universal-Router-style packed paths — fails
+    this check and is left as opaque hex.
+    """
+    return byte_len == 4 or (byte_len >= 36 and (byte_len - 4) % 32 == 0)
+
+
 def _try_decode_inner_bytes(value: object) -> DecodedCall | None:
-    """If ``value`` looks like calldata for a known function, decode it."""
+    """If ``value`` looks like calldata for an offline-known function, decode it.
+
+    Gated on (1) length matching the calldata shape and (2) the selector
+    being resolvable without a network call. Without these guards we'd
+    spam the Sourcify 4byte API on every `signatures`/hash/packed-bytes
+    parameter, paying a 30s timeout each miss to maybe get a false positive.
+    """
     if isinstance(value, bytes):
-        if len(value) < 4:
+        raw_len = len(value)
+        if not _looks_like_calldata(raw_len):
             return None
         hex_str = "0x" + value.hex()
     elif isinstance(value, str):
         hex_str = value if value.startswith("0x") else "0x" + value
-        if len(hex_str) < 10:
+        # Each hex char is 4 bits, so byte_len = (len(hex_str) - 2) // 2.
+        if len(hex_str) < 10 or not _looks_like_calldata((len(hex_str) - 2) // 2):
             return None
     else:
         return None
+
+    if not is_selector_resolvable_offline(hex_str[:10]):
+        return None
+
     try:
         return decode_calldata(hex_str)
-    except Exception:  # noqa: BLE001 - any decoder error -> treat as opaque
+    except (ValueError, TypeError):
         return None
 
 

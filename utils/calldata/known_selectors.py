@@ -43,6 +43,13 @@ KNOWN_SELECTORS: dict[str, str] = {
     "0x2d6e853c": "proposeRoleUpdates(bytes32[],address[],bool[])",
     # Safe (Gnosis)
     "0x6a761202": "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)",
+    # Initializers — frequently appear as the inner payload of upgradeToAndCall / upgradeAndCall
+    "0x8129fc1c": "initialize()",
+    "0xc4d66de8": "initialize(address)",
+    "0x485cc955": "initialize(address,address)",
+    "0xc0c53b8b": "initialize(address,address,address)",
+    "0xcd6dc687": "initialize(address,uint256)",
+    "0xd1f57894": "initialize(address,bytes)",
     # Compound Comptroller
     "0xa76b3fda": "_supportMarket(address)",
     "0x55ee1fe1": "_setPriceOracle(address)",

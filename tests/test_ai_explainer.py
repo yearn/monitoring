@@ -572,20 +572,49 @@ class TestNestedBytesDecoding(unittest.TestCase):
             result = _format_decoded_calls([outer])
         self.assertIn(f"bytes: {garbage}", result)
 
+    def test_unknown_selector_skipped_no_network(self) -> None:
+        """A bytes blob whose selector isn't in KNOWN_SELECTORS must not trigger a network lookup."""
+        from utils.llm.ai_explainer import _format_decoded_calls
+
+        unknown = "0xdeadbeef" + "00" * 32  # well-formed length, selector unknown
+        outer = DecodedCall(
+            function_name="exec",
+            signature="exec(bytes)",
+            params=[("bytes", unknown)],
+        )
+        with patch("utils.llm.ai_explainer.decode_calldata") as mock_decode:
+            result = _format_decoded_calls([outer])
+            mock_decode.assert_not_called()
+        self.assertIn(f"bytes: {unknown}", result)
+
+    def test_unaligned_bytes_skipped(self) -> None:
+        """Safe `signatures` (e.g. 195 bytes packed) and other non-calldata blobs are skipped."""
+        from utils.llm.ai_explainer import _format_decoded_calls
+
+        sigs_blob = "0x" + "11" * 195  # 3 packed Safe signatures, not calldata
+        outer = DecodedCall(
+            function_name="execTx",
+            signature="execTx(bytes)",
+            params=[("bytes", sigs_blob)],
+        )
+        with patch("utils.llm.ai_explainer.decode_calldata") as mock_decode:
+            result = _format_decoded_calls([outer])
+            mock_decode.assert_not_called()
+        self.assertIn(sigs_blob, result)
+
     def test_recursion_depth_capped(self) -> None:
         from utils.llm.ai_explainer import _MAX_BYTES_RECURSION_DEPTH, _format_decoded_calls
 
-        # Build a call where decode_calldata always returns a call with one
-        # bytes param pointing back at itself. Without the cap this would
-        # recurse forever.
+        # Mock _try_decode_inner_bytes so it always returns a self-referential
+        # call, bypassing the selector/alignment guard. Without the depth cap
+        # this would recurse forever.
         self_referential = DecodedCall(
             function_name="wrap",
             signature="wrap(bytes)",
             params=[("bytes", "0xfeedfacefeedfacefeedfacefeedfacefeedface")],
         )
-        with patch("utils.llm.ai_explainer.decode_calldata", return_value=self_referential):
+        with patch("utils.llm.ai_explainer._try_decode_inner_bytes", return_value=self_referential):
             result = _format_decoded_calls([self_referential])
-        # Should expand exactly _MAX_BYTES_RECURSION_DEPTH times then bail.
         self.assertEqual(result.count("↳"), _MAX_BYTES_RECURSION_DEPTH)
 
 
@@ -717,6 +746,49 @@ class TestAddressLabels(unittest.TestCase):
         # Address shows up, but with no `(Label)` suffix.
         self.assertIn(self.FARM_CKS, prompt)
         self.assertNotIn(f"{self.FARM_CKS} (", prompt)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    @patch("utils.llm.ai_explainer.get_contract_label")
+    def test_address_inside_nested_bytes_is_labeled(
+        self,
+        mock_label: MagicMock,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        """upgradeToAndCall(impl, initData) → the address inside initData must get a label."""
+        from utils.calldata.decoder import decode_calldata as real_decode
+
+        # initialize(address) calldata, address arg = 0x1111...1111
+        inner_init_payload = "0xc4d66de8" + "00" * 12 + "11" * 20
+        outer = DecodedCall(
+            function_name="upgradeToAndCall",
+            signature="upgradeToAndCall(address,bytes)",
+            params=[("address", self.REGISTRY.lower()), ("bytes", inner_init_payload)],
+        )
+
+        # The outer decode is mocked (no fake selector to resolve); the inner
+        # bytes recursion uses the real decoder so `initialize(address)`
+        # resolves via KNOWN_SELECTORS and yields the inner address.
+        def routed_decode(data: str) -> DecodedCall | None:
+            return outer if data == "0xUPGRADE_CALLDATA" else real_decode(data)
+
+        mock_decode.side_effect = routed_decode
+        mock_label.return_value = "ImplContract"
+
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: upgrades. MEDIUM."
+        provider.model_name = "test-model"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target=self.REGISTRY, calldata="0xUPGRADE_CALLDATA", chain_id=1)
+
+        addresses_looked_up = {call.args[1].lower() for call in mock_label.call_args_list}
+        self.assertIn("0x" + "11" * 20, addresses_looked_up)
 
     @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
     @patch("utils.llm.ai_explainer.get_llm_provider")

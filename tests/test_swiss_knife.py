@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import patch
 
-from utils.swiss_knife import fetch_swiss_knife_labels, reset_cache
+from utils.swiss_knife import fetch_swiss_knife_labels, pick_display_name, reset_cache
 
 
 class TestFetchSwissKnifeLabels(unittest.TestCase):
@@ -44,6 +44,29 @@ class TestFetchSwissKnifeLabels(unittest.TestCase):
         fetch_swiss_knife_labels(addr, 1)
         fetch_swiss_knife_labels(addr, 1)
         self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]
+
+
+class TestPickDisplayName(unittest.TestCase):
+    """Sanity-check that we only use Swiss Knife's first label when it looks like a name."""
+
+    def test_accepts_name_colon_description(self) -> None:
+        self.assertEqual(pick_display_name(["Circle: USDC Token", "circle", "stablecoin"]), "Circle: USDC Token")
+
+    def test_accepts_name_with_space(self) -> None:
+        self.assertEqual(pick_display_name(["Uniswap V3 Router", "uniswap", "dex"]), "Uniswap V3 Router")
+
+    def test_accepts_ens_style_name(self) -> None:
+        self.assertEqual(pick_display_name(["vitalik.eth"]), "vitalik.eth")
+
+    def test_accepts_capitalized_single_word(self) -> None:
+        self.assertEqual(pick_display_name(["WETH"]), "WETH")
+
+    def test_rejects_bare_lowercase_tag(self) -> None:
+        # API sometimes returns just ["stablecoin"] — that's a tag, not a name.
+        self.assertEqual(pick_display_name(["stablecoin"]), "")
+
+    def test_empty_input(self) -> None:
+        self.assertEqual(pick_display_name([]), "")
 
 
 if __name__ == "__main__":

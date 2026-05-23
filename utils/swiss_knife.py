@@ -48,6 +48,24 @@ def fetch_swiss_knife_labels(address: str, chain_id: int) -> list[str]:
     return labels
 
 
+def pick_display_name(labels: list[str]) -> str:
+    """Pick a human display name from a Swiss Knife label array.
+
+    Their API returns ``[name, *tags]`` for well-known addresses — the head
+    looks like ``"Circle: USDC Token"`` and tags are short lowercase words
+    like ``"stablecoin"``. We only want the head, and only when it actually
+    looks like a name: must contain a separator (space, colon, dot for ENS)
+    or an uppercase letter. Bare tags like ``"stablecoin"`` are not useful
+    as a label since they don't identify the address.
+    """
+    if not labels:
+        return ""
+    head = labels[0]
+    if " " in head or ":" in head or "." in head or any(c.isupper() for c in head):
+        return head
+    return ""
+
+
 def reset_cache() -> None:
     """Reset the in-memory label cache. Useful for tests."""
     _label_cache.clear()
