@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from eth_utils import to_checksum_address
 
 from utils.calldata.decoder import DecodedCall, decode_calldata, is_selector_resolvable_offline
+from utils.erc20_metadata import fetch_erc20_metadata
 from utils.impl_diff import diff_implementations, format_impl_diff
 from utils.llm import get_llm_provider
 from utils.llm.base import LLMError
@@ -17,7 +18,15 @@ from utils.logging import get_logger
 from utils.on_chain_state import StateRead, format_state_reads, read_before_state
 from utils.paste import upload_to_paste
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
-from utils.source_context import SourceContext, format_source_context, get_contract_label, get_source_context
+from utils.risk_anchors import format_anchors_block
+from utils.risk_anchors import lookup as lookup_risk_anchor
+from utils.source_context import (
+    SourceContext,
+    fetch_function_input_names,
+    format_source_context,
+    get_contract_label,
+    get_source_context,
+)
 from utils.telegram import escape_markdown
 from utils.tenderly.simulation import SimulationResult, simulate_transaction
 
@@ -51,7 +60,10 @@ Critical rules for parameter interpretation:
 - When a Current State section is provided, quote concrete before→after deltas.
 - If a unit is ambiguous and no source context resolves it, say so explicitly rather than
   guessing. Quote the raw value plus its 1e18-normalized form.
-- Never assign HIGH/CRITICAL risk on the basis of a guessed unit interpretation."""
+- Never assign HIGH/CRITICAL risk on the basis of a guessed unit interpretation.
+- When a Risk Anchors section is provided, treat it as a typical floor/ceiling, not a
+  verdict. Adjust up or down based on the specific parameters (e.g. grantRole of a
+  minor role can be LOW; an upgrade to fresh-bytecode code can be CRITICAL)."""
 
 FORMAT_REMINDER = """
 Format your response exactly as:
@@ -159,17 +171,51 @@ def _format_batch_param_constants(decoded_calls: list[DecodedCall]) -> str:
     return "\n".join(notes)
 
 
+def _parallel_map(fn, items: list, max_workers: int = 8) -> list:
+    """Run ``fn`` over ``items`` concurrently, preserving input order.
+
+    Returns a list of results aligned with ``items``. Used to fan out
+    independent HTTP-bound lookups (Etherscan source, Swiss Knife labels,
+    ABI fetches) so a batch alert with N addresses doesn't pay N × ~3s
+    serially. Each item is wrapped in try/except so a single failure is
+    isolated.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    if not items:
+        return []
+    if len(items) == 1:
+        # No point spinning up a thread pool for a single call.
+        try:
+            return [fn(items[0])]
+        except Exception:  # noqa: BLE001
+            return [None]
+
+    results: list = [None] * len(items)
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(items))) as pool:
+        future_to_idx = {pool.submit(fn, item): i for i, item in enumerate(items)}
+        for future in future_to_idx:
+            idx = future_to_idx[future]
+            try:
+                results[idx] = future.result()
+            except Exception as e:  # noqa: BLE001
+                logger.info("Parallel lookup failed at index %d: %s", idx, e)
+                results[idx] = None
+    return results
+
+
 def _collect_source_contexts(
     targets_and_calls: list[tuple[str, DecodedCall]],
     chain_id: int,
 ) -> list[SourceContext]:
     """Fetch source context for each (target, decoded_call) pair, best-effort.
 
-    Deduplicates by (target, function_name). Silent on failure so a missing
-    Etherscan key or unverified contract never blocks an explanation.
+    Deduplicates by (target, function_name) then fans out the Etherscan
+    lookups in parallel. Silent on failure so a missing Etherscan key or
+    unverified contract never blocks an explanation.
     """
-    contexts: list[SourceContext] = []
     seen: set[tuple[str, str]] = set()
+    unique: list[tuple[str, str]] = []
     for target, decoded in targets_and_calls:
         if not target or not decoded.function_name:
             continue
@@ -177,14 +223,17 @@ def _collect_source_contexts(
         if key in seen:
             continue
         seen.add(key)
+        unique.append((target, decoded.function_name))
+
+    def fetch(item: tuple[str, str]) -> SourceContext | None:
+        target, fname = item
         try:
-            ctx = get_source_context(chain_id, target, decoded.function_name)
+            return get_source_context(chain_id, target, fname)
         except Exception as e:  # noqa: BLE001
-            logger.info("Source context fetch failed for %s.%s: %s", target, decoded.function_name, e)
-            continue
-        if ctx:
-            contexts.append(ctx)
-    return contexts
+            logger.info("Source context fetch failed for %s.%s: %s", target, fname, e)
+            return None
+
+    return [ctx for ctx in _parallel_map(fetch, unique) if ctx is not None]
 
 
 def _get_proxy_upgrade_info(calldata: str, target: str, chain_id: int) -> str:
@@ -224,6 +273,20 @@ def _checksum_or_none(addr: str) -> str | None:
         return None
 
 
+def _annotate_target_line(target: str, labels: dict[str, str]) -> str:
+    """Annotate the ``Target:`` line — works for single addresses and batch lists.
+
+    Batch entry points pass a comma-joined target string; we annotate each
+    item independently so the LLM sees per-target labels rather than one
+    confusing blob.
+    """
+    if not target:
+        return target
+    if "," not in target:
+        return _annotate_address(target, labels)
+    return ", ".join(_annotate_address(part.strip(), labels) for part in target.split(","))
+
+
 def _annotate_address(addr: str, labels: dict[str, str]) -> str:
     """Render a single address with an optional `(ContractName)` suffix."""
     checksum = _checksum_or_none(addr)
@@ -257,37 +320,57 @@ def _collect_address_labels(
     targets_and_calls: list[tuple[str, DecodedCall]],
     chain_id: int,
 ) -> dict[str, str]:
-    """Look up `{checksum_address: contract_name}` for every address-typed argument.
+    """Look up `{checksum_address: contract_name}` for every relevant address.
 
-    Skips each call's own target — its name is already surfaced via Contract
-    Source Context. Best-effort: any lookup failure is silently dropped.
+    Includes each call's own target (so the prompt can annotate the
+    ``Target: …`` line — especially useful when the target is an ERC20
+    and the decimals matter) plus every address-typed argument. Lookups
+    run concurrently so a batch alert with N distinct addresses doesn't
+    pay N × ~3s serially. Best-effort: any lookup failure is silently dropped.
     """
-    target_lower = {tgt.lower() for tgt, _ in targets_and_calls if tgt}
     seen: set[str] = set()
-    labels: dict[str, str] = {}
+    candidates: list[str] = []  # checksum addresses to look up
 
-    for _, decoded in targets_and_calls:
+    def _consider(raw: str) -> None:
+        addr_lower = raw.lower()
+        if addr_lower in seen:
+            return
+        seen.add(addr_lower)
+        if len(addr_lower) != 42 or int(addr_lower, 16) == 0:
+            return
+        checksum = _checksum_or_none(raw)
+        if checksum is None:
+            return
+        candidates.append(checksum)
+
+    for target, decoded in targets_and_calls:
+        if target:
+            _consider(target)
         for raw in _extract_address_args(decoded):
-            addr_lower = raw.lower()
-            if addr_lower in seen:
-                continue
-            seen.add(addr_lower)
-            if addr_lower in target_lower:
-                continue
-            # Skip malformed / zero addresses — no point asking Etherscan.
-            if len(addr_lower) != 42 or int(addr_lower, 16) == 0:
-                continue
-            checksum = _checksum_or_none(raw)
-            if checksum is None:
-                continue
-            try:
-                label = get_contract_label(chain_id, checksum)
-            except Exception as e:  # noqa: BLE001 - best-effort enrichment
-                logger.info("Contract label fetch failed for %s: %s", checksum, e)
-                continue
-            if label:
-                labels[checksum] = label
-    return labels
+            _consider(raw)
+
+    def fetch(checksum: str) -> tuple[str, str] | None:
+        try:
+            base = get_contract_label(chain_id, checksum)
+        except Exception as e:  # noqa: BLE001 - best-effort enrichment
+            logger.info("Contract label fetch failed for %s: %s", checksum, e)
+            return None
+        # Augment with ERC20 metadata when applicable. The eth_call is best-effort
+        # and cached — non-token addresses fail fast and produce no annotation.
+        try:
+            meta = fetch_erc20_metadata(chain_id, checksum)
+        except Exception as e:  # noqa: BLE001
+            logger.info("ERC20 metadata fetch failed for %s: %s", checksum, e)
+            meta = None
+        if meta:
+            decorated = (
+                f"{base} ({meta.symbol}, {meta.decimals} dec)" if base else f"{meta.symbol}, {meta.decimals} dec"
+            )
+            return (checksum, decorated)
+        return (checksum, base) if base else None
+
+    results = _parallel_map(fetch, candidates)
+    return {checksum: label for entry in results if entry for checksum, label in [entry]}
 
 
 _MAX_BYTES_RECURSION_DEPTH = 2
@@ -334,9 +417,69 @@ def _try_decode_inner_bytes(value: object) -> DecodedCall | None:
         return None
 
 
+def _collect_risk_anchors(decoded_calls: list[DecodedCall]) -> str:
+    """Build the Risk Anchors prompt section for calls with known anchors.
+
+    Deduped by signature so a 5-call batch of identical setCoverageCap calls
+    surfaces a single line rather than five. Returns "" if no call in the
+    batch has a registered anchor.
+    """
+    seen: set[str] = set()
+    anchored: list[tuple[str, object]] = []
+    for call in decoded_calls:
+        if call.signature in seen:
+            continue
+        # The decoder normalizes signatures to the 4byte-selector text form, so
+        # we re-compute the selector locally rather than carrying it through.
+        from eth_utils import function_signature_to_4byte_selector
+
+        try:
+            sel = "0x" + function_signature_to_4byte_selector(call.signature).hex()
+        except Exception:  # noqa: BLE001 - bad signatures are skipped
+            continue
+        anchor = lookup_risk_anchor(sel)
+        if anchor:
+            anchored.append((call.signature, anchor))
+            seen.add(call.signature)
+    return format_anchors_block(anchored)
+
+
+def _collect_param_names(
+    targets_and_calls: list[tuple[str, DecodedCall]],
+    chain_id: int,
+) -> list[list[str] | None]:
+    """For each (target, call) pair, fetch parameter names from the verified ABI.
+
+    Returns a list aligned with the input. Entries are ``None`` when the
+    function isn't found or any parameter is unnamed (better to show bare
+    types than partially-labeled ones). Fans out in parallel; cached via
+    the same Etherscan call that powers `fetch_source`, so when source
+    context has already been collected for the same target the ABI call
+    is a cache hit and free.
+    """
+
+    def fetch(item: tuple[str, DecodedCall]) -> list[str] | None:
+        target, decoded = item
+        if not target or not decoded.function_name:
+            return None
+        try:
+            return fetch_function_input_names(chain_id, target, decoded.function_name)
+        except Exception as e:  # noqa: BLE001 - best-effort enrichment
+            logger.info("Param name fetch failed for %s.%s: %s", target, decoded.function_name, e)
+            return None
+
+    return _parallel_map(fetch, list(targets_and_calls))
+
+
+def _param_label(type_str: str, name: str | None) -> str:
+    """Render a Solidity-style ``type name`` declaration, falling back to bare type."""
+    return f"{type_str} {name}" if name else type_str
+
+
 def _format_decoded_calls(
     calls: list[DecodedCall],
     address_labels: dict[str, str] | None = None,
+    param_names_per_call: list[list[str] | None] | None = None,
     _depth: int = 0,
     _indent: str = "  ",
 ) -> str:
@@ -345,6 +488,12 @@ def _format_decoded_calls(
     When ``address_labels`` is provided, address arguments (including elements
     of ``address[]``) are annotated with their contract name so the LLM can
     refer to "MorphoFarm" instead of "0xac21...".
+
+    When ``param_names_per_call`` is provided (aligned 1:1 with ``calls``),
+    each parameter is rendered as ``type name: value`` instead of bare
+    ``type: value`` so the LLM sees ``uint256 _maxSlippage: …`` rather than
+    just ``uint256: …``. Nested (recursed) calls don't use this since their
+    target ABI isn't known.
 
     ``bytes`` parameters that themselves contain a known function call (e.g.
     ``upgradeToAndCall``'s init payload, governor ``execute(target,data)``
@@ -356,25 +505,28 @@ def _format_decoded_calls(
     parts: list[str] = []
     nested_indent = _indent + "    "
     for i, call in enumerate(calls):
+        names = (param_names_per_call or [None] * len(calls))[i] if _depth == 0 else None
         lines = [f"{_indent}Call {i + 1}: {call.signature}"] if _depth else [f"Call {i + 1}: {call.signature}"]
-        for type_str, value in call.params:
+        for j, (type_str, value) in enumerate(call.params):
+            name = names[j] if names is not None and j < len(names) else None
+            label = _param_label(type_str, name)
             if type_str == "address":
-                lines.append(f"{_indent}  {type_str}: {_annotate_address(value, labels)}")
+                lines.append(f"{_indent}  {label}: {_annotate_address(value, labels)}")
             elif type_str.startswith("address[") and isinstance(value, (list, tuple)):
                 if not value:
-                    lines.append(f"{_indent}  {type_str}: []")
+                    lines.append(f"{_indent}  {label}: []")
                 else:
-                    lines.append(f"{_indent}  {type_str}:")
+                    lines.append(f"{_indent}  {label}:")
                     lines.extend(f"{_indent}    - {_annotate_address(v, labels)}" for v in value)
             elif type_str == "bytes" and _depth < _MAX_BYTES_RECURSION_DEPTH:
                 inner = _try_decode_inner_bytes(value)
                 if inner:
-                    lines.append(f"{_indent}  {type_str}: ↳")
+                    lines.append(f"{_indent}  {label}: ↳")
                     lines.append(_format_decoded_calls([inner], labels, _depth=_depth + 1, _indent=nested_indent))
                 else:
-                    lines.append(f"{_indent}  {type_str}: {value}")
+                    lines.append(f"{_indent}  {label}: {value}")
             else:
-                lines.append(f"{_indent}  {type_str}: {value}")
+                lines.append(f"{_indent}  {label}: {value}")
         parts.append("\n".join(lines))
     return "\n\n".join(parts)
 
@@ -426,6 +578,7 @@ def _build_prompt(
     context_note: str = "",
     state_reads: list[tuple[str, list[StateRead]]] | None = None,
     address_labels: dict[str, str] | None = None,
+    param_names_per_call: list[list[str] | None] | None = None,
 ) -> str:
     """Build the full prompt for the LLM."""
     parts: list[str] = [SYSTEM_PROMPT, ""]
@@ -434,14 +587,19 @@ def _build_prompt(
         parts.append(f"Protocol: {protocol}")
     if label:
         parts.append(f"Contract: {label}")
-    parts.append(f"Target: {target}")
+    # Annotate the target with any label we have for it (token symbol/decimals,
+    # protocol name). For batch alerts this is a comma-joined list — we
+    # annotate the individual addresses, not the whole string.
+    parts.append(f"Target: {_annotate_target_line(target, address_labels or {})}")
     if value > 0:
         parts.append(f"ETH Value: {value / 1e18:.6f} ETH")
 
     if context_note:
         parts.append(f"\n--- Execution Context ---\n{context_note}")
 
-    parts.append(f"\n--- Decoded Calldata ---\n{_format_decoded_calls(decoded_calls, address_labels)}")
+    parts.append(
+        f"\n--- Decoded Calldata ---\n{_format_decoded_calls(decoded_calls, address_labels, param_names_per_call)}"
+    )
 
     constants_note = _format_batch_param_constants(decoded_calls)
     if constants_note:
@@ -460,6 +618,10 @@ def _build_prompt(
 
     if proxy_upgrade_info:
         parts.append(f"\n--- Proxy Upgrade ---\n{proxy_upgrade_info}")
+
+    risk_anchors = _collect_risk_anchors(decoded_calls)
+    if risk_anchors:
+        parts.append(f"\n--- Risk Anchors ---\n{risk_anchors}")
 
     if simulation:
         parts.append(f"\n--- Simulation Results ---\n{_format_simulation_context(simulation)}")
@@ -600,6 +762,7 @@ def explain_transaction(
     source_contexts = _collect_source_contexts([(target, decoded)], chain_id)
     state_reads = _collect_state_reads([(target, decoded)], chain_id)
     address_labels = _collect_address_labels([(target, decoded)], chain_id)
+    param_names = _collect_param_names([(target, decoded)], chain_id)
 
     simulation: SimulationResult | None = None
     if not skip_simulation:
@@ -634,6 +797,7 @@ def explain_transaction(
         context_note=context_note,
         state_reads=state_reads,
         address_labels=address_labels,
+        param_names_per_call=param_names,
     )
     logger.info("Full AI context for %s:\n%s", target, prompt)
 
@@ -728,6 +892,7 @@ def explain_batch_transaction(
     source_contexts = _collect_source_contexts(decoded_with_target, chain_id)
     state_reads = _collect_state_reads(decoded_with_target, chain_id)
     address_labels = _collect_address_labels(decoded_with_target, chain_id)
+    param_names = _collect_param_names(decoded_with_target, chain_id)
 
     targets = ", ".join(c.get("target", "?") for c in calls)
     total_value = sum(int(c.get("value", "0")) for c in calls)
@@ -744,6 +909,7 @@ def explain_batch_transaction(
         context_note=context_note,
         state_reads=state_reads,
         address_labels=address_labels,
+        param_names_per_call=param_names,
     )
     logger.info("Full AI context for batch (%s calls):\n%s", len(calls), prompt)
 

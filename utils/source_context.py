@@ -24,9 +24,11 @@ ETHERSCAN_V2_API_URL = "https://api.etherscan.io/v2/api"
 # always under a few hundred chars in practice.
 MAX_SNIPPET_CHARS = 4000
 
-# Per-process cache: (chain_id, address_lower) -> (contract_name, source) or None for miss.
-# Workflows are short-lived so a process-lifetime dict is sufficient.
-_source_cache: dict[tuple[int, str], tuple[str, str] | None] = {}
+# Per-process cache: (chain_id, address_lower) -> (contract_name, source, abi_json_string)
+# or None for miss. Workflows are short-lived so a process-lifetime dict is sufficient.
+# The ABI is stored as the raw JSON string from Etherscan and parsed lazily by callers
+# that need it — keeps the cache small for the common case where only source is read.
+_source_cache: dict[tuple[int, str], tuple[str, str, str] | None] = {}
 
 _NATSPEC_LINE = r"(?:[ \t]*///.*\n|[ \t]*\*[^/].*\n|[ \t]*/\*\*[\s\S]*?\*/[ \t]*\n)"
 _NATSPEC_BLOCK = rf"(?:(?:{_NATSPEC_LINE})+)?"
@@ -67,12 +69,11 @@ class SourceContext:
     state_var_snippets: list[str]  # natspec + declaration for each mutated state var
 
 
-def fetch_source(chain_id: int, address: str) -> tuple[str, str] | None:
-    """Fetch (contract_name, concatenated_source) for a verified contract.
+def _fetch_etherscan_contract(chain_id: int, address: str) -> tuple[str, str, str] | None:
+    """Internal: fetch and cache (contract_name, source, abi_json_string).
 
-    Returns None if the API key is missing, the contract is unverified, or the
-    request fails. Caches by (chain_id, address) so repeated calls during the
-    same run hit the API only once.
+    Single Etherscan call shared by `fetch_source` (for natspec) and
+    `fetch_function_input_names` (for parameter labels).
     """
     api_key = os.getenv("ETHERSCAN_TOKEN")
     if not api_key:
@@ -98,9 +99,90 @@ def fetch_source(chain_id: int, address: str) -> tuple[str, str] | None:
         _source_cache[cache_key] = None
         return None
 
-    result = (entry.get("ContractName") or "", _concat_sources(raw_source))
+    result = (
+        entry.get("ContractName") or "",
+        _concat_sources(raw_source),
+        entry.get("ABI") or "",
+    )
     _source_cache[cache_key] = result
     return result
+
+
+def fetch_source(chain_id: int, address: str) -> tuple[str, str] | None:
+    """Fetch (contract_name, concatenated_source) for a verified contract.
+
+    Returns None if the API key is missing, the contract is unverified, or the
+    request fails. Caches by (chain_id, address) so repeated calls during the
+    same run hit the API only once.
+    """
+    record = _fetch_etherscan_contract(chain_id, address)
+    return None if record is None else (record[0], record[1])
+
+
+def _parse_abi(abi_json: str) -> list[dict] | None:
+    """Parse Etherscan's ABI string. Returns None for unverified/malformed."""
+    if not abi_json or abi_json == "Contract source code not verified":
+        return None
+    try:
+        parsed = json.loads(abi_json)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, list) else None
+
+
+def fetch_function_input_names(chain_id: int, address: str, function_name: str) -> list[str] | None:
+    """Return parameter names for ``function_name`` on the verified ABI, or None.
+
+    Used by the explainer to render decoded calldata with named parameters
+    (``_maxSlippage: 95e16``) instead of bare types (``uint256: 95e16``).
+    Follows EIP-1967 to the implementation when the target is a generic
+    proxy — the proxy's ABI has the proxy's own functions, not the impl's.
+    """
+    record = _fetch_etherscan_contract(chain_id, address)
+    if record is None:
+        return None
+
+    names = _function_input_names_from_abi(record[2], function_name)
+    if names is not None:
+        return names
+
+    # Function isn't in target ABI — try the impl if this is a generic proxy.
+    if record[0] and record[0] not in _GENERIC_PROXY_NAMES:
+        return None
+
+    from utils.proxy import get_current_implementation
+
+    impl = get_current_implementation(address, chain_id)
+    if not impl or impl.lower() == address.lower():
+        return None
+    impl_record = _fetch_etherscan_contract(chain_id, impl)
+    if impl_record is None:
+        return None
+    return _function_input_names_from_abi(impl_record[2], function_name)
+
+
+def _function_input_names_from_abi(abi_json: str, function_name: str) -> list[str] | None:
+    """Pull input names for ``function_name`` out of an ABI JSON string.
+
+    Returns ``None`` if the function isn't present; an empty list if the
+    function has no parameters. If any input is unnamed (anonymous param),
+    return ``None`` rather than a mix — the LLM is better off without than
+    with partial labels.
+    """
+    abi = _parse_abi(abi_json)
+    if abi is None:
+        return None
+    for entry in abi:
+        if not isinstance(entry, dict) or entry.get("type") != "function":
+            continue
+        if entry.get("name") != function_name:
+            continue
+        inputs = entry.get("inputs") or []
+        names = [(inp.get("name") or "") for inp in inputs if isinstance(inp, dict)]
+        if any(not n for n in names):
+            return None
+        return names
+    return None
 
 
 def _concat_sources(raw_source: str) -> str:
@@ -253,53 +335,12 @@ def get_source_context(chain_id: int, address: str, function_name: str) -> Sourc
 def get_contract_label(chain_id: int, address: str) -> str:
     """Best-effort human label for a contract address.
 
-    Resolution order:
-      1. Safe utility registry (no API call) — covers MultiSendCallOnly etc.
-      2. Etherscan ContractName for the address.
-      3. If that name is a generic proxy wrapper, follow EIP-1967 to the impl
-         and use the impl's contract name instead.
-
-    Returns "" for EOAs, unverified contracts, missing API key, or any failure.
+    Thin compatibility wrapper around :func:`utils.address_resolver.resolve_address_label`.
+    Kept here so existing imports (and tests that patch this name) continue to work.
     """
-    if not address:
-        return ""
+    from utils.address_resolver import resolve_address_label
 
-    # Lazy import to keep utils/source_context.py free of safe/ dependencies at
-    # module load time (and to avoid a cycle if safe ever imports from here).
-    from safe.multisend import safe_utility_label
-
-    cheap = safe_utility_label(address)
-    if cheap:
-        return cheap
-
-    # Swiss Knife has curated labels for well-known protocol contracts
-    # (Circle: USDC Token, Uniswap V3 Router, etc.) — much richer than the
-    # Etherscan ContractName for those. High precision, low recall, so we
-    # fall through to Etherscan for the long tail of custom contracts.
-    from utils.swiss_knife import fetch_swiss_knife_labels, pick_display_name
-
-    sk_name = pick_display_name(fetch_swiss_knife_labels(address, chain_id))
-    if sk_name:
-        return sk_name
-
-    fetched = fetch_source(chain_id, address)
-    if not fetched:
-        return ""
-
-    name = fetched[0]
-    if name and name not in _GENERIC_PROXY_NAMES:
-        return name
-
-    from utils.proxy import get_current_implementation
-
-    impl = get_current_implementation(address, chain_id)
-    if not impl or impl.lower() == address.lower():
-        return name
-
-    impl_fetched = fetch_source(chain_id, impl)
-    if impl_fetched and impl_fetched[0]:
-        return impl_fetched[0]
-    return name
+    return resolve_address_label(chain_id, address)
 
 
 def format_source_context(ctx: SourceContext) -> str:
