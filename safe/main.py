@@ -189,7 +189,7 @@ def _explain_safe_tx(
 
 def check_for_pending_transactions(safe_address: str, network_name: str, protocol: str) -> None:
     pending_transactions = get_pending_transactions(safe_address, network_name)
-    expected_proposers = YEARN_EXPECTED_PROPOSERS.get((network_name, safe_address.lower()))
+    expected_proposers = {a.lower() for a in YEARN_EXPECTED_PROPOSERS.get((network_name, safe_address.lower()), ())}
 
     if pending_transactions:
         for tx in pending_transactions:
