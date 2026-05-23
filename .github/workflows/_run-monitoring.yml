@@ -172,11 +172,31 @@ jobs:
           restore-keys: |
             ${{ inputs.cache_key_prefix }}-
 
+      # Shared 4byte selector cache. Lives outside the per-workflow `cache_file`
+      # because every workflow's Sourcify hits are equally valid to every other
+      # workflow's: selectors are deterministic, chain-agnostic, and identical
+      # across all callers. One shared key means the hourly run warms up the
+      # cache for the multisig-checker, the timelock alerts, etc.
+      - name: Restore selector cache
+        id: selector-cache-restore
+        uses: actions/cache/restore@v5
+        with:
+          path: selector-cache.txt
+          key: selector-cache-v1-${{ hashFiles('selector-cache.txt') }}
+          restore-keys: |
+            selector-cache-v1-
+
       - name: Get initial cache hash
         if: inputs.cache_file != ''
         id: initial-hash
         env:
           CACHE_HASH: ${{ hashFiles(inputs.cache_file) }}
+        run: echo "hash=$CACHE_HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Get initial selector-cache hash
+        id: initial-selector-hash
+        env:
+          CACHE_HASH: ${{ hashFiles('selector-cache.txt') }}
         run: echo "hash=$CACHE_HASH" >> "$GITHUB_OUTPUT"
 
       - name: Run monitoring scripts
@@ -202,9 +222,25 @@ jobs:
           CACHE_HASH: ${{ hashFiles(inputs.cache_file) }}
         run: echo "hash=$CACHE_HASH" >> "$GITHUB_OUTPUT"
 
+      - name: Get final selector-cache hash
+        id: final-selector-hash
+        env:
+          CACHE_HASH: ${{ hashFiles('selector-cache.txt') }}
+        run: echo "hash=$CACHE_HASH" >> "$GITHUB_OUTPUT"
+
       - name: Save cache
         if: always() && inputs.cache_file != '' && steps.initial-hash.outputs.hash != steps.final-hash.outputs.hash
         uses: actions/cache/save@v5
         with:
           path: ${{ inputs.cache_file }}
           key: ${{ inputs.cache_key_prefix }}-${{ hashFiles(inputs.cache_file) }}
+
+      # Only save when the file actually grew/changed and isn't empty. Concurrent
+      # workflows racing on save are handled by actions/cache@v5 — first writer
+      # with a given key wins, others no-op silently.
+      - name: Save selector cache
+        if: always() && steps.initial-selector-hash.outputs.hash != steps.final-selector-hash.outputs.hash && steps.final-selector-hash.outputs.hash != ''
+        uses: actions/cache/save@v5
+        with:
+          path: selector-cache.txt
+          key: selector-cache-v1-${{ hashFiles('selector-cache.txt') }}
