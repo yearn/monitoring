@@ -272,6 +272,18 @@ def get_contract_label(chain_id: int, address: str) -> str:
     if cheap:
         return cheap
 
+    # Swiss Knife has curated labels for well-known protocol contracts
+    # (Circle: USDC Token, Uniswap V3 Router, etc.) — much richer than the
+    # Etherscan ContractName for those. High precision, low recall, so we
+    # fall through to Etherscan for the long tail of custom contracts.
+    from utils.swiss_knife import fetch_swiss_knife_labels
+
+    sk_labels = fetch_swiss_knife_labels(address, chain_id)
+    if sk_labels:
+        # Use the first label as the human name; it's the most descriptive
+        # (e.g. "Circle: USDC Token") with subsequent labels being tags.
+        return sk_labels[0]
+
     fetched = fetch_source(chain_id, address)
     if not fetched:
         return ""
