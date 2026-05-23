@@ -92,11 +92,43 @@ def get_safe_transactions(
     return []
 
 
+def get_safe_current_nonce(safe_address: str, network_name: str) -> int | None:
+    """Fetch the safe's current onchain nonce (next nonce to use).
+
+    Uses the v1 Safe-info endpoint (v2 returns 404 for this resource). Returns
+    None if the call fails so callers can fall back gracefully.
+    """
+    base_url = safe_apis[network_name] + "/api/v1"
+    endpoint = f"{base_url}/safes/{safe_address}/"
+    api_key = next(_api_key_cycle)
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        response = requests.get(endpoint, headers=headers, timeout=10)
+        response.raise_for_status()
+        return int(response.json()["nonce"])
+    except (requests.RequestException, KeyError, ValueError) as e:
+        logger.warning("Failed to fetch current nonce for %s on %s: %s", safe_address, network_name, e)
+        return None
+
+
 def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]:
-    """Fetch pending transactions with nonce higher than the last cached nonce."""
+    """Fetch pending transactions worth alerting on.
+
+    Filters out two classes of noise:
+    - Already-cached: nonce <= last_cached_nonce (we've alerted on them).
+    - Dead-slot: nonce < safe.currentNonce. These remain in the API as
+      ``executed=false`` because a competing tx at the same nonce executed
+      first, but they will never run themselves.
+    """
     last_cached_nonce = get_last_executed_nonce_from_file(safe_address)
+    current_safe_nonce = get_safe_current_nonce(safe_address, network_name)
     pending_txs = get_safe_transactions(safe_address, network_name, executed=False)
-    return [tx for tx in pending_txs if int(tx["nonce"]) > last_cached_nonce]
+
+    baseline = last_cached_nonce
+    if current_safe_nonce is not None:
+        baseline = max(baseline, current_safe_nonce - 1)
+
+    return [tx for tx in pending_txs if int(tx["nonce"]) > baseline]
 
 
 def get_safe_url(safe_address: str, network_name: str) -> str:
