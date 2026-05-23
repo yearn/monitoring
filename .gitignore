@@ -44,5 +44,6 @@ htmlcov/
 # Cache files
 cache-id.txt
 tks-trigger-cache.json
+selector-cache.txt
 *.cache
 .uv/

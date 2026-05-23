@@ -270,5 +270,65 @@ class TestFormatCallLines(unittest.TestCase):
         self.assertEqual(lines[0], "📝 Function: `pause()`")
 
 
+class TestPersistentSelectorCache(unittest.TestCase):
+    """Selector cache is persisted to disk so Sourcify is queried at most once per run."""
+
+    def setUp(self) -> None:
+        import tempfile
+
+        # Point the cache at a fresh temp file for this test.
+        self._tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+        self._tmp.close()
+        self._patcher = patch("utils.calldata.decoder._SELECTOR_CACHE_FILE", self._tmp.name)
+        self._patcher.start()
+        _selector_cache.clear()
+
+    def tearDown(self) -> None:
+        import os
+
+        self._patcher.stop()
+        try:
+            os.unlink(self._tmp.name)
+        except OSError:
+            pass
+
+    @patch("utils.calldata.decoder.fetch_json")
+    def test_sourcify_hit_is_persisted(self, mock_fetch: object) -> None:
+        from utils.calldata.decoder import _load_selector_cache
+
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "result": {"function": {_UNKNOWN_SELECTOR: [{"name": "doSomething(uint256)"}]}}
+        }
+        sig = resolve_selector(_UNKNOWN_SELECTOR)
+        self.assertEqual(sig, "doSomething(uint256)")
+        # The on-disk cache should now contain it.
+        reloaded = _load_selector_cache()
+        self.assertEqual(reloaded.get(_UNKNOWN_SELECTOR), "doSomething(uint256)")
+
+    @patch("utils.calldata.decoder.fetch_json")
+    def test_sourcify_miss_is_persisted(self, mock_fetch: object) -> None:
+        from utils.calldata.decoder import _load_selector_cache
+
+        # No data → negative cache.
+        mock_fetch.return_value = None  # type: ignore[attr-defined]
+        self.assertIsNone(resolve_selector(_UNKNOWN_SELECTOR))
+        reloaded = _load_selector_cache()
+        self.assertIn(_UNKNOWN_SELECTOR, reloaded)
+        self.assertIsNone(reloaded[_UNKNOWN_SELECTOR])
+
+    @patch("utils.calldata.decoder.fetch_json")
+    def test_persisted_negative_avoids_retry(self, mock_fetch: object) -> None:
+        # Pre-populate disk cache with a negative result, then ensure
+        # the in-memory cache picks it up and skips the network call.
+        with open(self._tmp.name, "w") as f:
+            f.write(f"{_UNKNOWN_SELECTOR}|__NONE__\n")
+        from utils.calldata.decoder import _load_selector_cache
+
+        cache = _load_selector_cache()
+        _selector_cache.update(cache)
+        self.assertIsNone(resolve_selector(_UNKNOWN_SELECTOR))
+        mock_fetch.assert_not_called()  # type: ignore[attr-defined]
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,9 +1,12 @@
 """Decode raw calldata into human-readable function calls.
 
 Uses a local lookup table for common selectors and falls back to the
-Sourcify 4byte signature database API for unknown ones.
+Sourcify 4byte signature database API for unknown ones. The Sourcify
+results are persisted between runs in a file-backed cache so each
+selector pays the lookup cost only once across all workflow invocations.
 """
 
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -17,11 +20,47 @@ from utils.logging import get_logger
 
 logger = get_logger("calldata_decoder")
 
-# In-memory cache: selector hex -> function signature or None
-_selector_cache: dict[str, str | None] = {}
-
 # Sourcify 4byte signature database (successor to openchain.xyz)
 _SELECTOR_LOOKUP_URL = "https://api.4byte.sourcify.dev/signature-database/v1/lookup"
+
+# Persistent selector cache: append-only file backing the in-memory dict so we
+# don't re-query Sourcify for the same selector on every cron run. Negative
+# results are stored too (Sourcify miss → __NONE__ sentinel) so we don't retry
+# selectors that aren't in any database. Format: one `selector|signature` per
+# line, pipe-delimited because ABI signatures don't contain pipes.
+_SELECTOR_CACHE_FILE = os.getenv("SELECTOR_CACHE_FILENAME", "selector-cache.txt")
+_NEGATIVE_SENTINEL = "__NONE__"
+
+
+def _load_selector_cache() -> dict[str, str | None]:
+    cache: dict[str, str | None] = {}
+    if not os.path.exists(_SELECTOR_CACHE_FILE):
+        return cache
+    try:
+        with open(_SELECTOR_CACHE_FILE, "r") as f:
+            for raw in f:
+                line = raw.rstrip("\n")
+                if "|" not in line:
+                    continue
+                sel, sig = line.split("|", 1)
+                cache[sel.lower()] = None if sig == _NEGATIVE_SENTINEL else sig
+    except OSError as e:
+        logger.warning("Failed to load selector cache %s: %s", _SELECTOR_CACHE_FILE, e)
+    return cache
+
+
+def _persist_selector(selector: str, signature: str | None) -> None:
+    """Append one selector→signature pair to the on-disk cache (best-effort)."""
+    try:
+        with open(_SELECTOR_CACHE_FILE, "a") as f:
+            f.write(f"{selector.lower()}|{signature or _NEGATIVE_SENTINEL}\n")
+    except OSError as e:
+        logger.debug("Failed to persist selector %s: %s", selector, e)
+
+
+# In-memory cache: selector hex -> function signature or None.
+# Bootstrapped from the on-disk cache so each workflow starts warm.
+_selector_cache: dict[str, str | None] = _load_selector_cache()
 
 
 @dataclass(frozen=True)
@@ -70,6 +109,7 @@ def resolve_selector(selector_hex: str) -> str | None:
     data = fetch_json(_SELECTOR_LOOKUP_URL, params={"function": selector_hex})
     if not data:
         _selector_cache[selector_hex] = None
+        _persist_selector(selector_hex, None)
         return None
 
     try:
@@ -77,11 +117,13 @@ def resolve_selector(selector_hex: str) -> str | None:
         if results and len(results) > 0:
             sig = results[0].get("name")
             _selector_cache[selector_hex] = sig
+            _persist_selector(selector_hex, sig)
             return sig
     except (AttributeError, IndexError, TypeError):
         pass
 
     _selector_cache[selector_hex] = None
+    _persist_selector(selector_hex, None)
     return None
 
 
