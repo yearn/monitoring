@@ -19,6 +19,7 @@ jobs:
       cache_file: cache-id.txt
       cache_key_prefix: cache-id-v4
       scripts: |
+        apyusd/main.py
         3jane/main.py
         morpho/markets.py
         morpho/markets_v2.py

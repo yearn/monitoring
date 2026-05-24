@@ -93,6 +93,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = [
+    "apyusd",
     "aave", "bad-debt", "cap", "compound", "ethena", "euler",
     "fluid", "infinifi", "lido", "lrt-pegs", "maker",
     "maple", "morpho", "pendle", "rtoken",
