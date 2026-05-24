@@ -539,6 +539,290 @@ class TestFailedSimulationDropped(unittest.TestCase):
         self.assertNotIn("FAILED", prompt)
 
 
+class TestAbiParamNames(unittest.TestCase):
+    """When the ABI is available, parameters render as `type name: value`."""
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    @patch("utils.llm.ai_explainer.fetch_function_input_names")
+    def test_named_params_appear_in_prompt(
+        self,
+        mock_names: MagicMock,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        mock_decode.return_value = DecodedCall(
+            function_name="setMaxSlippage",
+            signature="setMaxSlippage(uint256)",
+            params=[("uint256", 950000000000000000)],
+        )
+        mock_names.return_value = ["_maxSlippage"]
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: tightens slippage. LOW."
+        provider.model_name = "test"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target="0xT", calldata="0x736defe0" + "00" * 32, chain_id=1)
+        prompt = provider.complete.call_args[0][0]
+        self.assertIn("uint256 _maxSlippage: 950000000000000000", prompt)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    @patch("utils.llm.ai_explainer.fetch_function_input_names", return_value=None)
+    def test_falls_back_to_bare_types_when_abi_missing(
+        self,
+        mock_names: MagicMock,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        mock_decode.return_value = DecodedCall(
+            function_name="setMaxSlippage",
+            signature="setMaxSlippage(uint256)",
+            params=[("uint256", 1)],
+        )
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: tightens slippage. LOW."
+        provider.model_name = "test"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target="0xT", calldata="0x736defe0" + "00" * 32, chain_id=1)
+        prompt = provider.complete.call_args[0][0]
+        # Without ABI names, params render as plain `type: value`.
+        decoded_section = prompt.split("--- Decoded Calldata ---")[1]
+        self.assertIn("uint256: 1", decoded_section)
+
+
+class TestErc20MetadataInPrompt(unittest.TestCase):
+    """ERC20 symbol/decimals are appended to address labels so the LLM can size amounts."""
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata")
+    @patch("utils.llm.ai_explainer.get_contract_label")
+    def test_erc20_target_gets_decimals_suffix(
+        self,
+        mock_label: MagicMock,
+        mock_meta: MagicMock,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        from utils.erc20_metadata import ERC20Metadata
+
+        usdc = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        mock_decode.return_value = DecodedCall(
+            function_name="transfer",
+            signature="transfer(address,uint256)",
+            params=[("address", "0x" + "11" * 20), ("uint256", 1000000)],
+        )
+
+        # Label resolver returns the USDC name; metadata fills in decimals.
+        def label_for(_chain: int, addr: str) -> str:
+            return "Circle: USDC Token" if addr.lower() == usdc.lower() else ""
+
+        mock_label.side_effect = label_for
+        mock_meta.side_effect = lambda _c, addr: ERC20Metadata("USDC", 6) if addr.lower() == usdc.lower() else None
+
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: tiny transfer. LOW."
+        provider.model_name = "test"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target=usdc, calldata="0xa9059cbb" + "00" * 64, chain_id=1)
+        prompt = provider.complete.call_args[0][0]
+        # Target line should show the token symbol + decimals.
+        self.assertIn("Circle: USDC Token (USDC, 6 dec)", prompt)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="FarmRegistry")
+    def test_non_erc20_keeps_label_unchanged(
+        self,
+        mock_label: MagicMock,
+        mock_meta: MagicMock,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        mock_decode.return_value = DecodedCall(
+            function_name="addFarms",
+            signature="addFarms(uint256,address[])",
+            params=[("uint256", 1), ("address[]", ("0x" + "ac" * 20,))],
+        )
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: registers farm. LOW."
+        provider.model_name = "test"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target="0x" + "ff" * 20, calldata="0xabcdef10" + "00" * 64, chain_id=1)
+        prompt = provider.complete.call_args[0][0]
+        # FarmRegistry label without ERC20 decoration.
+        self.assertIn("FarmRegistry", prompt)
+        self.assertNotIn("dec)", prompt)
+
+
+class TestRiskAnchorsSection(unittest.TestCase):
+    """Risk Anchors block is added for calls with anchored selectors."""
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    def test_anchor_section_added_for_known_selector(
+        self,
+        mock_label: MagicMock,
+        mock_meta: MagicMock,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        mock_decode.return_value = DecodedCall(
+            function_name="transferOwnership",
+            signature="transferOwnership(address)",
+            params=[("address", "0x" + "11" * 20)],
+        )
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: hands ownership. HIGH."
+        provider.model_name = "test"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target="0x" + "ff" * 20, calldata="0xf2fde38b" + "00" * 32, chain_id=1)
+        prompt = provider.complete.call_args[0][0]
+        self.assertIn("--- Risk Anchors ---", prompt)
+        self.assertIn("transferOwnership(address) → typically HIGH", prompt)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    def test_no_anchor_section_for_unknown_selector(
+        self,
+        mock_label: MagicMock,
+        mock_meta: MagicMock,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        # setMaxSlippage isn't anchored — parameter-dependent.
+        mock_decode.return_value = DecodedCall(
+            function_name="setMaxSlippage",
+            signature="setMaxSlippage(uint256)",
+            params=[("uint256", 1)],
+        )
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: tightens slippage. LOW."
+        provider.model_name = "test"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target="0x" + "ff" * 20, calldata="0x736defe0" + "00" * 32, chain_id=1)
+        prompt = provider.complete.call_args[0][0]
+        self.assertNotIn("--- Risk Anchors ---", prompt)
+
+
+class TestNestedBytesDecoding(unittest.TestCase):
+    """`bytes` arguments that hold inner calldata are recursively decoded."""
+
+    def test_inner_call_rendered_as_nested(self) -> None:
+        from utils.llm.ai_explainer import _format_decoded_calls
+
+        # `0x8456cb59` is pause() — a known selector, always decodes.
+        inner_payload = "0x8456cb59"
+        outer = DecodedCall(
+            function_name="upgradeToAndCall",
+            signature="upgradeToAndCall(address,bytes)",
+            params=[
+                ("address", "0x" + "ab" * 20),
+                ("bytes", inner_payload),
+            ],
+        )
+        result = _format_decoded_calls([outer])
+        self.assertIn("bytes: ↳", result)
+        self.assertIn("pause()", result)
+
+    def test_undecodable_bytes_falls_back_to_raw(self) -> None:
+        from utils.llm.ai_explainer import _format_decoded_calls
+
+        garbage = "0xdeadbeefcafebabe"  # not a known selector, Sourcify miss in test env
+        outer = DecodedCall(
+            function_name="initialize",
+            signature="initialize(bytes)",
+            params=[("bytes", garbage)],
+        )
+        with patch("utils.llm.ai_explainer.decode_calldata", return_value=None):
+            result = _format_decoded_calls([outer])
+        self.assertIn(f"bytes: {garbage}", result)
+
+    def test_unknown_selector_skipped_no_network(self) -> None:
+        """A bytes blob whose selector isn't in KNOWN_SELECTORS must not trigger a network lookup."""
+        from utils.calldata.decoder import _selector_cache
+        from utils.llm.ai_explainer import _format_decoded_calls
+
+        # Pollution from the persistent cache (prior runs may have resolved
+        # this selector to something) would defeat the offline-only guard.
+        _selector_cache.pop("0xdeadbeef", None)
+        unknown = "0xdeadbeef" + "00" * 32  # well-formed length, selector unknown
+        outer = DecodedCall(
+            function_name="exec",
+            signature="exec(bytes)",
+            params=[("bytes", unknown)],
+        )
+        with patch("utils.llm.ai_explainer.decode_calldata") as mock_decode:
+            result = _format_decoded_calls([outer])
+            mock_decode.assert_not_called()
+        self.assertIn(f"bytes: {unknown}", result)
+
+    def test_unaligned_bytes_skipped(self) -> None:
+        """Safe `signatures` (e.g. 195 bytes packed) and other non-calldata blobs are skipped."""
+        from utils.llm.ai_explainer import _format_decoded_calls
+
+        sigs_blob = "0x" + "11" * 195  # 3 packed Safe signatures, not calldata
+        outer = DecodedCall(
+            function_name="execTx",
+            signature="execTx(bytes)",
+            params=[("bytes", sigs_blob)],
+        )
+        with patch("utils.llm.ai_explainer.decode_calldata") as mock_decode:
+            result = _format_decoded_calls([outer])
+            mock_decode.assert_not_called()
+        self.assertIn(sigs_blob, result)
+
+    def test_recursion_depth_capped(self) -> None:
+        from utils.llm.ai_explainer import _MAX_BYTES_RECURSION_DEPTH, _format_decoded_calls
+
+        # Mock _try_decode_inner_bytes so it always returns a self-referential
+        # call, bypassing the selector/alignment guard. Without the depth cap
+        # this would recurse forever.
+        self_referential = DecodedCall(
+            function_name="wrap",
+            signature="wrap(bytes)",
+            params=[("bytes", "0xfeedfacefeedfacefeedfacefeedfacefeedface")],
+        )
+        with patch("utils.llm.ai_explainer._try_decode_inner_bytes", return_value=self_referential):
+            result = _format_decoded_calls([self_referential])
+        self.assertEqual(result.count("↳"), _MAX_BYTES_RECURSION_DEPTH)
+
+
 class TestAddressLabels(unittest.TestCase):
     """Tests for address-argument annotation in the LLM prompt."""
 
@@ -551,8 +835,10 @@ class TestAddressLabels(unittest.TestCase):
     @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
     @patch("utils.llm.ai_explainer.decode_calldata")
     @patch("utils.llm.ai_explainer.get_contract_label")
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
     def test_address_array_arg_is_labeled(
         self,
+        mock_meta: MagicMock,
         mock_label: MagicMock,
         mock_decode: MagicMock,
         mock_simulate: MagicMock,
@@ -584,8 +870,10 @@ class TestAddressLabels(unittest.TestCase):
     @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
     @patch("utils.llm.ai_explainer.decode_calldata")
     @patch("utils.llm.ai_explainer.get_contract_label")
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
     def test_scalar_address_arg_is_labeled(
         self,
+        mock_meta: MagicMock,
         mock_label: MagicMock,
         mock_decode: MagicMock,
         mock_simulate: MagicMock,
@@ -613,21 +901,25 @@ class TestAddressLabels(unittest.TestCase):
     @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
     @patch("utils.llm.ai_explainer.decode_calldata")
     @patch("utils.llm.ai_explainer.get_contract_label")
-    def test_target_address_is_not_relabeled(
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
+    def test_target_appearing_as_arg_is_deduped(
         self,
+        mock_meta: MagicMock,
         mock_label: MagicMock,
         mock_decode: MagicMock,
         mock_simulate: MagicMock,
         mock_get_provider: MagicMock,
         mock_source: MagicMock,
     ) -> None:
-        # The target appears as its own argument — should be skipped so we don't
-        # double up with the Contract Source Context block.
+        # The target now also gets labeled (so the Target: line can show
+        # ERC20 decimals/symbol). When the same address appears as an
+        # argument, we still want exactly one resolver call, not two.
         mock_decode.return_value = DecodedCall(
             function_name="selfWire",
             signature="selfWire(address)",
             params=[("address", self.REGISTRY.lower())],
         )
+        mock_label.return_value = ""
         provider = MagicMock()
         provider.complete.return_value = "TLDR: wires self. LOW."
         provider.model_name = "test-model"
@@ -635,15 +927,17 @@ class TestAddressLabels(unittest.TestCase):
 
         explain_transaction(target=self.REGISTRY, calldata="0xdeadbeef" + "00" * 32, chain_id=1)
 
-        mock_label.assert_not_called()
+        self.assertEqual(mock_label.call_count, 1)
 
     @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
     @patch("utils.llm.ai_explainer.get_llm_provider")
     @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
     @patch("utils.llm.ai_explainer.decode_calldata")
     @patch("utils.llm.ai_explainer.get_contract_label")
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
     def test_unverified_address_left_unannotated(
         self,
+        mock_meta: MagicMock,
         mock_label: MagicMock,
         mock_decode: MagicMock,
         mock_simulate: MagicMock,
@@ -673,27 +967,79 @@ class TestAddressLabels(unittest.TestCase):
     @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
     @patch("utils.llm.ai_explainer.decode_calldata")
     @patch("utils.llm.ai_explainer.get_contract_label")
-    def test_zero_address_not_queried(
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
+    def test_address_inside_nested_bytes_is_labeled(
         self,
+        mock_meta: MagicMock,
         mock_label: MagicMock,
         mock_decode: MagicMock,
         mock_simulate: MagicMock,
         mock_get_provider: MagicMock,
         mock_source: MagicMock,
     ) -> None:
+        """upgradeToAndCall(impl, initData) → the address inside initData must get a label."""
+        from utils.calldata.decoder import decode_calldata as real_decode
+
+        # initialize(address) calldata, address arg = 0x1111...1111
+        inner_init_payload = "0xc4d66de8" + "00" * 12 + "11" * 20
+        outer = DecodedCall(
+            function_name="upgradeToAndCall",
+            signature="upgradeToAndCall(address,bytes)",
+            params=[("address", self.REGISTRY.lower()), ("bytes", inner_init_payload)],
+        )
+
+        # The outer decode is mocked (no fake selector to resolve); the inner
+        # bytes recursion uses the real decoder so `initialize(address)`
+        # resolves via KNOWN_SELECTORS and yields the inner address.
+        def routed_decode(data: str) -> DecodedCall | None:
+            return outer if data == "0xUPGRADE_CALLDATA" else real_decode(data)
+
+        mock_decode.side_effect = routed_decode
+        mock_label.return_value = "ImplContract"
+
+        provider = MagicMock()
+        provider.complete.return_value = "TLDR: upgrades. MEDIUM."
+        provider.model_name = "test-model"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target=self.REGISTRY, calldata="0xUPGRADE_CALLDATA", chain_id=1)
+
+        addresses_looked_up = {call.args[1].lower() for call in mock_label.call_args_list}
+        self.assertIn("0x" + "11" * 20, addresses_looked_up)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    @patch("utils.llm.ai_explainer.get_contract_label")
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
+    def test_zero_address_not_queried(
+        self,
+        mock_meta: MagicMock,
+        mock_label: MagicMock,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        # The target is still resolved (it's a real address) but the zero
+        # address arg must be filtered before reaching the label resolver.
         zero = "0x" + "00" * 20
         mock_decode.return_value = DecodedCall(
             function_name="setOracle",
             signature="setOracle(address)",
             params=[("address", zero)],
         )
+        mock_label.return_value = ""
         provider = MagicMock()
         provider.complete.return_value = "TLDR: unsets oracle. LOW."
         provider.model_name = "test-model"
         mock_get_provider.return_value = provider
 
         explain_transaction(target=self.REGISTRY, calldata="0x7adbf973" + "00" * 32, chain_id=1)
-        mock_label.assert_not_called()
+        # Resolver called exactly once — for the target, not for the zero arg.
+        addresses_queried = {call.args[1].lower() for call in mock_label.call_args_list}
+        self.assertNotIn(zero, addresses_queried)
 
 
 if __name__ == "__main__":
