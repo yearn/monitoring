@@ -125,71 +125,43 @@ ALL_SAFE_ADDRESSES = [
     # ],
 ]
 
-# Yearn-controlled multisigs. Source:
-# https://gist.githubusercontent.com/engn33r/c02a3a511a2ffdd1fe5453640e155b40/raw/multisigs.csv
-# Limited to mainnet/base/katana (other chains intentionally excluded).
+# Yearn bots/EOAs that routinely propose txs on monitored multisigs.
+YEARN_PROPOSER_BOTS: dict[str, str] = {
+    "chad": "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5",
+    "strategist": "0xce434267f53926d4f6bbb12a5c2a3ef3873db254",
+    "curation": "0x80a3887ba60f76acab48ee4aead0a71a0774a8b2",
+}
+
+# 5th field: key into YEARN_PROPOSER_BOTS.
 YEARN_MULTISIGS: list[list[str]] = [
-    ["YEARN_MS", "mainnet", "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52", "yChad (Yearn multisig/daddy)"],
-    ["YEARN_MS", "base-main", "0xbfAABa9F56A39B814281D68d2Ad949e88D06b02E", "bChad Multisig"],
-    ["YEARN_MS", "katana-main", "0xe6ad5A88f5da0F276C903d9Ac2647A937c917162", "kChad Multisig"],
-    ["YEARN_MS", "mainnet", "0x16388463d60FFE0661Cf7F1f31a7D658aC790ff7", "Strategist Multisig (brain.ychad.eth)"],
-    ["YEARN_MS", "base-main", "0x01fE3347316b2223961B20689C65eaeA71348e93", "Strategist Multisig (base)"],
-    ["YEARN_MS", "katana-main", "0xBe7c7efc1ef3245d37E3157F76A512108D6D7aE6", "Strategist Multisig (katana)"],
-    ["YEARN_MS", "mainnet", "0x846e211e8ba920B353FB717631C015cf04061Cc9", "Core Dev Multisig (dev.ychad.eth)"],
-    ["YEARN_MS", "mainnet", "0xe5e2Baf96198c56380dDD5E992D7d1ADa0e989c0", "SAM Multisig (mainnet)"],
-    ["YEARN_MS", "base-main", "0xFEaE2F855250c36A77b8C68dB07C4dD9711fE36F", "SAM Multisig (base)"],
-    ["YEARN_MS", "katana-main", "0x518C21DC88D9780c0A1Be566433c571461A70149", "SAM Multisig (katana)"],
-    ["YEARN_MS", "mainnet", "0x90D0f26025571295D18a6c041E47450B81886B51", "Curation Multisig (mainnet)"],
-    ["YEARN_MS", "base-main", "0x90D0f26025571295D18a6c041E47450B81886B51", "Curation Multisig (base)"],
-    ["YEARN_MS", "katana-main", "0x90D0f26025571295D18a6c041E47450B81886B51", "Curation Multisig (katana)"],
+    ["YEARN_MS", "mainnet", "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52", "yChad (Yearn multisig/daddy)", "chad"],
+    ["YEARN_MS", "base-main", "0xbfAABa9F56A39B814281D68d2Ad949e88D06b02E", "bChad Multisig", "chad"],
+    ["YEARN_MS", "katana-main", "0xe6ad5A88f5da0F276C903d9Ac2647A937c917162", "kChad Multisig", "chad"],
+    [
+        "YEARN_MS",
+        "mainnet",
+        "0x16388463d60FFE0661Cf7F1f31a7D658aC790ff7",
+        "Strategist Multisig (brain.ychad.eth)",
+        "strategist",
+    ],
+    ["YEARN_MS", "base-main", "0x01fE3347316b2223961B20689C65eaeA71348e93", "Strategist Multisig (base)", "strategist"],
+    [
+        "YEARN_MS",
+        "katana-main",
+        "0xBe7c7efc1ef3245d37E3157F76A512108D6D7aE6",
+        "Strategist Multisig (katana)",
+        "strategist",
+    ],
+    ["YEARN_MS", "mainnet", "0xe5e2Baf96198c56380dDD5E992D7d1ADa0e989c0", "SAM Multisig (mainnet)", "curation"],
+    ["YEARN_MS", "base-main", "0xFEaE2F855250c36A77b8C68dB07C4dD9711fE36F", "SAM Multisig (base)", "curation"],
+    ["YEARN_MS", "katana-main", "0x518C21DC88D9780c0A1Be566433c571461A70149", "SAM Multisig (katana)", "curation"],
+    ["YEARN_MS", "mainnet", "0x90D0f26025571295D18a6c041E47450B81886B51", "Curation Multisig (mainnet)", "curation"],
+    ["YEARN_MS", "base-main", "0x90D0f26025571295D18a6c041E47450B81886B51", "Curation Multisig (base)", "curation"],
+    ["YEARN_MS", "katana-main", "0x90D0f26025571295D18a6c041E47450B81886B51", "Curation Multisig (katana)", "curation"],
 ]
 
 ALL_SAFE_ADDRESSES += YEARN_MULTISIGS
 
-# Yearn's bots/EOAs that routinely propose txs on each safe. Pending txs proposed
-# by these addresses are skipped to cut noise — only "unexpected" proposers alert.
-# Discovered from the last ~50 executed txs per safe (>=20% share, >=5 occurrences).
-# Key: (network_name, safe_address_lower). Values: lowercase proposer addresses.
-# Safes absent from this map are NOT filtered (alert on every tx).
 YEARN_EXPECTED_PROPOSERS: dict[tuple[str, str], set[str]] = {
-    # yChad
-    ("mainnet", "0xfeb4acf3df3cdea7399794d0869ef76a6efaff52"): {
-        "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5",
-    },
-    # bChad
-    ("base-main", "0xbfaaba9f56a39b814281d68d2ad949e88d06b02e"): {"0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"},
-    # kChad
-    ("katana-main", "0xe6ad5a88f5da0f276c903d9ac2647a937c917162"): {"0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"},
-    # Strategist (non-katana share one bot)
-    ("mainnet", "0x16388463d60ffe0661cf7f1f31a7d658ac790ff7"): {
-        "0xce434267f53926d4f6bbb12a5c2a3ef3873db254",
-    },
-    ("base-main", "0x01fe3347316b2223961b20689c65eaea71348e93"): {
-        "0xce434267f53926d4f6bbb12a5c2a3ef3873db254",
-    },
-    # Strategist katana uses a different bot
-    ("katana-main", "0xbe7c7efc1ef3245d37e3157f76a512108d6d7ae6"): {
-        "0xce434267f53926d4f6bbb12a5c2a3ef3873db254",
-    },
-    # SAM Multisig (same bot every chain)
-    ("mainnet", "0xe5e2baf96198c56380ddd5e992d7d1ada0e989c0"): {
-        "0x80a3887ba60f76acab48ee4aead0a71a0774a8b2",
-    },
-    ("base-main", "0xfeae2f855250c36a77b8c68db07c4dd9711fe36f"): {
-        "0x80a3887ba60f76acab48ee4aead0a71a0774a8b2",
-    },
-    ("katana-main", "0x518c21dc88d9780c0a1be566433c571461a70149"): {
-        "0x80a3887ba60f76acab48ee4aead0a71a0774a8b2",
-    },
-    # Curation Multisig (same bot every chain)
-    ("mainnet", "0x90d0f26025571295d18a6c041e47450b81886b51"): {
-        "0x80a3887ba60f76acab48ee4aead0a71a0774a8b2",
-    },
-    ("base-main", "0x90d0f26025571295d18a6c041e47450b81886b51"): {
-        "0x80a3887ba60f76acab48ee4aead0a71a0774a8b2",
-    },
-    ("katana-main", "0x90d0f26025571295d18a6c041e47450b81886b51"): {
-        "0x80a3887ba60f76acab48ee4aead0a71a0774a8b2",
-    },
-    # Core Dev Multisig: historic txs predate Safe's proposer field — no filter.
+    (entry[1], entry[2].lower()): {YEARN_PROPOSER_BOTS[entry[4]]} for entry in YEARN_MULTISIGS
 }
