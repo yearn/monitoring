@@ -9,6 +9,8 @@ from utils.llm.ai_explainer import (
     Explanation,
     _build_prompt,
     _collect_safety_checks,
+    _explanation_from_json,
+    _generate_draft,
     _parse_explanation,
     _refine_explanation,
     explain_transaction,
@@ -210,6 +212,7 @@ class TestSkipSimulation(unittest.TestCase):
     ) -> None:
         mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
         mock_provider = MagicMock()
+        mock_provider.supports_structured_output = False
         mock_provider.complete.return_value = "TLDR: paused"
         mock_provider.model_name = "test-model"
         mock_get_provider.return_value = mock_provider
@@ -243,6 +246,7 @@ class TestSkipSimulation(unittest.TestCase):
             function_name="swapOwner", signature="swapOwner(address,address,address)"
         )
         mock_provider = MagicMock()
+        mock_provider.supports_structured_output = False
         mock_provider.complete.return_value = "TLDR: swap"
         mock_provider.model_name = "test-model"
         mock_get_provider.return_value = mock_provider
@@ -290,6 +294,7 @@ class TestExplainTransaction(unittest.TestCase):
         mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
         mock_simulate.return_value = SimulationResult(success=True, gas_used=50000)
         mock_provider = MagicMock()
+        mock_provider.supports_structured_output = False
         mock_provider.complete.return_value = "TLDR: This pauses the protocol.\n\nDETAIL:\nPauses all operations."
         mock_provider.model_name = "test-model"
         mock_get_provider.return_value = mock_provider
@@ -321,6 +326,7 @@ class TestExplainTransaction(unittest.TestCase):
         mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
         mock_simulate.return_value = None
         mock_provider = MagicMock()
+        mock_provider.supports_structured_output = False
         mock_provider.complete.side_effect = LLMError("API error")
         mock_get_provider.return_value = mock_provider
 
@@ -348,6 +354,7 @@ class TestExplainTransaction(unittest.TestCase):
         mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
         mock_simulate.return_value = None  # Simulation failed
         mock_provider = MagicMock()
+        mock_provider.supports_structured_output = False
         mock_provider.complete.return_value = "TLDR: This pauses the protocol."
         mock_provider.model_name = "test-model"
         mock_get_provider.return_value = mock_provider
@@ -376,6 +383,7 @@ class TestExplainTransaction(unittest.TestCase):
             state_var_snippets=["/// @dev so actually 1 - slippage\nuint256 public maxSlippage;"],
         )
         mock_provider = MagicMock()
+        mock_provider.supports_structured_output = False
         mock_provider.complete.return_value = "TLDR: Tight slippage."
         mock_provider.model_name = "test-model"
         mock_get_provider.return_value = mock_provider
@@ -385,6 +393,52 @@ class TestExplainTransaction(unittest.TestCase):
         prompt = mock_provider.complete.call_args[0][0]
         self.assertIn("Contract Source Context", prompt)
         self.assertIn("so actually 1 - slippage", prompt)
+
+
+class TestStructuredOutput(unittest.TestCase):
+    """Tests for the structured-output draft path and JSON→Explanation mapping."""
+
+    def test_appends_risk_tag_when_missing(self) -> None:
+        exp = _explanation_from_json({"summary": "Pauses the vault", "detail": "d", "risk_tag": "MEDIUM"})
+        self.assertEqual(exp.summary, "Pauses the vault MEDIUM")
+        self.assertEqual(exp.detail, "d")
+
+    def test_keeps_existing_trailing_tag(self) -> None:
+        exp = _explanation_from_json({"summary": "Pauses the vault. LOW.", "detail": "d", "risk_tag": "LOW"})
+        self.assertEqual(exp.summary, "Pauses the vault. LOW.")
+
+    def test_generate_draft_uses_structured_when_supported(self) -> None:
+        provider = MagicMock()
+        provider.supports_structured_output = True
+        provider.complete_structured.return_value = {"summary": "Does X", "detail": "d", "risk_tag": "HIGH"}
+
+        result = _generate_draft(provider, "prompt")
+
+        provider.complete_structured.assert_called_once()
+        provider.complete.assert_not_called()
+        self.assertEqual(result.summary, "Does X HIGH")
+
+    def test_generate_draft_falls_back_to_text_on_error(self) -> None:
+        provider = MagicMock()
+        provider.supports_structured_output = True
+        provider.complete_structured.side_effect = LLMError("unsupported")
+        provider.complete.return_value = "TLDR: Does X. LOW."
+
+        result = _generate_draft(provider, "prompt")
+
+        provider.complete.assert_called_once()
+        self.assertEqual(result.summary, "Does X. LOW.")
+
+    def test_generate_draft_falls_back_on_empty_summary(self) -> None:
+        provider = MagicMock()
+        provider.supports_structured_output = True
+        provider.complete_structured.return_value = {"summary": "", "detail": "", "risk_tag": "LOW"}
+        provider.complete.return_value = "TLDR: text path. LOW."
+
+        result = _generate_draft(provider, "prompt")
+
+        provider.complete.assert_called_once()
+        self.assertEqual(result.summary, "text path. LOW.")
 
 
 class TestParseExplanation(unittest.TestCase):
@@ -461,6 +515,7 @@ class TestRefineExplanation(unittest.TestCase):
         # Trailing whitespace around "PASS" must also count as PASS.
         draft = Explanation(summary="Lowers fee 30→25 bps. LOW.", detail="bla")
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "  PASS  \n"
         self.assertIs(_refine_explanation("orig prompt", draft, provider), draft)
         provider.complete.assert_called_once()
@@ -468,6 +523,7 @@ class TestRefineExplanation(unittest.TestCase):
     def test_revision_replaces_draft(self) -> None:
         draft = Explanation(summary="This transaction does X. LOW.", detail="bla")
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: Does X. LOW.\n\nDETAIL:\nrefined detail."
         result = _refine_explanation("orig", draft, provider)
         self.assertEqual(result.summary, "Does X. LOW.")
@@ -476,12 +532,14 @@ class TestRefineExplanation(unittest.TestCase):
     def test_llm_error_falls_back_to_draft(self) -> None:
         draft = Explanation(summary="x", detail="y")
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.side_effect = LLMError("rate limit")
         self.assertIs(_refine_explanation("p", draft, provider), draft)
 
     def test_empty_response_falls_back_to_draft(self) -> None:
         draft = Explanation(summary="x", detail="y")
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = ""
         self.assertIs(_refine_explanation("p", draft, provider), draft)
 
@@ -504,6 +562,7 @@ class TestRefineFlagInExplainTransaction(unittest.TestCase):
     ) -> None:
         mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: Pauses. LOW."
         provider.model_name = "test-model"
         mock_get_provider.return_value = provider
@@ -526,6 +585,7 @@ class TestRefineFlagInExplainTransaction(unittest.TestCase):
     ) -> None:
         mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.side_effect = ["TLDR: Pauses. LOW.", "PASS"]
         provider.model_name = "test-model"
         mock_get_provider.return_value = provider
@@ -559,6 +619,7 @@ class TestFailedSimulationDropped(unittest.TestCase):
             success=False, gas_used=0, error_message="execution reverted: not authorized"
         )
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: pauses. LOW."
         provider.model_name = "test"
         mock_get_provider.return_value = provider
@@ -588,6 +649,7 @@ class TestFailedSimulationDropped(unittest.TestCase):
         mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
         mock_simulate.return_value = SimulationResult(success=False, gas_used=0, error_message="reverted")
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: pauses both. LOW."
         provider.model_name = "test"
         mock_get_provider.return_value = provider
@@ -627,6 +689,7 @@ class TestAbiParamNames(unittest.TestCase):
         )
         mock_names.return_value = ["_maxSlippage"]
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: tightens slippage. LOW."
         provider.model_name = "test"
         mock_get_provider.return_value = provider
@@ -654,6 +717,7 @@ class TestAbiParamNames(unittest.TestCase):
             params=[("uint256", 1)],
         )
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: tightens slippage. LOW."
         provider.model_name = "test"
         mock_get_provider.return_value = provider
@@ -700,6 +764,7 @@ class TestErc20MetadataInPrompt(unittest.TestCase):
         mock_meta.side_effect = lambda _c, addr: ERC20Metadata("USDC", 6) if addr.lower() == usdc.lower() else None
 
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: tiny transfer. LOW."
         provider.model_name = "test"
         mock_get_provider.return_value = provider
@@ -730,6 +795,7 @@ class TestErc20MetadataInPrompt(unittest.TestCase):
             params=[("uint256", 1), ("address[]", ("0x" + "ac" * 20,))],
         )
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: registers farm. LOW."
         provider.model_name = "test"
         mock_get_provider.return_value = provider
@@ -765,6 +831,7 @@ class TestRiskAnchorsSection(unittest.TestCase):
             params=[("address", "0x" + "11" * 20)],
         )
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: hands ownership. HIGH."
         provider.model_name = "test"
         mock_get_provider.return_value = provider
@@ -796,6 +863,7 @@ class TestRiskAnchorsSection(unittest.TestCase):
             params=[("uint256", 1)],
         )
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: tightens slippage. LOW."
         provider.model_name = "test"
         mock_get_provider.return_value = provider
@@ -917,6 +985,7 @@ class TestAddressLabels(unittest.TestCase):
         )
         mock_label.return_value = "MorphoFarm"
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: adds farm. LOW."
         provider.model_name = "test-model"
         mock_get_provider.return_value = provider
@@ -952,6 +1021,7 @@ class TestAddressLabels(unittest.TestCase):
         )
         mock_label.return_value = "ChainlinkOracle"
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: rewires oracle. MEDIUM."
         provider.model_name = "test-model"
         mock_get_provider.return_value = provider
@@ -986,6 +1056,7 @@ class TestAddressLabels(unittest.TestCase):
         )
         mock_label.return_value = ""
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: wires self. LOW."
         provider.model_name = "test-model"
         mock_get_provider.return_value = provider
@@ -1016,6 +1087,7 @@ class TestAddressLabels(unittest.TestCase):
         )
         mock_label.return_value = ""  # unverified / EOA / no API key
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: rewires. MEDIUM."
         provider.model_name = "test-model"
         mock_get_provider.return_value = provider
@@ -1063,6 +1135,7 @@ class TestAddressLabels(unittest.TestCase):
         mock_label.return_value = "ImplContract"
 
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: upgrades. MEDIUM."
         provider.model_name = "test-model"
         mock_get_provider.return_value = provider
@@ -1097,6 +1170,7 @@ class TestAddressLabels(unittest.TestCase):
         )
         mock_label.return_value = ""
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: unsets oracle. LOW."
         provider.model_name = "test-model"
         mock_get_provider.return_value = provider

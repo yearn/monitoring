@@ -1,6 +1,7 @@
 """Abstract base class for LLM providers."""
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 
 class LLMProvider(ABC):
@@ -23,6 +24,34 @@ class LLMProvider(ABC):
         Raises:
             LLMError: If the API call fails.
         """
+
+    @property
+    def supports_structured_output(self) -> bool:
+        """Whether this provider can return JSON matching a supplied schema.
+
+        Defaults to False. Providers that implement :meth:`complete_structured`
+        override this; the explainer only takes the structured path when it's
+        True, falling back to text parsing otherwise.
+        """
+        return False
+
+    def complete_structured(self, prompt: str, schema: dict[str, Any], system_prompt: str = "") -> dict[str, Any]:
+        """Generate a completion constrained to ``schema`` and return it parsed.
+
+        Args:
+            prompt: The user prompt.
+            schema: A JSON Schema object the response must conform to.
+            system_prompt: Optional system prompt (see :meth:`complete`).
+
+        Returns:
+            The decoded JSON object matching ``schema``.
+
+        Raises:
+            LLMError: If structured output is unsupported, the call fails, or the
+                response can't be parsed. Callers should fall back to
+                :meth:`complete` on this error.
+        """
+        raise LLMError("structured output is not supported by this provider")
 
     @property
     @abstractmethod

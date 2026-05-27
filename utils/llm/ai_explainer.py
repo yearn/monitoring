@@ -13,7 +13,7 @@ from utils.calldata.decoder import DecodedCall, decode_calldata, is_selector_res
 from utils.erc20_metadata import fetch_erc20_metadata
 from utils.impl_diff import diff_implementations, format_impl_diff
 from utils.llm import get_llm_provider
-from utils.llm.base import LLMError
+from utils.llm.base import LLMError, LLMProvider
 from utils.logging import get_logger
 from utils.on_chain_state import StateRead, format_state_reads, read_before_state
 from utils.paste import upload_to_paste
@@ -87,6 +87,31 @@ DETAIL:
 # every alert, so providers that support prompt caching (Anthropic) pay for it
 # once per cache window instead of on every call.
 SYSTEM_INSTRUCTIONS = SYSTEM_PROMPT + "\n" + FORMAT_REMINDER
+
+# Structured-output variant: same rules, but the schema (not a text format)
+# carries the shape, so we swap FORMAT_REMINDER for a field-mapping note.
+JSON_OUTPUT_NOTE = """
+Return a structured object with three fields:
+- summary: the TLDR — verb-first, up to 10 short sentences, no "This transaction" preamble.
+- detail: the thorough DETAIL analysis.
+- risk_tag: one of LOW, MEDIUM, HIGH, CRITICAL.
+The summary need not repeat the risk tag; the risk_tag field carries it."""
+SYSTEM_INSTRUCTIONS_JSON = SYSTEM_PROMPT + JSON_OUTPUT_NOTE
+
+_RISK_TAGS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+
+# JSON Schema for the structured explanation. risk_tag is enum-constrained so the
+# Telegram tag is always valid — no regex extraction or fallback parsing needed.
+EXPLANATION_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string", "description": "Verb-first TLDR, up to 10 short sentences."},
+        "detail": {"type": "string", "description": "Thorough analysis of the transaction."},
+        "risk_tag": {"type": "string", "enum": list(_RISK_TAGS)},
+    },
+    "required": ["summary", "detail", "risk_tag"],
+    "additionalProperties": False,
+}
 
 REFINE_TASK = """--- Critique Task ---
 Check the draft above against this checklist. Each item is a yes/no question:
@@ -293,10 +318,10 @@ def _collect_safety_checks(
     for target, decoded, value in targets_calls_values:
         if not (target and value > 0 and decoded.function_name):
             continue
-        key = (target.lower(), decoded.function_name)
-        if key in payable_seen:
+        fn_key = (target.lower(), decoded.function_name)
+        if fn_key in payable_seen:
             continue
-        payable_seen.add(key)
+        payable_seen.add(fn_key)
         try:
             mut = get_function_state_mutability(chain_id, target, decoded.function_name)
         except Exception as e:  # noqa: BLE001 - best-effort enrichment
@@ -765,6 +790,50 @@ def _parse_explanation(raw: str) -> Explanation:
     return Explanation(summary=raw.strip(), detail="")
 
 
+def _ends_with_risk_tag(text: str) -> bool:
+    """True if ``text`` ends with a risk tag (ignoring trailing punctuation)."""
+    tail = text.rstrip().rstrip(".").strip().upper()
+    return any(tail.endswith(tag) for tag in _RISK_TAGS)
+
+
+def _explanation_from_json(data: dict) -> Explanation:
+    """Build an Explanation from a structured-output object.
+
+    Ensures the summary still ends with the risk tag (the Telegram message uses
+    only the summary), appending the explicit ``risk_tag`` when the model didn't
+    inline it.
+    """
+    summary = str(data.get("summary", "")).strip()
+    detail = str(data.get("detail", "")).strip()
+    risk = str(data.get("risk_tag", "")).strip().upper()
+    # Only append to a non-empty summary — leaving an empty summary empty lets
+    # _generate_draft detect the failure and fall back to the text path.
+    if summary and risk in _RISK_TAGS and not _ends_with_risk_tag(summary):
+        summary = f"{summary} {risk}"
+    return Explanation(summary=summary, detail=detail)
+
+
+def _generate_draft(provider: LLMProvider, prompt: str) -> Explanation:
+    """Produce the initial explanation, preferring structured output.
+
+    Uses the provider's JSON-schema path when available (guaranteed-valid risk
+    tag, no regex parsing) and falls back to text completion + ``_parse_explanation``
+    on any structured-output failure or empty result.
+    """
+    if provider.supports_structured_output:
+        try:
+            data = provider.complete_structured(prompt, EXPLANATION_SCHEMA, system_prompt=SYSTEM_INSTRUCTIONS_JSON)
+            explanation = _explanation_from_json(data)
+            if explanation.summary:
+                return explanation
+            logger.warning("Structured output returned an empty summary; falling back to text")
+        except LLMError as e:
+            logger.warning("Structured output failed (%s); falling back to text", e)
+
+    raw = provider.complete(prompt, system_prompt=SYSTEM_INSTRUCTIONS)
+    return _parse_explanation(raw)
+
+
 def _refine_explanation(original_prompt: str, draft: Explanation, provider) -> Explanation:
     """Self-critique then revise. Returns the draft unchanged on PASS or any error."""
     refine_prompt = (
@@ -895,8 +964,7 @@ def explain_transaction(
 
     try:
         provider = get_llm_provider()
-        raw = provider.complete(prompt, system_prompt=SYSTEM_INSTRUCTIONS)
-        explanation = _parse_explanation(raw)
+        explanation = _generate_draft(provider, prompt)
         if refine:
             explanation = _refine_explanation(prompt, explanation, provider)
         logger.info("AI summary using %s:\n%s", provider.model_name, explanation.summary)
@@ -1016,8 +1084,7 @@ def explain_batch_transaction(
 
     try:
         provider = get_llm_provider()
-        raw = provider.complete(prompt, system_prompt=SYSTEM_INSTRUCTIONS)
-        explanation = _parse_explanation(raw)
+        explanation = _generate_draft(provider, prompt)
         if refine:
             explanation = _refine_explanation(prompt, explanation, provider)
         logger.info("Batch AI summary using %s:\n%s", provider.model_name, explanation.summary)

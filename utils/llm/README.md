@@ -207,24 +207,32 @@ When `refine=True` is passed to `explain_transaction` / `explain_batch_transacti
 
 Cost: ~2× LLM calls per alert when enabled. Default is **off**.
 
-### 8. Dual-Output Parsing
+### 8. Dual-Output: Structured or Text
 
-The LLM is asked to return two sections:
+`_generate_draft()` produces the `Explanation` dataclass (`summary` → Telegram, `detail` → paste service) via one of two paths:
+
+**Structured output (preferred).** When the provider advertises `supports_structured_output`, the draft is requested as JSON matching `EXPLANATION_SCHEMA`:
+
+```json
+{ "summary": "Upgrades AAVE pool impl 0xOld → 0xNew. Verify audited.",
+  "detail": "Calls upgradeTo(address) on the AAVE pool proxy...",
+  "risk_tag": "MEDIUM" }
+```
+
+`risk_tag` is `enum`-constrained to `LOW/MEDIUM/HIGH/CRITICAL`, so the Telegram tag is always valid — no regex extraction. OpenAI-compatible providers use `response_format: json_schema`; the Anthropic provider uses a forced tool call. `_explanation_from_json` maps the object to `Explanation`, appending `risk_tag` to the summary if the model didn't inline it.
+
+**Text fallback.** If structured output is disabled, fails, or returns an empty summary, the draft falls back to a plain `complete()` call returning:
 
 ```
 TLDR: Upgrades AAVE pool impl 0xOld → 0xNew. Verify audited. MEDIUM.
 
 DETAIL:
 Calls upgradeTo(address) on the AAVE pool proxy...
-Current implementation: 0xOld...
-New implementation: 0xNew...
 ```
 
-`_parse_explanation()` splits this into an `Explanation` dataclass:
-- `summary` (from TLDR) — short, goes to Telegram
-- `detail` (from DETAIL) — thorough analysis, uploaded to a paste service and linked from the Telegram message
+`_parse_explanation()` splits this with tolerant regex (handles `### DETAIL`, `**TLDR:**`, etc.); if the format isn't followed, the whole response becomes the summary (backward compatible).
 
-If the LLM doesn't follow the format, the full response is used as the summary (backward compatible).
+Structured output is controlled by `LLM_STRUCTURED_OUTPUT` (per-provider default: on for `anthropic`/`openai`, off for `venice`/`groq`/custom, since JSON-schema support varies by backend). The refine pass (step 7) always uses the text path.
 
 ### 9. Output Formatting
 
@@ -248,6 +256,7 @@ All configuration is via environment variables:
 | `LLM_API_KEY` | *(required)* | API key for the LLM provider |
 | `LLM_MODEL` | `deepseek-v4-flash` | Model identifier |
 | `LLM_BASE_URL` | *(per provider)* | API base URL (not needed for anthropic) |
+| `LLM_STRUCTURED_OUTPUT` | *(per provider)* | `true`/`false` to force JSON-schema output. Default: on for anthropic/openai, off for venice/groq/custom |
 | `ETHERSCAN_TOKEN` | *(optional)* | Etherscan v2 multichain API key for source context |
 | `TENDERLY_API_KEY` | *(optional)* | Tenderly API key for simulation |
 | `TENDERLY_ACCOUNT` | `yearn` | Tenderly account slug |

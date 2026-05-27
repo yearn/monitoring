@@ -5,6 +5,8 @@ Environment variables:
     LLM_API_KEY: API key for the provider (required).
     LLM_BASE_URL: Base URL for the API (not needed for anthropic).
     LLM_MODEL: Model identifier to use.
+    LLM_STRUCTURED_OUTPUT: "true"/"false" to force JSON-schema structured output
+        on or off. Unset uses a per-provider default (on for anthropic/openai).
 
 Provider defaults:
     venice: base_url=https://api.venice.ai/api/v1, model=deepseek-v4-flash
@@ -44,7 +46,29 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
 _instance: LLMProvider | None = None
 
 
-def _create_provider(provider_name: str, api_key: str, model: str, base_url: str) -> LLMProvider:
+# Providers whose default model reliably supports JSON-schema structured output.
+# Others (venice, groq, custom) default off and must opt in via LLM_STRUCTURED_OUTPUT,
+# since support varies by backend and model. Anthropic uses forced tool use, which
+# all Claude models support, so it defaults on.
+_STRUCTURED_OUTPUT_DEFAULTS: dict[str, bool] = {
+    "anthropic": True,
+    "openai": True,
+    "venice": False,
+    "groq": False,
+}
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Parse a boolean env var; unset/blank falls back to ``default``."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _create_provider(
+    provider_name: str, api_key: str, model: str, base_url: str, structured_output: bool
+) -> LLMProvider:
     """Create the appropriate provider instance.
 
     Args:
@@ -52,6 +76,7 @@ def _create_provider(provider_name: str, api_key: str, model: str, base_url: str
         api_key: API key for the provider.
         model: Model identifier.
         base_url: Base URL (only used for OpenAI-compatible providers).
+        structured_output: Whether to enable JSON-schema structured output.
 
     Returns:
         Configured LLMProvider instance.
@@ -59,7 +84,7 @@ def _create_provider(provider_name: str, api_key: str, model: str, base_url: str
     if provider_name == "anthropic":
         from utils.llm.anthropic_provider import AnthropicProvider
 
-        return AnthropicProvider(api_key=api_key, model=model)
+        return AnthropicProvider(api_key=api_key, model=model, structured_output=structured_output)
 
     from utils.llm.openai_compat import OpenAICompatProvider
 
@@ -68,7 +93,7 @@ def _create_provider(provider_name: str, api_key: str, model: str, base_url: str
             f"LLM_BASE_URL must be set for provider '{provider_name}'. "
             f"Known providers with defaults: {list(_PROVIDER_DEFAULTS.keys())}"
         )
-    return OpenAICompatProvider(api_key=api_key, base_url=base_url, model=model)
+    return OpenAICompatProvider(api_key=api_key, base_url=base_url, model=model, structured_output=structured_output)
 
 
 def get_llm_provider() -> LLMProvider:
@@ -99,8 +124,10 @@ def get_llm_provider() -> LLMProvider:
             f"Known providers with defaults: {list(_PROVIDER_DEFAULTS.keys())}"
         )
 
-    logger.info("Creating LLM provider: %s (model=%s)", provider_name, model)
-    _instance = _create_provider(provider_name, api_key, model, base_url)
+    structured_output = _env_bool("LLM_STRUCTURED_OUTPUT", _STRUCTURED_OUTPUT_DEFAULTS.get(provider_name, False))
+
+    logger.info("Creating LLM provider: %s (model=%s, structured=%s)", provider_name, model, structured_output)
+    _instance = _create_provider(provider_name, api_key, model, base_url, structured_output)
     return _instance
 
 
