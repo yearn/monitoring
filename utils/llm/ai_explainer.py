@@ -935,7 +935,7 @@ def explain_transaction(
     if not calldata or len(calldata) < 10:
         return None
 
-    decoded = decode_calldata(calldata)
+    decoded = decode_calldata(calldata, chain_id=chain_id, target=target)
     if not decoded:
         logger.info("Could not decode calldata for %s, skipping AI explanation", target)
         return None
@@ -1047,7 +1047,7 @@ def explain_batch_transaction(
         data = call.get("data", "0x")
         value = int(call.get("value", "0"))
 
-        decoded = decode_calldata(data)
+        decoded = decode_calldata(data, chain_id=chain_id, target=target)
         if decoded:
             decoded_calls.append(decoded)
             decoded_with_target.append((target, decoded))
