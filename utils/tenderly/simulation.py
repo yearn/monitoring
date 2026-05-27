@@ -97,12 +97,33 @@ def _parse_state_changes(raw: list[dict[str, Any]]) -> list[StateChange]:
     return changes
 
 
+def _merge_balance_override(
+    state_objects: dict[str, dict[str, Any]] | None,
+    from_address: str,
+    value: int,
+) -> dict[str, dict[str, Any]]:
+    """Return state overrides with a balance for ``from_address`` when value > 0.
+
+    Governance executors (timelocks, Safes) frequently don't hold the ETH a
+    value-bearing call forwards, so a faithful simulation would revert with
+    "insufficient funds" — a false negative. Granting the sender exactly the
+    forwarded ``value`` removes that class of spurious revert without masking a
+    genuine logic failure. Caller-supplied overrides win on conflict.
+    """
+    merged: dict[str, dict[str, Any]] = {k: dict(v) for k, v in (state_objects or {}).items()}
+    if value > 0 and from_address:
+        slot = merged.setdefault(from_address, {})
+        slot.setdefault("balance", hex(value))
+    return merged
+
+
 def simulate_transaction(
     target: str,
     calldata: str,
     chain_id: int,
     value: int = 0,
     from_address: str = "0x0000000000000000000000000000000000000000",
+    state_objects: dict[str, dict[str, Any]] | None = None,
 ) -> SimulationResult | None:
     """Simulate a transaction using the Tenderly API.
 
@@ -112,6 +133,11 @@ def simulate_transaction(
         chain_id: Chain ID (e.g. 1 for mainnet).
         value: ETH value in wei.
         from_address: Sender address for simulation context.
+        state_objects: Optional Tenderly state overrides keyed by address
+            (e.g. ``{addr: {"balance": "0x...", "storage": {...}}}``). Used to
+            reduce false reverts — governance executors often don't hold the ETH
+            a value-bearing call forwards, and access-gated setters can be
+            unblocked by overriding the relevant role/owner slot.
 
     Returns:
         SimulationResult with parsed state changes and asset transfers,
@@ -122,7 +148,9 @@ def simulate_transaction(
         logger.warning("TENDERLY_API_KEY not set, skipping simulation")
         return None
 
-    body = {
+    overrides = _merge_balance_override(state_objects, from_address, value)
+
+    body: dict[str, Any] = {
         "network_id": str(chain_id),
         "from": from_address,
         "to": target,
@@ -132,6 +160,8 @@ def simulate_transaction(
         "save_if_fails": False,
         "simulation_type": "full",
     }
+    if overrides:
+        body["state_objects"] = overrides
 
     headers = {"X-Access-Key": api_key}
     url = _get_simulation_url()

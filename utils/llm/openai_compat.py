@@ -31,12 +31,16 @@ class OpenAICompatProvider(LLMProvider):
         self._client = OpenAI(api_key=api_key, base_url=base_url)
         logger.info("Initialized OpenAI-compatible provider: base_url=%s model=%s", base_url, model)
 
-    def complete(self, prompt: str) -> str:
+    def complete(self, prompt: str, system_prompt: str = "") -> str:
         """Generate a completion using the OpenAI chat completions API."""
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
         try:
             response = self._client.chat.completions.create(
                 model=self._model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=messages,
             )
             content = response.choices[0].message.content
             if not content:

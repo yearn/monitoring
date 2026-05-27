@@ -161,6 +161,93 @@ def fetch_function_input_names(chain_id: int, address: str, function_name: str) 
     return _function_input_names_from_abi(impl_record[2], function_name)
 
 
+def get_verification_status(chain_id: int, address: str) -> bool | None:
+    """Tri-state Etherscan verification check for ``address``.
+
+    Returns ``True`` if the contract has verified source, ``False`` if Etherscan
+    explicitly reports it unverified, and ``None`` when we can't tell (no API
+    key, request error). The ``None`` case is deliberate — flagging a target as
+    "UNVERIFIED" on a transient failure would cry wolf, so callers should only
+    surface the warning on an explicit ``False``.
+    """
+    api_key = os.getenv("ETHERSCAN_TOKEN")
+    if not api_key:
+        return None
+
+    # Verified contracts are already cached by source-context collection.
+    if _fetch_etherscan_contract(chain_id, address) is not None:
+        return True
+
+    # Cache miss → unverified or a transient error. One explicit call to
+    # disambiguate: Etherscan returns status "1" with an empty SourceCode for a
+    # genuinely unverified contract, and status "0" on error.
+    params = {
+        "chainid": str(chain_id),
+        "module": "contract",
+        "action": "getsourcecode",
+        "address": address,
+        "apikey": api_key,
+    }
+    data = fetch_json(ETHERSCAN_V2_API_URL, params=params)
+    if not data or data.get("status") != "1":
+        return None
+    results = data.get("result") or []
+    entry = results[0] if isinstance(results, list) and results else {}
+    if not (entry.get("SourceCode") or ""):
+        return False
+    return None
+
+
+def get_function_state_mutability(chain_id: int, address: str, function_name: str) -> str | None:
+    """Return the ABI ``stateMutability`` for ``function_name`` (or None).
+
+    One of ``"pure"`` / ``"view"`` / ``"nonpayable"`` / ``"payable"``. Follows
+    EIP-1967 to the implementation for generic proxies, same as
+    :func:`fetch_function_input_names`. If the function is overloaded and any
+    overload is ``payable``, ``"payable"`` is returned so a value-bearing call
+    is never falsely flagged as reverting.
+    """
+    record = _fetch_etherscan_contract(chain_id, address)
+    if record is None:
+        return None
+
+    mut = _function_state_mutability_from_abi(record[2], function_name)
+    if mut is not None:
+        return mut
+
+    if record[0] and record[0] not in _GENERIC_PROXY_NAMES:
+        return None
+
+    from utils.proxy import get_current_implementation
+
+    impl = get_current_implementation(address, chain_id)
+    if not impl or impl.lower() == address.lower():
+        return None
+    impl_record = _fetch_etherscan_contract(chain_id, impl)
+    if impl_record is None:
+        return None
+    return _function_state_mutability_from_abi(impl_record[2], function_name)
+
+
+def _function_state_mutability_from_abi(abi_json: str, function_name: str) -> str | None:
+    """Pull ``stateMutability`` for ``function_name`` from an ABI JSON string."""
+    abi = _parse_abi(abi_json)
+    if abi is None:
+        return None
+    muts: list[str] = []
+    for entry in abi:
+        if not isinstance(entry, dict) or entry.get("type") != "function":
+            continue
+        if entry.get("name") != function_name:
+            continue
+        mut = entry.get("stateMutability")
+        if isinstance(mut, str):
+            muts.append(mut)
+    if not muts:
+        return None
+    return "payable" if "payable" in muts else muts[0]
+
+
 def _function_input_names_from_abi(abi_json: str, function_name: str) -> list[str] | None:
     """Pull input names for ``function_name`` out of an ABI JSON string.
 

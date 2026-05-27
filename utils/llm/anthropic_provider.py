@@ -28,14 +28,22 @@ class AnthropicProvider(LLMProvider):
         self._client = Anthropic(api_key=api_key)
         logger.info("Initialized Anthropic provider: model=%s", model)
 
-    def complete(self, prompt: str) -> str:
-        """Generate a completion using the Anthropic messages API."""
+    def complete(self, prompt: str, system_prompt: str = "") -> str:
+        """Generate a completion using the Anthropic messages API.
+
+        The static ``system_prompt`` is sent as a cacheable system block so
+        repeated alerts within the 5-minute cache window pay input-token cost
+        for the (large) instruction prompt only once.
+        """
+        kwargs: dict = {
+            "model": self._model,
+            "max_tokens": 10000,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if system_prompt:
+            kwargs["system"] = [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
         try:
-            response = self._client.messages.create(
-                model=self._model,
-                max_tokens=10000,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            response = self._client.messages.create(**kwargs)
             block = response.content[0]
             if block.type != "text":
                 raise LLMError(f"Unexpected response block type: {block.type}")

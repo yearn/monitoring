@@ -90,6 +90,8 @@ Simulates the transaction against current on-chain state to get:
 
 Requires `TENDERLY_API_KEY`. Simulation failure is non-blocking — the pipeline continues with the decoded calldata only.
 
+**State overrides** (`state_objects`) reduce false reverts. When a call forwards ETH (`value > 0`), the executor (timelock/Safe) often doesn't hold that balance, so a faithful sim would revert with "insufficient funds" — a false negative. `_merge_balance_override` grants the sender exactly the forwarded `value`. Callers can pass additional overrides (e.g. a role/owner storage slot) to unblock access-gated setters; caller-supplied values win on conflict.
+
 Callers can pass `skip_simulation=True` to bypass Tenderly entirely. Used for Safe transactions with `operation=DELEGATECALL` (typically multiSend batches), where our plain-CALL simulator can't model the real execution and would produce a spurious "revert" verdict.
 
 ### 5. Proxy Upgrade Detection & Implementation Diff (`utils/proxy.py`, `utils/impl_diff.py`)
@@ -117,20 +119,33 @@ When an upgrade is detected the pipeline:
 
 The structural diff is injected into the prompt under `--- Implementation Diff ---`. Best-effort: if either impl is unverified or extraction fails, the diff section is silently omitted but the rest of the upgrade context still renders.
 
+### 5b. Deterministic Safety Checks (`utils/llm/ai_explainer.py`, `utils/source_context.py`)
+
+`_collect_safety_checks()` runs seatbelt-style checks grounded in Etherscan data we already fetch, and surfaces them as hard facts under `--- Safety Checks ---`:
+
+- **Unverified target** — a governance tx whose target has no published source is a red flag (`get_verification_status` returns a tri-state; the note is emitted only on an explicit `False`, never on a fetch error, so it doesn't cry wolf).
+- **ETH to a non-payable function** — forwarding `value > 0` to a `nonpayable` function reverts and can strand funds (`get_function_state_mutability`, with EIP-1967 proxy follow; overloaded functions resolve to `payable` if any overload accepts value).
+
+The system prompt instructs the LLM to treat each item as verified and reflect it in the verdict (e.g. an unverified target is at least MEDIUM).
+
 ### 6. LLM Prompt & Completion (`utils/llm/ai_explainer.py`)
 
-The prompt is built from all available context. The system prompt enforces brevity:
+The prompt is split into a **system** prompt (static instructions) and a **user** prompt (per-tx context). `complete(prompt, system_prompt=...)` passes the system block via the provider's native system role, which improves instruction-following and lets the Anthropic provider mark it `cache_control: ephemeral` — repeated alerts within the cache window pay for the (large) instruction prompt only once. The static block (`SYSTEM_INSTRUCTIONS`) enforces brevity:
 
 - Starts with a verb, no "This transaction…" preamble
 - Trailing risk tag in caps (LOW / MEDIUM / HIGH / CRITICAL)
 - Refuses to assume parameter units from function name alone
 - Trusts source-context natspec over prior assumptions
 - Quotes concrete before→after deltas when state reads are available
+- Flags any divergence between a proposal's **stated intent** and the decoded actions
+
+When a `description` is passed to the explainer, it renders under `--- Stated Intent (proposal description) ---` and the LLM compares stated intent against the calldata, flagging undisclosed role/ownership/upgrade or fund-movement changes.
 
 Example assembled prompt:
 
 ```
-System: You are a DeFi risk analyst writing alerts for a monitoring team...
+System (sent via native system role, cached):
+        You are a DeFi risk analyst writing alerts for a monitoring team...
         (brevity rules, unit-interpretation rules)
 
 Protocol: AAVE
@@ -139,6 +154,9 @@ Target: 0x...
 
 --- Execution Context ---             (optional, e.g. for DELEGATECALL via MultiSendCallOnly)
 Outer call is DELEGATECALL from the Safe (0x...) into ...
+
+--- Stated Intent (proposal description) ---  (optional, when a description is supplied)
+Upgrade the pool implementation to add an emergency pause.
 
 --- Decoded Calldata ---
 Call 1: upgradeTo(address)
@@ -171,6 +189,9 @@ Functions added (2):
 
 Storage layout safe (append-only). New state vars at end:
   + address public oracle
+
+--- Safety Checks ---                 (optional, deterministic seatbelt-style checks)
+- 0xNewImpl is UNVERIFIED on Etherscan — source is not published; the call cannot be inspected.
 
 --- Simulation Results ---
 Simulation: SUCCESS

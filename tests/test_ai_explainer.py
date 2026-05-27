@@ -5,8 +5,10 @@ from unittest.mock import MagicMock, patch
 
 from utils.calldata.decoder import DecodedCall
 from utils.llm.ai_explainer import (
+    SYSTEM_INSTRUCTIONS,
     Explanation,
     _build_prompt,
+    _collect_safety_checks,
     _parse_explanation,
     _refine_explanation,
     explain_transaction,
@@ -25,7 +27,8 @@ class TestBuildPrompt(unittest.TestCase):
         result = _build_prompt(target="0xTarget", value=0, decoded_calls=calls, simulation=None)
         self.assertIn("Target: 0xTarget", result)
         self.assertIn("pause()", result)
-        self.assertIn("DeFi risk analyst", result)
+        # Static instructions now live in the system prompt, not the user prompt.
+        self.assertIn("DeFi risk analyst", SYSTEM_INSTRUCTIONS)
 
     def test_with_protocol_and_label(self) -> None:
         calls = [DecodedCall(function_name="pause", signature="pause()")]
@@ -74,10 +77,9 @@ class TestBuildPromptWithSourceContext(unittest.TestCase):
         self.assertIn("so actually 1 - slippage", result)
 
     def test_hardened_prompt_includes_unit_guidance(self) -> None:
-        calls = [DecodedCall(function_name="pause", signature="pause()")]
-        result = _build_prompt(target="0xT", value=0, decoded_calls=calls, simulation=None)
-        self.assertIn("Do NOT assume the semantic meaning", result)
-        self.assertIn("source context", result.lower())
+        # Unit-interpretation guidance is part of the static system prompt.
+        self.assertIn("Do NOT assume the semantic meaning", SYSTEM_INSTRUCTIONS)
+        self.assertIn("source context", SYSTEM_INSTRUCTIONS.lower())
 
     def test_context_note_appears_in_prompt(self) -> None:
         calls = [DecodedCall(function_name="swapOwner", signature="swapOwner(address,address,address)")]
@@ -90,6 +92,69 @@ class TestBuildPromptWithSourceContext(unittest.TestCase):
         )
         self.assertIn("--- Execution Context ---", result)
         self.assertIn("DELEGATECALL from the Safe", result)
+
+    def test_safety_notes_appear_in_prompt(self) -> None:
+        calls = [DecodedCall(function_name="pause", signature="pause()")]
+        result = _build_prompt(
+            target="0xT",
+            value=0,
+            decoded_calls=calls,
+            simulation=None,
+            safety_notes=["0xT is UNVERIFIED on Etherscan — source is not published."],
+        )
+        self.assertIn("--- Safety Checks ---", result)
+        self.assertIn("UNVERIFIED", result)
+
+    def test_description_appears_in_prompt(self) -> None:
+        calls = [DecodedCall(function_name="pause", signature="pause()")]
+        result = _build_prompt(
+            target="0xT",
+            value=0,
+            decoded_calls=calls,
+            simulation=None,
+            description="Pause the vault during the migration window.",
+        )
+        self.assertIn("--- Stated Intent (proposal description) ---", result)
+        self.assertIn("migration window", result)
+
+
+class TestCollectSafetyChecks(unittest.TestCase):
+    """Tests for _collect_safety_checks (seatbelt-style deterministic checks)."""
+
+    @patch("utils.llm.ai_explainer.get_function_state_mutability", return_value=None)
+    @patch("utils.llm.ai_explainer.get_verification_status", return_value=False)
+    def test_unverified_target_flagged(self, _mut: MagicMock, _ver: MagicMock) -> None:
+        call = DecodedCall(function_name="pause", signature="pause()")
+        notes = _collect_safety_checks([("0xT", call, 0)], chain_id=1)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("UNVERIFIED", notes[0])
+
+    @patch("utils.llm.ai_explainer.get_function_state_mutability", return_value=None)
+    @patch("utils.llm.ai_explainer.get_verification_status", return_value=True)
+    def test_verified_target_no_note(self, _mut: MagicMock, _ver: MagicMock) -> None:
+        call = DecodedCall(function_name="pause", signature="pause()")
+        self.assertEqual(_collect_safety_checks([("0xT", call, 0)], chain_id=1), [])
+
+    @patch("utils.llm.ai_explainer.get_function_state_mutability", return_value=None)
+    @patch("utils.llm.ai_explainer.get_verification_status", return_value=None)
+    def test_unknown_verification_no_note(self, _mut: MagicMock, _ver: MagicMock) -> None:
+        # None (no API key / fetch error) must not cry wolf.
+        call = DecodedCall(function_name="pause", signature="pause()")
+        self.assertEqual(_collect_safety_checks([("0xT", call, 0)], chain_id=1), [])
+
+    @patch("utils.llm.ai_explainer.get_function_state_mutability", return_value="nonpayable")
+    @patch("utils.llm.ai_explainer.get_verification_status", return_value=True)
+    def test_value_to_nonpayable_flagged(self, _ver: MagicMock, _mut: MagicMock) -> None:
+        call = DecodedCall(function_name="setConfig", signature="setConfig(uint256)")
+        notes = _collect_safety_checks([("0xT", call, 10**18)], chain_id=1)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("non-payable", notes[0])
+
+    @patch("utils.llm.ai_explainer.get_function_state_mutability", return_value="payable")
+    @patch("utils.llm.ai_explainer.get_verification_status", return_value=True)
+    def test_value_to_payable_not_flagged(self, _ver: MagicMock, _mut: MagicMock) -> None:
+        call = DecodedCall(function_name="deposit", signature="deposit()")
+        self.assertEqual(_collect_safety_checks([("0xT", call, 10**18)], chain_id=1), [])
 
 
 class TestBatchParamConstants(unittest.TestCase):
