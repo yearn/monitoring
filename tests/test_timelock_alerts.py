@@ -112,6 +112,21 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         self.assertIn("Short summary.", msg)
         self.assertNotIn("...", msg)
 
+    @patch("timelock.timelock_alerts._get_ai_explanation")
+    def test_ai_skipped_for_governance_protocol(self, mock_ai: object) -> None:
+        """Protocols with dedicated governance monitoring skip the AI summary entirely."""
+        aave_info = TimelockConfig(
+            address="0x" + "bb" * 20,
+            chain_id=1,
+            protocol="AAVE",
+            label="Aave Governance V3",
+        )
+        msg = build_alert_message([_make_event()], aave_info)
+
+        mock_ai.assert_not_called()  # type: ignore[attr-defined]
+        self.assertNotIn("AI Summary", msg)
+        self.assertIn("TIMELOCK: New Operation Scheduled", msg)
+
 
 class TestMapleProposalUnwrap(unittest.TestCase):
     """Maple ProposalScheduled has no target/data; recover them from the source tx."""
