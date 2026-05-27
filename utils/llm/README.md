@@ -306,3 +306,16 @@ safe/multisend.py            # Safe MultiSendCallOnly inner-call extractor + DEL
 - **Safe alerts** (`safe/main.py`): Routes through `_explain_safe_tx()`, which detects `operation=DELEGATECALL` multisend batches and dispatches to `explain_batch_transaction()` with `skip_simulation=True` and a DELEGATECALL context note. Plain CALL Safe txs use `explain_transaction()` as before.
 - Both call sites use `format_explanation_line()` to append the AI summary to Telegram messages.
 - Both call sites can opt into the refine pass per-protocol by passing `refine=True` to the explainer.
+
+## Eval Harness
+
+`tests/eval/` guards the prompt/pipeline against regressions with real mainnet fixtures (`fixtures.py`) and tolerant assertions — a risk tag within an acceptable band plus required/forbidden substrings, since LLM output isn't deterministic.
+
+It makes live LLM + Etherscan + RPC calls (costs money), so it's **excluded from the default test suite**. Run it after prompt or pipeline changes:
+
+```bash
+python -m tests.eval.run_eval                          # standalone report, non-zero exit on failure
+RUN_LLM_EVAL=1 python -m pytest tests/eval -v          # same cases as parametrized tests
+```
+
+Add a fixture whenever a prompt change fixes a specific failure mode (e.g. the intent-mismatch case asserts a misleading "no changes" description can't downgrade a real parameter change below MEDIUM).
