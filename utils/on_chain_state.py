@@ -103,6 +103,19 @@ def _parse_var_declaration(snippet: str, var_name: str) -> tuple[str, list[str]]
     return None
 
 
+def _is_externally_readable(snippet: str) -> bool:
+    """Whether a state-var declaration exposes a compiler-generated getter.
+
+    Only ``public`` (and ``external``) state variables get an auto-generated
+    getter callable via eth_call. ``internal``/``private`` vars have no getter,
+    so a read always reverts (e.g. Compound's Configurator declares
+    ``mapping(address => Configuration) internal configuratorParams``).
+    """
+    decl_lines = [line for line in snippet.splitlines() if not line.strip().startswith(("///", "*", "/**"))]
+    decl = " ".join(line.strip() for line in decl_lines)
+    return bool(re.search(r"\b(?:public|external)\b", decl))
+
+
 def _match_key_value_from_params(decoded_call: DecodedCall, key_type: str) -> Any | None:
     """Pick the first call param whose type matches the mapping key type.
 
@@ -233,6 +246,12 @@ def read_before_state(
     reads: list[StateRead] = []
     for var_name in var_names:
         snippet = extract_state_var_snippet(source, var_name)
+        if snippet and not _is_externally_readable(snippet):
+            # The var is declared at top level but internal/private, so no
+            # compiler getter exists and a read would always revert. Skip it
+            # rather than guessing a getter from the setter signature.
+            logger.info("Skipping non-public state var %s.%s", target, var_name)
+            continue
         parsed = _parse_var_declaration(snippet, var_name) if snippet else None
 
         key_values: list[Any] = []
