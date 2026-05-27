@@ -1128,7 +1128,7 @@ class TestAddressLabels(unittest.TestCase):
         # The outer decode is mocked (no fake selector to resolve); the inner
         # bytes recursion uses the real decoder so `initialize(address)`
         # resolves via KNOWN_SELECTORS and yields the inner address.
-        def routed_decode(data: str) -> DecodedCall | None:
+        def routed_decode(data: str, chain_id: int | None = None, target: str | None = None) -> DecodedCall | None:
             return outer if data == "0xUPGRADE_CALLDATA" else real_decode(data)
 
         mock_decode.side_effect = routed_decode

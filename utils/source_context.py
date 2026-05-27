@@ -229,6 +229,64 @@ def get_function_state_mutability(chain_id: int, address: str, function_name: st
     return _function_state_mutability_from_abi(impl_record[2], function_name)
 
 
+def get_function_signature_by_selector(chain_id: int, address: str, selector_hex: str) -> str | None:
+    """Return the canonical signature for a 4-byte selector from the verified ABI.
+
+    More reliable than the Sourcify 4byte database, which returns *all* known
+    signatures for a selector (collisions) and may pick the wrong one. The
+    target's own ABI has exactly the function being called. Follows EIP-1967 to
+    the implementation for generic proxies. Returns None when unavailable.
+    """
+    record = _fetch_etherscan_contract(chain_id, address)
+    if record is None:
+        return None
+
+    sig = _function_signature_from_abi(record[2], selector_hex)
+    if sig is not None:
+        return sig
+
+    # Selector not in the target's own ABI. If the target proxies to an impl,
+    # try there. Unlike the natspec/param-name helpers we don't gate on a
+    # generic-proxy *name* — custom proxies (e.g. Compound's "Unitroller") miss
+    # that list — so we follow whenever an impl address resolves.
+    from utils.proxy import get_current_implementation
+
+    impl = get_current_implementation(address, chain_id)
+    if not impl or impl.lower() == address.lower():
+        return None
+    impl_record = _fetch_etherscan_contract(chain_id, impl)
+    if impl_record is None:
+        return None
+    return _function_signature_from_abi(impl_record[2], selector_hex)
+
+
+def _function_signature_from_abi(abi_json: str, selector_hex: str) -> str | None:
+    """Find the function whose 4-byte selector matches and return its signature."""
+    from eth_utils import function_signature_to_4byte_selector
+    from eth_utils.abi import collapse_if_tuple
+
+    abi = _parse_abi(abi_json)
+    if abi is None:
+        return None
+    want = selector_hex.lower()
+    for entry in abi:
+        if not isinstance(entry, dict) or entry.get("type") != "function":
+            continue
+        name = entry.get("name")
+        if not name:
+            continue
+        inputs = entry.get("inputs") or []
+        try:
+            types = ",".join(collapse_if_tuple(inp) for inp in inputs)
+            sig = f"{name}({types})"
+            sel = "0x" + function_signature_to_4byte_selector(sig).hex()
+        except Exception:  # noqa: BLE001 - malformed ABI entry, skip
+            continue
+        if sel.lower() == want:
+            return sig
+    return None
+
+
 def _function_state_mutability_from_abi(abi_json: str, function_name: str) -> str | None:
     """Pull ``stateMutability`` for ``function_name`` from an ABI JSON string."""
     abi = _parse_abi(abi_json)

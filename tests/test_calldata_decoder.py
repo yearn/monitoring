@@ -227,6 +227,28 @@ class TestDecodeCalldata(unittest.TestCase):
         self.assertEqual(result.function_name, "transfer")
         self.assertEqual(result.params, [])
 
+    @patch("utils.calldata.decoder._resolve_signature_via_abi", return_value="transfer(address,uint256)")
+    @patch("utils.calldata.decoder.resolve_selector")
+    def test_abi_signature_preferred_with_target(self, mock_resolve, mock_abi):
+        result = decode_calldata(TRANSFER_CALLDATA, chain_id=1, target="0xToken")
+        mock_abi.assert_called_once()
+        mock_resolve.assert_not_called()  # ABI hit → Sourcify skipped
+        self.assertEqual(result.signature, "transfer(address,uint256)")
+
+    @patch("utils.calldata.decoder._resolve_signature_via_abi", return_value=None)
+    @patch("utils.calldata.decoder.resolve_selector", return_value="transfer(address,uint256)")
+    def test_falls_back_to_sourcify_when_abi_misses(self, mock_resolve, mock_abi):
+        result = decode_calldata(TRANSFER_CALLDATA, chain_id=1, target="0xToken")
+        mock_abi.assert_called_once()
+        mock_resolve.assert_called_once()
+        self.assertEqual(result.signature, "transfer(address,uint256)")
+
+    @patch("utils.calldata.decoder._resolve_signature_via_abi")
+    @patch("utils.calldata.decoder.resolve_selector", return_value="transfer(address,uint256)")
+    def test_no_abi_lookup_without_target(self, mock_resolve, mock_abi):
+        decode_calldata(TRANSFER_CALLDATA)
+        mock_abi.assert_not_called()
+
 
 class TestFormatCallLines(unittest.TestCase):
     """Tests for format_call_lines."""

@@ -49,10 +49,11 @@ Generates human-readable explanations for queued governance transactions (timelo
 Converts raw hex calldata into a structured `DecodedCall`:
 
 1. Extract the 4-byte function selector (first 4 bytes after `0x`)
-2. Look up the selector in `utils/calldata/known_selectors.py` (local table)
-3. If not found, query the [Sourcify 4byte API](https://api.4byte.sourcify.dev)
-4. Parse the function signature to extract parameter types
-5. Decode parameters using `eth_abi.decode()`
+2. When the call's `target` + `chain_id` are known, resolve the signature from the target's **verified ABI** first (`get_function_signature_by_selector`, EIP-1967/getter proxy-aware) — more reliable than 4byte, which can't disambiguate selector collisions
+3. Otherwise look up the selector in `utils/calldata/known_selectors.py` (local table)
+4. If still unresolved, query the [Sourcify 4byte API](https://api.4byte.sourcify.dev)
+5. Parse the function signature to extract parameter types
+6. Decode parameters using `eth_abi.decode()`
 
 Result: `DecodedCall(function_name="upgradeTo", signature="upgradeTo(address)", params=[("address", "0x...")])`
 
