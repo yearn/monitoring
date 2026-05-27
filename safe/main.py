@@ -222,7 +222,6 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
                 f"🔗 Safe URL: {get_safe_url(safe_address, network_name)}\n"
                 f"#️⃣ Nonce: {nonce}\n"
                 f"📜 Target Contract Address: {target_contract}\n"
-                f"💰 Value: {tx['value']}\n"
                 f"📅 Submission Date: {tx['submissionDate']}"
             )
             # Find the additional info for the current safe address

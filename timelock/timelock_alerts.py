@@ -72,6 +72,11 @@ TIMELOCK_LIST: list[TimelockConfig] = [
 # Lookup by (lowercase address, chain_id) to support same address on multiple chains
 TIMELOCKS: dict[tuple[str, int], TimelockConfig] = {(t.address, t.chain_id): t for t in TIMELOCK_LIST}
 
+# Protocols whose governance proposals are already monitored (and human-described)
+# by a dedicated script (e.g. aave/proposals.py, compound/proposals.py). For these,
+# the AI summary on the timelock execution is redundant, so we skip it.
+SKIP_AI_SUMMARY_PROTOCOLS: frozenset[str] = frozenset({"AAVE", "COMP", "LIDO", "FLUID"})
+
 _logger = get_logger("timelock_alerts")
 
 
@@ -416,11 +421,13 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
         # Unknown type - show operationId at minimum
         call_lines.append(f"🆔 Operation: {first.get('operationId') or ''}")
 
-    # AI explanation (best-effort, non-blocking)
+    # AI explanation (best-effort, non-blocking). Skipped for protocols whose
+    # governance proposals are already monitored by a dedicated script.
     ai_line = ""
-    explanation = _get_ai_explanation(events, timelock_info, chain_id)
-    if explanation:
-        ai_line = format_explanation_line(explanation)
+    if timelock_info.protocol.upper() not in SKIP_AI_SUMMARY_PROTOCOLS:
+        explanation = _get_ai_explanation(events, timelock_info, chain_id)
+        if explanation:
+            ai_line = format_explanation_line(explanation)
 
     # Footer (always included)
     if explorer:
