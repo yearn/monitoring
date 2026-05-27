@@ -150,7 +150,19 @@ class TestCollectSafetyChecks(unittest.TestCase):
         call = DecodedCall(function_name="setConfig", signature="setConfig(uint256)")
         notes = _collect_safety_checks([("0xT", call, 10**18)], chain_id=1)
         self.assertEqual(len(notes), 1)
-        self.assertIn("non-payable", notes[0])
+        self.assertIn("nonpayable", notes[0])
+        self.assertIn("revert", notes[0])
+
+    def test_value_to_view_or_pure_flagged(self) -> None:
+        # view and pure functions are also non-payable; value to them reverts.
+        for mut in ("view", "pure"):
+            with self.subTest(mut=mut):
+                with patch("utils.llm.ai_explainer.get_verification_status", return_value=True):
+                    with patch("utils.llm.ai_explainer.get_function_state_mutability", return_value=mut):
+                        call = DecodedCall(function_name="getConfig", signature="getConfig()")
+                        notes = _collect_safety_checks([("0xT", call, 10**18)], chain_id=1)
+                self.assertEqual(len(notes), 1)
+                self.assertIn(mut, notes[0])
 
     @patch("utils.llm.ai_explainer.get_function_state_mutability", return_value="payable")
     @patch("utils.llm.ai_explainer.get_verification_status", return_value=True)
@@ -403,9 +415,14 @@ class TestStructuredOutput(unittest.TestCase):
         self.assertEqual(exp.summary, "Pauses the vault MEDIUM")
         self.assertEqual(exp.detail, "d")
 
-    def test_keeps_existing_trailing_tag(self) -> None:
+    def test_normalizes_matching_trailing_tag(self) -> None:
         exp = _explanation_from_json({"summary": "Pauses the vault. LOW.", "detail": "d", "risk_tag": "LOW"})
-        self.assertEqual(exp.summary, "Pauses the vault. LOW.")
+        self.assertEqual(exp.summary, "Pauses the vault. LOW")
+
+    def test_schema_tag_overrides_inlined_tag(self) -> None:
+        # Model put LOW in the prose but the validated risk_tag is HIGH — schema wins.
+        exp = _explanation_from_json({"summary": "Grants admin role. LOW.", "detail": "d", "risk_tag": "HIGH"})
+        self.assertEqual(exp.summary, "Grants admin role. HIGH")
 
     def test_generate_draft_uses_structured_when_supported(self) -> None:
         provider = MagicMock()

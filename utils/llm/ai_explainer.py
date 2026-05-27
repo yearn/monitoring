@@ -334,10 +334,11 @@ def _collect_safety_checks(
         except Exception as e:  # noqa: BLE001 - best-effort enrichment
             logger.info("State-mutability lookup failed for %s.%s: %s", target, decoded.function_name, e)
             continue
-        if mut == "nonpayable":
+        # Only `payable` functions accept ETH; nonpayable/view/pure all reject it.
+        if mut in ("nonpayable", "view", "pure"):
             notes.append(
-                f"Forwards {value / 1e18:.6f} ETH to {decoded.function_name}() on {target}, which is non-payable "
-                f"— the call will revert."
+                f"Forwards {value / 1e18:.6f} ETH to {decoded.function_name}() on {target}, which is {mut} "
+                f"(does not accept ETH) — the call will revert."
             )
     return notes
 
@@ -815,26 +816,29 @@ def _parse_explanation(raw: str) -> Explanation:
     return Explanation(summary=raw.strip(), detail="")
 
 
-def _ends_with_risk_tag(text: str) -> bool:
-    """True if ``text`` ends with a risk tag (ignoring trailing punctuation)."""
-    tail = text.rstrip().rstrip(".").strip().upper()
-    return any(tail.endswith(tag) for tag in _RISK_TAGS)
+def _strip_trailing_risk_tag(text: str) -> str:
+    """Remove a trailing risk tag (with surrounding space/punctuation) from text."""
+    import re
+
+    # Only whitespace (not a period) may precede the tag, so the preceding
+    # sentence's period is preserved: "…vault. LOW." → "…vault."
+    pattern = r"\s*\b(?:" + "|".join(_RISK_TAGS) + r")\b[\s.]*$"
+    return re.sub(pattern, "", text, flags=re.IGNORECASE).rstrip()
 
 
 def _explanation_from_json(data: dict) -> Explanation:
     """Build an Explanation from a structured-output object.
 
-    Ensures the summary still ends with the risk tag (the Telegram message uses
-    only the summary), appending the explicit ``risk_tag`` when the model didn't
-    inline it.
+    The schema's ``risk_tag`` is authoritative (it's enum-validated), so we
+    normalize the summary to end with it — replacing any tag the model inlined
+    in the prose, which may differ. An empty summary is left empty so
+    ``_generate_draft`` can detect the failure and fall back to the text path.
     """
     summary = str(data.get("summary", "")).strip()
     detail = str(data.get("detail", "")).strip()
     risk = str(data.get("risk_tag", "")).strip().upper()
-    # Only append to a non-empty summary — leaving an empty summary empty lets
-    # _generate_draft detect the failure and fall back to the text path.
-    if summary and risk in _RISK_TAGS and not _ends_with_risk_tag(summary):
-        summary = f"{summary} {risk}"
+    if summary and risk in _RISK_TAGS:
+        summary = f"{_strip_trailing_risk_tag(summary)} {risk}".strip()
     return Explanation(summary=summary, detail=detail)
 
 
