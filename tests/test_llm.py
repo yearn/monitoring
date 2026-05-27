@@ -303,16 +303,22 @@ class TestFactory(unittest.TestCase):
             self.assertIn("model", defaults, f"Missing model for {name}")
 
     @patch("openai.OpenAI")
-    def test_structured_output_off_by_default_for_venice(self, mock_openai_cls: MagicMock) -> None:
+    def test_structured_output_on_by_default_for_venice(self, mock_openai_cls: MagicMock) -> None:
         env = {"LLM_PROVIDER": "venice", "LLM_API_KEY": "test-key"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertTrue(get_llm_provider().supports_structured_output)
+
+    @patch("openai.OpenAI")
+    def test_structured_output_off_by_default_for_groq(self, mock_openai_cls: MagicMock) -> None:
+        env = {"LLM_PROVIDER": "groq", "LLM_API_KEY": "test-key"}
         with patch.dict(os.environ, env, clear=True):
             self.assertFalse(get_llm_provider().supports_structured_output)
 
     @patch("openai.OpenAI")
-    def test_structured_output_env_override_enables(self, mock_openai_cls: MagicMock) -> None:
-        env = {"LLM_PROVIDER": "venice", "LLM_API_KEY": "test-key", "LLM_STRUCTURED_OUTPUT": "true"}
+    def test_structured_output_env_override_disables(self, mock_openai_cls: MagicMock) -> None:
+        env = {"LLM_PROVIDER": "venice", "LLM_API_KEY": "test-key", "LLM_STRUCTURED_OUTPUT": "false"}
         with patch.dict(os.environ, env, clear=True):
-            self.assertTrue(get_llm_provider().supports_structured_output)
+            self.assertFalse(get_llm_provider().supports_structured_output)
 
     @patch("anthropic.Anthropic")
     def test_structured_output_on_by_default_for_anthropic(self, mock_anthropic_cls: MagicMock) -> None:

@@ -6,7 +6,7 @@ Environment variables:
     LLM_BASE_URL: Base URL for the API (not needed for anthropic).
     LLM_MODEL: Model identifier to use.
     LLM_STRUCTURED_OUTPUT: "true"/"false" to force JSON-schema structured output
-        on or off. Unset uses a per-provider default (on for anthropic/openai).
+        on or off. Unset uses a per-provider default (on for anthropic/openai/venice).
 
 Provider defaults:
     venice: base_url=https://api.venice.ai/api/v1, model=deepseek-v4-flash
@@ -47,13 +47,14 @@ _instance: LLMProvider | None = None
 
 
 # Providers whose default model reliably supports JSON-schema structured output.
-# Others (venice, groq, custom) default off and must opt in via LLM_STRUCTURED_OUTPUT,
-# since support varies by backend and model. Anthropic uses forced tool use, which
-# all Claude models support, so it defaults on.
+# Verified live against venice/deepseek-v4-flash and openai. groq and custom
+# backends default off (support varies by model) and must opt in via
+# LLM_STRUCTURED_OUTPUT. Anthropic uses forced tool use — all Claude models
+# support it — so it defaults on.
 _STRUCTURED_OUTPUT_DEFAULTS: dict[str, bool] = {
     "anthropic": True,
     "openai": True,
-    "venice": False,
+    "venice": True,
     "groq": False,
 }
 

@@ -232,7 +232,7 @@ Calls upgradeTo(address) on the AAVE pool proxy...
 
 `_parse_explanation()` splits this with tolerant regex (handles `### DETAIL`, `**TLDR:**`, etc.); if the format isn't followed, the whole response becomes the summary (backward compatible).
 
-Structured output is controlled by `LLM_STRUCTURED_OUTPUT` (per-provider default: on for `anthropic`/`openai`, off for `venice`/`groq`/custom, since JSON-schema support varies by backend). The refine pass (step 7) always uses the text path.
+Structured output is controlled by `LLM_STRUCTURED_OUTPUT` (per-provider default: on for `anthropic`/`openai`/`venice` — all verified live — off for `groq`/custom, since JSON-schema support varies by backend). The refine pass (step 7) always uses the text path.
 
 ### 9. Output Formatting
 
@@ -256,7 +256,7 @@ All configuration is via environment variables:
 | `LLM_API_KEY` | *(required)* | API key for the LLM provider |
 | `LLM_MODEL` | `deepseek-v4-flash` | Model identifier |
 | `LLM_BASE_URL` | *(per provider)* | API base URL (not needed for anthropic) |
-| `LLM_STRUCTURED_OUTPUT` | *(per provider)* | `true`/`false` to force JSON-schema output. Default: on for anthropic/openai, off for venice/groq/custom |
+| `LLM_STRUCTURED_OUTPUT` | *(per provider)* | `true`/`false` to force JSON-schema output. Default: on for anthropic/openai/venice (all verified live), off for groq/custom |
 | `ETHERSCAN_TOKEN` | *(optional)* | Etherscan v2 multichain API key for source context |
 | `TENDERLY_API_KEY` | *(optional)* | Tenderly API key for simulation |
 | `TENDERLY_ACCOUNT` | `yearn` | Tenderly account slug |
