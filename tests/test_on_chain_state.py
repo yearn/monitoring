@@ -6,12 +6,31 @@ from unittest.mock import MagicMock, patch
 from utils.calldata.decoder import DecodedCall
 from utils.on_chain_state import (
     StateRead,
+    _is_externally_readable,
     _is_simple_type,
     _match_key_value_from_params,
     _parse_var_declaration,
     format_state_reads,
     read_before_state,
 )
+
+
+class TestIsExternallyReadable(unittest.TestCase):
+    def test_public_var(self) -> None:
+        self.assertTrue(_is_externally_readable("uint256 public maxSlippage;"))
+
+    def test_public_mapping(self) -> None:
+        self.assertTrue(_is_externally_readable("mapping(address => uint256) public coverageCap;"))
+
+    def test_internal_var(self) -> None:
+        self.assertFalse(_is_externally_readable("mapping(address => Configuration) internal configuratorParams;"))
+
+    def test_private_var(self) -> None:
+        self.assertFalse(_is_externally_readable("uint256 private _secret;"))
+
+    def test_ignores_natspec_mentioning_public(self) -> None:
+        snippet = "/// @notice exposed via a public helper\nuint256 internal _x;"
+        self.assertFalse(_is_externally_readable(snippet))
 
 
 class TestIsSimpleType(unittest.TestCase):
@@ -184,6 +203,32 @@ class TestReadBeforeState(unittest.TestCase):
     def test_no_source_returns_empty(self, mock_fetch: MagicMock) -> None:
         call = DecodedCall(function_name="setX", signature="setX(uint256)", params=[("uint256", 1)])
         self.assertEqual(read_before_state(1, "0xT", call), [])
+
+    @patch("utils.on_chain_state.ChainManager")
+    @patch("utils.on_chain_state.fetch_source")
+    def test_internal_var_skipped_without_eth_call(self, mock_fetch: MagicMock, mock_chain: MagicMock) -> None:
+        # Compound III Configurator: configuratorParams is `internal`, so there is
+        # no auto-generated getter — the read must be skipped, not attempted.
+        source = """
+        mapping(address => Configuration) internal configuratorParams;
+        function setSupplyKink(address cometProxy, uint64 newSupplyKink) external {
+            configuratorParams[cometProxy].supplyKink = newSupplyKink;
+        }
+        """
+        mock_fetch.return_value = ("Configurator", source)
+        mock_client = MagicMock()
+        mock_chain.get_client.return_value = mock_client
+
+        call = DecodedCall(
+            function_name="setSupplyKink",
+            signature="setSupplyKink(address,uint64)",
+            params=[("address", "0xc3d688B66703497DAA19211EEdff47f25384cdc3"), ("uint64", 850000000000000000)],
+        )
+
+        reads = read_before_state(1, "0x316f9708bb98af7da9c68c1c3b5e79039cd336e3", call)
+
+        self.assertEqual(reads, [])
+        mock_client.eth.call.assert_not_called()
 
     @patch("utils.on_chain_state.fetch_source")
     def test_struct_mapping_returns_empty(self, mock_fetch: MagicMock) -> None:

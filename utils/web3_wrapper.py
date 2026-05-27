@@ -21,6 +21,21 @@ logger = get_logger("utils.web3")
 
 T = TypeVar("T")  # Generic type for return values
 
+# Cap on the per-attempt backoff sleep so exponential growth cannot stall a run
+# for hours (a single uncapped attempt could otherwise sleep for over an hour).
+MAX_BACKOFF_SECONDS = 30
+
+# Substrings identifying deterministic contract errors. These return identically
+# from every provider, so retrying or rotating providers is pointless and only
+# wastes time on backoff sleeps.
+NON_RETRYABLE_ERROR_MARKERS = ("execution reverted",)
+
+
+def _is_non_retryable(error: Exception) -> bool:
+    """Return True for deterministic errors that won't change across providers/retries."""
+    msg = str(error).lower()
+    return any(marker in msg for marker in NON_RETRYABLE_ERROR_MARKERS)
+
 
 def retry_with_provider_rotation(func):
     @functools.wraps(func)
@@ -30,10 +45,14 @@ def retry_with_provider_rotation(func):
             try:
                 return func(self, *args, **kwargs)
             except Exception as e:
+                # Deterministic contract errors (e.g. reverts) can never succeed
+                # on retry, so fail fast and let the caller handle it.
+                if _is_non_retryable(e):
+                    raise
                 current_url = self.endpoint_uri
                 errors[current_url] = str(e)
                 logger.warning("Failed on %s: %s", current_url, e)
-                time.sleep(self.backoff_factor * (2**attempt))
+                time.sleep(min(self.backoff_factor * (2**attempt), MAX_BACKOFF_SECONDS))
                 self._rotate_provider()
 
         raise ProviderConnectionError(
