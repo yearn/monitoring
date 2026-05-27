@@ -18,6 +18,12 @@ logger = get_logger("utils.proxy")
 # bytes32(uint256(keccak256("eip1967.proxy.implementation")) - 1)
 EIP1967_IMPL_SLOT = 0x360894A13BA1A3210667C828492DB98DCA3E2076CC3735A920A3CA505D382BBC
 
+# Legacy OpenZeppelin (zeppelinos) implementation slot — predates EIP-1967 and is
+# the plain keccak256 of the label (no `- 1`). Still used by long-lived proxies
+# like USDC's FiatTokenProxy. Tried as a fallback when the EIP-1967 slot is empty.
+# bytes32(keccak256("org.zeppelinos.proxy.implementation"))
+ZEPPELINOS_IMPL_SLOT = 0x7050C9E0F4CA769C69BD3A8EF740BC37934F8E2C036E5A723FD8EE048ED3F8C3
+
 # Selectors that indicate a proxy upgrade.
 # - upgradeTo(address)                       — called on the proxy itself
 # - upgradeToAndCall(address,bytes)          — called on the proxy itself
@@ -87,7 +93,10 @@ def detect_proxy_upgrade(data_hex: str, target: str = "") -> ProxyUpgrade | None
 
 
 def get_current_implementation(proxy_address: str, chain_id: int) -> str | None:
-    """Read the current implementation address from the EIP-1967 storage slot.
+    """Read the current implementation address from a proxy's storage.
+
+    Tries the EIP-1967 implementation slot first, then the legacy zeppelinos
+    slot so pre-EIP-1967 proxies (e.g. USDC's FiatTokenProxy) still resolve.
 
     Args:
         proxy_address: The proxy contract address.
@@ -103,18 +112,20 @@ def get_current_implementation(proxy_address: str, chain_id: int) -> str | None:
         client = ChainManager.get_client(chain)
         from web3 import Web3
 
-        raw = client.eth.get_storage_at(Web3.to_checksum_address(proxy_address), EIP1967_IMPL_SLOT)
+        checksum_proxy = Web3.to_checksum_address(proxy_address)
+        for slot in (EIP1967_IMPL_SLOT, ZEPPELINOS_IMPL_SLOT):
+            raw = client.eth.get_storage_at(checksum_proxy, slot)
 
-        # get_storage_at returns HexBytes (32 bytes), address is last 20 bytes
-        hex_str = raw.hex() if isinstance(raw, bytes) else str(raw)
-        hex_str = hex_str.replace("0x", "").zfill(64)
-        addr = "0x" + hex_str[-40:]
+            # get_storage_at returns HexBytes (32 bytes), address is last 20 bytes
+            hex_str = raw.hex() if isinstance(raw, bytes) else str(raw)
+            hex_str = hex_str.replace("0x", "").zfill(64)
+            addr = "0x" + hex_str[-40:]
 
-        # Zero address means no implementation set (not a proxy)
-        if int(addr, 16) == 0:
-            return None
+            # Zero means the slot is unused — try the next layout.
+            if int(addr, 16) != 0:
+                return to_checksum_address(addr)
 
-        return to_checksum_address(addr)
+        return None
     except Exception:
         logger.debug("Failed to read implementation slot for %s on chain %s", proxy_address, chain_id, exc_info=True)
         return None

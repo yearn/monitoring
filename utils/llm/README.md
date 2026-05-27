@@ -108,7 +108,7 @@ For the ProxyAdmin pattern, the tx target is the ProxyAdmin and the actual proxy
 
 When an upgrade is detected the pipeline:
 
-1. Reads the **current implementation** from the EIP-1967 storage slot (`0x360894a...`) of the proxy.
+1. Reads the **current implementation** from the EIP-1967 storage slot (`0x360894a...`) of the proxy, falling back to the legacy zeppelinos slot (`0x7050c9e...`) for pre-EIP-1967 proxies like USDC's `FiatTokenProxy`.
 2. Builds an Etherscan diff URL: `etherscan.io/contractdiffchecker?a1=old&a2=new`.
 3. Fetches the verified source of **both** implementations and runs a structural diff (`utils/impl_diff.py`):
    - **Functions added / removed / changed visibility or modifiers**, identified by name + arg types so overloads are distinct.
