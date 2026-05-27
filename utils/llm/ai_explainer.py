@@ -342,6 +342,22 @@ def _collect_safety_checks(
     return notes
 
 
+def _new_impl_verification_note(new_impl: str, chain_id: int) -> str:
+    """One-line note on whether the new implementation is verified on Etherscan.
+
+    Upgrading a proxy to UNVERIFIED bytecode is a major red flag — the new code
+    can't be inspected and the structural impl-diff can't run. Surfacing a hard
+    verified/unverified fact stops the LLM from guessing. Empty on unknown
+    (no API key / fetch error).
+    """
+    status = get_verification_status(chain_id, new_impl)
+    if status is False:
+        return "\nNew implementation is UNVERIFIED on Etherscan — its bytecode cannot be inspected (high risk)."
+    if status is True:
+        return "\nNew implementation is verified on Etherscan."
+    return ""
+
+
 def _get_proxy_upgrade_info(calldata: str, target: str, chain_id: int) -> str:
     """Detect proxy upgrade, fetch impl diff, and return context string for the prompt."""
     upgrade = detect_proxy_upgrade(calldata, target)
@@ -350,11 +366,13 @@ def _get_proxy_upgrade_info(calldata: str, target: str, chain_id: int) -> str:
 
     proxy = upgrade.proxy_address
     new_impl = upgrade.new_implementation
+    verification_note = _new_impl_verification_note(new_impl, chain_id)
     old_impl = get_current_implementation(proxy, chain_id)
     if not old_impl:
-        return f"This is a PROXY UPGRADE on {proxy}.\nNew implementation: {new_impl}"
+        return f"This is a PROXY UPGRADE on {proxy}.\nNew implementation: {new_impl}{verification_note}"
 
     info = f"This is a PROXY UPGRADE on {proxy}.\nCurrent implementation: {old_impl}\nNew implementation: {new_impl}"
+    info += verification_note
     diff_url = build_diff_url(old_impl, new_impl, chain_id)
     if diff_url:
         info += f"\nDiff: {diff_url}"

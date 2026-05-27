@@ -128,30 +128,36 @@ class TestGetCurrentImplementation(unittest.TestCase):
             return bytes(32)
         return bytes(12) + bytes.fromhex(addr[2:])
 
-    def _run_with_slots(self, slot_values: dict[int, str | None]) -> str | None:
+    def _run(self, slot_values: dict[int, str | None], getter_addr: str | None = None) -> str | None:
         from unittest.mock import MagicMock, patch
 
         client = MagicMock()
         client.eth.get_storage_at.side_effect = lambda _addr, slot: self._slot_word(slot_values.get(slot))
+        # eth.call backs the impl-getter fallback (implementation() etc.).
+        client.eth.call.return_value = self._slot_word(getter_addr)
         with patch("utils.web3_wrapper.ChainManager.get_client", return_value=client):
             return get_current_implementation("0x" + "ab" * 20, chain_id=1)
 
     def test_reads_eip1967_slot(self) -> None:
         impl = _cs("0x" + "11" * 20)
-        self.assertEqual(self._run_with_slots({EIP1967_IMPL_SLOT: impl}), impl)
+        self.assertEqual(self._run({EIP1967_IMPL_SLOT: impl}), impl)
 
     def test_falls_back_to_zeppelinos_slot(self) -> None:
         impl = _cs("0x" + "22" * 20)
-        result = self._run_with_slots({EIP1967_IMPL_SLOT: None, ZEPPELINOS_IMPL_SLOT: impl})
-        self.assertEqual(result, impl)
+        self.assertEqual(self._run({EIP1967_IMPL_SLOT: None, ZEPPELINOS_IMPL_SLOT: impl}), impl)
+
+    def test_falls_back_to_impl_getter(self) -> None:
+        impl = _cs("0x" + "33" * 20)
+        # Both slots empty → resolves via the implementation() getter.
+        self.assertEqual(self._run({}, getter_addr=impl), impl)
 
     def test_eip1967_takes_precedence(self) -> None:
         eip = _cs("0x" + "11" * 20)
-        result = self._run_with_slots({EIP1967_IMPL_SLOT: eip, ZEPPELINOS_IMPL_SLOT: _cs("0x" + "22" * 20)})
+        result = self._run({EIP1967_IMPL_SLOT: eip, ZEPPELINOS_IMPL_SLOT: _cs("0x" + "22" * 20)})
         self.assertEqual(result, eip)
 
-    def test_returns_none_when_both_slots_empty(self) -> None:
-        self.assertIsNone(self._run_with_slots({}))
+    def test_returns_none_when_nothing_resolves(self) -> None:
+        self.assertIsNone(self._run({}, getter_addr=None))
 
 
 if __name__ == "__main__":
