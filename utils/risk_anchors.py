@@ -40,6 +40,9 @@ _ANCHORS: dict[str, RiskAnchor] = {
     # Ownership — irreversible authority change
     "0xf2fde38b": RiskAnchor("HIGH", "transferOwnership(): hands over full admin control"),
     "0x715018a6": RiskAnchor("HIGH", "renounceOwnership(): irrevocably abandons admin"),
+    "0x79ba5097": RiskAnchor("HIGH", "acceptOwnership(): completes an Ownable2Step handover"),
+    # Token supply
+    "0x40c10f19": RiskAnchor("MEDIUM", "mint(address,uint256): new supply — elevate to HIGH if large or unbacked"),
     # Proxy upgrades — replaces all code; impl-diff section should drive the verdict
     "0x3659cfe6": RiskAnchor("HIGH", "upgradeTo(): replaces all implementation code"),
     "0x4f1ef286": RiskAnchor("HIGH", "upgradeToAndCall(): replaces code AND runs initializer"),
@@ -50,6 +53,15 @@ _ANCHORS: dict[str, RiskAnchor] = {
     "0x0e18b681": RiskAnchor("HIGH", "acceptAdmin(): completes an admin handover"),
     # Diamond / facet operations
     "0x1f931c1c": RiskAnchor("HIGH", "diamondCut(): replaces/adds/removes selectors — bytecode-level change"),
+    # Gnosis Safe self-administration — changes who/what can move the multisig's funds
+    "0x0d582f13": RiskAnchor("HIGH", "addOwnerWithThreshold(): adds a Safe signer"),
+    "0xf8dc5dd9": RiskAnchor("HIGH", "removeOwner(): removes a Safe signer"),
+    "0xe318b52b": RiskAnchor("HIGH", "swapOwner(): replaces a Safe signer"),
+    "0x694e80c3": RiskAnchor("HIGH", "changeThreshold(): changes signatures required to execute"),
+    "0x610b5925": RiskAnchor("CRITICAL", "enableModule(): a module can move funds with NO owner signatures"),
+    "0xe009cfde": RiskAnchor("MEDIUM", "disableModule(): removes a module — usually defensive"),
+    "0xe19a9dd9": RiskAnchor("HIGH", "setGuard(): a guard can permit or block every Safe transaction"),
+    "0xf08a0323": RiskAnchor("MEDIUM", "setFallbackHandler(): changes the Safe's fallback behavior"),
 }
 
 
