@@ -194,6 +194,7 @@ class TestTelegram(unittest.TestCase):
                 "TELEGRAM_BOT_TOKEN_AAVE": "aave_token",
                 "TELEGRAM_CHAT_ID_AAVE": "aave_chat_id",
                 "TELEGRAM_CHAT_ID_TOPICS": "topics_chat_id",
+                "TELEGRAM_TOPIC_ID_AAVE": "",
                 "LOG_LEVEL": "INFO",
             },
         ):
