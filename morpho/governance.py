@@ -153,8 +153,8 @@ def fetch_market_info(market_id: str, chain: Chain) -> tuple[str, int | None]:
     'WBTC/USDC (86.00%)'. On failure returns (market_id, None).
     """
     query = """
-    query GetMarket($uniqueKey: String!, $chainId: Int!) {
-        marketByUniqueKey(uniqueKey: $uniqueKey, chainId: $chainId) {
+    query GetMarket($marketId: String!, $chainId: Int!) {
+        marketById(marketId: $marketId, chainId: $chainId) {
             lltv
             loanAsset { symbol, decimals }
             collateralAsset { symbol }
@@ -165,10 +165,10 @@ def fetch_market_info(market_id: str, chain: Chain) -> tuple[str, int | None]:
         response = request_with_retry(
             "post",
             API_URL,
-            json={"query": query, "variables": {"uniqueKey": market_id, "chainId": chain.chain_id}},
+            json={"query": query, "variables": {"marketId": market_id, "chainId": chain.chain_id}},
         )
         data = response.json()
-        market = data["data"]["marketByUniqueKey"]
+        market = data["data"]["marketById"]
         collateral_symbol = market["collateralAsset"]["symbol"] if market.get("collateralAsset") else "idle"
         loan_asset = market["loanAsset"]
         loan_symbol = loan_asset["symbol"]

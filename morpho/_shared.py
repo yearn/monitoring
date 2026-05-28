@@ -51,7 +51,7 @@ def get_chain_name(chain: Chain) -> str:
 
 
 def get_market_url(market_id: str, chain: Chain) -> str:
-    """Build the Morpho UI URL for a market by its uniqueKey."""
+    """Build the Morpho UI URL for a market by its marketId."""
     return f"{MORPHO_URL}/{get_chain_name(chain)}/market/{market_id}"
 
 
@@ -66,8 +66,8 @@ def fetch_market_name(market_id: str, chain: Chain) -> str:
     Falls back to the raw market_id on error so alerts always render.
     """
     query = """
-    query GetMarket($uniqueKey: String!, $chainId: Int!) {
-        marketByUniqueKey(uniqueKey: $uniqueKey, chainId: $chainId) {
+    query GetMarket($marketId: String!, $chainId: Int!) {
+        marketById(marketId: $marketId, chainId: $chainId) {
             lltv
             loanAsset { symbol, decimals }
             collateralAsset { symbol }
@@ -78,9 +78,9 @@ def fetch_market_name(market_id: str, chain: Chain) -> str:
         response = request_with_retry(
             "post",
             API_URL,
-            json={"query": query, "variables": {"uniqueKey": market_id, "chainId": chain.chain_id}},
+            json={"query": query, "variables": {"marketId": market_id, "chainId": chain.chain_id}},
         )
-        market = response.json()["data"]["marketByUniqueKey"]
+        market = response.json()["data"]["marketById"]
         collateral_symbol = market["collateralAsset"]["symbol"] if market.get("collateralAsset") else "idle"
         loan_symbol = market["loanAsset"]["symbol"]
         lltv_pct = int(market["lltv"]) / 1e18 * 100
@@ -122,7 +122,7 @@ class BadDebt:
 class MarketMetrics:
     """State + bad debt for a single Morpho Blue market."""
 
-    unique_key: str
+    market_id: str
     loan_asset: Asset
     collateral_asset: Optional[Asset]
     state: MarketState
@@ -144,7 +144,7 @@ def _parse_market_metrics(raw: Dict[str, Any]) -> MarketMetrics:
     bad_debt_raw = raw.get("badDebt") or {}
     loan_asset = _parse_asset(raw.get("loanAsset")) or Asset(address="", symbol="")
     return MarketMetrics(
-        unique_key=raw["uniqueKey"],
+        market_id=raw["marketId"],
         loan_asset=loan_asset,
         collateral_asset=_parse_asset(raw.get("collateralAsset")),
         state=MarketState(
@@ -162,7 +162,7 @@ def _parse_market_metrics(raw: Dict[str, Any]) -> MarketMetrics:
 
 
 def fetch_market_metrics(market_ids: List[str], chain: Chain) -> Dict[str, MarketMetrics]:
-    """Fetch state + bad debt for a batch of market uniqueKeys.
+    """Fetch state + bad debt for a batch of market IDs.
 
     Returns a dict keyed by lowercase market_id mapping to a ``MarketMetrics``
     dataclass. Empty dict on GraphQL error or empty input.
@@ -174,7 +174,7 @@ def fetch_market_metrics(market_ids: List[str], chain: Chain) -> Dict[str, Marke
     query GetMarkets($keys: [String!]!, $chainId: Int!) {
         markets(where: { uniqueKey_in: $keys, chainId_in: [$chainId] }) {
             items {
-                uniqueKey
+                marketId
                 loanAsset { address, symbol, decimals }
                 collateralAsset { address, symbol }
                 state {
@@ -198,4 +198,4 @@ def fetch_market_metrics(market_ids: List[str], chain: Chain) -> Dict[str, Marke
         logger.warning("GraphQL error fetching market metrics: %s", payload["errors"])
         return {}
     items = payload.get("data", {}).get("markets", {}).get("items", []) or []
-    return {item["uniqueKey"].lower(): _parse_market_metrics(item) for item in items}
+    return {item["marketId"].lower(): _parse_market_metrics(item) for item in items}

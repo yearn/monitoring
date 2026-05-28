@@ -405,7 +405,7 @@ def get_market_url(market: Dict[str, Any]) -> str:
     """Generate URL for a Morpho market."""
     chain_id = market["collateralAsset"]["chain"]["id"]
     chain = Chain.from_chain_id(chain_id)
-    return f"{MORPHO_URL}/{get_chain_name(chain)}/market/{market['uniqueKey']}"
+    return f"{MORPHO_URL}/{get_chain_name(chain)}/market/{market['marketId']}"
 
 
 def get_vault_url(vault_data: Dict[str, Any]) -> str:
@@ -430,11 +430,11 @@ def bad_debt_alert(
         vault_name: Name of the vault (for alert message)
         vault_url: URL of the vault
         chain: Chain the vault is on
-        alerted_markets: Set of market unique keys already alerted (prevents duplicates across vaults)
+        alerted_markets: Set of market IDs already alerted (prevents duplicates across vaults)
     """
     for market in markets:
-        unique_key = market["uniqueKey"]
-        if unique_key in alerted_markets:
+        market_id = market["marketId"]
+        if market_id in alerted_markets:
             continue
 
         bad_debt = market["badDebt"]["usd"]
@@ -446,7 +446,7 @@ def bad_debt_alert(
 
         # Alert if bad debt ratio exceeds threshold
         if bad_debt / borrowed_tvl > BAD_DEBT_RATIO:
-            alerted_markets.add(unique_key)
+            alerted_markets.add(market_id)
             market_url = get_market_url(market)
             market_name = f"{market['collateralAsset']['symbol']}/{market['loanAsset']['symbol']}"
 
@@ -493,21 +493,21 @@ def check_allocation_and_risk(vault_data):
             continue
 
         market = allocation["market"]
-        unique_key = market["uniqueKey"]
+        market_id = market["marketId"]
         market_supply = allocation.get("supplyAssetsUsd", 0) or 0
         if market_supply == 0:
-            logger.info("Skipping market %s has 0 supply assets", unique_key)
+            logger.info("Skipping market %s has 0 supply assets", market_id)
             continue
         allocation_ratio = min(market_supply / total_assets, 1.0)  # prevent allocation ratio from exceeding 100%
 
         # Determine market risk level
-        if unique_key in MARKETS_RISK_1[chain]:
+        if market_id in MARKETS_RISK_1[chain]:
             market_risk_level = 1
-        elif unique_key in MARKETS_RISK_2[chain]:
+        elif market_id in MARKETS_RISK_2[chain]:
             market_risk_level = 2
-        elif unique_key in MARKETS_RISK_3[chain]:
+        elif market_id in MARKETS_RISK_3[chain]:
             market_risk_level = 3
-        elif unique_key in MARKETS_RISK_4[chain]:
+        elif market_id in MARKETS_RISK_4[chain]:
             market_risk_level = 4
         else:
             market_risk_level = 5
@@ -808,7 +808,7 @@ def main() -> None:
                         pendingSupplyCapUsd
                         pendingSupplyCapValidAt
                         market {
-                            uniqueKey
+                            marketId
                             loanAsset {
                                 address
                                 symbol
