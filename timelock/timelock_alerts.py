@@ -20,7 +20,7 @@ from utils.llm.ai_explainer import explain_batch_transaction, explain_transactio
 from utils.logging import get_logger
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
 from utils.safe_tx import unwrap_safe_exec_transaction
-from utils.telegram import MAX_MESSAGE_LENGTH, send_telegram_message
+from utils.telegram import MAX_MESSAGE_LENGTH, escape_markdown, send_telegram_message
 from utils.web3_wrapper import ChainManager
 
 load_dotenv()
@@ -377,11 +377,14 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
     tx_hash = first["transactionHash"]
     timelock_type = first.get("timelockType", "Unknown")
 
-    # Header (always included)
+    # Header (always included). Escape protocol and label since they're
+    # config-supplied and may contain Markdown-V1 specials — e.g. the
+    # underscore in "YEARN_TIMELOCK" was opening an italic that never
+    # closed, breaking the whole message with Telegram 400.
     header_lines: list[str] = [
         "⏰ *TIMELOCK: New Operation Scheduled*",
-        f"🅿️ Protocol: {timelock_info.protocol}",
-        _format_address(first["timelockAddress"], explorer, f"📋 {timelock_info.label}: "),
+        f"🅿️ Protocol: {escape_markdown(timelock_info.protocol)}",
+        _format_address(first["timelockAddress"], explorer, f"📋 {escape_markdown(timelock_info.label)}: "),
         f"🔗 Chain: {chain_name}",
     ]
 
@@ -466,10 +469,15 @@ def process_events(events: list[dict], use_cache: bool) -> None:
     # Group events: only TimelockController has batch operations (multiple
     # CallScheduled events sharing the same operationId). All other types
     # emit one event per operation, so each is its own group.
+    # Key includes chainId because operationId is content-derived
+    # (keccak of targets/values/data/predecessor/salt) — when the same
+    # address (e.g. Yearn TimelockController) lives on multiple chains, an
+    # identical payload scheduled on two of them collides on operationId
+    # and only the first chain's alert would fire.
     operations: dict[str, list[dict]] = {}
     for event in events:
         if event.get("timelockType") == "TimelockController":
-            key = event["operationId"]
+            key = f"{event['chainId']}:{event['operationId']}"
         else:
             key = event["id"]
         if key not in operations:
@@ -505,6 +513,7 @@ def process_events(events: list[dict], use_cache: bool) -> None:
 
     # Send alerts grouped by protocol, splitting into chunks that fit Telegram's limit
     separator = "\n\n---\n\n"
+    all_sent = True
     for protocol, messages in messages_by_protocol.items():
         chunks: list[str] = []
         current_parts: list[str] = []
@@ -528,10 +537,21 @@ def process_events(events: list[dict], use_cache: bool) -> None:
                 send_telegram_message(chunk, protocol)
             except Exception:
                 _logger.exception("Failed to send Telegram alert for protocol %s", protocol)
+                all_sent = False
 
+    # Only advance the cache when every chunk landed. Advancing on partial
+    # failure silently drops the failed events — the next run sees no new
+    # events past the new timestamp and the alerts are lost forever. Risk of
+    # duplicate alerts on retry is acceptable; missing alerts is not.
     if use_cache and max_timestamp > 0:
-        write_last_value_to_file(cache_filename, CACHE_KEY, str(max_timestamp))
-        _logger.info("Updated cache: %s = %s", CACHE_KEY, max_timestamp)
+        if all_sent:
+            write_last_value_to_file(cache_filename, CACHE_KEY, str(max_timestamp))
+            _logger.info("Updated cache: %s = %s", CACHE_KEY, max_timestamp)
+        else:
+            _logger.warning(
+                "Skipping cache update due to Telegram send failure(s); %s events will be re-fetched on the next run",
+                len(events),
+            )
 
 
 def main() -> None:
