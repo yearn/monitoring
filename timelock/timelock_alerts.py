@@ -466,10 +466,15 @@ def process_events(events: list[dict], use_cache: bool) -> None:
     # Group events: only TimelockController has batch operations (multiple
     # CallScheduled events sharing the same operationId). All other types
     # emit one event per operation, so each is its own group.
+    # Key includes chainId because operationId is content-derived
+    # (keccak of targets/values/data/predecessor/salt) — when the same
+    # address (e.g. Yearn TimelockController) lives on multiple chains, an
+    # identical payload scheduled on two of them collides on operationId
+    # and only the first chain's alert would fire.
     operations: dict[str, list[dict]] = {}
     for event in events:
         if event.get("timelockType") == "TimelockController":
-            key = event["operationId"]
+            key = f"{event['chainId']}:{event['operationId']}"
         else:
             key = event["id"]
         if key not in operations:
