@@ -1,4 +1,5 @@
 import os
+import re
 
 import requests
 from dotenv import load_dotenv
@@ -11,6 +12,17 @@ logger = get_logger("utils.telegram")
 
 # Maximum message length allowed by Telegram API
 MAX_MESSAGE_LENGTH = 4096
+
+# Matches `bot<digits>:<token>` in Telegram API URLs. Used to scrub the bot
+# token out of exception messages — `requests.HTTPError.__str__()` includes
+# the full URL, so without this the token leaks into any log or alert that
+# surfaces the error. GitHub Actions auto-masks secrets in workflow logs,
+# but local runs and any Telegram crash-alert do not.
+_BOT_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
+
+
+def _redact_bot_token(text: str) -> str:
+    return _BOT_TOKEN_RE.sub("bot***", text)
 
 
 def escape_markdown(text: str) -> str:
@@ -100,10 +112,12 @@ def send_telegram_message(
                 body = f" body={err_response.text}"
             except Exception:
                 pass
-        raise TelegramError(f"Failed to send telegram message: {e}{body}")
+        raise TelegramError(_redact_bot_token(f"Failed to send telegram message: {e}{body}"))
 
     if response.status_code != 200:
-        raise TelegramError(f"Failed to send telegram message: {response.status_code} - {response.text}")
+        raise TelegramError(
+            _redact_bot_token(f"Failed to send telegram message: {response.status_code} - {response.text}")
+        )
 
 
 def get_github_run_url() -> str:

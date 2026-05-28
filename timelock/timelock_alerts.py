@@ -20,7 +20,7 @@ from utils.llm.ai_explainer import explain_batch_transaction, explain_transactio
 from utils.logging import get_logger
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
 from utils.safe_tx import unwrap_safe_exec_transaction
-from utils.telegram import MAX_MESSAGE_LENGTH, send_telegram_message
+from utils.telegram import MAX_MESSAGE_LENGTH, escape_markdown, send_telegram_message
 from utils.web3_wrapper import ChainManager
 
 load_dotenv()
@@ -377,11 +377,14 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
     tx_hash = first["transactionHash"]
     timelock_type = first.get("timelockType", "Unknown")
 
-    # Header (always included)
+    # Header (always included). Escape protocol and label since they're
+    # config-supplied and may contain Markdown-V1 specials — e.g. the
+    # underscore in "YEARN_TIMELOCK" was opening an italic that never
+    # closed, breaking the whole message with Telegram 400.
     header_lines: list[str] = [
         "⏰ *TIMELOCK: New Operation Scheduled*",
-        f"🅿️ Protocol: {timelock_info.protocol}",
-        _format_address(first["timelockAddress"], explorer, f"📋 {timelock_info.label}: "),
+        f"🅿️ Protocol: {escape_markdown(timelock_info.protocol)}",
+        _format_address(first["timelockAddress"], explorer, f"📋 {escape_markdown(timelock_info.label)}: "),
         f"🔗 Chain: {chain_name}",
     ]
 
