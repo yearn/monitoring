@@ -395,6 +395,8 @@ def chaos_labs_check():
 
 
 if __name__ == "__main__":
+    from utils.runner import run_with_alert
+
     # NOTE: skip using LlamaRisk data because it is not reliable
     # llama_risk_check()
-    chaos_labs_check()
+    run_with_alert(chaos_labs_check, PROTOCOL)

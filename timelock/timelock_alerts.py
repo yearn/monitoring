@@ -610,4 +610,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from utils.runner import run_with_alert
+
+    # Multi-protocol script with per-timelock routing; crash alerts go to the general ops channel.
+    run_with_alert(main, "yearn")

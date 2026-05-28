@@ -143,4 +143,6 @@ def get_proposals():
 
 
 if __name__ == "__main__":
-    get_proposals()
+    from utils.runner import run_with_alert
+
+    run_with_alert(get_proposals, PROTOCOL)

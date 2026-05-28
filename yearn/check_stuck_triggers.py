@@ -546,4 +546,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from utils.runner import run_with_alert
+
+    run_with_alert(main, PROTOCOL)
