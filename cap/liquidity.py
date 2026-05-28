@@ -103,5 +103,7 @@ def main():
 
 
 if __name__ == "__main__":
+    from utils.runner import run_with_alert
+
     logger.info("Running liquidity checks for CAP protocol")
-    main()
+    run_with_alert(main, PROTOCOL)

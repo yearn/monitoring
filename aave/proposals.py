@@ -107,4 +107,6 @@ def handle_governance_proposals():
 
 
 if __name__ == "__main__":
-    handle_governance_proposals()
+    from utils.runner import run_with_alert
+
+    run_with_alert(handle_governance_proposals, PROTOCOL)

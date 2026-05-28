@@ -52,4 +52,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    from utils.runner import run_with_alert
+
+    # Multi-pool script with per-pool protocol routing; crash alerts go to the pegs channel.
+    run_with_alert(main, "pegs")
