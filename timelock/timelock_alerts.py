@@ -505,6 +505,7 @@ def process_events(events: list[dict], use_cache: bool) -> None:
 
     # Send alerts grouped by protocol, splitting into chunks that fit Telegram's limit
     separator = "\n\n---\n\n"
+    all_sent = True
     for protocol, messages in messages_by_protocol.items():
         chunks: list[str] = []
         current_parts: list[str] = []
@@ -528,10 +529,21 @@ def process_events(events: list[dict], use_cache: bool) -> None:
                 send_telegram_message(chunk, protocol)
             except Exception:
                 _logger.exception("Failed to send Telegram alert for protocol %s", protocol)
+                all_sent = False
 
+    # Only advance the cache when every chunk landed. Advancing on partial
+    # failure silently drops the failed events — the next run sees no new
+    # events past the new timestamp and the alerts are lost forever. Risk of
+    # duplicate alerts on retry is acceptable; missing alerts is not.
     if use_cache and max_timestamp > 0:
-        write_last_value_to_file(cache_filename, CACHE_KEY, str(max_timestamp))
-        _logger.info("Updated cache: %s = %s", CACHE_KEY, max_timestamp)
+        if all_sent:
+            write_last_value_to_file(cache_filename, CACHE_KEY, str(max_timestamp))
+            _logger.info("Updated cache: %s = %s", CACHE_KEY, max_timestamp)
+        else:
+            _logger.warning(
+                "Skipping cache update due to Telegram send failure(s); %s events will be re-fetched on the next run",
+                len(events),
+            )
 
 
 def main() -> None:

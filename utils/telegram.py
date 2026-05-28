@@ -90,7 +90,17 @@ def send_telegram_message(
         response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
     except requests.RequestException as e:
-        raise TelegramError(f"Failed to send telegram message: {e}")
+        # Telegram's response body carries the real failure reason
+        # (e.g. "can't parse entities", invalid message_thread_id). Surface it
+        # so callers don't have to debug from just an HTTP status.
+        body = ""
+        err_response = getattr(e, "response", None)
+        if err_response is not None:
+            try:
+                body = f" body={err_response.text}"
+            except Exception:
+                pass
+        raise TelegramError(f"Failed to send telegram message: {e}{body}")
 
     if response.status_code != 200:
         raise TelegramError(f"Failed to send telegram message: {response.status_code} - {response.text}")
