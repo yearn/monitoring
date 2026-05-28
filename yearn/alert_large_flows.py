@@ -208,6 +208,7 @@ def gql_request(query: str, variables: dict) -> dict | None:
         send_telegram_message(
             f"⚠️ {PROTOCOL} Large Flow Alert: Envio GraphQL error (HTTP {exc.code}). Skipping this run.",
             PROTOCOL,
+            plain_text=True,
         )
         _logger.error("Envio request failed with HTTP %d", exc.code)
         return None

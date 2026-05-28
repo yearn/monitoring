@@ -66,7 +66,7 @@ def query_swap(balancer_query, balancer_vault, single_swap, fund_management):
             )
         except Exception as e:
             message += f"Error querying balances in pool: {e}"
-        send_telegram_message(message, PROTOCOL, True)
+        send_telegram_message(message, PROTOCOL, True, plain_text=True)
         return None
 
 

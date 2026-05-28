@@ -139,7 +139,7 @@ def get_proposals():
 
     except requests.RequestException as e:
         message = f"Failed to fetch compound proposals: {e}"
-        send_telegram_message(message, PROTOCOL)
+        send_telegram_message(message, PROTOCOL, disable_notification=True, plain_text=True)
 
 
 if __name__ == "__main__":

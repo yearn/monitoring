@@ -31,13 +31,13 @@ def run_query(query: str, variables: dict) -> dict | None:
         response = request_with_retry("post", url, json=request_body)
     except requests.RequestException as e:
         logger.error("Graph API query failed after retries: %s", e)
-        send_telegram_message(f"Graph API query failed after retries: {e}", PROTOCOL, True)
+        send_telegram_message(f"Graph API query failed after retries: {e}", PROTOCOL, True, plain_text=True)
         return None
 
     data = response.json()
     if "errors" in data:
         logger.error("GraphQL error in response: %s", data["errors"])
-        send_telegram_message(f"GraphQL error in response: {data['errors']}", PROTOCOL, True)
+        send_telegram_message(f"GraphQL error in response: {data['errors']}", PROTOCOL, True, plain_text=True)
         return None
 
     return data
