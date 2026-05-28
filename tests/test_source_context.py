@@ -1,5 +1,6 @@
 """Tests for utils/source_context.py."""
 
+import json
 import unittest
 from unittest.mock import patch
 
@@ -7,6 +8,7 @@ from utils.source_context import (
     _concat_sources,
     _extract_function_body,
     _extract_function_snippet,
+    _function_signature_from_abi,
     extract_state_var_snippet,
     fetch_function_input_names,
     find_state_var_writes,
@@ -396,6 +398,43 @@ class TestFetchFunctionInputNames(unittest.TestCase):
         mock_impl.return_value = "0x" + "11" * 20  # type: ignore[attr-defined]
         names = fetch_function_input_names(1, "0xProxy", "setMaxSlippage")
         self.assertEqual(names, ["_maxSlippage"])
+
+
+class TestFunctionSignatureFromAbi(unittest.TestCase):
+    """Tests for _function_signature_from_abi (selector → canonical signature)."""
+
+    _ABI = json.dumps(
+        [
+            {"type": "function", "name": "transfer", "inputs": [{"type": "address"}, {"type": "uint256"}]},
+            {"type": "function", "name": "pause", "inputs": []},
+            {
+                "type": "function",
+                "name": "configure",
+                "inputs": [{"type": "tuple", "components": [{"type": "address"}, {"type": "uint256"}]}],
+            },
+        ]
+    )
+
+    def test_matches_selector(self) -> None:
+        # transfer(address,uint256) selector is 0xa9059cbb.
+        self.assertEqual(_function_signature_from_abi(self._ABI, "0xa9059cbb"), "transfer(address,uint256)")
+
+    def test_no_arg_function(self) -> None:
+        # pause() selector is 0x8456cb59.
+        self.assertEqual(_function_signature_from_abi(self._ABI, "0x8456cb59"), "pause()")
+
+    def test_expands_tuple_types(self) -> None:
+        # configure((address,uint256)) — tuple expanded by collapse_if_tuple.
+        from eth_utils import function_signature_to_4byte_selector
+
+        sel = "0x" + function_signature_to_4byte_selector("configure((address,uint256))").hex()
+        self.assertEqual(_function_signature_from_abi(self._ABI, sel), "configure((address,uint256))")
+
+    def test_unknown_selector_returns_none(self) -> None:
+        self.assertIsNone(_function_signature_from_abi(self._ABI, "0xdeadbeef"))
+
+    def test_unverified_abi_returns_none(self) -> None:
+        self.assertIsNone(_function_signature_from_abi("Contract source code not verified", "0xa9059cbb"))
 
 
 if __name__ == "__main__":

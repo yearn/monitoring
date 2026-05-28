@@ -49,10 +49,11 @@ Generates human-readable explanations for queued governance transactions (timelo
 Converts raw hex calldata into a structured `DecodedCall`:
 
 1. Extract the 4-byte function selector (first 4 bytes after `0x`)
-2. Look up the selector in `utils/calldata/known_selectors.py` (local table)
-3. If not found, query the [Sourcify 4byte API](https://api.4byte.sourcify.dev)
-4. Parse the function signature to extract parameter types
-5. Decode parameters using `eth_abi.decode()`
+2. When the call's `target` + `chain_id` are known, resolve the signature from the target's **verified ABI** first (`get_function_signature_by_selector`, EIP-1967/getter proxy-aware) — more reliable than 4byte, which can't disambiguate selector collisions
+3. Otherwise look up the selector in `utils/calldata/known_selectors.py` (local table)
+4. If still unresolved, query the [Sourcify 4byte API](https://api.4byte.sourcify.dev)
+5. Parse the function signature to extract parameter types
+6. Decode parameters using `eth_abi.decode()`
 
 Result: `DecodedCall(function_name="upgradeTo", signature="upgradeTo(address)", params=[("address", "0x...")])`
 
@@ -90,6 +91,8 @@ Simulates the transaction against current on-chain state to get:
 
 Requires `TENDERLY_API_KEY`. Simulation failure is non-blocking — the pipeline continues with the decoded calldata only.
 
+**State overrides** (`state_objects`) reduce false reverts. When a call forwards ETH (`value > 0`), the executor (timelock/Safe) often doesn't hold that balance, so a faithful sim would revert with "insufficient funds" — a false negative. `_merge_balance_override` grants the sender exactly the forwarded `value`. Callers can pass additional overrides (e.g. a role/owner storage slot) to unblock access-gated setters; caller-supplied values win on conflict.
+
 Callers can pass `skip_simulation=True` to bypass Tenderly entirely. Used for Safe transactions with `operation=DELEGATECALL` (typically multiSend batches), where our plain-CALL simulator can't model the real execution and would produce a spurious "revert" verdict.
 
 ### 5. Proxy Upgrade Detection & Implementation Diff (`utils/proxy.py`, `utils/impl_diff.py`)
@@ -106,7 +109,7 @@ For the ProxyAdmin pattern, the tx target is the ProxyAdmin and the actual proxy
 
 When an upgrade is detected the pipeline:
 
-1. Reads the **current implementation** from the EIP-1967 storage slot (`0x360894a...`) of the proxy.
+1. Reads the **current implementation** from the EIP-1967 storage slot (`0x360894a...`) of the proxy, falling back to the legacy zeppelinos slot (`0x7050c9e...`) for pre-EIP-1967 proxies like USDC's `FiatTokenProxy`.
 2. Builds an Etherscan diff URL: `etherscan.io/contractdiffchecker?a1=old&a2=new`.
 3. Fetches the verified source of **both** implementations and runs a structural diff (`utils/impl_diff.py`):
    - **Functions added / removed / changed visibility or modifiers**, identified by name + arg types so overloads are distinct.
@@ -117,20 +120,33 @@ When an upgrade is detected the pipeline:
 
 The structural diff is injected into the prompt under `--- Implementation Diff ---`. Best-effort: if either impl is unverified or extraction fails, the diff section is silently omitted but the rest of the upgrade context still renders.
 
+### 5b. Deterministic Safety Checks (`utils/llm/ai_explainer.py`, `utils/source_context.py`)
+
+`_collect_safety_checks()` runs seatbelt-style checks grounded in Etherscan data we already fetch, and surfaces them as hard facts under `--- Safety Checks ---`:
+
+- **Unverified target** — a governance tx whose target has no published source is a red flag (`get_verification_status` returns a tri-state; the note is emitted only on an explicit `False`, never on a fetch error, so it doesn't cry wolf).
+- **ETH to a non-payable function** — forwarding `value > 0` to a `nonpayable` function reverts and can strand funds (`get_function_state_mutability`, with EIP-1967 proxy follow; overloaded functions resolve to `payable` if any overload accepts value).
+
+The system prompt instructs the LLM to treat each item as verified and reflect it in the verdict (e.g. an unverified target is at least MEDIUM).
+
 ### 6. LLM Prompt & Completion (`utils/llm/ai_explainer.py`)
 
-The prompt is built from all available context. The system prompt enforces brevity:
+The prompt is split into a **system** prompt (static instructions) and a **user** prompt (per-tx context). `complete(prompt, system_prompt=...)` passes the system block via the provider's native system role, which improves instruction-following and lets the Anthropic provider mark it `cache_control: ephemeral` — repeated alerts within the cache window pay for the (large) instruction prompt only once. The static block (`SYSTEM_INSTRUCTIONS`) enforces brevity:
 
 - Starts with a verb, no "This transaction…" preamble
 - Trailing risk tag in caps (LOW / MEDIUM / HIGH / CRITICAL)
 - Refuses to assume parameter units from function name alone
 - Trusts source-context natspec over prior assumptions
 - Quotes concrete before→after deltas when state reads are available
+- Flags any divergence between a proposal's **stated intent** and the decoded actions
+
+When a `description` is passed to the explainer, it renders under `--- Stated Intent (proposal description) ---` and the LLM compares stated intent against the calldata, flagging undisclosed role/ownership/upgrade or fund-movement changes.
 
 Example assembled prompt:
 
 ```
-System: You are a DeFi risk analyst writing alerts for a monitoring team...
+System (sent via native system role, cached):
+        You are a DeFi risk analyst writing alerts for a monitoring team...
         (brevity rules, unit-interpretation rules)
 
 Protocol: AAVE
@@ -139,6 +155,9 @@ Target: 0x...
 
 --- Execution Context ---             (optional, e.g. for DELEGATECALL via MultiSendCallOnly)
 Outer call is DELEGATECALL from the Safe (0x...) into ...
+
+--- Stated Intent (proposal description) ---  (optional, when a description is supplied)
+Upgrade the pool implementation to add an emergency pause.
 
 --- Decoded Calldata ---
 Call 1: upgradeTo(address)
@@ -172,6 +191,9 @@ Functions added (2):
 Storage layout safe (append-only). New state vars at end:
   + address public oracle
 
+--- Safety Checks ---                 (optional, deterministic seatbelt-style checks)
+- 0xNewImpl is UNVERIFIED on Etherscan — source is not published; the call cannot be inspected.
+
 --- Simulation Results ---
 Simulation: SUCCESS
 Gas used: 50,000
@@ -186,24 +208,32 @@ When `refine=True` is passed to `explain_transaction` / `explain_batch_transacti
 
 Cost: ~2× LLM calls per alert when enabled. Default is **off**.
 
-### 8. Dual-Output Parsing
+### 8. Dual-Output: Structured or Text
 
-The LLM is asked to return two sections:
+`_generate_draft()` produces the `Explanation` dataclass (`summary` → Telegram, `detail` → paste service) via one of two paths:
+
+**Structured output (preferred).** When the provider advertises `supports_structured_output`, the draft is requested as JSON matching `EXPLANATION_SCHEMA`:
+
+```json
+{ "summary": "Upgrades AAVE pool impl 0xOld → 0xNew. Verify audited.",
+  "detail": "Calls upgradeTo(address) on the AAVE pool proxy...",
+  "risk_tag": "MEDIUM" }
+```
+
+`risk_tag` is `enum`-constrained to `LOW/MEDIUM/HIGH/CRITICAL`, so the Telegram tag is always valid — no regex extraction. OpenAI-compatible providers use `response_format: json_schema`; the Anthropic provider uses a forced tool call. `_explanation_from_json` maps the object to `Explanation`, appending `risk_tag` to the summary if the model didn't inline it.
+
+**Text fallback.** If structured output is disabled, fails, or returns an empty summary, the draft falls back to a plain `complete()` call returning:
 
 ```
 TLDR: Upgrades AAVE pool impl 0xOld → 0xNew. Verify audited. MEDIUM.
 
 DETAIL:
 Calls upgradeTo(address) on the AAVE pool proxy...
-Current implementation: 0xOld...
-New implementation: 0xNew...
 ```
 
-`_parse_explanation()` splits this into an `Explanation` dataclass:
-- `summary` (from TLDR) — short, goes to Telegram
-- `detail` (from DETAIL) — thorough analysis, uploaded to a paste service and linked from the Telegram message
+`_parse_explanation()` splits this with tolerant regex (handles `### DETAIL`, `**TLDR:**`, etc.); if the format isn't followed, the whole response becomes the summary (backward compatible).
 
-If the LLM doesn't follow the format, the full response is used as the summary (backward compatible).
+Structured output is controlled by `LLM_STRUCTURED_OUTPUT` (per-provider default: on for `anthropic`/`openai`/`venice` — all verified live — off for `groq`/custom, since JSON-schema support varies by backend). The refine pass (step 7) always uses the text path.
 
 ### 9. Output Formatting
 
@@ -227,6 +257,7 @@ All configuration is via environment variables:
 | `LLM_API_KEY` | *(required)* | API key for the LLM provider |
 | `LLM_MODEL` | `deepseek-v4-flash` | Model identifier |
 | `LLM_BASE_URL` | *(per provider)* | API base URL (not needed for anthropic) |
+| `LLM_STRUCTURED_OUTPUT` | *(per provider)* | `true`/`false` to force JSON-schema output. Default: on for anthropic/openai/venice (all verified live), off for groq/custom |
 | `ETHERSCAN_TOKEN` | *(optional)* | Etherscan v2 multichain API key for source context |
 | `TENDERLY_API_KEY` | *(optional)* | Tenderly API key for simulation |
 | `TENDERLY_ACCOUNT` | `yearn` | Tenderly account slug |
@@ -275,3 +306,16 @@ safe/multisend.py            # Safe MultiSendCallOnly inner-call extractor + DEL
 - **Safe alerts** (`safe/main.py`): Routes through `_explain_safe_tx()`, which detects `operation=DELEGATECALL` multisend batches and dispatches to `explain_batch_transaction()` with `skip_simulation=True` and a DELEGATECALL context note. Plain CALL Safe txs use `explain_transaction()` as before.
 - Both call sites use `format_explanation_line()` to append the AI summary to Telegram messages.
 - Both call sites can opt into the refine pass per-protocol by passing `refine=True` to the explainer.
+
+## Eval Harness
+
+`tests/eval/` guards the prompt/pipeline against regressions with real mainnet fixtures (`fixtures.py`) and tolerant assertions — a risk tag within an acceptable band plus required/forbidden substrings, since LLM output isn't deterministic.
+
+It makes live LLM + Etherscan + RPC calls (costs money), so it's **excluded from the default test suite**. Run it after prompt or pipeline changes:
+
+```bash
+python -m tests.eval.run_eval                          # standalone report, non-zero exit on failure
+RUN_LLM_EVAL=1 python -m pytest tests/eval -v          # same cases as parametrized tests
+```
+
+Add a fixture whenever a prompt change fixes a specific failure mode (e.g. the intent-mismatch case asserts a misleading "no changes" description can't downgrade a real parameter change below MEDIUM).

@@ -42,6 +42,25 @@ class TestParseParamTypes(unittest.TestCase):
     def test_no_parentheses(self):
         self.assertEqual(_parse_param_types("malformed"), [])
 
+    def test_tuple_param_not_split(self):
+        # The inner comma must not split the tuple into invalid types.
+        self.assertEqual(
+            _parse_param_types("configure((address,uint256))"),
+            ["(address,uint256)"],
+        )
+
+    def test_tuple_mixed_with_scalars(self):
+        self.assertEqual(
+            _parse_param_types("foo((address,uint256),uint256)"),
+            ["(address,uint256)", "uint256"],
+        )
+
+    def test_tuple_array(self):
+        self.assertEqual(
+            _parse_param_types("foo((address,uint256)[],bool)"),
+            ["(address,uint256)[]", "bool"],
+        )
+
 
 class TestFormatParamValue(unittest.TestCase):
     """Tests for _format_param_value."""
@@ -226,6 +245,42 @@ class TestDecodeCalldata(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.function_name, "transfer")
         self.assertEqual(result.params, [])
+
+    @patch("utils.calldata.decoder._resolve_signature_via_abi", return_value="configure((address,uint256))")
+    def test_tuple_params_decoded_not_dropped(self, mock_abi):
+        from eth_abi import encode
+
+        addr = "0x" + "11" * 20
+        data = "0xaabbccdd" + encode(["(address,uint256)"], [(addr, 7)]).hex()
+        result = decode_calldata(data, chain_id=1, target="0xX")
+        assert result is not None
+        self.assertEqual(len(result.params), 1)
+        self.assertEqual(result.params[0][0], "(address,uint256)")
+        decoded_addr, decoded_val = result.params[0][1]
+        self.assertEqual(decoded_addr.lower(), addr)
+        self.assertEqual(decoded_val, 7)
+
+    @patch("utils.calldata.decoder._resolve_signature_via_abi", return_value="transfer(address,uint256)")
+    @patch("utils.calldata.decoder.resolve_selector")
+    def test_abi_signature_preferred_with_target(self, mock_resolve, mock_abi):
+        result = decode_calldata(TRANSFER_CALLDATA, chain_id=1, target="0xToken")
+        mock_abi.assert_called_once()
+        mock_resolve.assert_not_called()  # ABI hit → Sourcify skipped
+        self.assertEqual(result.signature, "transfer(address,uint256)")
+
+    @patch("utils.calldata.decoder._resolve_signature_via_abi", return_value=None)
+    @patch("utils.calldata.decoder.resolve_selector", return_value="transfer(address,uint256)")
+    def test_falls_back_to_sourcify_when_abi_misses(self, mock_resolve, mock_abi):
+        result = decode_calldata(TRANSFER_CALLDATA, chain_id=1, target="0xToken")
+        mock_abi.assert_called_once()
+        mock_resolve.assert_called_once()
+        self.assertEqual(result.signature, "transfer(address,uint256)")
+
+    @patch("utils.calldata.decoder._resolve_signature_via_abi")
+    @patch("utils.calldata.decoder.resolve_selector", return_value="transfer(address,uint256)")
+    def test_no_abi_lookup_without_target(self, mock_resolve, mock_abi):
+        decode_calldata(TRANSFER_CALLDATA)
+        mock_abi.assert_not_called()
 
 
 class TestFormatCallLines(unittest.TestCase):

@@ -89,6 +89,50 @@ class TestOpenAICompatProvider(unittest.TestCase):
         result = provider.complete("prompt")
         self.assertEqual(result, "Some explanation with spaces")
 
+    @patch("openai.OpenAI")
+    def test_structured_output_disabled_by_default(self, mock_openai_cls: MagicMock) -> None:
+        provider = OpenAICompatProvider(api_key="key", base_url="https://api.test.ai/v1", model="model")
+        self.assertFalse(provider.supports_structured_output)
+
+    @patch("openai.OpenAI")
+    def test_complete_structured_parses_json(self, mock_openai_cls: MagicMock) -> None:
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+
+        mock_choice = MagicMock()
+        mock_choice.message.content = '{"summary": "Pauses. LOW.", "detail": "d", "risk_tag": "LOW"}'
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+        mock_client.chat.completions.create.return_value = mock_response
+
+        provider = OpenAICompatProvider(
+            api_key="key", base_url="https://api.test.ai/v1", model="model", structured_output=True
+        )
+        self.assertTrue(provider.supports_structured_output)
+        result = provider.complete_structured("prompt", {"type": "object"}, system_prompt="sys")
+
+        self.assertEqual(result["risk_tag"], "LOW")
+        kwargs = mock_client.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs["response_format"]["type"], "json_schema")
+        self.assertEqual(kwargs["messages"][0], {"role": "system", "content": "sys"})
+
+    @patch("openai.OpenAI")
+    def test_complete_structured_invalid_json_raises(self, mock_openai_cls: MagicMock) -> None:
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+
+        mock_choice = MagicMock()
+        mock_choice.message.content = "not json"
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+        mock_client.chat.completions.create.return_value = mock_response
+
+        provider = OpenAICompatProvider(
+            api_key="key", base_url="https://api.test.ai/v1", model="model", structured_output=True
+        )
+        with self.assertRaises(LLMError):
+            provider.complete_structured("prompt", {"type": "object"})
+
 
 class TestAnthropicProvider(unittest.TestCase):
     """Tests for AnthropicProvider."""
@@ -153,6 +197,34 @@ class TestAnthropicProvider(unittest.TestCase):
 
         provider = AnthropicProvider(api_key="key", model="claude-haiku-4-5-20251001")
         self.assertEqual(provider.model_name, "claude-haiku-4-5-20251001")
+
+    @patch("anthropic.Anthropic")
+    def test_structured_output_enabled_by_default(self, mock_anthropic_cls: MagicMock) -> None:
+        from utils.llm.anthropic_provider import AnthropicProvider
+
+        provider = AnthropicProvider(api_key="key", model="claude-haiku-4-5-20251001")
+        self.assertTrue(provider.supports_structured_output)
+
+    @patch("anthropic.Anthropic")
+    def test_complete_structured_uses_forced_tool(self, mock_anthropic_cls: MagicMock) -> None:
+        from utils.llm.anthropic_provider import AnthropicProvider
+
+        mock_client = MagicMock()
+        mock_anthropic_cls.return_value = mock_client
+
+        tool_block = MagicMock()
+        tool_block.type = "tool_use"
+        tool_block.input = {"summary": "Pauses. LOW.", "detail": "d", "risk_tag": "LOW"}
+        mock_response = MagicMock()
+        mock_response.content = [tool_block]
+        mock_client.messages.create.return_value = mock_response
+
+        provider = AnthropicProvider(api_key="sk-ant-test", model="claude-haiku-4-5-20251001")
+        result = provider.complete_structured("prompt", {"type": "object"})
+
+        self.assertEqual(result["risk_tag"], "LOW")
+        kwargs = mock_client.messages.create.call_args.kwargs
+        self.assertEqual(kwargs["tool_choice"]["type"], "tool")
 
 
 class TestFactory(unittest.TestCase):
@@ -229,6 +301,30 @@ class TestFactory(unittest.TestCase):
     def test_provider_defaults_contain_model(self) -> None:
         for name, defaults in _PROVIDER_DEFAULTS.items():
             self.assertIn("model", defaults, f"Missing model for {name}")
+
+    @patch("openai.OpenAI")
+    def test_structured_output_on_by_default_for_venice(self, mock_openai_cls: MagicMock) -> None:
+        env = {"LLM_PROVIDER": "venice", "LLM_API_KEY": "test-key"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertTrue(get_llm_provider().supports_structured_output)
+
+    @patch("openai.OpenAI")
+    def test_structured_output_off_by_default_for_groq(self, mock_openai_cls: MagicMock) -> None:
+        env = {"LLM_PROVIDER": "groq", "LLM_API_KEY": "test-key"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertFalse(get_llm_provider().supports_structured_output)
+
+    @patch("openai.OpenAI")
+    def test_structured_output_env_override_disables(self, mock_openai_cls: MagicMock) -> None:
+        env = {"LLM_PROVIDER": "venice", "LLM_API_KEY": "test-key", "LLM_STRUCTURED_OUTPUT": "false"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertFalse(get_llm_provider().supports_structured_output)
+
+    @patch("anthropic.Anthropic")
+    def test_structured_output_on_by_default_for_anthropic(self, mock_anthropic_cls: MagicMock) -> None:
+        env = {"LLM_PROVIDER": "anthropic", "LLM_API_KEY": "sk-ant-test"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertTrue(get_llm_provider().supports_structured_output)
 
 
 if __name__ == "__main__":

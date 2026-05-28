@@ -6,7 +6,13 @@ from eth_abi import encode
 from eth_utils import function_signature_to_4byte_selector
 from eth_utils import to_checksum_address as _cs
 
-from utils.proxy import ProxyUpgrade, detect_proxy_upgrade
+from utils.proxy import (
+    EIP1967_IMPL_SLOT,
+    ZEPPELINOS_IMPL_SLOT,
+    ProxyUpgrade,
+    detect_proxy_upgrade,
+    get_current_implementation,
+)
 
 
 def encode_call(sig: str, types: list[str], vals: list) -> str:
@@ -110,6 +116,48 @@ class TestDetectProxyUpgrade(unittest.TestCase):
             result = detect_proxy_upgrade(data, PROXY_ADDR)
         self.assertIsNone(result)
         mock_fetch.assert_not_called()
+
+
+class TestGetCurrentImplementation(unittest.TestCase):
+    """Tests for reading the implementation slot (EIP-1967 + legacy fallback)."""
+
+    @staticmethod
+    def _slot_word(addr: str | None) -> bytes:
+        """32-byte storage word holding ``addr`` in its low 20 bytes (zero if None)."""
+        if addr is None:
+            return bytes(32)
+        return bytes(12) + bytes.fromhex(addr[2:])
+
+    def _run(self, slot_values: dict[int, str | None], getter_addr: str | None = None) -> str | None:
+        from unittest.mock import MagicMock, patch
+
+        client = MagicMock()
+        client.eth.get_storage_at.side_effect = lambda _addr, slot: self._slot_word(slot_values.get(slot))
+        # eth.call backs the impl-getter fallback (implementation() etc.).
+        client.eth.call.return_value = self._slot_word(getter_addr)
+        with patch("utils.web3_wrapper.ChainManager.get_client", return_value=client):
+            return get_current_implementation("0x" + "ab" * 20, chain_id=1)
+
+    def test_reads_eip1967_slot(self) -> None:
+        impl = _cs("0x" + "11" * 20)
+        self.assertEqual(self._run({EIP1967_IMPL_SLOT: impl}), impl)
+
+    def test_falls_back_to_zeppelinos_slot(self) -> None:
+        impl = _cs("0x" + "22" * 20)
+        self.assertEqual(self._run({EIP1967_IMPL_SLOT: None, ZEPPELINOS_IMPL_SLOT: impl}), impl)
+
+    def test_falls_back_to_impl_getter(self) -> None:
+        impl = _cs("0x" + "33" * 20)
+        # Both slots empty → resolves via the implementation() getter.
+        self.assertEqual(self._run({}, getter_addr=impl), impl)
+
+    def test_eip1967_takes_precedence(self) -> None:
+        eip = _cs("0x" + "11" * 20)
+        result = self._run({EIP1967_IMPL_SLOT: eip, ZEPPELINOS_IMPL_SLOT: _cs("0x" + "22" * 20)})
+        self.assertEqual(result, eip)
+
+    def test_returns_none_when_nothing_resolves(self) -> None:
+        self.assertIsNone(self._run({}, getter_addr=None))
 
 
 if __name__ == "__main__":

@@ -5,8 +5,12 @@ from unittest.mock import MagicMock, patch
 
 from utils.calldata.decoder import DecodedCall
 from utils.llm.ai_explainer import (
+    SYSTEM_INSTRUCTIONS,
     Explanation,
     _build_prompt,
+    _collect_safety_checks,
+    _explanation_from_json,
+    _generate_draft,
     _parse_explanation,
     _refine_explanation,
     explain_transaction,
@@ -25,7 +29,8 @@ class TestBuildPrompt(unittest.TestCase):
         result = _build_prompt(target="0xTarget", value=0, decoded_calls=calls, simulation=None)
         self.assertIn("Target: 0xTarget", result)
         self.assertIn("pause()", result)
-        self.assertIn("DeFi risk analyst", result)
+        # Static instructions now live in the system prompt, not the user prompt.
+        self.assertIn("DeFi risk analyst", SYSTEM_INSTRUCTIONS)
 
     def test_with_protocol_and_label(self) -> None:
         calls = [DecodedCall(function_name="pause", signature="pause()")]
@@ -74,10 +79,9 @@ class TestBuildPromptWithSourceContext(unittest.TestCase):
         self.assertIn("so actually 1 - slippage", result)
 
     def test_hardened_prompt_includes_unit_guidance(self) -> None:
-        calls = [DecodedCall(function_name="pause", signature="pause()")]
-        result = _build_prompt(target="0xT", value=0, decoded_calls=calls, simulation=None)
-        self.assertIn("Do NOT assume the semantic meaning", result)
-        self.assertIn("source context", result.lower())
+        # Unit-interpretation guidance is part of the static system prompt.
+        self.assertIn("Do NOT assume the semantic meaning", SYSTEM_INSTRUCTIONS)
+        self.assertIn("source context", SYSTEM_INSTRUCTIONS.lower())
 
     def test_context_note_appears_in_prompt(self) -> None:
         calls = [DecodedCall(function_name="swapOwner", signature="swapOwner(address,address,address)")]
@@ -90,6 +94,81 @@ class TestBuildPromptWithSourceContext(unittest.TestCase):
         )
         self.assertIn("--- Execution Context ---", result)
         self.assertIn("DELEGATECALL from the Safe", result)
+
+    def test_safety_notes_appear_in_prompt(self) -> None:
+        calls = [DecodedCall(function_name="pause", signature="pause()")]
+        result = _build_prompt(
+            target="0xT",
+            value=0,
+            decoded_calls=calls,
+            simulation=None,
+            safety_notes=["0xT is UNVERIFIED on Etherscan — source is not published."],
+        )
+        self.assertIn("--- Safety Checks ---", result)
+        self.assertIn("UNVERIFIED", result)
+
+    def test_description_appears_in_prompt(self) -> None:
+        calls = [DecodedCall(function_name="pause", signature="pause()")]
+        result = _build_prompt(
+            target="0xT",
+            value=0,
+            decoded_calls=calls,
+            simulation=None,
+            description="Pause the vault during the migration window.",
+        )
+        self.assertIn("--- Stated Intent (proposal description) ---", result)
+        self.assertIn("migration window", result)
+
+
+class TestCollectSafetyChecks(unittest.TestCase):
+    """Tests for _collect_safety_checks (seatbelt-style deterministic checks)."""
+
+    @patch("utils.llm.ai_explainer.get_function_state_mutability", return_value=None)
+    @patch("utils.llm.ai_explainer.get_verification_status", return_value=False)
+    def test_unverified_target_flagged(self, _mut: MagicMock, _ver: MagicMock) -> None:
+        call = DecodedCall(function_name="pause", signature="pause()")
+        notes = _collect_safety_checks([("0xT", call, 0)], chain_id=1)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("UNVERIFIED", notes[0])
+
+    @patch("utils.llm.ai_explainer.get_function_state_mutability", return_value=None)
+    @patch("utils.llm.ai_explainer.get_verification_status", return_value=True)
+    def test_verified_target_no_note(self, _mut: MagicMock, _ver: MagicMock) -> None:
+        call = DecodedCall(function_name="pause", signature="pause()")
+        self.assertEqual(_collect_safety_checks([("0xT", call, 0)], chain_id=1), [])
+
+    @patch("utils.llm.ai_explainer.get_function_state_mutability", return_value=None)
+    @patch("utils.llm.ai_explainer.get_verification_status", return_value=None)
+    def test_unknown_verification_no_note(self, _mut: MagicMock, _ver: MagicMock) -> None:
+        # None (no API key / fetch error) must not cry wolf.
+        call = DecodedCall(function_name="pause", signature="pause()")
+        self.assertEqual(_collect_safety_checks([("0xT", call, 0)], chain_id=1), [])
+
+    @patch("utils.llm.ai_explainer.get_function_state_mutability", return_value="nonpayable")
+    @patch("utils.llm.ai_explainer.get_verification_status", return_value=True)
+    def test_value_to_nonpayable_flagged(self, _ver: MagicMock, _mut: MagicMock) -> None:
+        call = DecodedCall(function_name="setConfig", signature="setConfig(uint256)")
+        notes = _collect_safety_checks([("0xT", call, 10**18)], chain_id=1)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("nonpayable", notes[0])
+        self.assertIn("revert", notes[0])
+
+    def test_value_to_view_or_pure_flagged(self) -> None:
+        # view and pure functions are also non-payable; value to them reverts.
+        for mut in ("view", "pure"):
+            with self.subTest(mut=mut):
+                with patch("utils.llm.ai_explainer.get_verification_status", return_value=True):
+                    with patch("utils.llm.ai_explainer.get_function_state_mutability", return_value=mut):
+                        call = DecodedCall(function_name="getConfig", signature="getConfig()")
+                        notes = _collect_safety_checks([("0xT", call, 10**18)], chain_id=1)
+                self.assertEqual(len(notes), 1)
+                self.assertIn(mut, notes[0])
+
+    @patch("utils.llm.ai_explainer.get_function_state_mutability", return_value="payable")
+    @patch("utils.llm.ai_explainer.get_verification_status", return_value=True)
+    def test_value_to_payable_not_flagged(self, _ver: MagicMock, _mut: MagicMock) -> None:
+        call = DecodedCall(function_name="deposit", signature="deposit()")
+        self.assertEqual(_collect_safety_checks([("0xT", call, 10**18)], chain_id=1), [])
 
 
 class TestBatchParamConstants(unittest.TestCase):
@@ -145,6 +224,7 @@ class TestSkipSimulation(unittest.TestCase):
     ) -> None:
         mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
         mock_provider = MagicMock()
+        mock_provider.supports_structured_output = False
         mock_provider.complete.return_value = "TLDR: paused"
         mock_provider.model_name = "test-model"
         mock_get_provider.return_value = mock_provider
@@ -178,6 +258,7 @@ class TestSkipSimulation(unittest.TestCase):
             function_name="swapOwner", signature="swapOwner(address,address,address)"
         )
         mock_provider = MagicMock()
+        mock_provider.supports_structured_output = False
         mock_provider.complete.return_value = "TLDR: swap"
         mock_provider.model_name = "test-model"
         mock_get_provider.return_value = mock_provider
@@ -225,6 +306,7 @@ class TestExplainTransaction(unittest.TestCase):
         mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
         mock_simulate.return_value = SimulationResult(success=True, gas_used=50000)
         mock_provider = MagicMock()
+        mock_provider.supports_structured_output = False
         mock_provider.complete.return_value = "TLDR: This pauses the protocol.\n\nDETAIL:\nPauses all operations."
         mock_provider.model_name = "test-model"
         mock_get_provider.return_value = mock_provider
@@ -256,6 +338,7 @@ class TestExplainTransaction(unittest.TestCase):
         mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
         mock_simulate.return_value = None
         mock_provider = MagicMock()
+        mock_provider.supports_structured_output = False
         mock_provider.complete.side_effect = LLMError("API error")
         mock_get_provider.return_value = mock_provider
 
@@ -283,6 +366,7 @@ class TestExplainTransaction(unittest.TestCase):
         mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
         mock_simulate.return_value = None  # Simulation failed
         mock_provider = MagicMock()
+        mock_provider.supports_structured_output = False
         mock_provider.complete.return_value = "TLDR: This pauses the protocol."
         mock_provider.model_name = "test-model"
         mock_get_provider.return_value = mock_provider
@@ -311,6 +395,7 @@ class TestExplainTransaction(unittest.TestCase):
             state_var_snippets=["/// @dev so actually 1 - slippage\nuint256 public maxSlippage;"],
         )
         mock_provider = MagicMock()
+        mock_provider.supports_structured_output = False
         mock_provider.complete.return_value = "TLDR: Tight slippage."
         mock_provider.model_name = "test-model"
         mock_get_provider.return_value = mock_provider
@@ -320,6 +405,57 @@ class TestExplainTransaction(unittest.TestCase):
         prompt = mock_provider.complete.call_args[0][0]
         self.assertIn("Contract Source Context", prompt)
         self.assertIn("so actually 1 - slippage", prompt)
+
+
+class TestStructuredOutput(unittest.TestCase):
+    """Tests for the structured-output draft path and JSON→Explanation mapping."""
+
+    def test_appends_risk_tag_when_missing(self) -> None:
+        exp = _explanation_from_json({"summary": "Pauses the vault", "detail": "d", "risk_tag": "MEDIUM"})
+        self.assertEqual(exp.summary, "Pauses the vault MEDIUM")
+        self.assertEqual(exp.detail, "d")
+
+    def test_normalizes_matching_trailing_tag(self) -> None:
+        exp = _explanation_from_json({"summary": "Pauses the vault. LOW.", "detail": "d", "risk_tag": "LOW"})
+        self.assertEqual(exp.summary, "Pauses the vault. LOW")
+
+    def test_schema_tag_overrides_inlined_tag(self) -> None:
+        # Model put LOW in the prose but the validated risk_tag is HIGH — schema wins.
+        exp = _explanation_from_json({"summary": "Grants admin role. LOW.", "detail": "d", "risk_tag": "HIGH"})
+        self.assertEqual(exp.summary, "Grants admin role. HIGH")
+
+    def test_generate_draft_uses_structured_when_supported(self) -> None:
+        provider = MagicMock()
+        provider.supports_structured_output = True
+        provider.complete_structured.return_value = {"summary": "Does X", "detail": "d", "risk_tag": "HIGH"}
+
+        result = _generate_draft(provider, "prompt")
+
+        provider.complete_structured.assert_called_once()
+        provider.complete.assert_not_called()
+        self.assertEqual(result.summary, "Does X HIGH")
+
+    def test_generate_draft_falls_back_to_text_on_error(self) -> None:
+        provider = MagicMock()
+        provider.supports_structured_output = True
+        provider.complete_structured.side_effect = LLMError("unsupported")
+        provider.complete.return_value = "TLDR: Does X. LOW."
+
+        result = _generate_draft(provider, "prompt")
+
+        provider.complete.assert_called_once()
+        self.assertEqual(result.summary, "Does X. LOW.")
+
+    def test_generate_draft_falls_back_on_empty_summary(self) -> None:
+        provider = MagicMock()
+        provider.supports_structured_output = True
+        provider.complete_structured.return_value = {"summary": "", "detail": "", "risk_tag": "LOW"}
+        provider.complete.return_value = "TLDR: text path. LOW."
+
+        result = _generate_draft(provider, "prompt")
+
+        provider.complete.assert_called_once()
+        self.assertEqual(result.summary, "text path. LOW.")
 
 
 class TestParseExplanation(unittest.TestCase):
@@ -396,6 +532,7 @@ class TestRefineExplanation(unittest.TestCase):
         # Trailing whitespace around "PASS" must also count as PASS.
         draft = Explanation(summary="Lowers fee 30→25 bps. LOW.", detail="bla")
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "  PASS  \n"
         self.assertIs(_refine_explanation("orig prompt", draft, provider), draft)
         provider.complete.assert_called_once()
@@ -403,6 +540,7 @@ class TestRefineExplanation(unittest.TestCase):
     def test_revision_replaces_draft(self) -> None:
         draft = Explanation(summary="This transaction does X. LOW.", detail="bla")
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: Does X. LOW.\n\nDETAIL:\nrefined detail."
         result = _refine_explanation("orig", draft, provider)
         self.assertEqual(result.summary, "Does X. LOW.")
@@ -411,12 +549,14 @@ class TestRefineExplanation(unittest.TestCase):
     def test_llm_error_falls_back_to_draft(self) -> None:
         draft = Explanation(summary="x", detail="y")
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.side_effect = LLMError("rate limit")
         self.assertIs(_refine_explanation("p", draft, provider), draft)
 
     def test_empty_response_falls_back_to_draft(self) -> None:
         draft = Explanation(summary="x", detail="y")
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = ""
         self.assertIs(_refine_explanation("p", draft, provider), draft)
 
@@ -439,6 +579,7 @@ class TestRefineFlagInExplainTransaction(unittest.TestCase):
     ) -> None:
         mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: Pauses. LOW."
         provider.model_name = "test-model"
         mock_get_provider.return_value = provider
@@ -461,6 +602,7 @@ class TestRefineFlagInExplainTransaction(unittest.TestCase):
     ) -> None:
         mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.side_effect = ["TLDR: Pauses. LOW.", "PASS"]
         provider.model_name = "test-model"
         mock_get_provider.return_value = provider
@@ -494,6 +636,7 @@ class TestFailedSimulationDropped(unittest.TestCase):
             success=False, gas_used=0, error_message="execution reverted: not authorized"
         )
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: pauses. LOW."
         provider.model_name = "test"
         mock_get_provider.return_value = provider
@@ -523,6 +666,7 @@ class TestFailedSimulationDropped(unittest.TestCase):
         mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
         mock_simulate.return_value = SimulationResult(success=False, gas_used=0, error_message="reverted")
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: pauses both. LOW."
         provider.model_name = "test"
         mock_get_provider.return_value = provider
@@ -562,6 +706,7 @@ class TestAbiParamNames(unittest.TestCase):
         )
         mock_names.return_value = ["_maxSlippage"]
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: tightens slippage. LOW."
         provider.model_name = "test"
         mock_get_provider.return_value = provider
@@ -589,6 +734,7 @@ class TestAbiParamNames(unittest.TestCase):
             params=[("uint256", 1)],
         )
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: tightens slippage. LOW."
         provider.model_name = "test"
         mock_get_provider.return_value = provider
@@ -635,6 +781,7 @@ class TestErc20MetadataInPrompt(unittest.TestCase):
         mock_meta.side_effect = lambda _c, addr: ERC20Metadata("USDC", 6) if addr.lower() == usdc.lower() else None
 
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: tiny transfer. LOW."
         provider.model_name = "test"
         mock_get_provider.return_value = provider
@@ -665,6 +812,7 @@ class TestErc20MetadataInPrompt(unittest.TestCase):
             params=[("uint256", 1), ("address[]", ("0x" + "ac" * 20,))],
         )
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: registers farm. LOW."
         provider.model_name = "test"
         mock_get_provider.return_value = provider
@@ -700,6 +848,7 @@ class TestRiskAnchorsSection(unittest.TestCase):
             params=[("address", "0x" + "11" * 20)],
         )
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: hands ownership. HIGH."
         provider.model_name = "test"
         mock_get_provider.return_value = provider
@@ -731,6 +880,7 @@ class TestRiskAnchorsSection(unittest.TestCase):
             params=[("uint256", 1)],
         )
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: tightens slippage. LOW."
         provider.model_name = "test"
         mock_get_provider.return_value = provider
@@ -852,6 +1002,7 @@ class TestAddressLabels(unittest.TestCase):
         )
         mock_label.return_value = "MorphoFarm"
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: adds farm. LOW."
         provider.model_name = "test-model"
         mock_get_provider.return_value = provider
@@ -887,6 +1038,7 @@ class TestAddressLabels(unittest.TestCase):
         )
         mock_label.return_value = "ChainlinkOracle"
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: rewires oracle. MEDIUM."
         provider.model_name = "test-model"
         mock_get_provider.return_value = provider
@@ -921,6 +1073,7 @@ class TestAddressLabels(unittest.TestCase):
         )
         mock_label.return_value = ""
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: wires self. LOW."
         provider.model_name = "test-model"
         mock_get_provider.return_value = provider
@@ -951,6 +1104,7 @@ class TestAddressLabels(unittest.TestCase):
         )
         mock_label.return_value = ""  # unverified / EOA / no API key
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: rewires. MEDIUM."
         provider.model_name = "test-model"
         mock_get_provider.return_value = provider
@@ -991,13 +1145,14 @@ class TestAddressLabels(unittest.TestCase):
         # The outer decode is mocked (no fake selector to resolve); the inner
         # bytes recursion uses the real decoder so `initialize(address)`
         # resolves via KNOWN_SELECTORS and yields the inner address.
-        def routed_decode(data: str) -> DecodedCall | None:
+        def routed_decode(data: str, chain_id: int | None = None, target: str | None = None) -> DecodedCall | None:
             return outer if data == "0xUPGRADE_CALLDATA" else real_decode(data)
 
         mock_decode.side_effect = routed_decode
         mock_label.return_value = "ImplContract"
 
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: upgrades. MEDIUM."
         provider.model_name = "test-model"
         mock_get_provider.return_value = provider
@@ -1032,6 +1187,7 @@ class TestAddressLabels(unittest.TestCase):
         )
         mock_label.return_value = ""
         provider = MagicMock()
+        provider.supports_structured_output = False
         provider.complete.return_value = "TLDR: unsets oracle. LOW."
         provider.model_name = "test-model"
         mock_get_provider.return_value = provider

@@ -7,7 +7,6 @@ selector pays the lookup cost only once across all workflow invocations.
 """
 
 import os
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -147,19 +146,61 @@ def resolve_selector(selector_hex: str) -> str | None:
 def _parse_param_types(signature: str) -> list[str]:
     """Extract parameter types from a function signature.
 
+    Handles nested tuple types, e.g. ``configure((address,uint256),uint256)``
+    yields ``["(address,uint256)", "uint256"]`` rather than splitting on the
+    inner comma. Naive comma-splitting would corrupt tuple types and make
+    ``eth_abi.decode`` drop every parameter.
+
     Args:
         signature: Function signature like "grantRole(bytes32,address)".
 
     Returns:
-        List of type strings, e.g. ["bytes32", "address"]. Empty list for no-arg functions.
+        List of type strings. Empty list for no-arg functions.
     """
-    match = re.search(r"\(([^)]*)\)", signature)
-    if not match:
+    start = signature.find("(")
+    if start == -1:
         return []
-    params_str = match.group(1).strip()
-    if not params_str:
+
+    # Find the ")" that matches the opening "(" of the argument list.
+    depth = 0
+    end = -1
+    for i in range(start, len(signature)):
+        if signature[i] == "(":
+            depth += 1
+        elif signature[i] == ")":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end == -1:
         return []
-    return [t.strip() for t in params_str.split(",")]
+
+    inner = signature[start + 1 : end].strip()
+    return _split_top_level(inner) if inner else []
+
+
+def _split_top_level(types: str) -> list[str]:
+    """Split a comma-separated type list on top-level commas only.
+
+    Commas inside ``(...)`` tuples or ``[...]`` array sizes are preserved so a
+    type like ``(address,uint256)[]`` stays intact.
+    """
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in types:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        parts.append("".join(current).strip())
+    return parts
 
 
 def _format_param_value(type_str: str, value: Any) -> str:
@@ -195,11 +236,28 @@ def _format_param_value(type_str: str, value: Any) -> str:
     return str(value)
 
 
-def decode_calldata(data_hex: str) -> DecodedCall | None:
+def _resolve_signature_via_abi(chain_id: int, target: str, selector: str) -> str | None:
+    """Look up the selector's signature in the target's verified ABI (best-effort)."""
+    try:
+        from utils.source_context import get_function_signature_by_selector
+
+        sig: str | None = get_function_signature_by_selector(chain_id, target, selector)
+        return sig
+    except Exception as e:  # noqa: BLE001 - enrichment only; fall back to Sourcify
+        logger.debug("ABI signature lookup failed for %s on %s: %s", selector, target, e)
+        return None
+
+
+def decode_calldata(data_hex: str, chain_id: int | None = None, target: str | None = None) -> DecodedCall | None:
     """Decode raw calldata into a structured representation.
 
     Args:
         data_hex: Full calldata hex string including 0x prefix.
+        chain_id: Optional chain ID. When given with ``target``, the target's
+            verified ABI is consulted first to resolve the signature — more
+            reliable than the Sourcify 4byte database, which can't disambiguate
+            selector collisions.
+        target: Optional target address (see ``chain_id``).
 
     Returns:
         DecodedCall with function name, signature, and decoded params, or None if decoding fails.
@@ -208,7 +266,11 @@ def decode_calldata(data_hex: str) -> DecodedCall | None:
         return None
 
     selector = data_hex[:10]
-    signature = resolve_selector(selector)
+    signature = None
+    if chain_id is not None and target:
+        signature = _resolve_signature_via_abi(chain_id, target, selector)
+    if not signature:
+        signature = resolve_selector(selector)
     if not signature:
         return None
 

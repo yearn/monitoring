@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from utils.tenderly.simulation import (
+    _merge_balance_override,
     _parse_asset_changes,
     _parse_state_changes,
     simulate_transaction,
@@ -88,8 +89,37 @@ class TestParseStateChanges(unittest.TestCase):
         self.assertEqual(len(result), 0)
 
 
+class TestMergeBalanceOverride(unittest.TestCase):
+    """Tests for _merge_balance_override."""
+
+    def test_value_adds_balance_for_sender(self) -> None:
+        out = _merge_balance_override(None, "0xExec", 10**18)
+        self.assertEqual(out, {"0xExec": {"balance": hex(10**18)}})
+
+    def test_caller_override_wins(self) -> None:
+        existing = {"0xExec": {"balance": "0xdead", "storage": {"0x1": "0x2"}}}
+        out = _merge_balance_override(existing, "0xExec", 10**18)
+        # Caller-supplied balance is preserved; storage carried through.
+        self.assertEqual(out["0xExec"]["balance"], "0xdead")
+        self.assertEqual(out["0xExec"]["storage"], {"0x1": "0x2"})
+
+
 class TestSimulateTransaction(unittest.TestCase):
     """Tests for simulate_transaction."""
+
+    @patch("utils.tenderly.simulation.fetch_json")
+    @patch.dict("os.environ", {"TENDERLY_API_KEY": "test-key"}, clear=False)
+    def test_value_injects_state_objects(self, mock_fetch: unittest.mock.MagicMock) -> None:
+        mock_fetch.return_value = {"transaction": {"status": True, "transaction_info": {"gas_used": 1}}}
+        simulate_transaction(
+            target="0xTarget",
+            calldata="0x12345678",
+            chain_id=1,
+            value=10**18,
+            from_address="0xExec",
+        )
+        body = mock_fetch.call_args.kwargs["json"]
+        self.assertEqual(body["state_objects"], {"0xExec": {"balance": hex(10**18)}})
 
     @patch.dict("os.environ", {"TENDERLY_API_KEY": ""}, clear=False)
     def test_no_api_key_returns_none(self) -> None:
