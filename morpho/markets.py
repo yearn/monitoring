@@ -488,8 +488,9 @@ def check_allocation_and_risk(vault_data):
     allocation_violations: list[str] = []
 
     for allocation in vault_data["state"]["allocation"]:
-        # market without collateral asset is idle asset
-        if not allocation["enabled"] or allocation["market"]["collateralAsset"] is None:
+        # market without collateral asset is idle asset; supplyCap == 0 means the
+        # curator has not enabled this market for active supply.
+        if int(allocation.get("supplyCap", 0)) == 0 or allocation["market"]["collateralAsset"] is None:
             continue
 
         market = allocation["market"]
@@ -803,7 +804,7 @@ def main() -> None:
                 state {
                     totalAssetsUsd
                     allocation {
-                        enabled
+                        supplyCap
                         supplyAssetsUsd
                         pendingSupplyCapUsd
                         pendingSupplyCapValidAt
@@ -878,7 +879,7 @@ def main() -> None:
         vault_markets = []
         for allocation in vault_data["state"]["allocation"]:
             market_supply_usd = allocation.get("market", {}).get("state", {}).get("supplyAssetsUsd")
-            if allocation["enabled"] and (market_supply_usd or 0) > 1e4:  # skip low value markets
+            if int(allocation.get("supplyCap", 0)) > 0 and (market_supply_usd or 0) > 1e4:  # skip low value markets
                 market = allocation["market"]
                 if market["collateralAsset"] is not None:
                     # market without collateral asset is idle asset
