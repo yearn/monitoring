@@ -227,8 +227,10 @@ MARKETS_RISK_2 = {
         "0x61765602144e91e5ac9f9e98b8584eae308f9951596fd7f5e0f59f21cd2bf664",  # weETH/USDC -> lltv 91.5%, oracle: redstone weETH/usdc exchange rate
         "0xb7843fe78e7e7fd3106a1b939645367967d1f986c2e45edb8932ad1896450877",  # XAUT/USDT -> lltv 77%, oracle: Chainlink XAUT/USD and Chainlink USDT/USD.
         "0xc3b37a18d5b15f8e5b78bcdc014ffb3f22933bde4e5f6a36dedf36db87e68585",  # WETH/RLUSD -> lltv 86%, oracle: Chainlink ETH/USD and Chainlink RLUSD/USD.
+        "0x631e64ae8498821a5605bd3c14e253ffbf207f87411e2aeffc91a32a126cc13d",  # WETH/PYUSD -> lltv 86%, oracle: Chainlink ETH/USD and Chainlink PYUSD/USD.
         "0xc0ae375fd761ff19b3f04de5534c0f1ec110f80e1c2ede27c42c1c43c3040394",  # syrupUSDC/RLUSD -> lltv 91.5%, oracle: syrupUSDC MaplePool ERC4626 to USDC, chainlink USDC/USD and Chainlink RLUSD/USD.
         "0xffd010618ed3cb39bb2c5de0e3e58d3d2ec9f52187a180f29723c31756a939bc",  # cbBTC/RLUSD -> lltv 86%, oracle: chainlink cbBTC/USD and Chainlink RLUSD/USD.
+        "0xa128dddc761075df9a9a60689f3a41a989b245aad506352c509c0c3a76a9ec6b",  # WBTC/RLUSD -> lltv 86%, oracle: Chainlink WBTC/BTC, Chainlink BTC/USD and Chainlink RLUSD/USD.
         "0xea4bfb18df0ee6bffb7b3f0270899a8adb92ab6b684709634c8276128813cfd4",  # weETH/RLUSD -> lltv 86%, oracle: chainlink weETH/ETH and chainlink ETH/USD and Chainlink RLUSD/USD.
         "0x88abdf8693e663144c3544b9442e9b04520016d6ebc57aa76424c00ab1683c9d",  # wstETH/RLUSD -> lltv 86%, oracle: Compound wstETH/ETH price feed, chainlink ETH/USD and Chainlink RLUSD/USD.
         "0x48a0da254e4df7b1046baa5ef11beb7916203886ce153a07a6d28c5d63cf8fad",  # sUSDe/RLUSD -> lltv 91.5%, oracle: sUSDe ERC4626 vault, chainlink USDe/USD and Chainlink RLUSD/USD.
@@ -297,6 +299,7 @@ MARKETS_RISK_3 = {
         "0xc6ae8e71e11ef511acee3f6cc6ad2af67b862877d459e3789905f537c85db5e3",  # PT-sUSDE-25SEP2025/DAI -> lltv 91.5%, oracle: PendleSparkLinearDiscountOracle with linear discount oracle for sUSDE. No price oracle for DAI, USDe = DAI.
         "0x27b9a0a5bfee98a31eb51e3850250d103a9f8e41673c782defc66aa943af0e65",  # PT-srUSDe-2APR2026/USDC -> lltv 91.5%, oracle: Pendle PT exchange rate(PT to asset) srUSDe. USDC = 1 using dummy oracle.
         "0x15bb2a6af0c909eed19fb1f2ceeead34ecbdcba626de752c6b09389ee14eec32",  # kBTC/RLUSD -> lltv 86%, oracle: Chainlink BTC/USD and Chainlink RLUSD/USD.
+        "0xe51f9aaad25d0e755429cf77076b3c2d37cb1228ed81f8a5482f2102c220eef5",  # kBTC/PYUSD -> lltv 86%, oracle: Chainlink BTC/USD and Chainlink PYUSD/USD.
     ],
     Chain.BASE: [
         "0x4944a1169bc07b441473b830308ffe5bb535c10a9f824e33988b60738120c48e",  # LBTC/cbBTC -> lltv 91.5%, oracle: Custom moonwell oracle. Base feed is fetched from upgradeable oracle which uses 2 oracles. Primary oracle is redstone oracle, if the price changes more than 2% than it uses fallback oracle chainlink oracle. Chainlink didn't have an exchange rate feed. Redstone was the only provider for the LBTC reserves.
