@@ -201,21 +201,43 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
                 # send message for txs that target only vaults that we use in our strategies
                 continue
 
-            if expected_proposers:
-                tx_proposer = (tx.get("proposer") or "").lower()
-                tx_delegate = (tx.get("proposedByDelegate") or "").lower()
+            # Yearn multisigs (expected_proposers is non-empty) always get an
+            # alert so there's a record of every queued tx. Expected-proposer
+            # txs are sent silently (low importance); a tx proposed by an
+            # address that is NOT one of our known bots is escalated to a loud
+            # critical alert — it could mean a compromised proposer.
+            is_yearn_multisig = bool(expected_proposers)
+            unexpected_proposer = False
+            tx_proposer = (tx.get("proposer") or "").lower()
+            tx_delegate = (tx.get("proposedByDelegate") or "").lower()
+            if is_yearn_multisig:
                 matched = next((a for a in (tx_proposer, tx_delegate) if a and a in expected_proposers), None)
                 if matched:
                     logger.info(
-                        "Skipping nonce %s on %s — proposed by expected address %s",
+                        "Nonce %s on %s proposed by expected address %s",
                         nonce,
                         safe_address,
                         matched,
                     )
-                    write_last_executed_nonce_to_file(safe_address, nonce)
-                    continue
+                else:
+                    unexpected_proposer = True
+                    logger.warning(
+                        "Nonce %s on %s proposed by UNEXPECTED address (proposer=%s delegate=%s)",
+                        nonce,
+                        safe_address,
+                        tx_proposer or "?",
+                        tx_delegate or "?",
+                    )
 
-            message = (
+            message = ""
+            if unexpected_proposer:
+                message += (
+                    "⚠️🚨 *CRITICAL: UNEXPECTED PROPOSER* 🚨⚠️\n"
+                    "This Yearn multisig tx was NOT proposed by a known Yearn bot/EOA!\n"
+                    f"👤 Proposer: {tx_proposer or 'unknown'}\n"
+                    f"👤 Proposed by delegate: {tx_delegate or 'none'}\n\n"
+                )
+            message += (
                 "🚨 QUEUED TX DETECTED 🚨\n"
                 f"🅿️ Protocol: {escape_markdown(protocol)}\n"
                 f"🔐 Safe Address: {safe_address}\n"
@@ -270,7 +292,10 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
                 except Exception:
                     logger.debug("AI explanation failed for Safe tx nonce=%s", nonce, exc_info=True)
 
-            send_telegram_message(message, protocol, False)  # explicitly enable notification
+            # Silent for routine Yearn multisig txs (expected proposer); loud
+            # for unexpected proposers and for all non-Yearn protocol alerts.
+            disable_notification = is_yearn_multisig and not unexpected_proposer
+            send_telegram_message(message, protocol, disable_notification)
             # write the last executed nonce to file
             write_last_executed_nonce_to_file(safe_address, nonce)
     else:

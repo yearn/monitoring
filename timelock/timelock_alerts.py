@@ -29,6 +29,15 @@ ENVIO_GRAPHQL_URL = os.getenv("ENVIO_GRAPHQL_URL")
 DEFAULT_LOG_LEVEL = os.getenv("TIMELOCK_ALERTS_LOG_LEVEL", "INFO")
 CACHE_KEY = "TIMELOCK_LAST_TS"
 
+# Protocols whose alerts are mirrored to an additional chat in lockstep with the
+# primary destination. The value is just another protocol key — configure its
+# credentials with TELEGRAM_BOT_TOKEN_<MIRROR> / TELEGRAM_CHAT_ID_<MIRROR>.
+# Mirror sends are best-effort: a failure is logged but never blocks the primary
+# send or cache advancement.
+MIRROR_PROTOCOLS: dict[str, str] = {
+    "YEARN_TIMELOCK": "YEARN_TIMELOCK_INTERNAL",
+}
+
 
 @dataclass(frozen=True)
 class TimelockConfig:
@@ -460,6 +469,21 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
     return "\n".join(parts)
 
 
+def send_mirror_alert(message: str, protocol: str, plain_text: bool = False) -> None:
+    """Mirror an alert to the protocol's additional chat, if one is configured.
+
+    Best-effort: any failure is logged and swallowed so it never affects the
+    primary send or cache advancement.
+    """
+    mirror_protocol = MIRROR_PROTOCOLS.get(protocol.upper())
+    if not mirror_protocol:
+        return
+    try:
+        send_telegram_message(message, mirror_protocol, plain_text=plain_text)
+    except Exception:
+        _logger.exception("Failed to mirror alert for %s to %s", protocol, mirror_protocol)
+
+
 def process_events(events: list[dict], use_cache: bool) -> None:
     """Process TimelockEvent events, group by operationId, and send alerts."""
     if not events:
@@ -538,6 +562,10 @@ def process_events(events: list[dict], use_cache: bool) -> None:
             except Exception:
                 _logger.exception("Failed to send Telegram alert for protocol %s", protocol)
                 all_sent = False
+                continue
+            # Mirror only after a successful primary send so the internal chat
+            # stays in sync with the topic (no duplicates on primary retry).
+            send_mirror_alert(chunk, protocol)
 
     # Only advance the cache when every chunk landed. Advancing on partial
     # failure silently drops the failed events — the next run sees no new
@@ -615,6 +643,7 @@ def main() -> None:
                 send_telegram_message(msg, protocol)
             except Exception:
                 _logger.exception("Failed to send Envio error alert for protocol %s", protocol)
+            send_mirror_alert(msg, protocol)
         return
     if "errors" in response:
         msg = f"Timelock alerts: GraphQL errors: {response['errors']}"
