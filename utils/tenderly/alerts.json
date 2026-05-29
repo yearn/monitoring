@@ -240,6 +240,64 @@
       ]
     },
     {
+      "id": "78614e8f-a87c-4efa-8843-f0d12394268d",
+      "project_id": "6932cbec-2970-425a-a734-cb8374d95744",
+      "name": "Event CallScheduled emitted in TimelockController",
+      "description": "",
+      "enabled": true,
+      "color": "#eeeeee",
+      "severity": "default",
+      "created_at": "2026-05-29T10:10:13.458771Z",
+      "delivery_channels": [
+        {
+          "delivery_channel_id": "880bc453-0a45-418f-bd11-e1ed6b4800fb",
+          "delivery_channel": {
+            "id": "880bc453-0a45-418f-bd11-e1ed6b4800fb",
+            "type": "telegram",
+            "owner_id": "1f750734-c720-4fde-9d60-d7edd0c04d91",
+            "project_id": null,
+            "label": "YFI Timelock",
+            "reference_id": "9165680d-4467-4741-a009-bc6be8b5fb19",
+            "enabled": true,
+            "created_at": "2026-05-29T10:09:26.19057Z",
+            "information": {
+              "chat_id": -5289484701
+            }
+          },
+          "enabled": true,
+          "created_at": "2026-05-29T10:10:13.493404Z"
+        }
+      ],
+      "is_editable": true,
+      "updated_at": "2026-05-29T10:10:13.458771Z",
+      "expressions": [
+        {
+          "type": "contract_address",
+          "expression": {
+            "address": "0x88ba032be87d5ef1fbe87336b7090767f367bf73",
+            "transaction_type": null
+          }
+        },
+        {
+          "type": "network",
+          "expression": {
+            "network_id": "1"
+          }
+        },
+        {
+          "type": "emitted_log",
+          "expression": {
+            "address": "0x88ba032be87d5ef1fbe87336b7090767f367bf73",
+            "match_any": false,
+            "match_non_project_contracts": false,
+            "event_name": "CallScheduled",
+            "event_id": "0x4cf4410cc57040e44862ef0f45f3dd5a5e02db8eb8add648d4b0e236f1d07dca",
+            "decode_events": false
+          }
+        }
+      ]
+    },
+    {
       "id": "8e577a18-92b2-4cab-86b8-53c7c3025a00",
       "project_id": "6932cbec-2970-425a-a734-cb8374d95744",
       "name": "Event StartVote emitted in Lido DAO Voting",
