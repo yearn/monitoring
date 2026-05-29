@@ -496,25 +496,26 @@ class TestParseExplanation(unittest.TestCase):
 class TestFormatExplanationLine(unittest.TestCase):
     """Tests for format_explanation_line."""
 
-    @patch("utils.llm.ai_explainer.upload_to_paste", return_value="https://dpaste.com/abc123")
+    @patch("utils.llm.ai_explainer.upload_to_paste", return_value="https://rentry.co/abc123")
     def test_format_with_detail(self, mock_paste: MagicMock) -> None:
         explanation = Explanation(summary="This pauses the protocol.", detail="Full detail here.")
         result = format_explanation_line(explanation)
         self.assertIn("AI Summary", result)
         self.assertIn("This pauses the protocol.", result)
         self.assertNotIn("Full detail here.", result)
-        self.assertIn("https://dpaste.com/abc123", result)
+        self.assertIn("https://rentry.co/abc123", result)
         self.assertIn("Full details", result)
         mock_paste.assert_called_once_with("Full detail here.", title="AI Transaction Analysis")
 
     @patch("utils.llm.ai_explainer.upload_to_paste", return_value="")
     def test_format_paste_failure(self, mock_paste: MagicMock) -> None:
-        """If paste upload fails, no link is included."""
+        """If paste upload fails, surface a notice instead of a link."""
         explanation = Explanation(summary="This pauses the protocol.", detail="Full detail here.")
         result = format_explanation_line(explanation)
         self.assertIn("AI Summary", result)
         self.assertIn("This pauses the protocol.", result)
         self.assertNotIn("Full details", result)
+        self.assertIn("Couldn't post full report", result)
 
     def test_format_no_detail(self) -> None:
         """If there's no detail, no paste upload is attempted."""
