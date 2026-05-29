@@ -33,8 +33,8 @@ logger = get_logger("stables.dune_large_transfers")
 PROTOCOL = "stables"
 
 CACHE_KEY_LAST_TX = "stables_dune_large_transfers_last_tx"
-MAX_ROWS_PER_PROTOCOL_ALERT = 10
-DEFAULT_LARGE_TRANSFER_THRESHOLD = 5_000_000.0
+MAX_ROWS_PER_PROTOCOL_ALERT = 100
+DEFAULT_LARGE_TRANSFER_THRESHOLD = 5_000_000.0  # can be set only to higher value because dune query is set to 5M
 
 # Route each token to its owning protocol channel.
 TOKEN_ROUTE: dict[tuple[str, str], tuple[str, str]] = {
