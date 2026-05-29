@@ -29,14 +29,10 @@ ENVIO_GRAPHQL_URL = os.getenv("ENVIO_GRAPHQL_URL")
 DEFAULT_LOG_LEVEL = os.getenv("TIMELOCK_ALERTS_LOG_LEVEL", "INFO")
 CACHE_KEY = "TIMELOCK_LAST_TS"
 
-# Protocols whose alerts are mirrored to an additional chat in lockstep with the
-# primary destination. The value is just another protocol key — configure its
-# credentials with TELEGRAM_BOT_TOKEN_<MIRROR> / TELEGRAM_CHAT_ID_<MIRROR>.
-# Mirror sends are best-effort: a failure is logged but never blocks the primary
-# send or cache advancement.
-MIRROR_PROTOCOLS: dict[str, str] = {
-    "YEARN_TIMELOCK": "YEARN_TIMELOCK_INTERNAL",
-}
+# YEARN_TIMELOCK alerts are also mirrored to this internal-only chat, in lockstep
+# with the public topic. Configure its credentials with
+# TELEGRAM_BOT_TOKEN_YEARN_TIMELOCK_INTERNAL / TELEGRAM_CHAT_ID_YEARN_TIMELOCK_INTERNAL.
+YEARN_TIMELOCK_INTERNAL_PROTOCOL = "YEARN_TIMELOCK_INTERNAL"
 
 
 @dataclass(frozen=True)
@@ -470,18 +466,17 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
 
 
 def send_mirror_alert(message: str, protocol: str, plain_text: bool = False) -> None:
-    """Mirror an alert to the protocol's additional chat, if one is configured.
+    """Mirror YEARN_TIMELOCK alerts to the internal-only chat.
 
     Best-effort: any failure is logged and swallowed so it never affects the
     primary send or cache advancement.
     """
-    mirror_protocol = MIRROR_PROTOCOLS.get(protocol.upper())
-    if not mirror_protocol:
+    if protocol.upper() != "YEARN_TIMELOCK":
         return
     try:
-        send_telegram_message(message, mirror_protocol, plain_text=plain_text)
+        send_telegram_message(message, YEARN_TIMELOCK_INTERNAL_PROTOCOL, plain_text=plain_text)
     except Exception:
-        _logger.exception("Failed to mirror alert for %s to %s", protocol, mirror_protocol)
+        _logger.exception("Failed to mirror alert for %s to %s", protocol, YEARN_TIMELOCK_INTERNAL_PROTOCOL)
 
 
 def process_events(events: list[dict], use_cache: bool) -> None:
