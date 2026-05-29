@@ -1129,11 +1129,13 @@ def format_explanation_line(explanation: Explanation) -> str:
     """Format the AI explanation for inclusion in a Telegram alert message.
 
     Uses the short summary for the Telegram message. The detailed analysis
-    is uploaded to a paste service (dpaste.org) for easy access.
+    is uploaded to a paste service (rentry.co) for easy access.
     """
     line = f"\n🤖 *AI Summary:*\n{escape_markdown(explanation.summary)}"
     if explanation.detail:
         paste_url = upload_to_paste(explanation.detail, title="AI Transaction Analysis")
         if paste_url:
             line += f"\n[Full details]({paste_url})"
+        else:
+            line += "\n⚠️ Couldn't post full report"
     return line
