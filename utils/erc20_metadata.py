@@ -11,11 +11,12 @@ returns ``None``, treated as "no metadata available".
 
 from dataclasses import dataclass
 
-from eth_utils import to_checksum_address
+from eth_utils import function_signature_to_4byte_selector, to_checksum_address
 
 from utils.abi import load_abi
 from utils.chains import Chain
 from utils.logging import get_logger
+from utils.proxy import get_current_implementation
 from utils.web3_wrapper import ChainManager
 
 logger = get_logger("utils.erc20_metadata")
@@ -24,6 +25,12 @@ _ERC20_ABI = None  # loaded lazily on first call
 
 # Per-process cache: (chain_id, address_lower) -> ERC20Metadata or None for miss.
 _cache: dict[tuple[int, str], "ERC20Metadata | None"] = {}
+
+# Selectors an ERC20 must dispatch. We only ever call symbol()/decimals() when
+# the contract bytecode actually contains both — never a blind eth_call we expect
+# to fail. Stored as bare lowercase hex (no 0x) to substring-match raw bytecode.
+_SYMBOL_SELECTOR = function_signature_to_4byte_selector("symbol()").hex()  # 95d89b41
+_DECIMALS_SELECTOR = function_signature_to_4byte_selector("decimals()").hex()  # 313ce567
 
 
 @dataclass(frozen=True)
@@ -55,7 +62,16 @@ def fetch_erc20_metadata(chain_id: int, address: str) -> ERC20Metadata | None:
     try:
         chain = Chain.from_chain_id(chain_id)
         client = ChainManager.get_client(chain)
-        token = client.get_contract(to_checksum_address(address), _ERC20_ABI)
+        checksum = to_checksum_address(address)
+
+        # Gate: only call symbol()/decimals() when the bytecode proves the
+        # contract dispatches them. EOAs and non-token contracts are skipped
+        # without a blind eth_call.
+        if not _dispatches_token_metadata(chain_id, client, checksum):
+            _cache[cache_key] = None
+            return None
+
+        token = client.get_contract(checksum, _ERC20_ABI)
         with client.batch_requests() as batch:
             batch.add(token.functions.symbol())
             batch.add(token.functions.decimals())
@@ -68,6 +84,42 @@ def fetch_erc20_metadata(chain_id: int, address: str) -> ERC20Metadata | None:
 
     _cache[cache_key] = meta
     return meta
+
+
+def _code_hex(client, address: str) -> str:
+    """Return deployed bytecode at ``address`` as bare lowercase hex ("" if none)."""
+    raw = client.eth.get_code(to_checksum_address(address))
+    code = raw.hex()
+    if code.startswith("0x"):
+        code = code[2:]
+    return code.lower()
+
+
+def _has_token_selectors(code: str) -> bool:
+    """True if bytecode dispatches both symbol() and decimals()."""
+    return bool(code) and _SYMBOL_SELECTOR in code and _DECIMALS_SELECTOR in code
+
+
+def _dispatches_token_metadata(chain_id: int, client, checksum: str) -> bool:
+    """Positive-evidence ERC20 check via bytecode inspection.
+
+    Returns True only when the contract — or, for proxies, its implementation —
+    contains both the symbol() and decimals() selectors. EOAs and non-token
+    contracts return False so we never blind-call functions they can't serve.
+
+    Proxy stubs delegate through a fallback and carry none of the impl's
+    selectors, so a bare scan would false-negative proxy tokens (e.g. USDC).
+    We resolve the implementation and scan its bytecode too.
+    """
+    code = _code_hex(client, checksum)
+    if not code:
+        return False  # EOA / no deployed code
+    if _has_token_selectors(code):
+        return True
+    impl = get_current_implementation(checksum, chain_id)
+    if impl:
+        return _has_token_selectors(_code_hex(client, impl))
+    return False
 
 
 def reset_cache() -> None:
