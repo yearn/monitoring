@@ -28,7 +28,15 @@ MAX_BACKOFF_SECONDS = 30
 # Substrings identifying deterministic contract errors. These return identically
 # from every provider, so retrying or rotating providers is pointless and only
 # wastes time on backoff sleeps.
-NON_RETRYABLE_ERROR_MARKERS = ("execution reverted",)
+#   - "execution reverted": the call reverted on-chain.
+#   - "could not decode contract function call": the contract returned empty/
+#     malformed data (e.g. symbol() on a non-ERC20 address). The shape mismatch
+#     is a property of the contract, not the provider, so it can never succeed
+#     elsewhere.
+NON_RETRYABLE_ERROR_MARKERS = (
+    "execution reverted",
+    "could not decode contract function call",
+)
 
 
 def _is_non_retryable(error: Exception) -> bool:

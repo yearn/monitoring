@@ -29,6 +29,11 @@ ENVIO_GRAPHQL_URL = os.getenv("ENVIO_GRAPHQL_URL")
 DEFAULT_LOG_LEVEL = os.getenv("TIMELOCK_ALERTS_LOG_LEVEL", "INFO")
 CACHE_KEY = "TIMELOCK_LAST_TS"
 
+# YEARN_TIMELOCK alerts are also mirrored to this internal-only chat, in lockstep
+# with the public topic. Configure its credentials with
+# TELEGRAM_BOT_TOKEN_YEARN_TIMELOCK_INTERNAL / TELEGRAM_CHAT_ID_YEARN_TIMELOCK_INTERNAL.
+YEARN_TIMELOCK_INTERNAL_PROTOCOL = "YEARN_TIMELOCK_INTERNAL"
+
 
 @dataclass(frozen=True)
 class TimelockConfig:
@@ -501,15 +506,18 @@ def process_events(events: list[dict], use_cache: bool) -> None:
             continue
 
         protocol = timelock_info.protocol
-        if protocol not in messages_by_protocol:
-            messages_by_protocol[protocol] = []
-        messages_by_protocol[protocol].append(build_alert_message(op_events, timelock_info))
+        messages_by_protocol.setdefault(protocol, []).append(build_alert_message(op_events, timelock_info))
 
         # Track max timestamp
         for event in op_events:
             ts = int(event["blockTimestamp"])
             if ts > max_timestamp:
                 max_timestamp = ts
+
+    # Mirror all Yearn timelock alerts to the internal-only chat: the send loop
+    # below delivers the same messages to both protocols.
+    if "YEARN_TIMELOCK" in messages_by_protocol:
+        messages_by_protocol[YEARN_TIMELOCK_INTERNAL_PROTOCOL] = list(messages_by_protocol["YEARN_TIMELOCK"])
 
     # Send alerts grouped by protocol, splitting into chunks that fit Telegram's limit
     separator = "\n\n---\n\n"
@@ -610,7 +618,10 @@ def main() -> None:
     if response is None:
         msg = "⚠️ Timelock alerts: Envio API is unreachable after 3 retries"
         _logger.error(msg)
-        for protocol in {t.protocol for t in (filtered_timelocks or TIMELOCK_LIST)}:
+        protocols = {t.protocol for t in (filtered_timelocks or TIMELOCK_LIST)}
+        if "YEARN_TIMELOCK" in protocols:
+            protocols.add(YEARN_TIMELOCK_INTERNAL_PROTOCOL)
+        for protocol in protocols:
             try:
                 send_telegram_message(msg, protocol)
             except Exception:

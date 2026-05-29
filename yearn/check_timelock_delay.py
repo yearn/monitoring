@@ -20,7 +20,9 @@ load_dotenv()
 
 logger = get_logger("yearn.check_timelock_delay")
 
-PROTOCOL = "YEARN_TIMELOCK"
+# Delay-check violations are an internal security concern, not public topic
+# noise — route them to the internal-only chat instead of YEARN_TIMELOCK.
+ALERT_PROTOCOL = "YEARN_TIMELOCK_INTERNAL"
 
 TIMELOCK_ADDRESS = Web3.to_checksum_address("0x88ba032be87d5ef1fbe87336b7090767f367bf73")
 EXPECTED_MIN_DELAY_SECONDS = 7 * 24 * 60 * 60
@@ -107,10 +109,10 @@ def main() -> None:
         return
 
     message = build_alert_message(violations)
-    send_telegram_message(message, PROTOCOL, disable_notification=True)
+    send_telegram_message(message, ALERT_PROTOCOL, disable_notification=True)
 
 
 if __name__ == "__main__":
     from utils.runner import run_with_alert
 
-    run_with_alert(main, PROTOCOL)
+    run_with_alert(main, ALERT_PROTOCOL)
