@@ -465,20 +465,6 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
     return "\n".join(parts)
 
 
-def send_mirror_alert(message: str, protocol: str, plain_text: bool = False) -> None:
-    """Mirror YEARN_TIMELOCK alerts to the internal-only chat.
-
-    Best-effort: any failure is logged and swallowed so it never affects the
-    primary send or cache advancement.
-    """
-    if protocol.upper() != "YEARN_TIMELOCK":
-        return
-    try:
-        send_telegram_message(message, YEARN_TIMELOCK_INTERNAL_PROTOCOL, plain_text=plain_text)
-    except Exception:
-        _logger.exception("Failed to mirror alert for %s to %s", protocol, YEARN_TIMELOCK_INTERNAL_PROTOCOL)
-
-
 def process_events(events: list[dict], use_cache: bool) -> None:
     """Process TimelockEvent events, group by operationId, and send alerts."""
     if not events:
@@ -520,9 +506,12 @@ def process_events(events: list[dict], use_cache: bool) -> None:
             continue
 
         protocol = timelock_info.protocol
-        if protocol not in messages_by_protocol:
-            messages_by_protocol[protocol] = []
-        messages_by_protocol[protocol].append(build_alert_message(op_events, timelock_info))
+        alert = build_alert_message(op_events, timelock_info)
+        messages_by_protocol.setdefault(protocol, []).append(alert)
+        # Mirror Yearn timelock alerts to the internal-only chat by queuing them
+        # under a second protocol — the send loop below delivers both.
+        if protocol == "YEARN_TIMELOCK":
+            messages_by_protocol.setdefault(YEARN_TIMELOCK_INTERNAL_PROTOCOL, []).append(alert)
 
         # Track max timestamp
         for event in op_events:
@@ -557,10 +546,6 @@ def process_events(events: list[dict], use_cache: bool) -> None:
             except Exception:
                 _logger.exception("Failed to send Telegram alert for protocol %s", protocol)
                 all_sent = False
-                continue
-            # Mirror only after a successful primary send so the internal chat
-            # stays in sync with the topic (no duplicates on primary retry).
-            send_mirror_alert(chunk, protocol)
 
     # Only advance the cache when every chunk landed. Advancing on partial
     # failure silently drops the failed events — the next run sees no new
@@ -633,12 +618,14 @@ def main() -> None:
     if response is None:
         msg = "⚠️ Timelock alerts: Envio API is unreachable after 3 retries"
         _logger.error(msg)
-        for protocol in {t.protocol for t in (filtered_timelocks or TIMELOCK_LIST)}:
+        protocols = {t.protocol for t in (filtered_timelocks or TIMELOCK_LIST)}
+        if "YEARN_TIMELOCK" in protocols:
+            protocols.add(YEARN_TIMELOCK_INTERNAL_PROTOCOL)
+        for protocol in protocols:
             try:
                 send_telegram_message(msg, protocol)
             except Exception:
                 _logger.exception("Failed to send Envio error alert for protocol %s", protocol)
-            send_mirror_alert(msg, protocol)
         return
     if "errors" in response:
         msg = f"Timelock alerts: GraphQL errors: {response['errors']}"
