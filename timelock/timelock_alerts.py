@@ -506,18 +506,18 @@ def process_events(events: list[dict], use_cache: bool) -> None:
             continue
 
         protocol = timelock_info.protocol
-        alert = build_alert_message(op_events, timelock_info)
-        messages_by_protocol.setdefault(protocol, []).append(alert)
-        # Mirror Yearn timelock alerts to the internal-only chat by queuing them
-        # under a second protocol — the send loop below delivers both.
-        if protocol == "YEARN_TIMELOCK":
-            messages_by_protocol.setdefault(YEARN_TIMELOCK_INTERNAL_PROTOCOL, []).append(alert)
+        messages_by_protocol.setdefault(protocol, []).append(build_alert_message(op_events, timelock_info))
 
         # Track max timestamp
         for event in op_events:
             ts = int(event["blockTimestamp"])
             if ts > max_timestamp:
                 max_timestamp = ts
+
+    # Mirror all Yearn timelock alerts to the internal-only chat: the send loop
+    # below delivers the same messages to both protocols.
+    if "YEARN_TIMELOCK" in messages_by_protocol:
+        messages_by_protocol[YEARN_TIMELOCK_INTERNAL_PROTOCOL] = list(messages_by_protocol["YEARN_TIMELOCK"])
 
     # Send alerts grouped by protocol, splitting into chunks that fit Telegram's limit
     separator = "\n\n---\n\n"
