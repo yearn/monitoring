@@ -588,6 +588,23 @@ class TestRetryWithProviderRotation(unittest.TestCase):
                 provider.make_request()
         self.assertEqual(provider.call_count, 1)
 
+    def test_decode_failure_fails_fast_without_retry(self):
+        """Empty/malformed return data (e.g. symbol() on a non-ERC20) is a
+        contract-shape mismatch, deterministic across providers, so it must
+        raise immediately instead of rotating through every RPC."""
+        provider = _FakeProvider(
+            [
+                ValueError(
+                    "Could not decode contract function call to symbol() with return data: b'', output_types: ['string']"
+                )
+            ]
+        )
+        with patch("utils.web3_wrapper.time.sleep") as mock_sleep:
+            with self.assertRaises(ValueError):
+                provider.make_request()
+        self.assertEqual(provider.call_count, 1)
+        mock_sleep.assert_not_called()
+
     def test_transient_error_retries_then_succeeds(self):
         provider = _FakeProvider([ConnectionError("boom"), ConnectionError("boom"), "ok"])
         with patch("utils.web3_wrapper.time.sleep"):
