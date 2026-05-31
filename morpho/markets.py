@@ -29,11 +29,11 @@ LIQUIDITY_THRESHOLD_YV_COLLATERAL = 0.06  # 6% of total assets
 VAULTS_BY_CHAIN = {
     Chain.MAINNET: [
         # name, address, risk level
-        ["Steakhouse USDC", "0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB", 1],
-        ["Steakhouse USDT", "0xbEef047a543E45807105E51A8BBEFCc5950fcfBa", 1],
-        ["Gauntlet WETH Prime", "0x2371e134e3455e0593363cBF89d3b6cf53740618", 1],
-        ["Gauntlet USDC Prime", "0xdd0f28e19C1780eb6396170735D45153D261490d", 1],
-        ["Gauntlet USDT Prime", "0x8CB3649114051cA5119141a34C200D65dc0Faa73", 1],
+        # ["Steakhouse USDC", "0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB", 1],
+        # ["Steakhouse USDT", "0xbEef047a543E45807105E51A8BBEFCc5950fcfBa", 1],
+        # ["Gauntlet WETH Prime", "0x2371e134e3455e0593363cBF89d3b6cf53740618", 1],
+        # ["Gauntlet USDC Prime", "0xdd0f28e19C1780eb6396170735D45153D261490d", 1],
+        # ["Gauntlet USDT Prime", "0x8CB3649114051cA5119141a34C200D65dc0Faa73", 1],
         ["Yearn USDC", "0x68Aea7b82Df6CcdF76235D46445Ed83f85F845A3", 1],
         ["Yearn USDT", "0x0963232eB842BAF53E8e517691f81745C1F228a0", 1],
         ["Yearn WBTC", "0x2bB005127069A0F0325Fb7370967E8A2b64FB77E", 1],
