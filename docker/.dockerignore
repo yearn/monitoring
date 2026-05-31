@@ -1,0 +1,40 @@
+# VCS
+.git
+.gitignore
+.github
+
+# Worktrees
+.worktrees
+
+# Python build / venv
+__pycache__
+*.py[cod]
+*.egg-info
+*.egg
+.venv
+venv
+env
+build
+dist
+
+# Local dev cruft
+.vscode
+.idea
+.DS_Store
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# Plaintext secrets must never be in build context
+.env
+.env.*
+!.env.example
+
+# Docs/notes the image doesn't need
+*.md
+!README.md
+CLAUDE.md
+CONTRIBUTING.md
+
+# Tests are validated in CI, not at runtime
+tests

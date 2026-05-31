@@ -1,0 +1,37 @@
+# Production compose stack for the yearn/monitoring cron container on the Hetzner box.
+#
+# Single service. Restart on exit, cache files persist in a named volume. No autoheal
+# sidecar (the supercronic healthcheck only proves the process is alive, which
+# restart: unless-stopped already covers; the Docker-socket sidecar is unnecessary surface
+# area for a cron-only container).
+#
+# Before `docker compose up -d`:
+#   - Drop secrets into /etc/yearn-monitoring/.env (mode 600, root-owned). The host install
+#     script (#257) automates this; for local dev, `cp .env.example .env` and point
+#     env_file at the local path instead.
+#
+# Updating jobs.yaml requires a new image build (the file is baked in for reproducibility).
+# Local dev: `docker compose build`. Production: bump MONITOR_IMAGE to the new tag and
+# `docker compose pull && docker compose up -d`.
+
+services:
+  monitor:
+    image: ${MONITOR_IMAGE:-yearn-monitoring:local}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: yearn-monitor
+    restart: unless-stopped
+    # In production, the host install script (#257) drops secrets at /etc/yearn-monitoring/.env.
+    # For local dev, override: `ENV_FILE=$(pwd)/.env docker compose up -d`.
+    env_file: ${ENV_FILE:-/etc/yearn-monitoring/.env}
+    environment:
+      LOG_LEVEL: INFO
+    volumes:
+      # cache-id.txt, cache-id-daily.txt, nonces.txt, tks-trigger-cache.json. Survives
+      # container restarts; reset with `docker volume rm yearn-monitoring_monitor-cache`.
+      - monitor-cache:/srv/cache
+    # No port exposure — nothing to talk to.
+
+volumes:
+  monitor-cache:
