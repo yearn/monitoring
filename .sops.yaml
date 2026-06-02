@@ -1,0 +1,27 @@
+# SOPS configuration — controls which age recipients can decrypt each file.
+#
+# Workflow:
+#   1. Generate an age keypair on each operator's workstation:
+#        age-keygen -o ~/.config/sops/age/keys.txt
+#   2. Print the public key (starts with `age1…`):
+#        age-keygen -y ~/.config/sops/age/keys.txt
+#   3. Add it to the `age:` list below (replace the REPLACE-ME placeholder for
+#      the first operator; append for additional ones).
+#   4. Encrypt with:
+#        sops -e --input-type dotenv --output-type dotenv \
+#          deploy/secrets/prod.env > deploy/secrets/prod.env.enc
+#   5. On the VPS, install the matching private key at /etc/yearn-monitoring/age.key
+#      (mode 0600, root) — the systemd unit decrypts with it via SOPS_AGE_KEY_FILE.
+#   6. Rotate recipients after editing the list with:
+#        sops updatekeys deploy/secrets/prod.env.enc
+#
+# Bare `.env` files anywhere in the tree are gitignored — only `*.env.enc`
+# (SOPS output) and `*.env.example` (placeholder template) should be committed.
+
+creation_rules:
+  - path_regex: deploy/secrets/.*\.env$
+    # REPLACE-ME: there is no real recipient yet. `sops -e` will fail until the
+    # first operator adds their age public key here (see step 3 above).
+    age: >-
+      age1REPLACE_ME_WITH_YOUR_OPERATOR_PUBLIC_KEY000000000000000000000
+    encrypted_regex: "^.*$"  # encrypt every key=value pair, not just secret-named ones

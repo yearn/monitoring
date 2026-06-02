@@ -15,7 +15,7 @@ Single source of truth for what runs on the Hetzner monitoring box.
 # List profiles
 uv run python -m automation list
 
-# Print the crontab supercronic will execute inside the container
+# Print the crontab supercronic will execute
 uv run python -m automation render-crontab
 
 # Run a profile locally (executes the scripts)
@@ -40,7 +40,8 @@ uv run python -m automation run weekly --dry-run
        cache-file: /srv/cache/my-protocol.json
    ```
 3. `uv run python -m automation render-crontab` — confirm the line you expect appears.
-4. Rebuild the image (`docker compose build` locally, or merge to `main` and let GHA publish — see #257).
+4. Merge to `main`, then on the VPS `git pull` and `sudo systemctl restart yearn-monitor` to
+   re-render the crontab (see [deploy/runbook.md](../deploy/runbook.md)).
 
 ## Profile shape
 
@@ -63,7 +64,7 @@ profiles:
 
 The runner runs every task in declared order, capturing each subprocess's exit code without aborting the profile. After all tasks finish, if any failed, a single Markdown digest is posted to Telegram via `utils.telegram.send_telegram_message` with `protocol="automation"` — set `TELEGRAM_BOT_TOKEN_AUTOMATION` / `TELEGRAM_CHAT_ID_AUTOMATION` in `.env` to route it to a dedicated channel, otherwise it falls back to `TELEGRAM_BOT_TOKEN_DEFAULT` / `TELEGRAM_CHAT_ID_DEFAULT`.
 
-The profile's exit code is non-zero if any task failed, which supercronic surfaces in container logs.
+The profile's exit code is non-zero if any task failed, which supercronic surfaces in the journald logs (`journalctl -u yearn-monitor`).
 
 ## Locking
 

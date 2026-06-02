@@ -15,8 +15,9 @@ from pathlib import Path
 from automation.config import REPO_ROOT, JobsConfig, JobsConfigError, load_jobs_config
 from automation.runner import run_profile
 
-# Lock dir for `flock -n` wrappers emitted by render-crontab. /tmp is fine — the container
-# tmpfs survives across cron ticks but not container restarts, which is the correct scope.
+# Lock dir for `flock -n` wrappers emitted by render-crontab. /tmp is fine — under the
+# yearn-monitor systemd unit it's a per-service PrivateTmp that survives across cron ticks but
+# not service restarts, which is the correct scope.
 LOCK_DIR = "/tmp"
 
 logger = logging.getLogger(__name__)

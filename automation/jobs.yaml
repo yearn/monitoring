@@ -1,14 +1,16 @@
-# Single source of truth for scheduled monitoring runs on the Hetzner box.
+# Single source of truth for scheduled monitoring runs on the VPS.
 #
 # Consumed by:
 #   - `python -m automation list | render-crontab | run <profile>` (CLI)
-#   - docker/entrypoint.sh, which renders this into a supercronic crontab on container start.
+#   - the yearn-monitor systemd unit, whose ExecStartPre renders this into a supercronic
+#     crontab on start (see deploy/runbook.md).
 #
-# Adding or removing a script: edit the relevant profile's `tasks:`, then rebuild the image
-# (`docker compose build`) or restart the running container if you've baked it in via a tag.
+# Adding or removing a script: edit the relevant profile's `tasks:`, then `git pull` on the
+# VPS and `sudo systemctl restart yearn-monitor` to re-render the crontab.
 #
 # Each task invokes one script. CLI flags go under `args:` as `key: value` and are emitted as
-# `--key=value` in the declared order. Cache files write to /srv/cache (Docker named volume).
+# `--key=value` in the declared order. Cache files write to /srv/cache (created by
+# deploy/install.sh, owned by the runner user).
 
 profiles:
 

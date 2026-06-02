@@ -1,0 +1,104 @@
+# Drop in /etc/systemd/system/yearn-monitor.service then:
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now yearn-monitor
+#   sudo systemctl status yearn-monitor
+#
+# Native systemd-managed cron runner. supercronic runs in the foreground and
+# systemd owns the lifecycle. No container, no compose, no Caddy, no autoheal
+# sidecar. supercronic itself is the scheduler: ExecStartPre renders the
+# crontab from automation/jobs.yaml, ExecStart hands it to supercronic, which
+# spawns `python -m automation run <profile>` on each tick.
+#
+# There is no HTTP surface and nothing to expose. A crashed supercronic is
+# restarted by systemd (Restart=on-failure); there's no event loop that can
+# wedge while the process stays alive, so no /healthz watchdog is needed
+# (unlike the liquidity-monitor daemon).
+
+[Unit]
+Description=yearn monitoring cron runner (supercronic + automation)
+Documentation=https://github.com/yearn/monitoring
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=__MONITOR_USER__
+Group=__MONITOR_USER__
+WorkingDirectory=/srv/yearn-monitoring
+
+# automation.config reads REPO_ROOT to locate jobs.yaml and to set each task's
+# subprocess cwd. PATH puts the project venv first so `python` in the rendered
+# crontab resolves to .venv/bin/python; flock (util-linux) and supercronic live
+# in the system paths after it.
+Environment=REPO_ROOT=/srv/yearn-monitoring
+Environment=PATH=/srv/yearn-monitoring/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LOG_LEVEL=INFO
+Environment=PYTHONUNBUFFERED=1
+
+# Materialize /etc/yearn-monitoring/.env from the SOPS-encrypted file.
+#   - prod.env.enc present + newer (or no .env yet) → decrypt it. A decryption
+#     failure is fatal so a bad/missing age key surfaces immediately instead of
+#     silently booting without secrets.
+#   - no prod.env.enc and no .env → fatal: the scripts need RPC + Telegram creds
+#     to do anything useful, so refuse to start blind.
+#
+# The `+` prefix runs the command as root regardless of User= above, so it can
+# read the root-owned age key without granting the service process read on it.
+# After decryption the .env is root:__MONITOR_USER__ 0640.
+ExecStartPre=+/bin/bash -c '\
+  set -e; \
+  install -m 750 -o root -g __MONITOR_USER__ -d /etc/yearn-monitoring; \
+  enc=/srv/yearn-monitoring/deploy/secrets/prod.env.enc; \
+  if [ -f "$enc" ]; then \
+    if [ "$enc" -nt /etc/yearn-monitoring/.env ] || [ ! -f /etc/yearn-monitoring/.env ]; then \
+      SOPS_AGE_KEY_FILE=/etc/yearn-monitoring/age.key sops -d --input-type dotenv --output-type dotenv "$enc" > /etc/yearn-monitoring/.env.tmp; \
+      install -m 640 -o root -g __MONITOR_USER__ /etc/yearn-monitoring/.env.tmp /etc/yearn-monitoring/.env; \
+      rm -f /etc/yearn-monitoring/.env.tmp; \
+    fi; \
+  elif [ ! -f /etc/yearn-monitoring/.env ]; then \
+    echo "yearn-monitor: no deploy/secrets/prod.env.enc and no /etc/yearn-monitoring/.env — cannot start without secrets" >&2; \
+    exit 1; \
+  fi'
+
+# Load the decrypted env (RPC URLs, Telegram tokens, API keys) into supercronic;
+# it passes the environment through to every `python -m automation run` child.
+EnvironmentFile=-/etc/yearn-monitoring/.env
+
+# Render the crontab from jobs.yaml, then run supercronic against it. Rendering
+# in its own step means a malformed jobs.yaml fails the unit start loudly
+# instead of becoming a silent no-op. /tmp is per-service (PrivateTmp=yes), and
+# it also holds the flock lock files render-crontab points at (/tmp/automation.<profile>.lock).
+ExecStartPre=/bin/bash -c '/srv/yearn-monitoring/.venv/bin/python -m automation render-crontab > /tmp/crontab && echo "[yearn-monitor] rendered crontab:" && sed "s/^/  /" /tmp/crontab'
+ExecStart=/usr/local/bin/supercronic /tmp/crontab
+
+# Restart on crash; cap at 5 restarts per 60s window to surface a wedged runner
+# to the operator instead of crash-looping silently.
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Hardening — cheap wins now that there's no container boundary. /srv/cache is
+# the only writable path the scripts need (dedupe caches, nonces); the repo tree
+# and venv are read-only at runtime.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/srv/cache
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+# stdout/stderr → journald. supercronic logs one structured line per job start
+# and exit; `journalctl -u yearn-monitor -f` is the live feed.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yearn-monitor
+
+[Install]
+WantedBy=multi-user.target
