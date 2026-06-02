@@ -23,8 +23,12 @@ VAULTS_V2_BY_CHAIN: Dict[Chain, List[List[Any]]] = {
     Chain.MAINNET: [
         # name, address, risk level
         ["Yearn USDC", "0xaA8d9E2aBa210639cE6C7cE21385e7c673ACa6f3", 1],
-        ["Yearn OG USDC", "0xB885F6d448dA7E2C642Ec31190B629E40E87B069", 2],
-        ["Yearn OG WETH V2", "0xbe518068EB6135117207256F8C9aFf81B4382DB1", 2],
+        ["Yearn OG WETH V2", "0xbe518068EB6135117207256F8C9aFf81B4382DB1", 1],
+        [
+            "Yearn OG USDC",
+            "0xB885F6d448dA7E2C642Ec31190B629E40E87B069",
+            3,
+        ],  # TODO: lower to 2 after lowering siusd allocation
     ],
     Chain.BASE: [
         ["Yearn OG USDC V2", "0xe7D0DBE3493830e2Ab62619211A2BfF0Fc60dB42", 2],

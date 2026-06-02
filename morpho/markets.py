@@ -38,7 +38,11 @@ VAULTS_BY_CHAIN = {
         ["Yearn USDT", "0x0963232eB842BAF53E8e517691f81745C1F228a0", 1],
         ["Yearn WBTC", "0x2bB005127069A0F0325Fb7370967E8A2b64FB77E", 1],
         ["Yearn OG WETH", "0xE89371eAaAC6D46d4C3ED23453241987916224FC", 2],
-        ["Yearn OG USDC", "0xF9bdDd4A9b3A45f980e11fDDE96e16364dDBEc49", 2],
+        [
+            "Yearn OG USDC",
+            "0xF9bdDd4A9b3A45f980e11fDDE96e16364dDBEc49",
+            3,
+        ],  # TODO: lower to 2 after lowering siusd allocation
         ["OUSD", "0x5B8b9FA8e4145eE06025F642cAdB1B47e5F39F04", 2],
         # these vaults are not used by yVaults
         # ["Gauntlet WBTC Core", "0x443df5eEE3196e9b2Dd77CaBd3eA76C3dee8f9b2", 3],
