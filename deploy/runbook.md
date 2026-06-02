@@ -14,6 +14,9 @@ No Docker, no compose, no Caddy, no reverse proxy. One systemd unit runs
 `python -m automation run <profile>` on each cron tick per
 `automation/jobs.yaml`.
 
+> Migrating off GitHub Actions for the first time? See
+> [`deploy/cutover.md`](./cutover.md) for the shadow-week + flip playbook.
+
 ---
 
 ## What's running
