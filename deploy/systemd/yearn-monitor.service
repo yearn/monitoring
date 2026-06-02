@@ -36,34 +36,21 @@ Environment=PATH=/srv/yearn-monitoring/.venv/bin:/usr/local/bin:/usr/bin:/bin
 Environment=LOG_LEVEL=INFO
 Environment=PYTHONUNBUFFERED=1
 
-# Materialize /etc/yearn-monitoring/.env from the SOPS-encrypted file.
-#   - prod.env.enc present + newer (or no .env yet) → decrypt it. A decryption
-#     failure is fatal so a bad/missing age key surfaces immediately instead of
-#     silently booting without secrets.
-#   - no prod.env.enc and no .env → fatal: the scripts need RPC + Telegram creds
-#     to do anything useful, so refuse to start blind.
-#
-# The `+` prefix runs the command as root regardless of User= above, so it can
-# read the root-owned age key without granting the service process read on it.
-# After decryption the .env is root:__MONITOR_USER__ 0640.
+# Require the operator-supplied env file before starting. The operator drops
+# /etc/yearn-monitoring/.env (RPC URLs, Telegram tokens, API keys) once, mode
+# 0640 root:__MONITOR_USER__ — see deploy/runbook.md. Refuse to start blind
+# rather than silently run with no credentials. The `+` prefix runs as root so
+# the dir can be created with root ownership regardless of User= above.
 ExecStartPre=+/bin/bash -c '\
-  set -e; \
   install -m 750 -o root -g __MONITOR_USER__ -d /etc/yearn-monitoring; \
-  enc=/srv/yearn-monitoring/deploy/secrets/prod.env.enc; \
-  if [ -f "$enc" ]; then \
-    if [ "$enc" -nt /etc/yearn-monitoring/.env ] || [ ! -f /etc/yearn-monitoring/.env ]; then \
-      SOPS_AGE_KEY_FILE=/etc/yearn-monitoring/age.key sops -d --input-type dotenv --output-type dotenv "$enc" > /etc/yearn-monitoring/.env.tmp; \
-      install -m 640 -o root -g __MONITOR_USER__ /etc/yearn-monitoring/.env.tmp /etc/yearn-monitoring/.env; \
-      rm -f /etc/yearn-monitoring/.env.tmp; \
-    fi; \
-  elif [ ! -f /etc/yearn-monitoring/.env ]; then \
-    echo "yearn-monitor: no deploy/secrets/prod.env.enc and no /etc/yearn-monitoring/.env — cannot start without secrets" >&2; \
+  if [ ! -f /etc/yearn-monitoring/.env ]; then \
+    echo "yearn-monitor: /etc/yearn-monitoring/.env missing — drop the production env there (0640 root:__MONITOR_USER__) before starting" >&2; \
     exit 1; \
   fi'
 
-# Load the decrypted env (RPC URLs, Telegram tokens, API keys) into supercronic;
-# it passes the environment through to every `python -m automation run` child.
-EnvironmentFile=-/etc/yearn-monitoring/.env
+# Load the env (RPC URLs, Telegram tokens, API keys) into supercronic; it passes
+# the environment through to every `python -m automation run` child.
+EnvironmentFile=/etc/yearn-monitoring/.env
 
 # Render the crontab from jobs.yaml, then run supercronic against it. Rendering
 # in its own step means a malformed jobs.yaml fails the unit start loudly

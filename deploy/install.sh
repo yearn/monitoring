@@ -20,9 +20,8 @@
 # Override with TARGET_USER=.
 #
 # After this script the operator still needs to (see deploy/runbook.md):
-#   1. Install the SOPS age private key at /etc/yearn-monitoring/age.key
-#      (mode 0600, root). The unit reads it via SOPS_AGE_KEY_FILE.
-#   2. Encrypt deploy/secrets/prod.env into prod.env.enc and push it.
+#   1. Drop the production env at /etc/yearn-monitoring/.env (mode 0640,
+#      root:<deploy-user>) — copy from .env.example and fill in the values.
 # Then: `systemctl enable --now yearn-monitor`.
 #
 # Private-repo auth over HTTPS resolves a token, in order:
@@ -41,8 +40,6 @@ BRANCH="${BRANCH:-main}"
 ETC_DIR="${ETC_DIR:-/etc/yearn-monitoring}"
 CACHE_DIR="${CACHE_DIR:-/srv/cache}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
-SOPS_VERSION="${SOPS_VERSION:-v3.10.2}"
-AGE_VERSION="${AGE_VERSION:-v1.2.1}"
 # Pinned to match the (now removed) docker/Dockerfile. linux/amd64 only — bump
 # both together and re-verify the checksum from the release page.
 SUPERCRONIC_VERSION="${SUPERCRONIC_VERSION:-v0.2.34}"
@@ -122,30 +119,6 @@ else
   log "supercronic already installed; skipping."
 fi
 
-# ─── sops + age (static binaries) ──────────────────────────────────────
-if ! command -v sops >/dev/null; then
-  log "installing sops ${SOPS_VERSION}…"
-  arch="$(dpkg --print-architecture)"
-  curl -fsSL "https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.linux.${arch}" \
-    -o /usr/local/bin/sops
-  chmod +x /usr/local/bin/sops
-else
-  log "sops already installed; skipping."
-fi
-
-if ! command -v age >/dev/null; then
-  log "installing age ${AGE_VERSION}…"
-  arch="$(dpkg --print-architecture)"
-  tmp="$(mktemp -d)"
-  curl -fsSL "https://github.com/FiloSottile/age/releases/download/${AGE_VERSION}/age-${AGE_VERSION}-linux-${arch}.tar.gz" \
-    | tar -xz -C "$tmp"
-  install -m 0755 "$tmp/age/age"        /usr/local/bin/age
-  install -m 0755 "$tmp/age/age-keygen" /usr/local/bin/age-keygen
-  rm -rf "$tmp"
-else
-  log "age already installed; skipping."
-fi
-
 # ─── git credentials (private repo over HTTPS) ─────────────────────────
 if [[ "$REPO_URL" == https://* ]]; then
   if token="$(_github_token)"; then
@@ -204,23 +177,16 @@ cat <<NEXT
 ✓ host provisioned (repo owned by ${TARGET_USER} at ${REPO_DIR}).
   remaining manual steps:
 
-  1. Install the age private key the service decrypts with:
-       sudo install -m 600 -o root -g root /dev/stdin ${ETC_DIR}/age.key   # paste, Ctrl-D
-     The systemd unit reads it via SOPS_AGE_KEY_FILE=${ETC_DIR}/age.key.
+  1. Drop the production env at ${ETC_DIR}/.env (copy from .env.example and
+     fill in RPC URLs, Telegram tokens, API keys):
+       sudo install -m 640 -o root -g ${TARGET_USER} /dev/stdin ${ETC_DIR}/.env   # paste, Ctrl-D
+     The systemd unit loads it via EnvironmentFile and refuses to start without it.
 
-  2. Make sure deploy/secrets/prod.env.enc exists and is encrypted to this
-     host's age recipient (see deploy/secrets/README.md). The unit decrypts it
-     to ${ETC_DIR}/.env on start. To validate by hand:
-       SOPS_AGE_KEY_FILE=${ETC_DIR}/age.key \\
-         sops -d --input-type dotenv --output-type dotenv \\
-         ${REPO_DIR}/deploy/secrets/prod.env.enc | sudo tee ${ETC_DIR}/.env >/dev/null
-       sudo chown root:${TARGET_USER} ${ETC_DIR}/.env && sudo chmod 640 ${ETC_DIR}/.env
-
-  3. Start the runner:
+  2. Start the runner:
        sudo systemctl enable --now yearn-monitor
        systemctl status yearn-monitor
 
-  4. Watch the first ticks:
+  3. Watch the first ticks:
        journalctl -u yearn-monitor -f
        # or dry-run a profile immediately:
        sudo -u ${TARGET_USER} bash -c 'cd ${REPO_DIR} && uv run python -m automation run hourly --dry-run'

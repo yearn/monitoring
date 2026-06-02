@@ -100,46 +100,18 @@ sudo systemctl restart yearn-monitor
 
 ## Rotate a secret (Telegram token, RPC URL, API key)
 
-Secrets live encrypted in `deploy/secrets/prod.env.enc` (SOPS + age) and are
-decrypted to `/etc/yearn-monitoring/.env` by the unit's `ExecStartPre`.
+Secrets live in `/etc/yearn-monitoring/.env` (mode 0640, root:<deploy-user>),
+loaded by the unit via `EnvironmentFile`. They are **not** in git. Edit in place
+and restart:
 
 ```sh
-# On a workstation that can decrypt (its age key is in .sops.yaml):
-cd <repo>
-sops deploy/secrets/prod.env.enc      # opens decrypted; edit, save
-git commit -am "ops: rotate <secret>"
-git push
-```
-
-On the VPS:
-
-```sh
-cd /srv/yearn-monitoring
-git pull --ff-only
+sudo $EDITOR /etc/yearn-monitoring/.env
 sudo systemctl restart yearn-monitor
 ```
 
-The `ExecStartPre` re-decrypts because `prod.env.enc` is now newer than
-`/etc/yearn-monitoring/.env`.
-
----
-
-## Rotate the age key (decryption operator)
-
-Granting access:
-1. The new operator runs `age-keygen` on their workstation and shares the
-   public key (`age1…`).
-2. Add the pubkey to `.sops.yaml` under the matching `creation_rules[].age`.
-3. Run `sops updatekeys deploy/secrets/prod.env.enc` and commit. The new
-   operator (and any host holding their private key) can now decrypt.
-
-Revoking access:
-1. Remove the operator's pubkey from `.sops.yaml`.
-2. Run `sops updatekeys deploy/secrets/prod.env.enc` and commit.
-3. **Rotate every credential the operator could have decrypted** — Telegram
-   bot tokens, RPC API keys, `SAFE_API_KEY*`, `TENDERLY_API_KEY`, `LLM_API_KEY`.
-   Removed keys can't decrypt *future* commits, but they already saw the
-   current secrets.
+The restart re-reads the env and re-renders the crontab. Anyone who could read
+the file has seen the old values, so a leaked credential should be rotated at
+the provider, not just edited here.
 
 ---
 
@@ -148,10 +120,11 @@ Revoking access:
 Single-node failover (cattle, not pets):
 
 1. Provision a fresh VPS: `sudo bash deploy/install.sh` (installs uv/Python/
-   supercronic/`sops`/`age`, clones the repo, creates the venv, installs the
-   systemd unit). It can also be curled — see the header of `install.sh`.
-2. Install the age private key at `/etc/yearn-monitoring/age.key` (mode 0600,
-   root) — the unit reads it via `SOPS_AGE_KEY_FILE`.
+   supercronic, clones the repo, creates the venv, installs the systemd unit).
+   It can also be curled — see the header of `install.sh`.
+2. Drop the production env at `/etc/yearn-monitoring/.env` (mode 0640,
+   root:<deploy-user>) — copy it from the old host or recreate from
+   `.env.example`.
 3. Start it:
    ```sh
    sudo systemctl enable --now yearn-monitor
@@ -184,8 +157,7 @@ skipped, not queued) — the others keep ticking.
 
 | Symptom | First thing to check | Likely cause |
 |---|---|---|
-| `Active: failed` on start | `journalctl -u yearn-monitor -n 50` | Malformed `automation/jobs.yaml` (render-crontab aborts the start), or sops decryption failed (bad/missing `/etc/yearn-monitoring/age.key`). |
-| `sops` decrypt error in logs | `ls -l /etc/yearn-monitoring/age.key` and confirm its pubkey is in `.sops.yaml` | Host's age key isn't a recipient of `prod.env.enc` — re-key with `sops updatekeys` or install the right key. |
+| `Active: failed` on start | `journalctl -u yearn-monitor -n 50` | Malformed `automation/jobs.yaml` (render-crontab aborts the start), or `/etc/yearn-monitoring/.env` missing (the unit refuses to start without it). |
 | Telegram suddenly silent | Is `TELEGRAM_BOT_TOKEN_DEFAULT` valid? `LOG_LEVEL=DEBUG` skips sends. | Bot revoked, chat removed bot, or LOG_LEVEL left at DEBUG. |
 | One profile never runs | `uv run python -m automation render-crontab` — is its line present? | Profile/task `enabled: false` in jobs.yaml, or its `flock` lock is stuck held by a hung run (restart clears it). |
 | `ModuleNotFoundError` after a deploy | `journalctl -u yearn-monitor -n 50` | Forgot `uv sync --frozen` after a `pyproject.toml`/`uv.lock` change. |
@@ -199,9 +171,8 @@ skipped, not queued) — the others keep ticking.
 - Python venv: `/srv/yearn-monitoring/.venv` (created by `uv sync`).
 - Cache / dedupe state: `/srv/cache` (owned by the deploy user; the unit grants
   it via `ReadWritePaths`). Paths are set per-profile in `automation/jobs.yaml`.
-- Decrypted env: `/etc/yearn-monitoring/.env` (mode 0640, root:<deploy-user>).
-- Age private key: `/etc/yearn-monitoring/age.key` (mode 0600, root — read by
-  the unit's `sops -d`).
+- Env file: `/etc/yearn-monitoring/.env` (mode 0640, root:<deploy-user>;
+  operator-supplied, not in git).
 - systemd unit: `/etc/systemd/system/yearn-monitor.service`.
 - Rendered crontab: `/tmp/crontab` (per-service `PrivateTmp`; regenerated on
   every start).
