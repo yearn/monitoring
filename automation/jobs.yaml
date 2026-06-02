@@ -9,19 +9,17 @@
 # VPS and `sudo systemctl restart yearn-monitor` to re-render the crontab.
 #
 # Each task invokes one script. CLI flags go under `args:` as `key: value` and are emitted as
-# `--key=value` in the declared order. Cache files write to /srv/cache (created by
-# deploy/install.sh, owned by the runner user).
+# `--key=value` in the declared order. Cache files resolve against $CACHE_DIR (set to
+# /srv/cache by the systemd unit; see utils/cache.py), so profiles only override a cache
+# *basename* when they need an isolated file (e.g. daily).
 
 profiles:
 
   hourly:
     cron: "26 * * * *"
     description: "Hourly monitoring (was .github/workflows/hourly.yml)."
-    env:
-      # utils/cache.py reads CACHE_FILENAME and MORPHO_FILENAME from env (both default to
-      # cache-id.txt). Hourly shares one file across alert dedupe and morpho key-value rows.
-      CACHE_FILENAME: /srv/cache/cache-id.txt
-      MORPHO_FILENAME: /srv/cache/cache-id.txt
+    # No env override: alert dedupe and morpho rows share the default cache-id.txt
+    # under $CACHE_DIR.
     tasks:
       - { name: "3jane",                  script: 3jane/main.py }
       - { name: "morpho-markets",         script: morpho/markets.py }
@@ -50,18 +48,19 @@ profiles:
   yearn-stuck-triggers:
     cron: "26 * * * *"
     description: "Yearn stuck triggers (was the second job in hourly.yml)."
+    # Cache file defaults to tks-trigger-cache.json under $CACHE_DIR (see
+    # check_stuck_triggers.DEFAULT_CACHE_FILE), so no --cache-file override needed.
     tasks:
-      - name: "yearn-check-stuck-triggers"
-        script: yearn/check_stuck_triggers.py
-        args:
-          cache-file: /srv/cache/tks-trigger-cache.json
+      - { name: "yearn-check-stuck-triggers", script: yearn/check_stuck_triggers.py }
 
   daily:
     cron: "19 8 * * *"
     description: "Daily monitoring (was .github/workflows/daily.yml)."
     env:
-      CACHE_FILENAME: /srv/cache/cache-id-daily.txt
-      MORPHO_FILENAME: /srv/cache/cache-id-daily.txt
+      # Isolated basenames (resolved under $CACHE_DIR) so a long daily run can't
+      # race the hourly profile on the same file.
+      CACHE_FILENAME: cache-id-daily.txt
+      MORPHO_FILENAME: cache-id-daily.txt
     tasks:
       - { name: "morpho-governance",    script: morpho/governance.py }
       - { name: "ethena",               script: ethena/ethena.py }
@@ -80,8 +79,7 @@ profiles:
   multisig:
     cron: "0/10 * * * *"
     description: "Safe multisig polling every 10 minutes (was multisig-checker.yml)."
-    env:
-      NONCE_FILENAME: /srv/cache/nonces.txt
+    # No env override: nonces land in the default nonces.txt under $CACHE_DIR.
     tasks:
       - { name: "safe",    script: safe/main.py }
       - { name: "stables", script: stables/main.py }

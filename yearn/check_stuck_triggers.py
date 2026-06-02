@@ -18,6 +18,7 @@ import requests
 from dotenv import load_dotenv
 from web3 import Web3
 
+from utils.cache import cache_path
 from utils.chains import Chain
 from utils.logging import get_logger
 from utils.telegram import send_telegram_message_with_fallback
@@ -73,8 +74,8 @@ COMMON_REPORT_TRIGGER_ABI = [
     },
 ]
 
-# Default cache file location
-DEFAULT_CACHE_FILE = "tks-trigger-cache.json"
+# Default cache file location (resolved against CACHE_DIR; /srv/cache on the VPS)
+DEFAULT_CACHE_FILE = cache_path("tks-trigger-cache.json")
 
 # Escalation thresholds in hours: alert only when crossing these milestones
 ESCALATION_THRESHOLDS_HOURS = [24, 72, 168, 336]  # 24h, 3 days, 7 days, 14 days

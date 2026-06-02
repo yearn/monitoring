@@ -35,6 +35,10 @@ Environment=REPO_ROOT=/srv/yearn-monitoring
 Environment=PATH=/srv/yearn-monitoring/.venv/bin:/usr/local/bin:/usr/bin:/bin
 Environment=LOG_LEVEL=INFO
 Environment=PYTHONUNBUFFERED=1
+# Single knob for all on-disk cache/dedupe state. utils.cache.cache_path()
+# resolves every cache file against this; it's the one writable path below
+# (ReadWritePaths=/srv/cache), created by deploy/install.sh.
+Environment=CACHE_DIR=/srv/cache
 
 # Require the operator-supplied env file before starting. The operator drops
 # /etc/yearn-monitoring/.env (RPC URLs, Telegram tokens, API keys) once, mode

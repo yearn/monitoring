@@ -170,7 +170,9 @@ skipped, not queued) — the others keep ticking.
 - Source tree: `/srv/yearn-monitoring` (owned by the deploy user).
 - Python venv: `/srv/yearn-monitoring/.venv` (created by `uv sync`).
 - Cache / dedupe state: `/srv/cache` (owned by the deploy user; the unit grants
-  it via `ReadWritePaths`). Paths are set per-profile in `automation/jobs.yaml`.
+  it via `ReadWritePaths` and sets `CACHE_DIR=/srv/cache`, which `utils.cache`
+  resolves every cache file against). A profile only overrides a cache *basename*
+  in `automation/jobs.yaml` when it needs an isolated file (e.g. daily).
 - Env file: `/etc/yearn-monitoring/.env` (mode 0640, root:<deploy-user>;
   operator-supplied, not in git).
 - systemd unit: `/etc/systemd/system/yearn-monitor.service`.

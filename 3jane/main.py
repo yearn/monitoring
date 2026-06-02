@@ -18,7 +18,7 @@ Monitors:
 from web3 import Web3
 
 from utils.abi import load_abi
-from utils.cache import get_last_value_for_key_from_file, write_last_value_to_file
+from utils.cache import cache_path, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import Chain
 from utils.formatting import format_usd
 from utils.logging import get_logger
@@ -28,7 +28,7 @@ from utils.web3_wrapper import ChainManager
 PROTOCOL = "3jane"
 logger = get_logger(PROTOCOL)
 
-CACHE_FILENAME = "cache-id.txt"
+CACHE_FILENAME = cache_path("cache-id.txt")
 
 # --- ABIs ---
 ABI_VAULT = load_abi("3jane/abi/ERC4626Vault.json")
