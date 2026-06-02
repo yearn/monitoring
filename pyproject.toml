@@ -63,10 +63,12 @@ dependencies = [
 [project.optional-dependencies]
 ai = [
     "anthropic>=0.40.0",
+    "openai-codex>=0.1.0b2",
     "openai>=1.0.0",
 ]
 dev = [
     "anthropic>=0.40.0",
+    "openai-codex>=0.1.0b2",
     "openai>=1.0.0",
     "mdformat==1.0.0",
     "mypy==2.0.0",
@@ -86,6 +88,9 @@ dev = [
 # or ISO 8601 (e.g. "P7D"). Applies to `uv pip install`, `uv lock`,
 # `uv sync`, etc. Also settable via `UV_EXCLUDE_NEWER=1 week`.
 exclude-newer = "1 week"
+# Narrow exception for the beta OpenAI Codex SDK requested by the LLM provider.
+# The SDK package pins this exact runtime package.
+exclude-newer-package = { openai-codex = "2026-05-29T00:00:00Z", openai-codex-cli-bin = "2026-05-21T00:00:00Z" }
 
 [build-system]
 requires = ["setuptools>=42", "wheel"]
