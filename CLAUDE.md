@@ -45,3 +45,13 @@
 - Keep files small and focused on a single task. If a file is too large, split it into smaller files.
 - Ask questions if you are not sure about the code. Ask for clarification if needed before writing the code.
 - always print full addresses with links instead of truncated ones.
+- Every script's `if __name__ == "__main__":` block must wrap its entrypoint with `run_with_alert` from `utils/runner.py` so an unhandled crash sends a Telegram alert and lets the CI loop continue:
+
+  ```python
+  if __name__ == "__main__":
+      from utils.runner import run_with_alert
+
+      run_with_alert(main, PROTOCOL)
+  ```
+
+  For multi-protocol scripts with no single `PROTOCOL` constant, pass a sensible default channel (e.g. `"yearn"` for ops, `"pegs"` for peg monitors).

@@ -4,7 +4,7 @@ import requests
 
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
 from utils.logging import get_logger
-from utils.telegram import send_telegram_message
+from utils.telegram import escape_markdown, send_telegram_message
 
 PROTOCOL = "fluid"
 logger = get_logger(PROTOCOL)
@@ -93,11 +93,11 @@ def get_proposals():
             new_proposals_found = True
             link = FLUID_PROPOSAL_URL + str(proposal_id)
             message += f"📗 Proposal ID: {proposal_id}\n"
-            message += f"🔗 Link: {link}\n"
+            message += f"🔗 Link: [Proposal {proposal_id}]({link})\n"
 
             title = proposal.get("title", "")
             if title:
-                message += f"📝 Title: {title}\n"
+                message += f"📝 Title: {escape_markdown(title)}\n"
 
             # Add execution info
             queued_at = proposal.get("queued_at")
@@ -106,14 +106,14 @@ def get_proposals():
                     queued_date = datetime.fromisoformat(queued_at.replace("Z", "+00:00"))
                     message += f"✅ Queued: {queued_date.strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
                 except Exception:
-                    message += f"✅ Queued: {queued_at}\n"
+                    message += f"✅ Queued: {escape_markdown(queued_at)}\n"
 
             # Add summary if available
             description = proposal.get("description", "")
             if description:
                 summary = extract_summary_from_description(description)
                 if summary:
-                    message += f"📄 Summary: {summary}\n"
+                    message += f"📄 Summary: {escape_markdown(summary)}\n"
 
             message += "\n"
 
@@ -126,12 +126,14 @@ def get_proposals():
     except requests.RequestException as e:
         error_message = f"Failed to fetch Fluid proposals: {e}"
         logger.error("%s", error_message)
-        send_telegram_message(error_message, PROTOCOL, True)
+        send_telegram_message(error_message, PROTOCOL, disable_notification=True, plain_text=True)
     except Exception as e:
         error_message = f"Error processing Fluid proposals: {e}"
         logger.error("%s", error_message)
-        send_telegram_message(error_message, PROTOCOL, True)
+        send_telegram_message(error_message, PROTOCOL, disable_notification=True, plain_text=True)
 
 
 if __name__ == "__main__":
-    get_proposals()
+    from utils.runner import run_with_alert
+
+    run_with_alert(get_proposals, PROTOCOL)

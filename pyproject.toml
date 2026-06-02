@@ -8,16 +8,16 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "aiohappyeyeballs>=2.6.1",
-    "aiohttp==3.13.3",
+    "aiohttp==3.13.5",
     "aiosignal==1.4.0",
     "annotated-types==0.7.0",
     "async-timeout==5.0.1",
-    "attrs==25.4.0",
-    "bitarray==3.8.0",
-    "certifi==2026.2.25",
-    "charset-normalizer==3.4.4",
-    "ckzg==2.1.6",
-    "click==8.3.1",
+    "attrs==26.1.0",
+    "bitarray==3.8.1",
+    "certifi==2026.4.22",
+    "charset-normalizer==3.4.7",
+    "ckzg==2.1.7",
+    "click==8.3.3",
     "cytoolz==1.1.0",
     "dataclasses-json==0.6.7",
     "deprecated==1.3.1",
@@ -25,39 +25,39 @@ dependencies = [
     "dune-client==1.7.10",
     "eth-abi==5.2.0",
     "eth-account==0.13.7",
-    "eth-hash==0.7.1",
+    "eth-hash==0.8.0",
     "eth-keyfile==0.8.1",
     "eth-keys==0.7.0",
     "eth-rlp==2.2.0",
-    "eth-typing==5.2.1",
-    "eth-utils==5.3.1",
+    "eth-typing==6.0.0",
+    "eth-utils==6.0.0",
     "frozenlist==1.8.0",
     "hexbytes==1.3.1",
-    "idna==3.11",
+    "idna==3.15",
     "marshmallow==3.26.2",
     "multidict==6.7.1",
     "ndjson==0.3.1",
-    "packaging==26.0",
+    "packaging==26.2",
     "parsimonious==0.10.0",
     "propcache==0.4.1",
     "pycryptodome==3.23.0",
-    "pydantic==2.12.5",
-    "pydantic-core==2.41.5",
+    "pydantic==2.13.4",
+    "pydantic-core==2.46.4",
     "python-dateutil==2.9.0.post0",
     "python-dotenv==1.2.2",
     "pyunormalize==17.0.0",
     "pyyaml==6.0.2",
-    "regex==2026.2.28",
-    "requests==2.32.5",
+    "regex==2026.4.4",
+    "requests==2.33.1",
     "rlp==4.1.0",
     "six==1.17.0",
     "toolz==1.1.0",
     "typing-extensions==4.15.0",
     "typing-inspect==0.9.0",
-    "urllib3==2.6.3",
-    "web3==7.14.1",
+    "urllib3==2.7.0",
+    "web3==7.16.0",
     "websockets==15.0.1",
-    "wrapt==2.1.1",
+    "wrapt==2.1.2",
     "yarl>=1.23.0",
 ]
 
@@ -70,15 +70,23 @@ dev = [
     "anthropic>=0.40.0",
     "openai>=1.0.0",
     "mdformat==1.0.0",
-    "mypy==1.19.1",
-    "pytest==9.0.2",
-    "ruff==0.15.5",
-    "types-deprecated==1.3.1.20260130",
-    "types-python-dateutil==2.9.0.20260305",
-    "types-pyyaml==6.0.12.20250915",
-    "types-requests==2.32.4.20260107",
-    "types-setuptools==82.0.0.20260210",
+    "mypy==2.0.0",
+    "pytest==9.0.3",
+    "ruff==0.15.12",
+    "types-deprecated==1.3.1.20260408",
+    "types-python-dateutil==2.9.0.20260408",
+    "types-pyyaml==6.0.12.20260408",
+    "types-requests==2.33.0.20260503",
+    "types-setuptools==82.0.0.20260408",
 ]
+
+[tool.uv]
+# Supply-chain hardening: never resolve packages that were uploaded
+# less than 7 days ago. Mirrors the `min-release-age=7` rule used in
+# yearn/risk-score's pnpm setup. Accepts a friendly duration ("1 week")
+# or ISO 8601 (e.g. "P7D"). Applies to `uv pip install`, `uv lock`,
+# `uv sync`, etc. Also settable via `UV_EXCLUDE_NEWER=1 week`.
+exclude-newer = "1 week"
 
 [build-system]
 requires = ["setuptools>=42", "wheel"]
@@ -86,10 +94,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = [
+    "apyusd",
     "aave", "automation", "bad-debt", "cap", "compound", "ethena", "euler",
-    "fluid", "infinifi", "lido", "lrt-pegs", "maker", "moonwell",
-    "maple", "morpho", "pendle", "resolv", "rtoken",
-    "safe", "silo", "spark", "stargate", "timelock", "usd0", "usdai",
+    "fluid", "infinifi", "lido", "lrt-pegs", "maker",
+    "maple", "morpho", "pendle", "rtoken",
+    "safe", "spark", "stargate", "timelock", "usdai",
     "utils", "yearn",
 ]
 

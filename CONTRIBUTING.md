@@ -42,6 +42,7 @@ Shared utilities live in `utils/`:
 | `utils/chains.py` | Chain enum and explorer URLs |
 | `utils/abi.py` | ABI loader |
 | `utils/gauntlet.py` | Gauntlet risk parameter helpers |
+| `utils/runner.py` | `run_with_alert` — script entrypoint wrapper with crash-alert telemetry |
 
 ## Code Style
 
@@ -97,6 +98,26 @@ from utils.telegram import send_telegram_message
 send_telegram_message("Alert text here", PROTOCOL)
 ```
 
+When interpolating uncrafted input (exception messages, API responses, on-chain strings that may contain `_*[\``), pass `plain_text=True` so Telegram doesn't try to parse Markdown on it:
+
+```python
+except requests.RequestException as e:
+    send_telegram_message(f"Fetch failed: {e}", PROTOCOL, disable_notification=True, plain_text=True)
+```
+
+### Script Entrypoint
+
+Wrap each script's entrypoint with `run_with_alert` from `utils/runner.py`. On any unhandled exception it sends a plain-text Telegram crash alert (with the script name and a link to the failing run, when available) and returns normally — so a CI shell loop running multiple scripts continues to the next one instead of aborting the whole run.
+
+```python
+if __name__ == "__main__":
+    from utils.runner import run_with_alert
+
+    run_with_alert(main, PROTOCOL)
+```
+
+For multi-protocol scripts with no single `PROTOCOL` constant (e.g. `timelock_alerts.py`, `safe/main.py`), pass a sensible default channel as a string: `"yearn"` for general ops, `"pegs"` for peg monitors.
+
 ### Web3 / RPC Calls
 
 Use `ChainManager` for connections and batch requests whenever possible:
@@ -126,7 +147,7 @@ write_last_value_to_file(cache_filename, "MY_KEY", new_value)
 
 ## Adding a New Protocol
 
-1. Create `protocol-name/main.py` following the pattern above
+1. Create `protocol-name/main.py` following the pattern above, with a `main()` function and an `if __name__ == "__main__":` block that wraps it via `run_with_alert(main, PROTOCOL)` (see [Script Entrypoint](#script-entrypoint))
 2. Add a `protocol-name/README.md` describing what it monitors
 3. Add `"protocol-name"` to the `packages` list in `pyproject.toml` under `[tool.setuptools]`
 4. Add the corresponding `TELEGRAM_BOT_TOKEN_*` and `TELEGRAM_CHAT_ID_*` entries to `.env.example`

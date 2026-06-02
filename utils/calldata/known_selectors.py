@@ -24,6 +24,7 @@ KNOWN_SELECTORS: dict[str, str] = {
     # Proxy / upgrades
     "0x3659cfe6": "upgradeTo(address)",
     "0x4f1ef286": "upgradeToAndCall(address,bytes)",
+    "0x9623609d": "upgradeAndCall(address,address,bytes)",  # OpenZeppelin ProxyAdmin
     # Ownable
     "0xf2fde38b": "transferOwnership(address)",
     # Pausable
@@ -37,6 +38,18 @@ KNOWN_SELECTORS: dict[str, str] = {
     "0xddf0b009": "queue(uint256)",
     "0xfe0d94c1": "execute(uint256)",
     "0xbb913f41": "_setImplementation(address)",
+    # Maple GovernorTimelock
+    "0xd9ab9270": "scheduleProposals(address[],bytes[])",
+    "0x2d6e853c": "proposeRoleUpdates(bytes32[],address[],bool[])",
+    # Safe (Gnosis)
+    "0x6a761202": "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)",
+    # Initializers — frequently appear as the inner payload of upgradeToAndCall / upgradeAndCall
+    "0x8129fc1c": "initialize()",
+    "0xc4d66de8": "initialize(address)",
+    "0x485cc955": "initialize(address,address)",
+    "0xc0c53b8b": "initialize(address,address,address)",
+    "0xcd6dc687": "initialize(address,uint256)",
+    "0xd1f57894": "initialize(address,bytes)",
     # Compound Comptroller
     "0xa76b3fda": "_supportMarket(address)",
     "0x55ee1fe1": "_setPriceOracle(address)",

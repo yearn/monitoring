@@ -1,6 +1,6 @@
 # Timelock Monitoring
 
-Monitors all timelock contract types (TimelockController, Aave, Compound, Puffer, Lido, Maple) and sends Telegram alerts to protocol-specific channels.
+Monitors all timelock contract types (TimelockController, Aave, Compound, Lido, Maple) and sends Telegram alerts to protocol-specific channels.
 
 ## How It Works
 
@@ -13,7 +13,7 @@ The script runs [hourly via GitHub Actions](../.github/workflows/hourly.yml).
 
 ## GraphQL Schema
 
-The script queries the unified `TimelockEvent` type from the Envio indexer. The query fetches all timelock types (TimelockController, Aave, Compound, Puffer, Lido, Maple) for monitored addresses.
+The script queries the unified `TimelockEvent` type from the Envio indexer. The query fetches all timelock types (TimelockController, Aave, Compound, Lido, Maple) for monitored addresses.
 
 ### Query Structure
 
@@ -58,7 +58,7 @@ The `TimelockEvent` type includes fields that vary by timelock type:
 **Common fields (all types):**
 - **`id`** - Unique identifier: `${chainId}_${blockNumber}_${logIndex}`
 - **`timelockAddress`** - Address of the timelock contract
-- **`timelockType`** - Type discriminator: `"TimelockController"`, `"Aave"`, `"Compound"`, `"Puffer"`, `"Lido"`, or `"Maple"`
+- **`timelockType`** - Type discriminator: `"TimelockController"`, `"Aave"`, `"Compound"`, `"Lido"`, or `"Maple"`
 - **`eventName`** - Original event name (e.g., `"CallScheduled"`, `"ProposalQueued"`, `"QueueTransaction"`, etc.)
 - **`chainId`** - Chain ID (1 for Mainnet, 8453 for Base, etc.)
 - **`blockNumber`** - Block number where the event was emitted
@@ -70,7 +70,6 @@ The `TimelockEvent` type includes fields that vary by timelock type:
 - **TimelockController**: `target`, `value`, `data`, `delay` (relative seconds), `predecessor`, `index`
 - **Aave**: `votesFor`, `votesAgainst`, `operationId` (proposalId)
 - **Compound**: `target`, `value`, `data`, `delay` (absolute timestamp/eta), `signature`, `operationId` (txHash)
-- **Puffer**: `target`, `data`, `delay` (absolute timestamp/lockedUntil), `operationId` (txHash)
 - **Lido**: `creator`, `metadata`, `operationId` (voteId)
 - **Maple**: `delay` (absolute timestamp/delayedUntil), `operationId` (proposalId)
 
@@ -83,8 +82,6 @@ For complete field mapping details, see [`detils.md`](./detils.md).
 | [0xd8236031d8279d82e615af2bfab5fc0127a329ab](https://etherscan.io/address/0xd8236031d8279d82e615af2bfab5fc0127a329ab) | Mainnet | CAP | CAP TimelockController |
 | [0x5d8a7dc9405f08f14541ba918c1bf7eb2dace556](https://etherscan.io/address/0x5d8a7dc9405f08f14541ba918c1bf7eb2dace556) | Mainnet | RTOKEN | ETH+ Timelock |
 | [0x055e84e7fe8955e2781010b866f10ef6e1e77e59](https://etherscan.io/address/0x055e84e7fe8955e2781010b866f10ef6e1e77e59) | Mainnet | LRT | Lombard TimeLock |
-| [0xe1f03b7b0ebf84e9b9f62a1db40f1efb8faa7d22](https://etherscan.io/address/0xe1f03b7b0ebf84e9b9f62a1db40f1efb8faa7d22) | Mainnet | SILO | Silo TimelockController |
-| [0x81f6e9914136da1a1d3b1efd14f7e0761c3d4cc7](https://etherscan.io/address/0x81f6e9914136da1a1d3b1efd14f7e0761c3d4cc7) | Mainnet | LRT | Renzo(ezETH) TimelockController |
 | [0x9f26d4c958fd811a1f59b01b86be7dffc9d20761](https://etherscan.io/address/0x9f26d4c958fd811a1f59b01b86be7dffc9d20761) | Mainnet | LRT | EtherFi Timelock |
 | [0x49bd9989e31ad35b0a62c20be86335196a3135b1](https://etherscan.io/address/0x49bd9989e31ad35b0a62c20be86335196a3135b1) | Mainnet | LRT | KelpDAO(rsETH) Timelock |
 | [0x3d18480cc32b6ab3b833dcabd80e76cfd41c48a9](https://etherscan.io/address/0x3d18480cc32b6ab3b833dcabd80e76cfd41c48a9) | Mainnet | INFINIFI | Infinifi Longtimelock |
@@ -92,7 +89,6 @@ For complete field mapping details, see [`detils.md`](./detils.md).
 | [0x9aee0b04504cef83a65ac3f0e838d0593bcb2bc7](https://etherscan.io/address/0x9aee0b04504cef83a65ac3f0e838d0593bcb2bc7) | Mainnet | AAVE | Aave Governance V3 |
 | [0x6d903f6003cca6255d85cca4d3b5e5146dc33925](https://etherscan.io/address/0x6d903f6003cca6255d85cca4d3b5e5146dc33925) | Mainnet | COMP | Compound Timelock |
 | [0x2386dc45added673317ef068992f19421b481f4c](https://etherscan.io/address/0x2386dc45added673317ef068992f19421b481f4c) | Mainnet | FLUID | Fluid Timelock |
-| [0x3c28b7c7ba1a1f55c9ce66b263b33b204f2126ea](https://etherscan.io/address/0x3c28b7c7ba1a1f55c9ce66b263b33b204f2126ea) | Mainnet | LRT | Puffer Timelock |
 | [0x2e59a20f205bb85a89c53f1936454680651e618e](https://etherscan.io/address/0x2e59a20f205bb85a89c53f1936454680651e618e) | Mainnet | LIDO | Lido Timelock |
 | [0x2efff88747eb5a3ff00d4d8d0f0800e306c0426b](https://etherscan.io/address/0x2efff88747eb5a3ff00d4d8d0f0800e306c0426b) | Mainnet | MAPLE | Maple GovernorTimelock |
 | [0x1dccd4628d48a50c1a7adea3848bcc869f08f8c2](https://etherscan.io/address/0x1dccd4628d48a50c1a7adea3848bcc869f08f8c2) | Mainnet | 3JANE | 3Jane TimelockController |
@@ -127,7 +123,7 @@ Parameters:
 
 The alert format varies by timelock type:
 
-**TimelockController/Compound/Puffer:**
+**TimelockController/Compound:**
 ```
 ⏰ TIMELOCK: New Operation Scheduled
 🅿️ Protocol: LRT
@@ -191,4 +187,4 @@ The script stores the latest processed `blockTimestamp` in `cache-id.txt` under 
 
 ## Schema Details
 
-For comprehensive information about the unified `TimelockEvent` schema, including field mappings for all supported timelock types (TimelockController, Aave, Compound, Puffer, Lido, Maple), see [`detils.md`](./detils.md).
+For comprehensive information about the unified `TimelockEvent` schema, including field mappings for all supported timelock types (TimelockController, Aave, Compound, Lido, Maple), see [`detils.md`](./detils.md).

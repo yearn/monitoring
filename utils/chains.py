@@ -51,6 +51,7 @@ _SAFE_NETWORK_ALIASES: dict[str, str] = {
     "polygon-main": "polygon",
     "base-main": "base",
     "optim-yearn": "optimism",
+    "katana-main": "katana",
 }
 
 

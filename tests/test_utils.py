@@ -12,6 +12,11 @@ import requests
 from utils.alert import Alert, AlertSeverity, register_alert_hook, send_alert
 from utils.config import Config, ProtocolConfig
 from utils.telegram import TelegramError, send_telegram_message
+from utils.web3_wrapper import (
+    MAX_BACKOFF_SECONDS,
+    ProviderConnectionError,
+    retry_with_provider_rotation,
+)
 
 
 class TestConfig(unittest.TestCase):
@@ -189,6 +194,7 @@ class TestTelegram(unittest.TestCase):
                 "TELEGRAM_BOT_TOKEN_AAVE": "aave_token",
                 "TELEGRAM_CHAT_ID_AAVE": "aave_chat_id",
                 "TELEGRAM_CHAT_ID_TOPICS": "topics_chat_id",
+                "TELEGRAM_TOPIC_ID_AAVE": "",
                 "LOG_LEVEL": "INFO",
             },
         ):
@@ -361,8 +367,9 @@ class TestDispatch(unittest.TestCase):
         self.assertEqual(payload["event_type"], "emergency_withdrawal")
         self.assertEqual(payload["client_payload"]["protocol"], "infinifi")
         self.assertEqual(payload["client_payload"]["severity"], "HIGH")
-        # Payload should only contain protocol and severity (no markets/vault/chain)
-        self.assertEqual(set(payload["client_payload"].keys()), {"protocol", "severity"})
+        self.assertEqual(payload["client_payload"]["message"], "Reserves low")
+        # Payload should only contain protocol, severity, and message (no markets/vault/chain)
+        self.assertEqual(set(payload["client_payload"].keys()), {"protocol", "severity", "message"})
 
         # Verify auth header
         headers = call_kwargs["headers"]
@@ -536,6 +543,84 @@ class TestDefiLlama(unittest.TestCase):
                     defillama.fetch_prices(["ethereum:0xtoken"])
             finally:
                 sys.modules.pop("utils.defillama", None)
+
+
+class _FakeProvider:
+    """Minimal stand-in exposing the attributes retry_with_provider_rotation needs."""
+
+    def __init__(self, side_effects):
+        self.provider_urls = ["http://a", "http://b", "http://c", "http://d"]
+        self.max_retries = 3
+        self.backoff_factor = 2
+        self.endpoint_uri = self.provider_urls[0]
+        self._side_effects = list(side_effects)
+        self.call_count = 0
+
+    def _rotate_provider(self):
+        idx = self.provider_urls.index(self.endpoint_uri)
+        self.endpoint_uri = self.provider_urls[(idx + 1) % len(self.provider_urls)]
+
+    @retry_with_provider_rotation
+    def make_request(self):
+        result = self._side_effects[self.call_count]
+        self.call_count += 1
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class TestRetryWithProviderRotation(unittest.TestCase):
+    """Tests for the provider-rotation retry decorator in utils.web3_wrapper."""
+
+    def test_revert_fails_fast_without_retry(self):
+        """Deterministic reverts must raise immediately, not retry across providers."""
+        provider = _FakeProvider([ValueError("execution reverted: 0x")])
+        with patch("utils.web3_wrapper.time.sleep") as mock_sleep:
+            with self.assertRaises(ValueError):
+                provider.make_request()
+        self.assertEqual(provider.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    def test_revert_marker_is_case_insensitive(self):
+        provider = _FakeProvider([RuntimeError("('Execution Reverted', '0x')")])
+        with patch("utils.web3_wrapper.time.sleep"):
+            with self.assertRaises(RuntimeError):
+                provider.make_request()
+        self.assertEqual(provider.call_count, 1)
+
+    def test_decode_failure_fails_fast_without_retry(self):
+        """Empty/malformed return data (e.g. symbol() on a non-ERC20) is a
+        contract-shape mismatch, deterministic across providers, so it must
+        raise immediately instead of rotating through every RPC."""
+        provider = _FakeProvider(
+            [
+                ValueError(
+                    "Could not decode contract function call to symbol() with return data: b'', output_types: ['string']"
+                )
+            ]
+        )
+        with patch("utils.web3_wrapper.time.sleep") as mock_sleep:
+            with self.assertRaises(ValueError):
+                provider.make_request()
+        self.assertEqual(provider.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    def test_transient_error_retries_then_succeeds(self):
+        provider = _FakeProvider([ConnectionError("boom"), ConnectionError("boom"), "ok"])
+        with patch("utils.web3_wrapper.time.sleep"):
+            self.assertEqual(provider.make_request(), "ok")
+        self.assertEqual(provider.call_count, 3)
+
+    def test_backoff_is_capped(self):
+        """Exponential backoff must never exceed MAX_BACKOFF_SECONDS per attempt."""
+        # All 12 attempts (3 retries * 4 providers) fail with a transient error.
+        provider = _FakeProvider([ConnectionError("boom")] * 12)
+        with patch("utils.web3_wrapper.time.sleep") as mock_sleep:
+            with self.assertRaises(ProviderConnectionError):
+                provider.make_request()
+        slept = [call.args[0] for call in mock_sleep.call_args_list]
+        self.assertTrue(slept)
+        self.assertTrue(all(s <= MAX_BACKOFF_SECONDS for s in slept))
 
 
 if __name__ == "__main__":

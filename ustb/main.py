@@ -29,14 +29,11 @@ logger = get_logger(PROTOCOL)
 USTB_TOKEN = "0x43415eB6ff9DB7E26A15b704e7A3eDCe97d31C4e"
 CONTINUOUS_ORACLE = "0xE4fA682f94610cCd170680cc3B045d77D9E528a8"
 CHAINLINK_ORACLE = "0x289B5036cd942e619E1Ee48670F98d214E745AAC"
-REDEMPTION_IDLE = "0x4c21B7577C8FE8b0B0669165ee7C8f67fa1454Cf"
-USDC_TOKEN = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
 
 # ---------------------------------------------------------------------------
 # Thresholds
 # ---------------------------------------------------------------------------
 ORACLE_DIFF_THRESHOLD = 0.005  # 0.5%
-REDEMPTION_MIN_USDC = 500_000  # $500K
 SUPPLY_CHANGE_THRESHOLD = 0.10  # 10%
 STALENESS_THRESHOLD = 345_600  # 4 days in seconds (revert at 5 days / 432_000s)
 
@@ -55,7 +52,6 @@ ABI_CHAINLINK = load_abi("ustb/abi/ChainlinkAggregator.json")
 ABI_ERC20 = load_abi("common-abi/ERC20.json")
 
 USTB_DECIMALS = 6
-USDC_DECIMALS = 6
 
 
 def main() -> None:
@@ -64,7 +60,6 @@ def main() -> None:
 
     oracle = client.eth.contract(address=CONTINUOUS_ORACLE, abi=ABI_ORACLE)
     chainlink = client.eth.contract(address=CHAINLINK_ORACLE, abi=ABI_CHAINLINK)
-    usdc = client.eth.contract(address=USDC_TOKEN, abi=ABI_ERC20)
     ustb = client.eth.contract(address=USTB_TOKEN, abi=ABI_ERC20)
 
     # --- Batch 1: all independent reads ------------------------------------------------
@@ -73,7 +68,6 @@ def main() -> None:
         batch.add(oracle.functions.decimals())
         batch.add(chainlink.functions.latestRoundData())
         batch.add(chainlink.functions.decimals())
-        batch.add(usdc.functions.balanceOf(REDEMPTION_IDLE))
         batch.add(ustb.functions.totalSupply())
         responses = client.execute_batch(batch)
 
@@ -81,8 +75,7 @@ def main() -> None:
     oracle_decimals = int(responses[1])
     chainlink_round_data = responses[2]
     chainlink_decimals = int(responses[3])
-    usdc_balance_raw = int(responses[4])
-    total_supply_raw = int(responses[5])
+    total_supply_raw = int(responses[4])
 
     oracle_round_id = int(oracle_round_data[0])
     oracle_answer = int(oracle_round_data[1])
@@ -106,7 +99,6 @@ def main() -> None:
     _check_nav_monotonicity(oracle_round_id, checkpoint_responses, oracle_decimals)
     _check_chainlink_monotonicity(chainlink_answer, chainlink_decimals)
     _check_oracle_divergence(oracle_price, chainlink_price)
-    _check_redemption_idle(usdc_balance_raw)
     _check_supply_change(total_supply_raw, oracle_price)
     _check_oracle_staleness(current_timestamp, effective_at)
 
@@ -210,23 +202,6 @@ def _check_chainlink_monotonicity(chainlink_answer: int, chainlink_decimals: int
         write_last_value_to_file(CACHE_FILE, CACHE_KEY_CHAINLINK_NAV, chainlink_answer)
 
 
-def _check_redemption_idle(usdc_balance_raw: int) -> None:
-    """Alert if RedemptionIdle USDC balance drops below threshold."""
-    usdc_balance = usdc_balance_raw / (10**USDC_DECIMALS)
-    logger.info("RedemptionIdle USDC balance: %s", format_usd(usdc_balance))
-    if usdc_balance < REDEMPTION_MIN_USDC:
-        send_alert(
-            Alert(
-                AlertSeverity.HIGH,
-                f"USTB RedemptionIdle USDC below threshold\n"
-                f"Balance: {format_usd(usdc_balance)}\n"
-                f"Threshold: {format_usd(REDEMPTION_MIN_USDC)}\n"
-                f"Contract: https://etherscan.io/address/{REDEMPTION_IDLE}",
-                PROTOCOL,
-            )
-        )
-
-
 def _check_supply_change(total_supply_raw: int, nav_price: float) -> None:
     """Alert if total supply changed by more than 10% since the previous hourly run."""
     total_supply = _to_tokens(total_supply_raw)
@@ -283,8 +258,10 @@ def _check_oracle_staleness(current_timestamp: int, effective_at: int) -> None:
 
 def _to_tokens(raw: int) -> float:
     """Convert raw USTB amount to human-readable float."""
-    return raw / 10**USTB_DECIMALS  # type: ignore[no-any-return]
+    return raw / 10**USTB_DECIMALS
 
 
 if __name__ == "__main__":
-    main()
+    from utils.runner import run_with_alert
+
+    run_with_alert(main, PROTOCOL)

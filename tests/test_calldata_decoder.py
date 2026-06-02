@@ -42,6 +42,25 @@ class TestParseParamTypes(unittest.TestCase):
     def test_no_parentheses(self):
         self.assertEqual(_parse_param_types("malformed"), [])
 
+    def test_tuple_param_not_split(self):
+        # The inner comma must not split the tuple into invalid types.
+        self.assertEqual(
+            _parse_param_types("configure((address,uint256))"),
+            ["(address,uint256)"],
+        )
+
+    def test_tuple_mixed_with_scalars(self):
+        self.assertEqual(
+            _parse_param_types("foo((address,uint256),uint256)"),
+            ["(address,uint256)", "uint256"],
+        )
+
+    def test_tuple_array(self):
+        self.assertEqual(
+            _parse_param_types("foo((address,uint256)[],bool)"),
+            ["(address,uint256)[]", "bool"],
+        )
+
 
 class TestFormatParamValue(unittest.TestCase):
     """Tests for _format_param_value."""
@@ -227,6 +246,42 @@ class TestDecodeCalldata(unittest.TestCase):
         self.assertEqual(result.function_name, "transfer")
         self.assertEqual(result.params, [])
 
+    @patch("utils.calldata.decoder._resolve_signature_via_abi", return_value="configure((address,uint256))")
+    def test_tuple_params_decoded_not_dropped(self, mock_abi):
+        from eth_abi import encode
+
+        addr = "0x" + "11" * 20
+        data = "0xaabbccdd" + encode(["(address,uint256)"], [(addr, 7)]).hex()
+        result = decode_calldata(data, chain_id=1, target="0xX")
+        assert result is not None
+        self.assertEqual(len(result.params), 1)
+        self.assertEqual(result.params[0][0], "(address,uint256)")
+        decoded_addr, decoded_val = result.params[0][1]
+        self.assertEqual(decoded_addr.lower(), addr)
+        self.assertEqual(decoded_val, 7)
+
+    @patch("utils.calldata.decoder._resolve_signature_via_abi", return_value="transfer(address,uint256)")
+    @patch("utils.calldata.decoder.resolve_selector")
+    def test_abi_signature_preferred_with_target(self, mock_resolve, mock_abi):
+        result = decode_calldata(TRANSFER_CALLDATA, chain_id=1, target="0xToken")
+        mock_abi.assert_called_once()
+        mock_resolve.assert_not_called()  # ABI hit → Sourcify skipped
+        self.assertEqual(result.signature, "transfer(address,uint256)")
+
+    @patch("utils.calldata.decoder._resolve_signature_via_abi", return_value=None)
+    @patch("utils.calldata.decoder.resolve_selector", return_value="transfer(address,uint256)")
+    def test_falls_back_to_sourcify_when_abi_misses(self, mock_resolve, mock_abi):
+        result = decode_calldata(TRANSFER_CALLDATA, chain_id=1, target="0xToken")
+        mock_abi.assert_called_once()
+        mock_resolve.assert_called_once()
+        self.assertEqual(result.signature, "transfer(address,uint256)")
+
+    @patch("utils.calldata.decoder._resolve_signature_via_abi")
+    @patch("utils.calldata.decoder.resolve_selector", return_value="transfer(address,uint256)")
+    def test_no_abi_lookup_without_target(self, mock_resolve, mock_abi):
+        decode_calldata(TRANSFER_CALLDATA)
+        mock_abi.assert_not_called()
+
 
 class TestFormatCallLines(unittest.TestCase):
     """Tests for format_call_lines."""
@@ -268,6 +323,108 @@ class TestFormatCallLines(unittest.TestCase):
 
         self.assertEqual(len(lines), 1)
         self.assertEqual(lines[0], "📝 Function: `pause()`")
+
+
+class TestPersistentSelectorCache(unittest.TestCase):
+    """Selector cache is persisted to disk so Sourcify is queried at most once per run."""
+
+    def setUp(self) -> None:
+        import tempfile
+
+        # Point the cache at a fresh temp file for this test.
+        self._tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+        self._tmp.close()
+        self._patcher = patch("utils.calldata.decoder._SELECTOR_CACHE_FILE", self._tmp.name)
+        self._patcher.start()
+        _selector_cache.clear()
+
+    def tearDown(self) -> None:
+        import os
+
+        self._patcher.stop()
+        try:
+            os.unlink(self._tmp.name)
+        except OSError:
+            pass
+
+    @patch("utils.calldata.decoder.fetch_json")
+    def test_sourcify_hit_is_persisted(self, mock_fetch: object) -> None:
+        from utils.calldata.decoder import _load_selector_cache
+
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "result": {"function": {_UNKNOWN_SELECTOR: [{"name": "doSomething(uint256)"}]}}
+        }
+        sig = resolve_selector(_UNKNOWN_SELECTOR)
+        self.assertEqual(sig, "doSomething(uint256)")
+        # The on-disk cache should now contain it.
+        reloaded = _load_selector_cache()
+        self.assertEqual(reloaded.get(_UNKNOWN_SELECTOR), "doSomething(uint256)")
+
+    @patch("utils.calldata.decoder.fetch_json")
+    def test_transient_failure_not_persisted(self, mock_fetch: object) -> None:
+        # `fetch_json` returns None on HTTP error / timeout / network failure.
+        # We must NOT persist a __NONE__ entry — that would permanently
+        # blacklist the selector across the shared CI cache after a single
+        # bad request.
+        from utils.calldata.decoder import _load_selector_cache
+
+        mock_fetch.return_value = None  # type: ignore[attr-defined]
+        self.assertIsNone(resolve_selector(_UNKNOWN_SELECTOR))
+        reloaded = _load_selector_cache()
+        self.assertNotIn(_UNKNOWN_SELECTOR, reloaded)
+        # But the in-memory cache should remember the miss for this run.
+        self.assertIn(_UNKNOWN_SELECTOR, _selector_cache)
+        self.assertIsNone(_selector_cache[_UNKNOWN_SELECTOR])
+
+    @patch("utils.calldata.decoder.fetch_json")
+    def test_malformed_response_not_persisted(self, mock_fetch: object) -> None:
+        # Response doesn't match the {"result": {"function": {...}}} shape —
+        # treat as transient, same as a network error.
+        from utils.calldata.decoder import _load_selector_cache
+
+        mock_fetch.return_value = {"unexpected": "shape"}  # type: ignore[attr-defined]
+        self.assertIsNone(resolve_selector(_UNKNOWN_SELECTOR))
+        self.assertNotIn(_UNKNOWN_SELECTOR, _load_selector_cache())
+
+    @patch("utils.calldata.decoder.fetch_json")
+    def test_explicit_miss_is_persisted(self, mock_fetch: object) -> None:
+        # Well-formed response with an empty result list for this selector —
+        # Sourcify is explicitly saying "we don't know this one". Safe to
+        # persist so future runs skip the lookup.
+        from utils.calldata.decoder import _load_selector_cache
+
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "result": {"function": {_UNKNOWN_SELECTOR: []}}
+        }
+        self.assertIsNone(resolve_selector(_UNKNOWN_SELECTOR))
+        reloaded = _load_selector_cache()
+        self.assertIn(_UNKNOWN_SELECTOR, reloaded)
+        self.assertIsNone(reloaded[_UNKNOWN_SELECTOR])
+
+    @patch("utils.calldata.decoder.fetch_json")
+    def test_well_formed_response_with_no_key_persists(self, mock_fetch: object) -> None:
+        # Schema looks right but the selector isn't even in the response
+        # dict. Same semantics as an empty list — definitive miss.
+        from utils.calldata.decoder import _load_selector_cache
+
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "result": {"function": {}}
+        }
+        self.assertIsNone(resolve_selector(_UNKNOWN_SELECTOR))
+        self.assertIn(_UNKNOWN_SELECTOR, _load_selector_cache())
+
+    @patch("utils.calldata.decoder.fetch_json")
+    def test_persisted_negative_avoids_retry(self, mock_fetch: object) -> None:
+        # Pre-populate disk cache with a negative result, then ensure
+        # the in-memory cache picks it up and skips the network call.
+        with open(self._tmp.name, "w") as f:
+            f.write(f"{_UNKNOWN_SELECTOR}|__NONE__\n")
+        from utils.calldata.decoder import _load_selector_cache
+
+        cache = _load_selector_cache()
+        _selector_cache.update(cache)
+        self.assertIsNone(resolve_selector(_UNKNOWN_SELECTOR))
+        mock_fetch.assert_not_called()  # type: ignore[attr-defined]
 
 
 if __name__ == "__main__":

@@ -43,7 +43,7 @@ def main() -> None:
         return
 
     # Group depegged tokens by protocol
-    depegged_by_protocol: dict[str, list[tuple[str, Decimal, Decimal]]] = {}
+    depegged_by_protocol: dict[str, list[tuple[str, str, Decimal, Decimal]]] = {}
     for name, key, protocol, depeg_threshold in MONITORED_TOKENS:
         price = prices.get(key)
         if price is None:
@@ -51,10 +51,15 @@ def main() -> None:
             continue
         logger.info("%s price: $%s", name, price)
         if price < depeg_threshold:
-            depegged_by_protocol.setdefault(protocol, []).append((name, price, depeg_threshold))
+            # key is a DeFiLlama id like "ethereum:0x...", so the address is the part after ":"
+            address = key.split(":", 1)[1]
+            depegged_by_protocol.setdefault(protocol, []).append((name, address, price, depeg_threshold))
 
     for protocol, depegged in depegged_by_protocol.items():
-        lines = [f"*{name}*: ${price} (below ${depeg_threshold})" for name, price, depeg_threshold in depegged]
+        lines = [
+            f"[{name}](https://etherscan.io/token/{address}): ${price} (below ${depeg_threshold})"
+            for name, address, price, depeg_threshold in depegged
+        ]
         message = f"Stablecoin Depeg ({protocol}):\n" + "\n".join(lines)
         send_alert(Alert(AlertSeverity.CRITICAL, message, protocol))
 
@@ -62,4 +67,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from utils.runner import run_with_alert
+
+    # Multi-safe script with per-safe routing; crash alerts go to the general ops channel.
+    run_with_alert(main, "yearn")

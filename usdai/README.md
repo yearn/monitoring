@@ -41,7 +41,7 @@ A legacy loan principal is intentionally included as a fixed adjustment for cont
 
 It runs cached `totalSupply` delta checks and alerts when the increase is above:
 
-- `USDAI_LARGE_MINT_THRESHOLD` (default: `100000` USDai)
+- `USDAI_LARGE_MINT_THRESHOLD_PERCENT` (default: `0.05`, i.e. `5%` of previous `totalSupply`)
 
 The GitHub workflow `.github/workflows/hourly.yml` runs this monitor hourly.
 

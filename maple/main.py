@@ -66,6 +66,7 @@ ABI_ERC20_BALANCE = [
 # --- Thresholds ---
 TVL_CHANGE_THRESHOLD = 0.15  # 15% TVL change alert
 WITHDRAWAL_QUEUE_THRESHOLD = 0.80  # 80% of liquid funds
+WITHDRAWAL_QUEUE_TVL_THRESHOLD = 0.01  # 1% of TVL
 
 
 def get_cache_value(key: str) -> float:
@@ -178,8 +179,11 @@ def check_unrealized_losses(client) -> float:
     return fixed_aum + open_aum
 
 
-def check_strategy_and_withdrawal_queue(client, pool) -> None:
-    """Check strategy allocations and alert if pending exit value > 80% of liquid funds."""
+def check_strategy_and_withdrawal_queue(client, pool, tvl: float) -> None:
+    """Check strategy allocations and alert on withdrawal queue size.
+
+    Alerts when pending exit value exceeds 80% of liquid funds (Aave + Sky) or 1% of TVL.
+    """
     aave_strategy = client.eth.contract(address=AAVE_STRATEGY, abi=ABI_STRATEGY)
     sky_strategy = client.eth.contract(address=SKY_STRATEGY, abi=ABI_STRATEGY)
     wm = client.eth.contract(address=WITHDRAWAL_MANAGER, abi=ABI_WITHDRAWAL_MANAGER)
@@ -213,15 +217,16 @@ def check_strategy_and_withdrawal_queue(client, pool) -> None:
         format_usd(liquid_funds),
     )
 
-    if liquid_funds > 0 and pending_assets / liquid_funds > WITHDRAWAL_QUEUE_THRESHOLD:
-        ratio = pending_assets / liquid_funds
+    if tvl > 0 and pending_assets / tvl > WITHDRAWAL_QUEUE_TVL_THRESHOLD:
+        tvl_ratio = pending_assets / tvl
         message = (
-            f"🚨 *Maple syrupUSDC Withdrawal Queue Alert*\n"
-            f"📊 Pending withdrawals: {format_usd(pending_assets)} ({ratio:.1%} of liquid funds)\n"
-            f"💧 Liquid funds: {format_usd(liquid_funds)} (Aave: {format_usd(aave_assets)}, Sky: {format_usd(sky_assets)})\n"
+            f"*Maple syrupUSDC Withdrawal Queue Alert*\n"
+            f"📊 Pending withdrawals: {format_usd(pending_assets)} ({tvl_ratio:.2%} of TVL)\n"
+            f"🪣 Liquid funds: {format_usd(liquid_funds)}"
+            f"💰 TVL: {format_usd(tvl)}\n"
             f"🔗 [WithdrawalManager](https://etherscan.io/address/{WITHDRAWAL_MANAGER})"
         )
-        send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
+        send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
 
 
 def check_pool_liquidity(client, pool) -> None:
@@ -319,7 +324,7 @@ def main() -> None:
         pps = check_pps(client, pool)
         tvl = check_tvl(client, pool)
         check_unrealized_losses(client)
-        check_strategy_and_withdrawal_queue(client, pool)
+        check_strategy_and_withdrawal_queue(client, pool, tvl)
         check_pool_liquidity(client, pool)
         check_collateral_risk()
         check_delegate_cover(client)
@@ -335,4 +340,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from utils.runner import run_with_alert
+
+    run_with_alert(main, PROTOCOL)

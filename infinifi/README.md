@@ -11,7 +11,7 @@ This folder contains monitoring scripts for the Infinifi protocol.
 
 ## Alerts
 
-- **Liquid Reserves**: A Telegram alert is triggered if liquid reserves drop below $12M.
+- **Liquid Reserves**: A Telegram alert is triggered if liquid reserves drop below $8M.
 - **Reserve Ratio Breach**: Alert if liquid ratio falls below protocol `reserveRatio` target.
 - **Illiquid Ratio Breach**: Alert if illiquid ratio rises above protocol `illiquidTargetRatio`.
 - **Backing Per iUSD**: Alert if `totalTVL / iUSD supply` drops below `0.999`.
@@ -19,6 +19,14 @@ This folder contains monitoring scripts for the Infinifi protocol.
 - **Farm Allocation Shift**: Alert if any farm allocation ratio (`farm assets / total TVL`) changes by more than `FARM_RATIO_CHANGE_ALERT_THRESHOLD` versus cached ratio. Farms below 1% of total TVL are excluded.
 - **Farm Activation**: Alert if a farm previously at `0` cached ratio moves above `FARM_RATIO_ACTIVATION_ALERT_THRESHOLD` of total TVL.
 - **Junior TVL Below Risky Exposure**: Alert if junior TVL (locked iUSD) covers less than 50% of risky farm TVL. Risky farms are all farms NOT in the `SAFE_FARM_IDENTIFIERS` whitelist.
+
+## Large Mint Monitoring (No Event Scanning)
+
+`main.py` includes large iUSD mint monitoring and intentionally does **not** scan events.
+
+It compares cached `totalSupply` deltas and alerts when the increase is above:
+
+- `IUSD_LARGE_MINT_THRESHOLD_PERCENT` (default: `0.05`, i.e. `5%` of previous `totalSupply`)
 
 ### Emergency dispatch
 

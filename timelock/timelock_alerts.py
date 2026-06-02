@@ -11,20 +11,28 @@ import urllib.request
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
+from eth_utils import to_checksum_address
 
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
-from utils.calldata.decoder import format_call_lines
+from utils.calldata.decoder import decode_calldata, format_call_lines
 from utils.chains import EXPLORER_URLS, Chain
 from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
 from utils.logging import get_logger
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
-from utils.telegram import MAX_MESSAGE_LENGTH, send_telegram_message
+from utils.safe_tx import unwrap_safe_exec_transaction
+from utils.telegram import MAX_MESSAGE_LENGTH, escape_markdown, send_telegram_message
+from utils.web3_wrapper import ChainManager
 
 load_dotenv()
 
 ENVIO_GRAPHQL_URL = os.getenv("ENVIO_GRAPHQL_URL")
 DEFAULT_LOG_LEVEL = os.getenv("TIMELOCK_ALERTS_LOG_LEVEL", "INFO")
 CACHE_KEY = "TIMELOCK_LAST_TS"
+
+# YEARN_TIMELOCK alerts are also mirrored to this internal-only chat, in lockstep
+# with the public topic. Configure its credentials with
+# TELEGRAM_BOT_TOKEN_YEARN_TIMELOCK_INTERNAL / TELEGRAM_CHAT_ID_YEARN_TIMELOCK_INTERNAL.
+YEARN_TIMELOCK_INTERNAL_PROTOCOL = "YEARN_TIMELOCK_INTERNAL"
 
 
 @dataclass(frozen=True)
@@ -43,8 +51,6 @@ TIMELOCK_LIST: list[TimelockConfig] = [
     TimelockConfig("0xd8236031d8279d82e615af2bfab5fc0127a329ab", 1, "CAP", "CAP TimelockController"),
     TimelockConfig("0x5d8a7dc9405f08f14541ba918c1bf7eb2dace556", 1, "RTOKEN", "ETH+ Timelock"),
     TimelockConfig("0x055e84e7fe8955e2781010b866f10ef6e1e77e59", 1, "LRT", "Lombard TimeLock"),
-    TimelockConfig("0xe1f03b7b0ebf84e9b9f62a1db40f1efb8faa7d22", 1, "SILO", "Silo TimelockController"),
-    TimelockConfig("0x81f6e9914136da1a1d3b1efd14f7e0761c3d4cc7", 1, "LRT", "Renzo(ezETH) TimelockController"),
     TimelockConfig("0x9f26d4c958fd811a1f59b01b86be7dffc9d20761", 1, "LRT", "EtherFi Timelock"),
     TimelockConfig("0x49bd9989e31ad35b0a62c20be86335196a3135b1", 1, "LRT", "KelpDAO(rsETH) Timelock"),
     TimelockConfig("0x3d18480cc32b6ab3b833dcabd80e76cfd41c48a9", 1, "INFINIFI", "Infinifi Longtimelock"),
@@ -52,7 +58,6 @@ TIMELOCK_LIST: list[TimelockConfig] = [
     TimelockConfig("0x9aee0b04504cef83a65ac3f0e838d0593bcb2bc7", 1, "AAVE", "Aave Governance V3"),
     TimelockConfig("0x6d903f6003cca6255d85cca4d3b5e5146dc33925", 1, "COMP", "Compound Timelock"),
     TimelockConfig("0x2386dc45added673317ef068992f19421b481f4c", 1, "FLUID", "Fluid Timelock"),
-    TimelockConfig("0x3c28b7c7ba1a1f55c9ce66b263b33b204f2126ea", 1, "LRT", "Puffer Timelock"),
     TimelockConfig("0x2e59a20f205bb85a89c53f1936454680651e618e", 1, "LIDO", "Lido Timelock"),
     TimelockConfig("0x2efff88747eb5a3ff00d4d8d0f0800e306c0426b", 1, "MAPLE", "Maple GovernorTimelock"),
     TimelockConfig("0xb2a3cf69c97afd4de7882e5fee120e4efc77b706", 1, "STRATA", "Strata 48h Timelock"),
@@ -61,16 +66,21 @@ TIMELOCK_LIST: list[TimelockConfig] = [
     # Chain 8453 - Base
     TimelockConfig("0xf817cb3092179083c48c014688d98b72fb61464f", 8453, "LRT", "superOETH Timelock"),
     # Yearn Timelock (0x88Ba032be87d5EF1fbE87336B7090767F367BF73) - all chains
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 1, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 8453, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 42161, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 137, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 747474, "YEARN", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 10, "YEARN", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 1, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 8453, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 42161, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 137, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 747474, "YEARN_TIMELOCK", "Yearn TimelockController"),
+    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 10, "YEARN_TIMELOCK", "Yearn TimelockController"),
 ]
 
 # Lookup by (lowercase address, chain_id) to support same address on multiple chains
 TIMELOCKS: dict[tuple[str, int], TimelockConfig] = {(t.address, t.chain_id): t for t in TIMELOCK_LIST}
+
+# Protocols whose governance proposals are already monitored (and human-described)
+# by a dedicated script (e.g. aave/proposals.py, compound/proposals.py). For these,
+# the AI summary on the timelock execution is redundant, so we skip it.
+SKIP_AI_SUMMARY_PROTOCOLS: frozenset[str] = frozenset({"AAVE", "COMP", "LIDO", "FLUID"})
 
 _logger = get_logger("timelock_alerts")
 
@@ -132,7 +142,18 @@ def format_delay(seconds: int) -> str:
 def load_events(limit: int, since_ts: int, timelocks: list[TimelockConfig] | None = None) -> dict | None:
     """Fetch TimelockEvent events from the Envio GraphQL API."""
     source = timelocks if timelocks is not None else TIMELOCK_LIST
-    addresses = [t.address for t in source]
+    # Some Envio deployments store timelockAddress checksummed; include both
+    # representations to avoid case-sensitive misses.
+    addresses = sorted(
+        {
+            addr
+            for t in source
+            for addr in (
+                t.address,
+                to_checksum_address(t.address),
+            )
+        }
+    )
     _logger.info("load_events limit=%s since_ts=%s addresses=%s", limit, since_ts, len(addresses))
     query = """
     query GetTimelockEvents($limit: Int!, $sinceTs: Int!, $addresses: [String!]!) {
@@ -184,7 +205,7 @@ def _format_delay_info(delay: int | None, timelock_type: str) -> str | None:
         return None
 
     delay_val = int(delay)
-    if timelock_type in ("Compound", "Puffer", "Maple"):
+    if timelock_type in ("Compound", "Maple"):
         # Absolute timestamp
         relative = delay_val - int(time.time())
         if relative > 0:
@@ -195,7 +216,7 @@ def _format_delay_info(delay: int | None, timelock_type: str) -> str | None:
 
 
 def _build_call_info(event: dict, explorer: str | None, show_index: bool, chain_id: int = 0) -> list[str]:
-    """Build call info lines for TimelockController/Compound/Puffer events."""
+    """Build call info lines for TimelockController/Compound events."""
     lines: list[str] = []
     target = event.get("target")
     if not target:
@@ -216,9 +237,15 @@ def _build_call_info(event: dict, explorer: str | None, show_index: bool, chain_
 
     # Proxy upgrade detection: show diff link between old and new implementation
     if len(data_hex) >= 10:
-        new_impl = detect_proxy_upgrade(data_hex)
-        if new_impl and chain_id:
-            old_impl = get_current_implementation(target, chain_id)
+        upgrade = detect_proxy_upgrade(data_hex, target)
+        if upgrade and chain_id:
+            # For ProxyAdmin-routed upgrades, `target` is the ProxyAdmin contract;
+            # the proxy being upgraded is inside the calldata. Surface it explicitly
+            # so recipients know which contract is changing.
+            if upgrade.proxy_address.lower() != target.lower():
+                lines.append(f"🅿️ Proxy: `{upgrade.proxy_address}`")
+            old_impl = get_current_implementation(upgrade.proxy_address, chain_id)
+            new_impl = upgrade.new_implementation
             if old_impl:
                 lines.append(f"🔄 Upgrade: `{old_impl}` → `{new_impl}`")
                 diff_url = build_diff_url(old_impl, new_impl, chain_id)
@@ -227,7 +254,6 @@ def _build_call_info(event: dict, explorer: str | None, show_index: bool, chain_
             else:
                 lines.append(f"🔄 New impl: `{new_impl}`")
 
-    # Value only for types that have it (not Puffer)
     value = event.get("value")
     if value and int(value) > 0:
         lines.append(f"💰 Value: {int(value) / 1e18:.4f} ETH")
@@ -235,9 +261,78 @@ def _build_call_info(event: dict, explorer: str | None, show_index: bool, chain_
     return lines
 
 
+def _maple_proposal_calls(event: dict, chain_id: int) -> list[dict[str, str]] | None:
+    """Recover the inner (target, data) pairs from a Maple ProposalScheduled event.
+
+    The GovernorTimelock only stores a hash of the proposal calls on-chain, so the
+    ProposalScheduled event itself has no target/data. The actual payload lives in
+    the transaction that emitted the event — typically a Safe execTransaction wrapping
+    a scheduleProposals(address[], bytes[]) call into the GovernorTimelock.
+
+    Returns None if the tx can't be fetched or doesn't match the expected shape.
+    """
+    tx_hash = event.get("transactionHash")
+    if not tx_hash:
+        return None
+
+    try:
+        chain = Chain.from_chain_id(chain_id)
+        client = ChainManager.get_client(chain)
+        tx = client.eth.get_transaction(tx_hash)
+    except Exception as e:  # noqa: BLE001
+        _logger.info("Failed to fetch Maple proposal tx %s: %s", tx_hash, e)
+        return None
+
+    raw_input = tx.get("input")
+    input_hex = raw_input.hex() if isinstance(raw_input, bytes) else str(raw_input or "")
+    if input_hex and not input_hex.startswith("0x"):
+        input_hex = "0x" + input_hex
+
+    # Unwrap one layer of Safe execTransaction if present; otherwise decode directly.
+    inner = unwrap_safe_exec_transaction(input_hex)
+    inner_data = inner.data if inner else input_hex
+    if not inner_data or len(inner_data) < 10:
+        return None
+
+    decoded = decode_calldata(inner_data)
+    if not decoded or len(decoded.params) < 2:
+        return None
+
+    # Expect scheduleProposals(address[] targets, bytes[] data). Some Maple proposal
+    # paths (proposeRoleUpdates etc.) don't carry concrete (target, data) tuples we
+    # can hand to the explainer — bail out cleanly for those.
+    targets_type, targets = decoded.params[0]
+    data_type, datas = decoded.params[1]
+    if targets_type != "address[]" or data_type != "bytes[]" or len(targets) != len(datas):
+        return None
+
+    def _to_hex(d: object) -> str:
+        if isinstance(d, bytes):
+            return "0x" + d.hex()
+        s = str(d)
+        return s if s.startswith("0x") else "0x" + s
+
+    return [{"target": str(t), "data": _to_hex(d), "value": "0"} for t, d in zip(targets, datas)]
+
+
 def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain_id: int) -> str | None:
     """Generate AI explanation for timelock events. Returns None on any failure."""
     try:
+        # Maple's ProposalScheduled event only carries an opaque proposalId — the
+        # targets/data must be recovered from the originating transaction.
+        if events and events[0].get("timelockType") == "Maple":
+            calls = _maple_proposal_calls(events[0], chain_id)
+            if not calls:
+                return None
+            return explain_batch_transaction(
+                calls=calls,
+                chain_id=chain_id,
+                protocol=timelock_info.protocol,
+                label=timelock_info.label,
+                from_address=timelock_info.address,
+                refine=True,
+            )
+
         calls_with_data = [e for e in events if e.get("target") and e.get("data") and len(e.get("data", "")) >= 10]
         if not calls_with_data:
             return None
@@ -252,6 +347,7 @@ def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain
                 protocol=timelock_info.protocol,
                 label=timelock_info.label,
                 from_address=timelock_info.address,
+                refine=True,
             )
 
         # Batch transaction
@@ -262,6 +358,7 @@ def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain
             protocol=timelock_info.protocol,
             label=timelock_info.label,
             from_address=timelock_info.address,
+            refine=True,
         )
     except Exception:
         _logger.warning("AI explanation failed", exc_info=True)
@@ -285,11 +382,14 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
     tx_hash = first["transactionHash"]
     timelock_type = first.get("timelockType", "Unknown")
 
-    # Header (always included)
+    # Header (always included). Escape protocol and label since they're
+    # config-supplied and may contain Markdown-V1 specials — e.g. the
+    # underscore in "YEARN_TIMELOCK" was opening an italic that never
+    # closed, breaking the whole message with Telegram 400.
     header_lines: list[str] = [
         "⏰ *TIMELOCK: New Operation Scheduled*",
-        f"🅿️ Protocol: {timelock_info.protocol}",
-        _format_address(first["timelockAddress"], explorer, f"📋 {timelock_info.label}: "),
+        f"🅿️ Protocol: {escape_markdown(timelock_info.protocol)}",
+        _format_address(first["timelockAddress"], explorer, f"📋 {escape_markdown(timelock_info.label)}: "),
         f"🔗 Chain: {chain_name}",
     ]
 
@@ -321,7 +421,7 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
     elif timelock_type == "Maple":
         call_lines.append(f"🆔 Proposal: {first.get('operationId') or ''}")
 
-    elif timelock_type in ("TimelockController", "Compound", "Puffer"):
+    elif timelock_type in ("TimelockController", "Compound"):
         for event in events:
             call_lines.extend(_build_call_info(event, explorer, len(events) > 1, chain_id))
 
@@ -329,11 +429,13 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
         # Unknown type - show operationId at minimum
         call_lines.append(f"🆔 Operation: {first.get('operationId') or ''}")
 
-    # AI explanation (best-effort, non-blocking)
+    # AI explanation (best-effort, non-blocking). Skipped for protocols whose
+    # governance proposals are already monitored by a dedicated script.
     ai_line = ""
-    explanation = _get_ai_explanation(events, timelock_info, chain_id)
-    if explanation:
-        ai_line = format_explanation_line(explanation)
+    if timelock_info.protocol.upper() not in SKIP_AI_SUMMARY_PROTOCOLS:
+        explanation = _get_ai_explanation(events, timelock_info, chain_id)
+        if explanation:
+            ai_line = format_explanation_line(explanation)
 
     # Footer (always included)
     if explorer:
@@ -372,10 +474,15 @@ def process_events(events: list[dict], use_cache: bool) -> None:
     # Group events: only TimelockController has batch operations (multiple
     # CallScheduled events sharing the same operationId). All other types
     # emit one event per operation, so each is its own group.
+    # Key includes chainId because operationId is content-derived
+    # (keccak of targets/values/data/predecessor/salt) — when the same
+    # address (e.g. Yearn TimelockController) lives on multiple chains, an
+    # identical payload scheduled on two of them collides on operationId
+    # and only the first chain's alert would fire.
     operations: dict[str, list[dict]] = {}
     for event in events:
         if event.get("timelockType") == "TimelockController":
-            key = event["operationId"]
+            key = f"{event['chainId']}:{event['operationId']}"
         else:
             key = event["id"]
         if key not in operations:
@@ -399,9 +506,7 @@ def process_events(events: list[dict], use_cache: bool) -> None:
             continue
 
         protocol = timelock_info.protocol
-        if protocol not in messages_by_protocol:
-            messages_by_protocol[protocol] = []
-        messages_by_protocol[protocol].append(build_alert_message(op_events, timelock_info))
+        messages_by_protocol.setdefault(protocol, []).append(build_alert_message(op_events, timelock_info))
 
         # Track max timestamp
         for event in op_events:
@@ -409,8 +514,14 @@ def process_events(events: list[dict], use_cache: bool) -> None:
             if ts > max_timestamp:
                 max_timestamp = ts
 
+    # Mirror all Yearn timelock alerts to the internal-only chat: the send loop
+    # below delivers the same messages to both protocols.
+    if "YEARN_TIMELOCK" in messages_by_protocol:
+        messages_by_protocol[YEARN_TIMELOCK_INTERNAL_PROTOCOL] = list(messages_by_protocol["YEARN_TIMELOCK"])
+
     # Send alerts grouped by protocol, splitting into chunks that fit Telegram's limit
     separator = "\n\n---\n\n"
+    all_sent = True
     for protocol, messages in messages_by_protocol.items():
         chunks: list[str] = []
         current_parts: list[str] = []
@@ -434,10 +545,21 @@ def process_events(events: list[dict], use_cache: bool) -> None:
                 send_telegram_message(chunk, protocol)
             except Exception:
                 _logger.exception("Failed to send Telegram alert for protocol %s", protocol)
+                all_sent = False
 
+    # Only advance the cache when every chunk landed. Advancing on partial
+    # failure silently drops the failed events — the next run sees no new
+    # events past the new timestamp and the alerts are lost forever. Risk of
+    # duplicate alerts on retry is acceptable; missing alerts is not.
     if use_cache and max_timestamp > 0:
-        write_last_value_to_file(cache_filename, CACHE_KEY, str(max_timestamp))
-        _logger.info("Updated cache: %s = %s", CACHE_KEY, max_timestamp)
+        if all_sent:
+            write_last_value_to_file(cache_filename, CACHE_KEY, str(max_timestamp))
+            _logger.info("Updated cache: %s = %s", CACHE_KEY, max_timestamp)
+        else:
+            _logger.warning(
+                "Skipping cache update due to Telegram send failure(s); %s events will be re-fetched on the next run",
+                len(events),
+            )
 
 
 def main() -> None:
@@ -496,7 +618,10 @@ def main() -> None:
     if response is None:
         msg = "⚠️ Timelock alerts: Envio API is unreachable after 3 retries"
         _logger.error(msg)
-        for protocol in {t.protocol for t in (filtered_timelocks or TIMELOCK_LIST)}:
+        protocols = {t.protocol for t in (filtered_timelocks or TIMELOCK_LIST)}
+        if "YEARN_TIMELOCK" in protocols:
+            protocols.add(YEARN_TIMELOCK_INTERNAL_PROTOCOL)
+        for protocol in protocols:
             try:
                 send_telegram_message(msg, protocol)
             except Exception:
@@ -516,4 +641,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from utils.runner import run_with_alert
+
+    # Multi-protocol script with per-timelock routing; crash alerts go to the general ops channel.
+    run_with_alert(main, "yearn")

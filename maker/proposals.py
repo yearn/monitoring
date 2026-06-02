@@ -78,12 +78,14 @@ def get_proposals():
     except requests.RequestException as e:
         error_message = f"Failed to fetch Sky executive proposals: {e}"
         logger.error("%s", error_message)
-        send_telegram_message(error_message, PROTOCOL, True)
+        send_telegram_message(error_message, PROTOCOL, True, plain_text=True)
     except Exception as e:
         error_message = f"Error processing Sky executive proposals: {e}"
         logger.error("%s", error_message)
-        send_telegram_message(error_message, PROTOCOL, True)
+        send_telegram_message(error_message, PROTOCOL, True, plain_text=True)
 
 
 if __name__ == "__main__":
-    get_proposals()
+    from utils.runner import run_with_alert
+
+    run_with_alert(get_proposals, PROTOCOL)

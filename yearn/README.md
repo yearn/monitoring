@@ -1,6 +1,6 @@
 # Yearn Monitoring
 
-This folder contains monitoring scripts for Yearn vault activity and timelock operations.
+This folder contains monitoring scripts for Yearn vault activity, Safe multisig queues, and timelock operations.
 
 ## Large Flows
 
@@ -227,6 +227,23 @@ Monitor specific standalone strategies:
 ```bash
 uv run yearn/check_stuck_triggers.py --include-strategies 0x1234...,0x5678...
 ```
+
+=======
+
+## Safe Multisig Monitoring
+
+Yearn Safe multisigs are monitored via the shared [Safe monitoring script](../safe/main.py). The script polls the [Safe Transaction Service](https://docs.safe.global/core-api/transaction-service-reference) for queued transactions and sends Telegram alerts when unexpected pending txs appear. It runs [every 10 minutes via GitHub Actions](../.github/workflows/multisig-checker.yml).
+
+Yearn multisig config lives in [`safe/addresses.py`](../safe/addresses.py) under `YEARN_MULTISIGS`. The same workflow also monitors non-Yearn protocol multisigs (LIDO, AAVE, etc.) configured in `ALL_SAFE_ADDRESSES`.
+
+### How It Works
+
+For each configured Safe on each chain:
+
+1. Fetches unexecuted multisig transactions from the Safe Transaction Service API.
+2. Filters out already-alerted nonces (cached in `nonces.txt`) and dead slots where `nonce < safe.currentNonce`.
+3. For Yearn safes, skips txs proposed by known bot EOAs (see Expected Proposers below).
+4. Sends a Telegram alert with Safe URL, target contract, nonce, and an optional AI calldata explanation.
 
 =======
 
