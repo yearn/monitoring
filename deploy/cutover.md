@@ -1,7 +1,7 @@
 # Cutover Playbook — GitHub Actions → VPS (supercronic)
 
 Operator-facing runbook for moving the scheduled monitoring off GitHub Actions
-and onto the `yearn-monitor` systemd unit on the VPS.
+and onto the `monitoring` systemd unit on the VPS.
 
 Unlike a signing daemon, this is **pure read-only monitoring**: every job just
 reads chain/API state and posts Telegram alerts, deduped by a file cache. So
@@ -32,7 +32,7 @@ part of this cutover. There are no `repository_dispatch` or cross-repo triggers.
 The manual equivalent of `workflow_dispatch` on the VPS is:
 
 ```sh
-cd /srv/yearn-monitoring && uv run python -m automation run <profile>
+cd /srv/monitoring && uv run python -m automation run <profile>
 ```
 
 ---
@@ -40,7 +40,7 @@ cd /srv/yearn-monitoring && uv run python -m automation run <profile>
 ## Pre-flight
 
 1. VPS provisioned per `deploy/runbook.md` (`install.sh` run, venv in place, the
-   `yearn-monitor` unit installed) **but not yet enabled**.
+   `monitoring` unit installed) **but not yet enabled**.
 2. `uv run python -m automation render-crontab` on the box shows the five
    expected lines.
 3. A separate **shadow** Telegram chat exists. Grab its chat id — the VPS posts
@@ -70,8 +70,8 @@ Concretely, on a copy of the prod env:
 
 ```sh
 # point all chat ids at the shadow chat, drop all topic ids
-sed -i -E "s/^(TELEGRAM_CHAT_ID_[A-Z0-9_]+)=.*/\1=<SHADOW_CHAT_ID>/" /etc/yearn-monitoring/.env
-sed -i -E "/^TELEGRAM_TOPIC_ID_[A-Z0-9_]+=/d"                         /etc/yearn-monitoring/.env
+sed -i -E "s/^(TELEGRAM_CHAT_ID_[A-Z0-9_]+)=.*/\1=<SHADOW_CHAT_ID>/" /etc/monitoring/.env
+sed -i -E "/^TELEGRAM_TOPIC_ID_[A-Z0-9_]+=/d"                         /etc/monitoring/.env
 ```
 
 > Do **not** use `LOG_LEVEL=DEBUG` to "mute" — it skips *all* Telegram sends, so
@@ -82,8 +82,8 @@ sed -i -E "/^TELEGRAM_TOPIC_ID_[A-Z0-9_]+=/d"                         /etc/yearn
 ## Shadow week (~7 days)
 
 ```sh
-sudo systemctl enable --now yearn-monitor
-journalctl -u yearn-monitor -f
+sudo systemctl enable --now monitoring
+journalctl -u monitoring -f
 ```
 
 GitHub Actions keeps running and posting to the **real** channels; the VPS posts
@@ -110,8 +110,8 @@ means missed alerts. So **go live before disabling GitHub**:
    `TELEGRAM_CHAT_ID_*` and any `TELEGRAM_TOPIC_ID_*`), then:
 
    ```sh
-   sudo systemctl restart yearn-monitor
-   journalctl -u yearn-monitor -f
+   sudo systemctl restart monitoring
+   journalctl -u monitoring -f
    ```
 
 2. Confirm one good real tick lands in production Telegram. `multisig` (every
@@ -142,7 +142,7 @@ No state to unwind — re-enable GitHub and quiet the VPS:
 gh workflow enable hourly.yml daily.yml weekly.yml multisig-checker.yml \
   --repo yearn/monitoring
 # then either stop the VPS unit…
-sudo systemctl stop yearn-monitor
+sudo systemctl stop monitoring
 # …or flip its env back to the shadow chat and restart, to keep observing.
 ```
 

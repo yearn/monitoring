@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fresh-VPS provisioning for the yearn-monitor cron runner (native deploy — no
+# Fresh-VPS provisioning for the monitoring cron runner (native deploy — no
 # Docker, no Caddy).
 #
 # Idempotent: re-running on an already-provisioned host is safe. Each step
@@ -12,17 +12,17 @@
 # Usage (as root):
 #   curl -fsSL https://raw.githubusercontent.com/yearn/monitoring/main/deploy/install.sh | bash
 #
-# Or, after cloning the repo to /srv/yearn-monitoring:
-#   sudo bash /srv/yearn-monitoring/deploy/install.sh
+# Or, after cloning the repo to /srv/monitoring:
+#   sudo bash /srv/monitoring/deploy/install.sh
 #
 # The repo is cloned as — and owned by — the invoking user (SUDO_USER, or
 # whoami when not run via sudo); the systemd unit also runs as that user.
 # Override with TARGET_USER=.
 #
 # After this script the operator still needs to (see deploy/runbook.md):
-#   1. Drop the production env at /etc/yearn-monitoring/.env (mode 0640,
+#   1. Drop the production env at /etc/monitoring/.env (mode 0640,
 #      root:<deploy-user>) — copy from .env.example and fill in the values.
-# Then: `systemctl enable --now yearn-monitor`.
+# Then: `systemctl enable --now monitoring`.
 #
 # Private-repo auth over HTTPS resolves a token, in order:
 #   1. $GITHUB_TOKEN in the environment (pass with `sudo -E`).
@@ -35,9 +35,13 @@
 set -Eeuo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/yearn/monitoring.git}"
-REPO_DIR="${REPO_DIR:-/srv/yearn-monitoring}"
+# Matches the GitHub repo name (`monitoring`), i.e. where `git clone` lands by
+# default. REPO_DIR is the single source of truth for the on-disk path: the
+# systemd unit's WorkingDirectory / REPO_ROOT / venv PATH are templated from it
+# (__REPO_DIR__ placeholder), so overriding REPO_DIR here rewrites the unit too.
+REPO_DIR="${REPO_DIR:-/srv/monitoring}"
 BRANCH="${BRANCH:-main}"
-ETC_DIR="${ETC_DIR:-/etc/yearn-monitoring}"
+ETC_DIR="${ETC_DIR:-/etc/monitoring}"
 CACHE_DIR="${CACHE_DIR:-/srv/cache}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 # journald cap for the box. Default journald is Storage=auto (logs are RAM-only
@@ -168,7 +172,7 @@ as_user bash -c "cd '${REPO_DIR}' && uv sync --frozen --extra ai"
 log "ensuring ${CACHE_DIR} exists (owned by ${TARGET_USER})…"
 install -m 0755 -o "$TARGET_USER" -g "$TARGET_USER" -d "$CACHE_DIR"
 
-# ─── /etc/yearn-monitoring scaffolding ─────────────────────────────────
+# ─── /etc/monitoring scaffolding ─────────────────────────────────
 log "ensuring ${ETC_DIR} exists with the right perms…"
 install -m 0750 -o root -g "$TARGET_USER" -d "$ETC_DIR"
 
@@ -179,7 +183,7 @@ install -m 0750 -o root -g "$TARGET_USER" -d "$ETC_DIR"
 if [[ -n "$JOURNAL_MAX_USE" ]]; then
   log "configuring journald (persistent, SystemMaxUse=${JOURNAL_MAX_USE})…"
   install -d -m 0755 /etc/systemd/journald.conf.d
-  cat > /etc/systemd/journald.conf.d/yearn-monitor.conf <<JOURNALD
+  cat > /etc/systemd/journald.conf.d/monitoring.conf <<JOURNALD
 # Managed by deploy/install.sh — persist logs across reboots and cap disk use.
 [Journal]
 Storage=persistent
@@ -192,10 +196,11 @@ fi
 
 # ─── systemd unit ──────────────────────────────────────────────────────
 log "installing systemd unit (User=${TARGET_USER})…"
-sed "s|__MONITOR_USER__|${TARGET_USER}|g" \
-  "${REPO_DIR}/deploy/systemd/yearn-monitor.service" \
-  > /etc/systemd/system/yearn-monitor.service
-chmod 0644 /etc/systemd/system/yearn-monitor.service
+sed -e "s|__MONITOR_USER__|${TARGET_USER}|g" \
+    -e "s|__REPO_DIR__|${REPO_DIR}|g" \
+  "${REPO_DIR}/deploy/systemd/monitoring.service" \
+  > /etc/systemd/system/monitoring.service
+chmod 0644 /etc/systemd/system/monitoring.service
 systemctl daemon-reload
 
 cat <<NEXT
@@ -210,16 +215,16 @@ cat <<NEXT
      The systemd unit loads it via EnvironmentFile and refuses to start without it.
 
   2. Start the runner:
-       sudo systemctl enable --now yearn-monitor
-       systemctl status yearn-monitor
+       sudo systemctl enable --now monitoring
+       systemctl status monitoring
 
   3. Watch the first ticks:
-       journalctl -u yearn-monitor -f
+       journalctl -u monitoring -f
        # or dry-run a profile immediately:
        sudo -u ${TARGET_USER} bash -c 'cd ${REPO_DIR} && uv run python -m automation run hourly --dry-run'
 
   Optional — searchable logs / dashboards / alerting beyond journald:
-    ship yearn-monitor.service to Grafana Cloud (free tier) with Grafana Alloy
+    ship monitoring.service to Grafana Cloud (free tier) with Grafana Alloy
     or Vector reading journald. Low effort; the structured (level=/msg=/job=)
     lines map cleanly to Loki labels. See deploy/runbook.md ("Shipping logs").
 
