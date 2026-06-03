@@ -156,8 +156,11 @@ else
 fi
 
 # ─── Python venv + project deps ────────────────────────────────────────
+# --extra ai pulls the LLM client (openai): the AI transaction explainer
+# (timelock and multisig alerts) imports it at runtime, and without the extra
+# those alerts silently drop their AI summary.
 log "installing Python deps into ${REPO_DIR}/.venv (as ${TARGET_USER})…"
-as_user bash -c "cd '${REPO_DIR}' && uv sync --frozen"
+as_user bash -c "cd '${REPO_DIR}' && uv sync --frozen --extra ai"
 
 # ─── writable cache dir ────────────────────────────────────────────────
 # jobs.yaml points CACHE_FILENAME / NONCE_FILENAME / etc. at ${CACHE_DIR};

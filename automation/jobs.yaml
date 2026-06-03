@@ -16,7 +16,7 @@
 profiles:
 
   hourly:
-    cron: "26 * * * *"
+    cron: "11 * * * *"
     description: "Hourly monitoring (was .github/workflows/hourly.yml)."
     # No env override: alert dedupe and morpho rows share the default cache-id.txt
     # under $CACHE_DIR.
@@ -29,10 +29,7 @@ profiles:
       - { name: "lrt-pegs-fluid",         script: lrt-pegs/fluid/main.py }
       - { name: "rtoken",                 script: rtoken/monitor_rtoken.py }
       - { name: "lrt-pegs-origin",        script: lrt-pegs/origin_protocol.py }
-      # euler/markets.py disabled upstream; kept for parity so re-enabling is a one-flag flip.
-      - { name: "euler-markets",          script: euler/markets.py, enabled: false }
       - { name: "infinifi",               script: infinifi/main.py }
-      - { name: "silo-ur-sniff",          script: silo/ur_sniff.py }
       - { name: "usdai",                  script: usdai/main.py }
       - { name: "usdai-large-mints",      script: usdai/large_mints.py }
       - { name: "yearn-alert-large-flows", script: yearn/alert_large_flows.py }
@@ -46,7 +43,7 @@ profiles:
       - { name: "maker-proposals",        script: maker/proposals.py }
 
   yearn-stuck-triggers:
-    cron: "26 * * * *"
+    cron: "15 * * * *"
     description: "Yearn stuck triggers (was the second job in hourly.yml)."
     # Cache file defaults to tks-trigger-cache.json under $CACHE_DIR (see
     # check_stuck_triggers.DEFAULT_CACHE_FILE), so no --cache-file override needed.
@@ -71,7 +68,7 @@ profiles:
       - { name: "compound",             script: compound/main.py }
 
   weekly:
-    cron: "19 8 * * 0"
+    cron: "25 10 * * 0"
     description: "Weekly monitoring (was .github/workflows/weekly.yml)."
     tasks:
       - { name: "yearn-check-endorsed", script: yearn/check_endorsed.py }

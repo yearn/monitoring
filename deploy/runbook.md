@@ -95,7 +95,7 @@ For dependency changes (`pyproject.toml` / `uv.lock`), re-sync the venv first:
 ```sh
 cd /srv/yearn-monitoring
 git pull --ff-only
-uv sync --frozen
+uv sync --frozen --extra ai   # --extra ai: openai client for the AI explainer
 sudo systemctl restart yearn-monitor
 ```
 

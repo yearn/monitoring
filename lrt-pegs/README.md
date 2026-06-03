@@ -19,9 +19,6 @@ Uniswap V3 pools that are checked are:
 
 - weETH-WETH
 
-### Balancer pools - DISABLED ⚠️
-
-> Disabled after Balancer V2 hack
 
 ### Lombard Finance (LBTC)
 
