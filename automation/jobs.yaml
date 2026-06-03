@@ -23,8 +23,10 @@ profiles:
     # No env override: alert dedupe and morpho rows share the default cache-id.txt
     # under $CACHE_DIR.
     tasks:
+      - { name: "apyusd",                 script: apyusd/main.py }
       - { name: "3jane",                  script: 3jane/main.py }
       - { name: "morpho-markets",         script: morpho/markets.py }
+      - { name: "morpho-markets-v2",      script: morpho/markets_v2.py }
       - { name: "aave",                   script: aave/main.py }
       - { name: "lido-steth",             script: lido/steth/main.py }
       - { name: "lrt-pegs-curve",         script: lrt-pegs/curve/main.py }
@@ -34,6 +36,7 @@ profiles:
       - { name: "infinifi",               script: infinifi/main.py }
       - { name: "usdai",                  script: usdai/main.py }
       - { name: "usdai-large-mints",      script: usdai/large_mints.py }
+      - { name: "stables-dune-large-transfers", script: stables/dune_large_transfers.py }
       - { name: "yearn-alert-large-flows", script: yearn/alert_large_flows.py }
       - { name: "maple",                  script: maple/main.py }
       - { name: "timelock-alerts",        script: timelock/timelock_alerts.py }
@@ -62,6 +65,7 @@ profiles:
       MORPHO_FILENAME: cache-id-daily.txt
     tasks:
       - { name: "morpho-governance",    script: morpho/governance.py }
+      - { name: "morpho-governance-v2", script: morpho/governance_v2.py }
       - { name: "ethena",               script: ethena/ethena.py }
       - { name: "strata",               script: strata/main.py }
       - { name: "cap-liquidity",        script: cap/liquidity.py }
@@ -74,6 +78,7 @@ profiles:
     description: "Weekly monitoring (was .github/workflows/weekly.yml)."
     tasks:
       - { name: "yearn-check-endorsed", script: yearn/check_endorsed.py }
+      - { name: "yearn-check-timelock-delay", script: yearn/check_timelock_delay.py }
 
   multisig:
     cron: "0/10 * * * *"
