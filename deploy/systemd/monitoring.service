@@ -71,13 +71,16 @@ StartLimitIntervalSec=60
 StartLimitBurst=5
 
 # Hardening — cheap wins now that there's no container boundary. /srv/cache is
-# the only writable path the scripts need (dedupe caches, nonces); the repo tree
-# and venv are read-only at runtime.
+# the scripts' state path (dedupe caches, nonces). The repo tree is also writable
+# because the multisig profile fast-forwards the checkout in-process before each
+# run (sync_before_run in jobs.yaml → git pull --ff-only, which writes .git/ and
+# the working tree); ProtectSystem=strict would otherwise make it read-only and
+# fail the pull. The venv and the rest of the system stay read-only.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/srv/cache
+ReadWritePaths=/srv/cache __REPO_DIR__
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
