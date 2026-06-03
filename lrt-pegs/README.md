@@ -19,7 +19,6 @@ Uniswap V3 pools that are checked are:
 
 - weETH-WETH
 
-
 ### Lombard Finance (LBTC)
 
 Monitor Lombard LBTC feed by [Redstone](https://docs.redstone.finance/docs/data/lombard/): "Currently, the value has an upper cap of 1, meaning a healthy value is 1, indicating the protocol’s stability.". If the value of LBTC changes in [contract oracle](https://etherscan.io/address/0xb415eAA355D8440ac7eCB602D3fb67ccC1f0bc81) between 2 blocks, we will get notified by [Tenderly alert](https://dashboard.tenderly.co/yearn/sam/alerts/rules/eca272ef-979a-47b3-a7f0-2e67172889bb).
