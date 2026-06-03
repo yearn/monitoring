@@ -40,6 +40,12 @@ BRANCH="${BRANCH:-main}"
 ETC_DIR="${ETC_DIR:-/etc/yearn-monitoring}"
 CACHE_DIR="${CACHE_DIR:-/srv/cache}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
+# journald cap for the box. Default journald is Storage=auto (logs are RAM-only
+# and lost on reboot unless /var/log/journal exists) with SystemMaxUse=10% of
+# the disk up to 4G. We force persistence and a modest cap — log volume here is
+# a handful of hourly cron profiles, so 500M is generous. Override with
+# JOURNAL_MAX_USE= (e.g. 1G), or set it empty to skip the journald drop-in.
+JOURNAL_MAX_USE="${JOURNAL_MAX_USE:-500M}"
 # Pinned to match the (now removed) docker/Dockerfile. linux/amd64 only — bump
 # both together and re-verify the checksum from the release page.
 SUPERCRONIC_VERSION="${SUPERCRONIC_VERSION:-v0.2.34}"
@@ -163,6 +169,24 @@ install -m 0755 -o "$TARGET_USER" -g "$TARGET_USER" -d "$CACHE_DIR"
 log "ensuring ${ETC_DIR} exists with the right perms…"
 install -m 0750 -o root -g "$TARGET_USER" -d "$ETC_DIR"
 
+# ─── journald persistence + cap ────────────────────────────────────────
+# All task output goes to journald (the unit sets StandardOutput=journal). The
+# stock defaults can drop logs on reboot and let the journal grow to 4G, so pin
+# persistence and a sane cap via a drop-in. Set JOURNAL_MAX_USE= empty to skip.
+if [[ -n "$JOURNAL_MAX_USE" ]]; then
+  log "configuring journald (persistent, SystemMaxUse=${JOURNAL_MAX_USE})…"
+  install -d -m 0755 /etc/systemd/journald.conf.d
+  cat > /etc/systemd/journald.conf.d/yearn-monitor.conf <<JOURNALD
+# Managed by deploy/install.sh — persist logs across reboots and cap disk use.
+[Journal]
+Storage=persistent
+SystemMaxUse=${JOURNAL_MAX_USE}
+JOURNALD
+  systemctl restart systemd-journald
+else
+  log "JOURNAL_MAX_USE empty; leaving journald at distro defaults."
+fi
+
 # ─── systemd unit ──────────────────────────────────────────────────────
 log "installing systemd unit (User=${TARGET_USER})…"
 sed "s|__MONITOR_USER__|${TARGET_USER}|g" \
@@ -190,6 +214,11 @@ cat <<NEXT
        journalctl -u yearn-monitor -f
        # or dry-run a profile immediately:
        sudo -u ${TARGET_USER} bash -c 'cd ${REPO_DIR} && uv run python -m automation run hourly --dry-run'
+
+  Optional — searchable logs / dashboards / alerting beyond journald:
+    ship yearn-monitor.service to Grafana Cloud (free tier) with Grafana Alloy
+    or Vector reading journald. Low effort; the structured (level=/msg=/job=)
+    lines map cleanly to Loki labels. See deploy/runbook.md ("Shipping logs").
 
 See deploy/runbook.md for ongoing operations.
 ──────────────────────────────────────────────────────────────────────

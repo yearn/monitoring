@@ -66,6 +66,16 @@ The runner runs every task in declared order, capturing each subprocess's exit c
 
 The profile's exit code is non-zero if any task failed, which supercronic surfaces in the journald logs (`journalctl -u yearn-monitor`).
 
+### The `automation` Telegram channel
+
+This channel is **errors-only**: a digest is sent *only* when one or more tasks in a profile fail. A run where every task exits 0 sends nothing, so it's safe to treat as a dedicated "internal automation errors" group — point `TELEGRAM_*_AUTOMATION` at a chat used for nothing else. (Leave those env vars unset and the failure digests fall into the `DEFAULT` channel and mix with everything else.)
+
+Scope, so you know what does and doesn't land here:
+
+- **Runner-level failures only.** It reports a monitoring script crashing or exiting non-zero (including subprocess spawn failures). It is *not* where the protocols' normal monitoring alerts go — those are still sent by each script to its own protocol channel (`TELEGRAM_*_AAVE`, etc.).
+- **One digest per profile run, not per task.** If three tasks in the `hourly` profile fail, you get one message listing all three.
+- **Per-script crashes route elsewhere.** An unhandled exception inside a script wrapped with `run_with_alert` (see [CLAUDE.md](../CLAUDE.md)) is alerted to *that script's* protocol channel, not the `automation` channel.
+
 ## Locking
 
 `render-crontab` wraps each invocation in `flock -n /tmp/automation.<profile>.lock` so consecutive ticks can't overlap a still-running profile (mirrors `concurrency: cancel-in-progress: true` on the existing GH Actions workflows). `flock -n` returns non-zero immediately if the lock is held; supercronic logs the skip and the next tick tries again.
