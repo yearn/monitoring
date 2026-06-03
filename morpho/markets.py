@@ -246,6 +246,8 @@ MARKETS_RISK_2 = {
         "0x90ef0c5a0dc7c4de4ad4585002d44e9d411d212d2f6258e94948beecf8b4c0d5",  # sUSDe/PYUSD -> lltv 91.5%, oracle: sUSDe ERC4626 vault, chainlink USDe/USD and Chainlink PYUSD/USD.
         "0xcb12dcbc7c6c4f20ca1537a3cc1a41ec27501f85a3e322a710d9a16a88a28c0e",  # PT-sUSDE-7MAY2026/PYUSD -> lltv 91.5%, oracle: Pendle oracle PT to USDe, chainlink USDe/USD and Chainlink PYUSD/USD.
         "0xd8a8e6667f58aa9229e8979bd619742b1660ee856c200a93e407dbccb7222323",  # cbBTC/PYUSD -> lltv 86%, oracle: chainlink cbBTC/USD and Chainlink PYUSD/USD.
+        "0x6d2fba32b8649d92432d036c16aa80779034b7469b63abc259b17678857f31c2",  # wstETH/USDC -> lltv 86%, oracle: MorphoChainlinkOracleV2 —  Api3 wstETH/USD + Api3 USDC/USD.
+        "0xba3ba077d9c838696b76e29a394ae9f0d1517a372e30fd9a0fc19c516fb4c5a7",  # cbBTC/USDC -> lltv 86%, oracle: MorphoChainlinkOracleV2, Api3 cbBTC/USD + Api3 USDC/USD.
     ],
     Chain.BASE: [
         "0x6aa81f51dfc955df598e18006deae56ce907ac02b0b5358705f1a28fcea23cc0",  # wstETH/WETH -> lltv 96.5%, oracle: Chainlink wstETH-stETH Exchange Rate
