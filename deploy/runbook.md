@@ -118,6 +118,28 @@ the provider, not just edited here.
 
 ---
 
+## Test / staging run (route every alert to one dummy group)
+
+To validate the whole fleet without spamming production chats — e.g. comparing
+this VPS's output against the old GitHub Actions runs — set
+`TELEGRAM_TEST_CHAT_ID` in the env. While it is set, **every** alert from every
+protocol is sent to that single chat via the default bot, prefixed with a
+`[protocol]` label and with no topic threading, so production routing
+(`TELEGRAM_TOPIC_ID_*` / per-protocol chats) is bypassed entirely:
+
+```sh
+sudo $EDITOR /etc/yearn-monitoring/.env
+#   TELEGRAM_TEST_CHAT_ID=-1001234567890   # the dummy group
+#   (the default bot, TELEGRAM_BOT_TOKEN_DEFAULT, must be a member of it)
+sudo systemctl restart yearn-monitor
+```
+
+Keep `LOG_LEVEL=INFO` (the default) — `LOG_LEVEL=DEBUG` skips all Telegram sends,
+so nothing would arrive. Comment the line out and restart to restore normal
+per-protocol routing.
+
+---
+
 ## Host failover
 
 Single-node failover (cattle, not pets):

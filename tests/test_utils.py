@@ -203,6 +203,40 @@ class TestTelegram(unittest.TestCase):
             self.assertEqual(kwargs["json"]["chat_id"], "aave_chat_id")
             self.assertNotIn("message_thread_id", kwargs["json"])
 
+    @patch("utils.telegram.requests.post")
+    def test_send_telegram_message_test_override(self, mock_post):
+        """TELEGRAM_TEST_CHAT_ID forces every message to one chat via the default bot.
+
+        It overrides both topic and legacy routing, prepends a [protocol] label,
+        and never applies topic threading.
+        """
+        mock_response = unittest.mock.Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_post.return_value = mock_response
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TEST_CHAT_ID": "dummy_group",
+                "TELEGRAM_BOT_TOKEN_DEFAULT": "default_token",
+                # Production routing that must be ignored while the override is set:
+                "TELEGRAM_BOT_TOKEN_AAVE": "aave_token",
+                "TELEGRAM_CHAT_ID_TOPICS": "topics_chat_id",
+                "TELEGRAM_TOPIC_ID_AAVE": "42",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_telegram_message("Test message", "aave")
+
+            url = mock_post.call_args[0][0]
+            kwargs = mock_post.call_args[1]
+            self.assertIn("default_token", url)
+            self.assertNotIn("aave_token", url)
+            self.assertEqual(kwargs["json"]["chat_id"], "dummy_group")
+            self.assertEqual(kwargs["json"]["text"], "[aave] Test message")
+            self.assertNotIn("message_thread_id", kwargs["json"])
+
 
 class TestAlert(unittest.TestCase):
     """Tests for the Alert system."""

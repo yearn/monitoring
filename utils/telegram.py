@@ -42,52 +42,15 @@ class TelegramError(Exception):
     pass
 
 
-def send_telegram_message(
+def _post_message(
+    bot_token: str,
+    chat_id: str,
     message: str,
-    protocol: str,
-    disable_notification: bool = False,
-    plain_text: bool = False,
+    plain_text: bool,
+    disable_notification: bool,
+    topic_id: str | None = None,
 ) -> None:
-    """
-    Send a message to a Telegram chat using a bot.
-
-    Args:
-        message: The message to send
-        protocol: Protocol identifier used to select bot token and chat ID
-        disable_notification: If True, sends the message silently
-
-    Raises:
-        TelegramError: If the message fails to send
-    """
-    logger.debug("Sending telegram message:\n%s", message)
-
-    if os.getenv("LOG_LEVEL", "INFO").upper() == "DEBUG":
-        logger.debug("Skipping Telegram send (LOG_LEVEL=DEBUG)")
-        return
-
-    # Truncate long messages; disable Markdown to avoid broken entities
-    if len(message) > MAX_MESSAGE_LENGTH:
-        message = message[: MAX_MESSAGE_LENGTH - 3] + "..."
-        plain_text = True
-
-    # Check if this protocol has a topic ID configured (forum-style group)
-    topic_id = os.getenv(f"TELEGRAM_TOPIC_ID_{protocol.upper()}")
-
-    if topic_id:
-        # Topics always use the default bot and the shared topics chat
-        bot_token = os.getenv("TELEGRAM_BOT_TOKEN_DEFAULT")
-        chat_id = os.getenv("TELEGRAM_CHAT_ID_TOPICS")
-    else:
-        # Legacy per-protocol chat routing
-        bot_token = os.getenv(f"TELEGRAM_BOT_TOKEN_{protocol.upper()}")
-        if not bot_token:
-            bot_token = os.getenv("TELEGRAM_BOT_TOKEN_DEFAULT")
-        chat_id = os.getenv(f"TELEGRAM_CHAT_ID_{protocol.upper()}")
-
-    if not bot_token or not chat_id:
-        logger.warning("Missing Telegram credentials for %s", protocol)
-        return
-
+    """Send a single message to Telegram, raising TelegramError on failure."""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload: dict[str, object] = {
         "chat_id": chat_id,
@@ -118,6 +81,69 @@ def send_telegram_message(
         raise TelegramError(
             _redact_bot_token(f"Failed to send telegram message: {response.status_code} - {response.text}")
         )
+
+
+def send_telegram_message(
+    message: str,
+    protocol: str,
+    disable_notification: bool = False,
+    plain_text: bool = False,
+) -> None:
+    """
+    Send a message to a Telegram chat using a bot.
+
+    Args:
+        message: The message to send
+        protocol: Protocol identifier used to select bot token and chat ID
+        disable_notification: If True, sends the message silently
+
+    Raises:
+        TelegramError: If the message fails to send
+    """
+    logger.debug("Sending telegram message:\n%s", message)
+
+    if os.getenv("LOG_LEVEL", "INFO").upper() == "DEBUG":
+        logger.debug("Skipping Telegram send (LOG_LEVEL=DEBUG)")
+        return
+
+    # Truncate long messages; disable Markdown to avoid broken entities
+    if len(message) > MAX_MESSAGE_LENGTH:
+        message = message[: MAX_MESSAGE_LENGTH - 3] + "..."
+        plain_text = True
+
+    # Test/staging override: route every message to one chat for comparison runs.
+    # Set TELEGRAM_TEST_CHAT_ID to a dummy group id; unset to restore prod routing.
+    # The DEFAULT bot must be a member of that group. The per-protocol label is
+    # prepended so the merged feed shows which monitor produced each message, and
+    # no topic threading is applied (the dummy group has no per-protocol topics).
+    test_chat_id = os.getenv("TELEGRAM_TEST_CHAT_ID")
+    if test_chat_id:
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN_DEFAULT")
+        if not bot_token:
+            logger.warning("TELEGRAM_TEST_CHAT_ID set but TELEGRAM_BOT_TOKEN_DEFAULT missing")
+            return
+        _post_message(bot_token, test_chat_id, f"[{protocol}] {message}", plain_text, disable_notification)
+        return
+
+    # Check if this protocol has a topic ID configured (forum-style group)
+    topic_id = os.getenv(f"TELEGRAM_TOPIC_ID_{protocol.upper()}")
+
+    if topic_id:
+        # Topics always use the default bot and the shared topics chat
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN_DEFAULT")
+        chat_id = os.getenv("TELEGRAM_CHAT_ID_TOPICS")
+    else:
+        # Legacy per-protocol chat routing
+        bot_token = os.getenv(f"TELEGRAM_BOT_TOKEN_{protocol.upper()}")
+        if not bot_token:
+            bot_token = os.getenv("TELEGRAM_BOT_TOKEN_DEFAULT")
+        chat_id = os.getenv(f"TELEGRAM_CHAT_ID_{protocol.upper()}")
+
+    if not bot_token or not chat_id:
+        logger.warning("Missing Telegram credentials for %s", protocol)
+        return
+
+    _post_message(bot_token, chat_id, message, plain_text, disable_notification, topic_id)
 
 
 def get_github_run_url() -> str:
