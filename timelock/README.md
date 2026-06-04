@@ -9,7 +9,7 @@ Monitors all timelock contract types (TimelockController, Aave, Compound, Lido, 
 3. Routes each alert to the correct Telegram channel based on the protocol mapping.
 4. Stores the latest processed `blockTimestamp` in `cache-id.txt` (key: `TIMELOCK_LAST_TS`) to avoid duplicate alerts between runs.
 
-The script runs [hourly via GitHub Actions](../.github/workflows/hourly.yml).
+The script runs hourly via the [monitoring runner](../automation/jobs.yaml).
 
 ## GraphQL Schema
 

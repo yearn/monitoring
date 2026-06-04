@@ -4,7 +4,7 @@
 
 For roles on Morpho vaults, refer to the following [document](https://github.com/morpho-org/metamorpho/blob/main/README.md).
 
-Morpho governance monitoring is defined in the [Python script](./governance.py) that is executed daily via [GitHub Actions](../.github/workflows/daily.yml) because minimum timelock is 3 days to get vaults whitelisted, and 1 day is mimimum value in the contract.
+Morpho governance monitoring is defined in the [Python script](./governance.py) that is executed daily via the [monitoring runner](../automation/jobs.yaml) because minimum timelock is 3 days to get vaults whitelisted, and 1 day is mimimum value in the contract.
 
 The script checks if there are any new values pending in the timelock for a given vault. It detects the following changes:
 
@@ -46,11 +46,11 @@ To monitor a new Morpho vault, add its address to the `VAULTS_BY_CHAIN` variable
 
 ### Bad Debt
 
-Bad debt is fetched from the Morpho GraphQL API. Each market is checked for bad debt; if any market exhibits bad debt, a Telegram message is sent. The script runs hourly via [GitHub Actions](../.github/workflows/hourly.yml). The monitoring logic is implemented in [markets.py#L166](./markets.py#L166).
+Bad debt is fetched from the Morpho GraphQL API. Each market is checked for bad debt; if any market exhibits bad debt, a Telegram message is sent. The script runs hourly via the [monitoring runner](../automation/jobs.yaml). The monitoring logic is implemented in [markets.py#L166](./markets.py#L166).
 
 ### Utilization & Liquidity
 
-The utilization ratio for each market is calculated as the ratio of borrowed assets to total collateral assets. If this ratio exceeds 95%, a Telegram message is sent. The script runs hourly via [GitHub Actions](../.github/workflows/hourly.yml), and the monitoring logic is defined in [markets.py#L263](./markets.py#L263). Note that liquidity is the inverse of utilization—high utilization implies low liquidity (e.g., 95% utilization corresponds to 5% liquidity).
+The utilization ratio for each market is calculated as the ratio of borrowed assets to total collateral assets. If this ratio exceeds 95%, a Telegram message is sent. The script runs hourly via the [monitoring runner](../automation/jobs.yaml), and the monitoring logic is defined in [markets.py#L263](./markets.py#L263). Note that liquidity is the inverse of utilization—high utilization implies low liquidity (e.g., 95% utilization corresponds to 5% liquidity).
 
 #### YV Collateral Vault Liquidity Monitoring
 
