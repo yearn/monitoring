@@ -67,8 +67,7 @@ uv run python -m automation run hourly --dry-run
 uv run python -m automation run hourly
 ```
 
-Available profiles: `hourly`, `yearn-stuck-triggers`, `daily`, `weekly`,
-`multisig` (see `automation/jobs.yaml`).
+Available profiles: `hourly`, `daily`, `multisig` (see `automation/jobs.yaml`).
 
 ---
 

@@ -19,15 +19,15 @@ uv run python -m automation list
 uv run python -m automation render-crontab
 
 # Run a profile locally (executes the scripts)
-uv run python -m automation run weekly
+uv run python -m automation run daily
 
 # Same, but only print the argv that would run
-uv run python -m automation run weekly --dry-run
+uv run python -m automation run daily --dry-run
 ```
 
 ## Adding a script
 
-1. Open `jobs.yaml`, find the profile whose cadence you want (`hourly` / `daily` / `weekly` / …).
+1. Open `jobs.yaml`, find the profile whose cadence you want (`hourly` / `daily` / …).
 2. Append a task:
    ```yaml
    - { name: "my-protocol", script: my-protocol/main.py }

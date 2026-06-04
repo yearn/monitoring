@@ -38,7 +38,7 @@ Optional flags:
 
 ## Endorsed Vault Check
 
-The script `yearn/check_endorsed.py` verifies that all Yearn v3 vaults listed in the yDaemon API are actually endorsed on-chain in the registry contract. It runs weekly via the [monitoring runner](../automation/jobs.yaml).
+The script `yearn/check_endorsed.py` verifies that all Yearn v3 vaults listed in the yDaemon API are actually endorsed on-chain in the registry contract. It runs daily via the [monitoring runner](../automation/jobs.yaml).
 
 ### How It Works
 

@@ -150,8 +150,8 @@ class TestRepoJobsYaml(unittest.TestCase):
     def test_repo_jobs_yaml_parses(self):
         repo_yaml = Path(__file__).resolve().parent.parent / "automation" / "jobs.yaml"
         cfg = load_jobs_config(repo_yaml)
-        self.assertGreaterEqual(len(cfg.profiles), 5)
-        for expected in ("hourly", "daily", "weekly", "multisig", "yearn-stuck-triggers"):
+        self.assertGreaterEqual(len(cfg.profiles), 3)
+        for expected in ("hourly", "daily", "multisig"):
             self.assertIn(expected, cfg.profiles, f"missing profile {expected}")
 
 

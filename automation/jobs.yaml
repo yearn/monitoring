@@ -18,7 +18,7 @@
 profiles:
 
   hourly:
-    cron: "11 * * * *"
+    cron: "5 * * * *"
     description: "Hourly monitoring (was .github/workflows/hourly.yml)."
     # No env override: alert dedupe and morpho rows share the default cache-id.txt
     # under $CACHE_DIR.
@@ -38,6 +38,8 @@ profiles:
       - { name: "usdai-large-mints",      script: usdai/large_mints.py }
       - { name: "stables-dune-large-transfers", script: stables/dune_large_transfers.py }
       - { name: "yearn-alert-large-flows", script: yearn/alert_large_flows.py }
+      # Cache: tks-trigger-cache.json under $CACHE_DIR (check_stuck_triggers.DEFAULT_CACHE_FILE).
+      - { name: "yearn-check-stuck-triggers", script: yearn/check_stuck_triggers.py, enabled: false }
       - { name: "maple",                  script: maple/main.py }
       - { name: "timelock-alerts",        script: timelock/timelock_alerts.py }
       # proposals scripts must run AFTER timelock-alerts (cache dedupe ordering).
@@ -46,14 +48,6 @@ profiles:
       - { name: "compound-proposals",     script: compound/proposals.py }
       - { name: "fluid-proposals",        script: fluid/proposals.py }
       - { name: "maker-proposals",        script: maker/proposals.py }
-
-  yearn-stuck-triggers:
-    cron: "15 * * * *"
-    description: "Yearn stuck triggers (was the second job in hourly.yml)."
-    # Cache file defaults to tks-trigger-cache.json under $CACHE_DIR (see
-    # check_stuck_triggers.DEFAULT_CACHE_FILE), so no --cache-file override needed.
-    tasks:
-      - { name: "yearn-check-stuck-triggers", script: yearn/check_stuck_triggers.py }
 
   daily:
     cron: "19 8 * * *"
@@ -70,13 +64,8 @@ profiles:
       - { name: "strata",               script: strata/main.py }
       - { name: "cap-liquidity",        script: cap/liquidity.py }
       - { name: "tenderly",             script: utils/tenderly/tenderly.py }
-      - { name: "yearn-check-shadow-debt", script: yearn/check_shadow_debt.py }
+      - { name: "yearn-check-shadow-debt", script: yearn/check_shadow_debt.py, enabled: false }
       - { name: "compound",             script: compound/main.py }
-
-  weekly:
-    cron: "25 10 * * 0"
-    description: "Weekly monitoring (was .github/workflows/weekly.yml)."
-    tasks:
       - { name: "yearn-check-endorsed", script: yearn/check_endorsed.py }
       - { name: "yearn-check-timelock-delay", script: yearn/check_timelock_delay.py }
 
