@@ -1,6 +1,6 @@
 import unittest
 
-from apyusd.main import _format_rate, get_rate_delta, should_alert_on_rate_delta
+from protocols.apyusd.main import _format_rate, get_rate_delta, should_alert_on_rate_delta
 
 
 class TestApyusdRateMonitor(unittest.TestCase):

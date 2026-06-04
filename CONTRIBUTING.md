@@ -19,10 +19,10 @@ uv run pytest tests/          # run tests
 
 ## Project Structure
 
-Each protocol lives in its own directory with a `main.py` entry point:
+Each protocol lives in its own directory under `protocols/` with a `main.py` entry point:
 
 ```
-protocol-name/
+protocols/protocol-name/
   main.py          # entry point
   abi/             # contract ABIs (if needed)
   README.md        # protocol-specific docs
@@ -116,7 +116,7 @@ if __name__ == "__main__":
     run_with_alert(main, PROTOCOL)
 ```
 
-For multi-protocol scripts with no single `PROTOCOL` constant (e.g. `timelock_alerts.py`, `safe/main.py`), pass a sensible default channel as a string: `"yearn"` for general ops, `"pegs"` for peg monitors.
+For multi-protocol scripts with no single `PROTOCOL` constant (e.g. `timelock_alerts.py`, `protocols/safe/main.py`), pass a sensible default channel as a string: `"yearn"` for general ops, `"pegs"` for peg monitors.
 
 ### Web3 / RPC Calls
 
@@ -147,11 +147,11 @@ write_last_value_to_file(cache_filename, "MY_KEY", new_value)
 
 ## Adding a New Protocol
 
-1. Create `protocol-name/main.py` following the pattern above, with a `main()` function and an `if __name__ == "__main__":` block that wraps it via `run_with_alert(main, PROTOCOL)` (see [Script Entrypoint](#script-entrypoint))
-2. Add a `protocol-name/README.md` describing what it monitors
-3. Add `"protocol-name"` to the `packages` list in `pyproject.toml` under `[tool.setuptools]`
+1. Create `protocols/protocol-name/main.py` following the pattern above, with a `main()` function and an `if __name__ == "__main__":` block that wraps it via `run_with_alert(main, PROTOCOL)` (see [Script Entrypoint](#script-entrypoint)). Reference ABIs by their repo-root-relative path, e.g. `load_abi("protocols/protocol-name/abi/Foo.json")`
+2. Add a `protocols/protocol-name/README.md` describing what it monitors
+3. No `pyproject.toml` change is needed — packages under `protocols/` are discovered automatically (see `[tool.setuptools.packages.find]`)
 4. Add the corresponding `TELEGRAM_BOT_TOKEN_*` and `TELEGRAM_CHAT_ID_*` entries to `.env.example`
-5. Add the protocol to the CI workflow if it should run on a schedule
+5. Register the script in `automation/jobs.yaml` under the right profile if it should run on a schedule
 
 ## Tests
 

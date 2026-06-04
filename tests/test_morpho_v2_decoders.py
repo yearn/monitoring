@@ -10,7 +10,7 @@ import unittest
 from eth_abi import encode as abi_encode
 from web3 import Web3
 
-from morpho.v2_decoders import (
+from protocols.morpho.v2_decoders import (
     SELECTOR_TO_SIG,
     decode_id_data,
     decode_submit,

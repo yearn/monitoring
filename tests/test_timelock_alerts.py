@@ -4,7 +4,7 @@ import unittest
 import unittest.mock
 from unittest.mock import patch
 
-from timelock.timelock_alerts import TimelockConfig, build_alert_message
+from protocols.timelock.timelock_alerts import TimelockConfig, build_alert_message
 from utils.telegram import MAX_MESSAGE_LENGTH
 
 
@@ -42,7 +42,7 @@ TIMELOCK_INFO = TimelockConfig(
 class TestBuildAlertMessageTruncation(unittest.TestCase):
     """Test that build_alert_message respects MAX_MESSAGE_LENGTH and priority."""
 
-    @patch("timelock.timelock_alerts._get_ai_explanation", return_value=None)
+    @patch("protocols.timelock.timelock_alerts._get_ai_explanation", return_value=None)
     def test_short_message_no_truncation(self, _mock_ai: object) -> None:
         """A simple message should not be truncated."""
         events = [_make_event()]
@@ -51,7 +51,7 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         self.assertIn("TIMELOCK: New Operation Scheduled", msg)
         self.assertIn("Test Timelock", msg)
 
-    @patch("timelock.timelock_alerts._get_ai_explanation", return_value=None)
+    @patch("protocols.timelock.timelock_alerts._get_ai_explanation", return_value=None)
     def test_long_call_details_truncated(self, _mock_ai: object) -> None:
         """When call details are very long, they should be truncated to fit."""
         events = [
@@ -66,8 +66,8 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         self.assertLessEqual(len(msg), MAX_MESSAGE_LENGTH)
         self.assertIn("...", msg)
 
-    @patch("timelock.timelock_alerts.format_explanation_line")
-    @patch("timelock.timelock_alerts._get_ai_explanation")
+    @patch("protocols.timelock.timelock_alerts.format_explanation_line")
+    @patch("protocols.timelock.timelock_alerts._get_ai_explanation")
     def test_ai_summary_preserved_over_call_details(self, mock_ai: object, mock_format: object) -> None:
         """AI summary must be preserved even when call details are long."""
         from utils.llm.ai_explainer import Explanation
@@ -95,8 +95,8 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         # Call details should be truncated
         self.assertIn("...", msg)
 
-    @patch("timelock.timelock_alerts.format_explanation_line")
-    @patch("timelock.timelock_alerts._get_ai_explanation")
+    @patch("protocols.timelock.timelock_alerts.format_explanation_line")
+    @patch("protocols.timelock.timelock_alerts._get_ai_explanation")
     def test_message_under_limit_with_ai(self, mock_ai: object, mock_format: object) -> None:
         """When everything fits, nothing should be truncated."""
         from utils.llm.ai_explainer import Explanation
@@ -112,7 +112,7 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         self.assertIn("Short summary.", msg)
         self.assertNotIn("...", msg)
 
-    @patch("timelock.timelock_alerts._get_ai_explanation")
+    @patch("protocols.timelock.timelock_alerts._get_ai_explanation")
     def test_ai_skipped_for_governance_protocol(self, mock_ai: object) -> None:
         """Protocols with dedicated governance monitoring skip the AI summary entirely."""
         aave_info = TimelockConfig(
@@ -155,9 +155,9 @@ class TestMapleProposalUnwrap(unittest.TestCase):
         )
         return "0x" + selector.hex() + body.hex()
 
-    @patch("timelock.timelock_alerts.ChainManager")
+    @patch("protocols.timelock.timelock_alerts.ChainManager")
     def test_unwraps_safe_wrapped_schedule_proposals(self, mock_cm: object) -> None:
-        from timelock.timelock_alerts import _maple_proposal_calls
+        from protocols.timelock.timelock_alerts import _maple_proposal_calls
 
         targets = ["0x" + "aa" * 20, "0x" + "bb" * 20]
         datas = [bytes.fromhex("8456cb59"), bytes.fromhex("3f4ba83a")]  # pause(), unpause()
@@ -178,9 +178,9 @@ class TestMapleProposalUnwrap(unittest.TestCase):
         self.assertEqual(calls[1]["target"], targets[1])
         self.assertEqual(calls[1]["data"], "0x3f4ba83a")
 
-    @patch("timelock.timelock_alerts.ChainManager")
+    @patch("protocols.timelock.timelock_alerts.ChainManager")
     def test_unwraps_direct_schedule_proposals(self, mock_cm: object) -> None:
-        from timelock.timelock_alerts import _maple_proposal_calls
+        from protocols.timelock.timelock_alerts import _maple_proposal_calls
 
         targets = ["0x" + "cc" * 20]
         datas = [bytes.fromhex("8456cb59")]
@@ -196,9 +196,9 @@ class TestMapleProposalUnwrap(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["data"], "0x8456cb59")
 
-    @patch("timelock.timelock_alerts.ChainManager")
+    @patch("protocols.timelock.timelock_alerts.ChainManager")
     def test_returns_none_for_unknown_selector(self, mock_cm: object) -> None:
-        from timelock.timelock_alerts import _maple_proposal_calls
+        from protocols.timelock.timelock_alerts import _maple_proposal_calls
 
         # proposeRoleUpdates path — we can't synthesize (target, data) pairs from it.
         mock_client = unittest.mock.MagicMock()

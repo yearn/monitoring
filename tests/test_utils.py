@@ -714,16 +714,16 @@ class TestUstbCachePath(unittest.TestCase):
     """Tests for USTB cache path handling under the hardened service."""
 
     def test_ustb_cache_file_respects_cache_dir(self):
-        for module_name in ("ustb.main", "utils.cache"):
+        for module_name in ("protocols.ustb.main", "utils.cache"):
             sys.modules.pop(module_name, None)
 
         with patch.dict(os.environ, {"CACHE_DIR": "/srv/cache"}):
-            ustb_main = importlib.import_module("ustb.main")
+            ustb_main = importlib.import_module("protocols.ustb.main")
 
         try:
             self.assertEqual(ustb_main.CACHE_FILE, "/srv/cache/cache-id.txt")
         finally:
-            for module_name in ("ustb.main", "utils.cache"):
+            for module_name in ("protocols.ustb.main", "utils.cache"):
                 sys.modules.pop(module_name, None)
 
 

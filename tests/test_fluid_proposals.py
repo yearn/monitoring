@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from fluid.proposals import get_proposals
+from protocols.fluid.proposals import get_proposals
 
 
 class _Response:
@@ -39,10 +39,10 @@ def test_fluid_proposal_alert_escapes_api_markdown_and_keeps_link():
     }
 
     with (
-        patch("fluid.proposals.requests.get", return_value=_Response(payload)),
-        patch("fluid.proposals.get_last_queued_id_from_file", return_value=130),
-        patch("fluid.proposals.write_last_queued_id_to_file") as mock_write,
-        patch("fluid.proposals.send_telegram_message") as mock_send,
+        patch("protocols.fluid.proposals.requests.get", return_value=_Response(payload)),
+        patch("protocols.fluid.proposals.get_last_queued_id_from_file", return_value=130),
+        patch("protocols.fluid.proposals.write_last_queued_id_to_file") as mock_write,
+        patch("protocols.fluid.proposals.send_telegram_message") as mock_send,
     ):
         get_proposals()
 
@@ -57,8 +57,8 @@ def test_fluid_proposal_alert_escapes_api_markdown_and_keeps_link():
 
 def test_fluid_proposal_fetch_error_alert_uses_plain_text():
     with (
-        patch("fluid.proposals.requests.get", side_effect=Exception("bad TYPE_1 payload")),
-        patch("fluid.proposals.send_telegram_message") as mock_send,
+        patch("protocols.fluid.proposals.requests.get", side_effect=Exception("bad TYPE_1 payload")),
+        patch("protocols.fluid.proposals.send_telegram_message") as mock_send,
     ):
         get_proposals()
 

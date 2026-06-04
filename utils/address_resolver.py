@@ -21,7 +21,7 @@ Backend = Callable[[int, str], str]
 
 def _safe_utility_backend(chain_id: int, address: str) -> str:
     """Canonical Safe utilities (MultiSendCallOnly, SignMessageLib, …). No IO."""
-    from safe.multisend import safe_utility_label
+    from protocols.safe.multisend import safe_utility_label
 
     return safe_utility_label(address)
 

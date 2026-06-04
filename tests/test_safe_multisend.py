@@ -2,7 +2,7 @@
 
 import unittest
 
-from safe.multisend import build_context_note, extract_inner_calls, safe_utility_label
+from protocols.safe.multisend import build_context_note, extract_inner_calls, safe_utility_label
 
 
 class TestSafeUtilityLabel(unittest.TestCase):

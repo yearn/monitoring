@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from maker.proposals import get_proposals
+from protocols.maker.proposals import get_proposals
 
 
 def test_maker_alerts_scheduled_uncast_executives_and_escapes_markdown():
@@ -27,10 +27,10 @@ def test_maker_alerts_scheduled_uncast_executives_and_escapes_markdown():
     ]
 
     with (
-        patch("maker.proposals.fetch_executive_proposals", return_value=proposals),
-        patch("maker.proposals.get_last_queued_id_from_file", return_value=0),
-        patch("maker.proposals.send_telegram_message") as mock_send,
-        patch("maker.proposals.write_last_queued_id_to_file") as mock_write,
+        patch("protocols.maker.proposals.fetch_executive_proposals", return_value=proposals),
+        patch("protocols.maker.proposals.get_last_queued_id_from_file", return_value=0),
+        patch("protocols.maker.proposals.send_telegram_message") as mock_send,
+        patch("protocols.maker.proposals.write_last_queued_id_to_file") as mock_write,
     ):
         get_proposals()
 
@@ -55,10 +55,10 @@ def test_maker_does_not_cache_when_only_new_executives_are_not_actionable():
     ]
 
     with (
-        patch("maker.proposals.fetch_executive_proposals", return_value=proposals),
-        patch("maker.proposals.get_last_queued_id_from_file", return_value=0),
-        patch("maker.proposals.send_telegram_message") as mock_send,
-        patch("maker.proposals.write_last_queued_id_to_file") as mock_write,
+        patch("protocols.maker.proposals.fetch_executive_proposals", return_value=proposals),
+        patch("protocols.maker.proposals.get_last_queued_id_from_file", return_value=0),
+        patch("protocols.maker.proposals.send_telegram_message") as mock_send,
+        patch("protocols.maker.proposals.write_last_queued_id_to_file") as mock_write,
     ):
         get_proposals()
 

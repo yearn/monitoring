@@ -1,6 +1,6 @@
 """Tests for the Dune-backed large transfer monitor."""
 
-from stables import dune_large_transfers as monitor
+from protocols.stables import dune_large_transfers as monitor
 
 
 def _row(**overrides):
