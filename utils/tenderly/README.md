@@ -4,7 +4,7 @@ Monitors Tenderly alerts to ensure they haven't been changed unexpectedly.
 
 ## Overview
 
-This script verifies that Tenderly alerts match a stored snapshot (`alerts.json`). It runs daily via GitHub Actions and will fail if alerts are added, removed, or modified without updating the snapshot.
+This script verifies that Tenderly alerts match a stored snapshot (`alerts.json`). It runs daily via the [monitoring runner](../../automation/jobs.yaml) and will fail if alerts are added, removed, or modified without updating the snapshot.
 
 ## Files
 
@@ -47,4 +47,4 @@ If alerts are accidentally deleted or modified, use `alerts.json` to recreate th
 
 ## CI/CD Integration
 
-Runs automatically daily via `.github/workflows/daily.yml`. The workflow will fail if alerts change unexpectedly, alerting you to investigate.
+Runs automatically daily via the [monitoring runner](../../automation/jobs.yaml). The run will fail if alerts change unexpectedly, alerting you to investigate.

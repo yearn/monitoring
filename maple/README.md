@@ -63,7 +63,7 @@ uv run maple/main.py
 
 ## Frequency
 
-Runs hourly via [GitHub Actions](../.github/workflows/hourly.yml).
+Runs hourly via the [monitoring runner](../automation/jobs.yaml).
 
 ## Risk Report
 

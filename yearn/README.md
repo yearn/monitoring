@@ -4,7 +4,7 @@ This folder contains monitoring scripts for Yearn vault activity, Safe multisig 
 
 ## Large Flows
 
-The script `yearn/alert_large_flows.py` checks recent deposit and withdrawal events and sends a Telegram alert when a single flow exceeds a USD threshold. It runs [hourly via GitHub Actions](../.github/workflows/hourly.yml).
+The script `yearn/alert_large_flows.py` checks recent deposit and withdrawal events and sends a Telegram alert when a single flow exceeds a USD threshold. It runs hourly via the [monitoring runner](../automation/jobs.yaml).
 
 ### Data Sources
 
@@ -38,7 +38,7 @@ Optional flags:
 
 ## Endorsed Vault Check
 
-The script `yearn/check_endorsed.py` verifies that all Yearn v3 vaults listed in the yDaemon API are actually endorsed on-chain in the registry contract. It runs [weekly via GitHub Actions](../.github/workflows/weekly.yml).
+The script `yearn/check_endorsed.py` verifies that all Yearn v3 vaults listed in the yDaemon API are actually endorsed on-chain in the registry contract. It runs weekly via the [monitoring runner](../automation/jobs.yaml).
 
 ### How It Works
 
@@ -232,7 +232,7 @@ uv run yearn/check_stuck_triggers.py --include-strategies 0x1234...,0x5678...
 
 ## Safe Multisig Monitoring
 
-Yearn Safe multisigs are monitored via the shared [Safe monitoring script](../safe/main.py). The script polls the [Safe Transaction Service](https://docs.safe.global/core-api/transaction-service-reference) for queued transactions and sends Telegram alerts when unexpected pending txs appear. It runs [every 10 minutes via GitHub Actions](../.github/workflows/multisig-checker.yml).
+Yearn Safe multisigs are monitored via the shared [Safe monitoring script](../safe/main.py). The script polls the [Safe Transaction Service](https://docs.safe.global/core-api/transaction-service-reference) for queued transactions and sends Telegram alerts when unexpected pending txs appear. It runs every 10 minutes via the [monitoring runner](../automation/jobs.yaml).
 
 Yearn multisig config lives in [`safe/addresses.py`](../safe/addresses.py) under `YEARN_MULTISIGS`. The same workflow also monitors non-Yearn protocol multisigs (LIDO, AAVE, etc.) configured in `ALL_SAFE_ADDRESSES`.
 

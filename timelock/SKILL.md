@@ -153,7 +153,7 @@ elif timelock_type in ("TimelockController", "Compound", "Puffer", "NewProtocol"
 
 - Add the new timelock to the table in `timelock/README.md`
 - Update the `timelockType` list in the schema fields section
-- If using a new protocol, add `TELEGRAM_CHAT_ID_{PROTOCOL}` to GitHub Actions secrets and `.github/workflows/_run-monitoring.yml`
+- If using a new protocol, add `TELEGRAM_CHAT_ID_{PROTOCOL}` to the monitoring env file (`/etc/monitoring/.env` on the VPS) and document it in `.env.example`
 
 ## Deployment Order
 
