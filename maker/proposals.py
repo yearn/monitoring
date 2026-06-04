@@ -4,7 +4,7 @@ import requests
 
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
 from utils.logging import get_logger
-from utils.telegram import send_telegram_message
+from utils.telegram import escape_markdown, send_telegram_message
 
 PROTOCOL = "maker"
 logger = get_logger(PROTOCOL)
@@ -28,8 +28,8 @@ def get_proposals():
             logger.info("No executive proposals found")
             return
 
-        # Sort by date ascending so we process oldest first
-        proposals.sort(key=lambda p: p["date"])
+        # Sort by date ascending so we process oldest first.
+        proposals = sorted(proposals, key=lambda p: p["date"])
 
         # Cache stores epoch timestamp of the latest reported proposal date
         last_reported_timestamp = get_last_queued_id_from_file(PROTOCOL)
@@ -43,7 +43,7 @@ def get_proposals():
             if proposal_timestamp <= last_reported_timestamp:
                 continue
 
-            spell_data = proposal.get("spellData", {})
+            spell_data = proposal.get("spellData") or {}
 
             # Only alert on scheduled (not yet executed) proposals
             if not spell_data.get("hasBeenScheduled") or spell_data.get("hasBeenCast"):
@@ -51,9 +51,9 @@ def get_proposals():
 
             link = SKY_EXECUTIVE_URL + proposal["key"]
 
-            message += f"📕 Title: {proposal['title']}\n"
+            message += f"📕 Title: {escape_markdown(proposal['title'])}\n"
             if proposal.get("proposalBlurb"):
-                blurb = proposal["proposalBlurb"]
+                blurb = escape_markdown(proposal["proposalBlurb"])
                 if len(blurb) > 450:
                     blurb = blurb[:450].rsplit(" ", 1)[0] + "..."
                 message += f"📝 Summary: {blurb}\n"

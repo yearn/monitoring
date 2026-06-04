@@ -10,6 +10,8 @@ from utils.telegram import send_telegram_message
 
 PROTOCOL = "aave"
 logger = get_logger(PROTOCOL)
+AAVE_GOVERNANCE_EXECUTED_STATE = 4
+AAVE_GOVERNANCE_CACHE_API = "https://governance-cache-api.aave.com/graphql"
 
 
 def run_query(query: str, variables: dict) -> dict | None:
@@ -45,10 +47,15 @@ def run_query(query: str, variables: dict) -> dict | None:
 
 def fetch_queued_proposals(last_reported_id: int):
     # state: 3 is queued state: https://github.com/bgd-labs/aave-governance-v3/blob/0c14d60ac89d7a9f79d0a1f77de5c99c3ba1201f/src/interfaces/IGovernanceCore.sol#L75
-    # queued state is transferred to active state when it's executed, few seconds later so we need to check state 4
+    # state: 4 is executed. Aave Governance execution queues proposal payloads in their PayloadsController.
     query = """
-        query($lastId: Int!) {
-            proposals(where:{state:4, proposalId_gt:$lastId}) {
+        query($lastId: Int!, $executedState: Int!) {
+            proposals(
+                where:{state:$executedState, proposalId_gt:$lastId}
+                orderBy: proposalId
+                orderDirection: desc
+                first: 10
+            ) {
                 proposalId
                 proposalMetadata{
                     title
@@ -58,18 +65,61 @@ def fetch_queued_proposals(last_reported_id: int):
                         timestamp
                     }
                 }
+                payloads{
+                    id
+                    chainId
+                    payloadsController
+                }
             }
         }
     """
 
-    # get only last 10 proposals
-    variables = {"lastId": last_reported_id}
+    variables = {"lastId": last_reported_id, "executedState": AAVE_GOVERNANCE_EXECUTED_STATE}
     response = run_query(query, variables)
     if response is None:
         return []
 
     proposals = response["data"]["proposals"]
-    return proposals
+    return sorted(proposals, key=lambda proposal: int(proposal["proposalId"]))
+
+
+def fetch_payload_states(proposal_id: int) -> list[dict]:
+    query = """
+        query GetProposalPayloads($proposalId: String!) {
+            getProposalPayloads(pProposalId: $proposalId) {
+                nodes {
+                    proposalId
+                    payloadId
+                    chainId
+                    state
+                    queuedAt
+                    executedAt
+                    cancelledAt
+                }
+            }
+        }
+    """
+    response = request_with_retry(
+        "post",
+        AAVE_GOVERNANCE_CACHE_API,
+        json={"query": query, "variables": {"proposalId": str(proposal_id)}},
+    )
+    data = response.json()
+    if "errors" in data:
+        raise ValueError(f"Aave governance cache API error: {data['errors']}")
+    return data["data"]["getProposalPayloads"]["nodes"]
+
+
+def has_pending_payload(proposal: dict) -> bool:
+    proposal_id = int(proposal["proposalId"])
+    payload_states = fetch_payload_states(proposal_id)
+    if not payload_states:
+        logger.info("Proposal: %s has no payload cache data", proposal_id)
+        return False
+
+    # The app shows proposals like 489 as still pending while any payload is not
+    # executed yet. Fully executed proposals like 488 should not alert again.
+    return any(payload.get("state") != "executed" for payload in payload_states)
 
 
 def handle_governance_proposals():
@@ -81,6 +131,7 @@ def handle_governance_proposals():
 
     aave_url = "https://app.aave.com/governance/v3/proposal/?proposalId="
     message = ""
+    newest_reported_id = last_sent_id
     for proposal in proposals:
         timestamp = int(proposal["transactions"]["executed"]["timestamp"])
         proposal_id = int(proposal["proposalId"])
@@ -88,12 +139,17 @@ def handle_governance_proposals():
             logger.info("Proposal: %s already reported", proposal["proposalId"])
             continue
 
+        if not has_pending_payload(proposal):
+            logger.info("Proposal: %s has no pending payloads", proposal["proposalId"])
+            continue
+
+        newest_reported_id = max(newest_reported_id, proposal_id)
         date_time = datetime.fromtimestamp(timestamp)
-        timestamp = date_time.strftime("%Y-%m-%d %H:%M:%S")
+        formatted_timestamp = date_time.strftime("%Y-%m-%d %H:%M:%S")
         message += (
             f"📕 Title: {proposal['proposalMetadata']['title']}\n"
             f"🆔 ID: {proposal['proposalId']}\n"
-            f"🕒 Queued at: {timestamp}\n"
+            f"🕒 Queued at: {formatted_timestamp}\n"
             f"🔗 Link to Proposal: {aave_url + proposal['proposalId']}\n\n"
         )
 
@@ -103,7 +159,7 @@ def handle_governance_proposals():
 
     message = "🖋️ Queued Aave Governance Proposals 🖋️\n" + message
     send_telegram_message(message, PROTOCOL)
-    write_last_queued_id_to_file(PROTOCOL, proposals[-1]["proposalId"])
+    write_last_queued_id_to_file(PROTOCOL, newest_reported_id)
 
 
 if __name__ == "__main__":
