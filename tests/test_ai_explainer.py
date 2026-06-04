@@ -11,11 +11,13 @@ from utils.llm.ai_explainer import (
     _build_prompt,
     _collect_safety_checks,
     _collect_token_flows,
+    _expand_detail,
     _explanation_from_json,
     _format_decimal,
-    _generate_draft,
+    _generate_explanation,
+    _generate_summary,
     _parse_explanation,
-    _refine_explanation,
+    _refine_summary,
     explain_transaction,
     format_explanation_line,
 )
@@ -427,38 +429,86 @@ class TestStructuredOutput(unittest.TestCase):
         exp = _explanation_from_json({"summary": "Grants admin role. LOW.", "detail": "d", "risk_tag": "HIGH"})
         self.assertEqual(exp.summary, "Grants admin role. HIGH")
 
-    def test_generate_draft_uses_structured_when_supported(self) -> None:
+    def test_generate_summary_uses_structured_when_supported(self) -> None:
         provider = MagicMock()
         provider.supports_structured_output = True
-        provider.complete_structured.return_value = {"summary": "Does X", "detail": "d", "risk_tag": "HIGH"}
+        # Stage-1 schema carries summary + risk_tag only — no detail field.
+        provider.complete_structured.return_value = {"summary": "Does X", "risk_tag": "HIGH"}
 
-        result = _generate_draft(provider, "prompt")
+        result = _generate_summary(provider, "prompt")
 
         provider.complete_structured.assert_called_once()
         provider.complete.assert_not_called()
         self.assertEqual(result.summary, "Does X HIGH")
+        self.assertEqual(result.detail, "")
 
-    def test_generate_draft_falls_back_to_text_on_error(self) -> None:
+    def test_generate_summary_falls_back_to_text_on_error(self) -> None:
         provider = MagicMock()
         provider.supports_structured_output = True
         provider.complete_structured.side_effect = LLMError("unsupported")
         provider.complete.return_value = "TLDR: Does X. LOW."
 
-        result = _generate_draft(provider, "prompt")
+        result = _generate_summary(provider, "prompt")
 
         provider.complete.assert_called_once()
         self.assertEqual(result.summary, "Does X. LOW.")
 
-    def test_generate_draft_falls_back_on_empty_summary(self) -> None:
+    def test_generate_summary_falls_back_on_empty_summary(self) -> None:
         provider = MagicMock()
         provider.supports_structured_output = True
-        provider.complete_structured.return_value = {"summary": "", "detail": "", "risk_tag": "LOW"}
+        provider.complete_structured.return_value = {"summary": "", "risk_tag": "LOW"}
         provider.complete.return_value = "TLDR: text path. LOW."
 
-        result = _generate_draft(provider, "prompt")
+        result = _generate_summary(provider, "prompt")
 
         provider.complete.assert_called_once()
         self.assertEqual(result.summary, "text path. LOW.")
+
+
+class TestTwoStageGeneration(unittest.TestCase):
+    """Tests for _generate_explanation: summary first, then detail derived from it."""
+
+    def test_detail_expanded_from_summary_on_structured_path(self) -> None:
+        provider = MagicMock()
+        provider.supports_structured_output = True
+        provider.complete_structured.return_value = {"summary": "Transfers 50.78 USDC", "risk_tag": "LOW"}
+        provider.complete.return_value = "Moves 50.78 USDC from the multisig to five addresses."
+
+        result = _generate_explanation(provider, "ctx prompt")
+
+        # Stage 1 = structured summary, stage 2 = one text completion for the detail.
+        provider.complete_structured.assert_called_once()
+        provider.complete.assert_called_once()
+        self.assertEqual(result.summary, "Transfers 50.78 USDC LOW")
+        self.assertEqual(result.detail, "Moves 50.78 USDC from the multisig to five addresses.")
+        # The expansion prompt must carry the confirmed summary so the detail derives from it.
+        expansion_prompt = provider.complete.call_args[0][0]
+        self.assertIn("Transfers 50.78 USDC LOW", expansion_prompt)
+        self.assertIn("ctx prompt", expansion_prompt)
+
+    def test_text_fallback_keeps_joint_detail_single_call(self) -> None:
+        provider = MagicMock()
+        provider.supports_structured_output = False
+        provider.complete.return_value = "TLDR: Does X. LOW.\n\nDETAIL:\njoint detail."
+
+        result = _generate_explanation(provider, "prompt")
+
+        # Degraded path: one completion produces both fields; no second expansion call.
+        provider.complete.assert_called_once()
+        self.assertEqual(result.summary, "Does X. LOW.")
+        self.assertEqual(result.detail, "joint detail.")
+
+    def test_empty_summary_skips_expansion(self) -> None:
+        provider = MagicMock()
+        provider.supports_structured_output = True
+        provider.complete_structured.return_value = {"summary": "", "risk_tag": "LOW"}
+        provider.complete.return_value = ""  # text fallback also empty
+
+        result = _generate_explanation(provider, "prompt")
+
+        self.assertEqual(result.summary, "")
+        # No expansion attempted when there's no summary to derive from.
+        self.assertEqual(result.detail, "")
 
 
 class TestParseExplanation(unittest.TestCase):
@@ -529,40 +579,59 @@ class TestFormatExplanationLine(unittest.TestCase):
         self.assertNotIn("Full details", result)
 
 
-class TestRefineExplanation(unittest.TestCase):
-    """Tests for _refine_explanation."""
+class TestRefineSummary(unittest.TestCase):
+    """Tests for _refine_summary (critiques the authoritative summary, not the detail)."""
 
     def test_pass_keeps_draft_unchanged(self) -> None:
         # Trailing whitespace around "PASS" must also count as PASS.
-        draft = Explanation(summary="Lowers fee 30→25 bps. LOW.", detail="bla")
+        draft = Explanation(summary="Lowers fee 30→25 bps. LOW.", detail="")
         provider = MagicMock()
-        provider.supports_structured_output = False
         provider.complete.return_value = "  PASS  \n"
-        self.assertIs(_refine_explanation("orig prompt", draft, provider), draft)
+        self.assertIs(_refine_summary("orig prompt", draft, provider), draft)
         provider.complete.assert_called_once()
 
-    def test_revision_replaces_draft(self) -> None:
-        draft = Explanation(summary="This transaction does X. LOW.", detail="bla")
+    def test_revision_replaces_summary(self) -> None:
+        draft = Explanation(summary="This transaction does X. LOW.", detail="")
         provider = MagicMock()
-        provider.supports_structured_output = False
-        provider.complete.return_value = "TLDR: Does X. LOW.\n\nDETAIL:\nrefined detail."
-        result = _refine_explanation("orig", draft, provider)
+        provider.complete.return_value = "TLDR: Does X. LOW."
+        result = _refine_summary("orig", draft, provider)
         self.assertEqual(result.summary, "Does X. LOW.")
-        self.assertEqual(result.detail, "refined detail.")
+        # Detail is produced later (stage 2), so a refined summary carries none.
+        self.assertEqual(result.detail, "")
 
     def test_llm_error_falls_back_to_draft(self) -> None:
-        draft = Explanation(summary="x", detail="y")
+        draft = Explanation(summary="x", detail="")
         provider = MagicMock()
-        provider.supports_structured_output = False
         provider.complete.side_effect = LLMError("rate limit")
-        self.assertIs(_refine_explanation("p", draft, provider), draft)
+        self.assertIs(_refine_summary("p", draft, provider), draft)
 
     def test_empty_response_falls_back_to_draft(self) -> None:
-        draft = Explanation(summary="x", detail="y")
+        draft = Explanation(summary="x", detail="")
         provider = MagicMock()
-        provider.supports_structured_output = False
         provider.complete.return_value = ""
-        self.assertIs(_refine_explanation("p", draft, provider), draft)
+        self.assertIs(_refine_summary("p", draft, provider), draft)
+
+
+class TestExpandDetail(unittest.TestCase):
+    """Tests for _expand_detail (stage 2: detail derived from the confirmed summary)."""
+
+    def test_returns_bare_detail_text(self) -> None:
+        provider = MagicMock()
+        provider.complete.return_value = "Pauses all operations; reversible. No fund movement."
+        detail = _expand_detail(provider, "ctx", "Pauses the protocol. LOW")
+        self.assertEqual(detail, "Pauses all operations; reversible. No fund movement.")
+        # The confirmed summary is handed to the expansion call.
+        self.assertIn("Pauses the protocol. LOW", provider.complete.call_args[0][0])
+
+    def test_strips_stray_detail_header(self) -> None:
+        provider = MagicMock()
+        provider.complete.return_value = "DETAIL:\nThe real detail body."
+        self.assertEqual(_expand_detail(provider, "ctx", "sum"), "The real detail body.")
+
+    def test_llm_error_returns_empty(self) -> None:
+        provider = MagicMock()
+        provider.complete.side_effect = LLMError("boom")
+        self.assertEqual(_expand_detail(provider, "ctx", "sum"), "")
 
 
 class TestRefineFlagInExplainTransaction(unittest.TestCase):

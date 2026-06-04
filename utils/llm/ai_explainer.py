@@ -100,69 +100,84 @@ DETAIL:
 # once per cache window instead of on every call.
 SYSTEM_INSTRUCTIONS = SYSTEM_PROMPT + "\n" + FORMAT_REMINDER
 
-# Structured-output variant: same rules, but the schema (not a text format)
-# carries the shape, so we swap FORMAT_REMINDER for a field-mapping note.
-JSON_OUTPUT_NOTE = """
-Return a structured object with three fields:
+# The explanation is generated in two stages so the Telegram-visible summary is the
+# single source of truth and the full report can never disagree with it (see
+# `_generate_explanation`). Stage 1 produces only the summary + risk_tag; stage 2
+# expands the detail *from* that confirmed summary. This variant asks for just the
+# two summary fields.
+JSON_SUMMARY_NOTE = """
+Produce ONLY the TLDR now — a separate detailed report is generated afterward from it.
+Return a structured object with two fields:
 - summary: the TLDR — verb-first, up to 10 short sentences, no "This transaction" preamble.
-- detail: the thorough DETAIL analysis.
 - risk_tag: one of LOW, MEDIUM, HIGH, CRITICAL.
 The summary need not repeat the risk tag; the risk_tag field carries it."""
-SYSTEM_INSTRUCTIONS_JSON = SYSTEM_PROMPT + JSON_OUTPUT_NOTE
+SYSTEM_INSTRUCTIONS_SUMMARY_JSON = SYSTEM_PROMPT + JSON_SUMMARY_NOTE
 
 _RISK_TAGS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 
-# JSON Schema for the structured explanation. risk_tag is enum-constrained so the
-# Telegram tag is always valid — no regex extraction or fallback parsing needed.
-EXPLANATION_SCHEMA: dict = {
+# JSON Schema for stage 1 (summary + risk_tag only). risk_tag is enum-constrained so
+# the Telegram tag is always valid — no regex extraction or fallback parsing needed.
+SUMMARY_SCHEMA: dict = {
     "type": "object",
     "properties": {
         "summary": {"type": "string", "description": "Verb-first TLDR, up to 10 short sentences."},
-        "detail": {"type": "string", "description": "Thorough analysis of the transaction."},
         "risk_tag": {"type": "string", "enum": list(_RISK_TAGS)},
     },
-    "required": ["summary", "detail", "risk_tag"],
+    "required": ["summary", "risk_tag"],
     "additionalProperties": False,
 }
 
-REFINE_TASK = """--- Critique Task ---
-Check the draft above against this checklist. Each item is a yes/no question:
+# Stage 2 prompt suffix: expand the full report FROM the confirmed summary. The detail
+# elaborates the reasoning but must not contradict the summary's numbers or risk tag,
+# so the two artifacts the team sees (Telegram summary + linked report) always agree.
+DETAIL_EXPANSION_TASK = """--- Detailed Report Task ---
+You have already produced this confirmed TLDR for the transaction:
 
-1. Does the TLDR start with a verb (NOT "This transaction" / "The proposal" /
+{summary}
+
+Write ONLY the thorough DETAIL analysis now. Cover what each call does and why,
+parameter values and significance, asset/token flow, state changes, and an explicit
+risk rationale. It MUST stay fully consistent with the TLDR above — same magnitudes,
+same risk level. Do not contradict its numbers or verdict and do not restate it
+verbatim; expand on the reasoning. Output the detail text directly, with no "TLDR:"
+or "DETAIL:" header and no trailing risk tag."""
+
+# Self-critique runs on the summary alone (stage 1), before the detail is expanded —
+# the summary is authoritative, so it's the artifact worth refining. Detail-specific
+# checks are dropped since there's no detail yet.
+SUMMARY_REFINE_TASK = """--- Critique Task ---
+Check the TLDR above against this checklist. Each item is a yes/no question:
+
+1. Does it start with a verb (NOT "This transaction" / "The proposal" /
    "The transaction" / "This governance")?
-2. Is the TLDR at most 10 short sentences and does it cover the impact/magnitude
-   beat? (Single-sentence TLDRs that omit impact/magnitude are too terse — flag
-   for revision. TLDRs longer than 10 sentences should be tightened.)
-3. Does the TLDR end with a risk tag in CAPS (LOW / MEDIUM / HIGH / CRITICAL)?
-4. Are all numeric magnitudes/units in the draft supported by the Token Flows
-   section, the Contract Source Context section, or the Current State section
-   above? If a Token Flows section is present, do the TLDR and DETAIL amounts
-   match its normalized values and "Total moved" exactly (no mis-scaling)? Or
-   does the draft explicitly say the unit cannot be confirmed?
-5. If a Current State section showed before→after values, does the DETAIL
-   quote the concrete delta (e.g., "10× relaxation", "20% reduction")?
-6. Does the risk verdict match the magnitude of change shown in Current State?
+2. Is it at most 10 short sentences and does it cover the impact/magnitude beat?
+   (Single-sentence TLDRs that omit impact/magnitude are too terse — flag for
+   revision. TLDRs longer than 10 sentences should be tightened.)
+3. Does it end with a risk tag in CAPS (LOW / MEDIUM / HIGH / CRITICAL)?
+4. Are all numeric magnitudes/units supported by the Token Flows section, the
+   Contract Source Context section, or the Current State section above? If a Token
+   Flows section is present, do the amounts match its normalized values and "Total
+   moved" exactly (no mis-scaling)? Or does it explicitly say the unit cannot be
+   confirmed?
+5. Does the risk tag match the magnitude of change shown in the context?
    (A 10× change to a critical parameter is rarely LOW; a no-op is rarely HIGH.)
 
 Hard rules for the revision (if you choose to revise):
-- Do NOT introduce a unit/scale assumption that wasn't in the draft. If the draft
-  says "raw values 1e15–8e15", do NOT rewrite as "<0.008 ETH". You don't know the
-  decimals unless the source context or state reads tell you.
+- Do NOT introduce a unit/scale assumption that wasn't supported by the context.
+  If the context shows "raw values 1e15–8e15", do NOT rewrite as "<0.008 ETH".
+  You don't know the decimals unless the source context or state reads tell you.
 - Do NOT escalate a justifiable LOW out of caution.
 - Do NOT remove an explicit hedge ("unit cannot be confirmed", "without source
   context", etc.).
 - Do NOT polish for style alone. Only edit if there's a concrete, specific issue
-  from items 1-6.
+  from items 1-5.
 
 If every check is satisfied AND no hard rule would be violated by the draft as-is,
 output exactly:
 PASS
 
-Otherwise output the revised explanation in the same format:
-TLDR: <revised>
-
-DETAIL:
-<revised>"""
+Otherwise output the revised TLDR on one line:
+TLDR: <revised>"""
 
 
 @dataclass(frozen=True)
@@ -941,7 +956,7 @@ def _explanation_from_json(data: dict) -> Explanation:
     The schema's ``risk_tag`` is authoritative (it's enum-validated), so we
     normalize the summary to end with it — replacing any tag the model inlined
     in the prose, which may differ. An empty summary is left empty so
-    ``_generate_draft`` can detect the failure and fall back to the text path.
+    ``_generate_summary`` can detect the failure and fall back to the text path.
     """
     summary = str(data.get("summary", "")).strip()
     detail = str(data.get("detail", "")).strip()
@@ -951,57 +966,99 @@ def _explanation_from_json(data: dict) -> Explanation:
     return Explanation(summary=summary, detail=detail)
 
 
-def _generate_draft(provider: LLMProvider, prompt: str) -> Explanation:
-    """Produce the initial explanation, preferring structured output.
+def _generate_summary(provider: LLMProvider, prompt: str) -> Explanation:
+    """Stage 1: produce the authoritative summary + risk_tag, preferring structured output.
 
     Uses the provider's JSON-schema path when available (guaranteed-valid risk
     tag, no regex parsing) and falls back to text completion + ``_parse_explanation``
-    on any structured-output failure or empty result.
+    on any structured-output failure or empty result. The returned Explanation's
+    ``detail`` is normally empty (the detail is expanded separately in stage 2);
+    on the text fallback it may carry a detail we keep only if expansion fails.
     """
     if provider.supports_structured_output:
         try:
-            data = provider.complete_structured(prompt, EXPLANATION_SCHEMA, system_prompt=SYSTEM_INSTRUCTIONS_JSON)
+            data = provider.complete_structured(prompt, SUMMARY_SCHEMA, system_prompt=SYSTEM_INSTRUCTIONS_SUMMARY_JSON)
             explanation = _explanation_from_json(data)
             if explanation.summary:
                 return explanation
-            logger.warning("Structured output returned an empty summary; falling back to text")
+            logger.warning("Structured summary returned an empty summary; falling back to text")
         except LLMError as e:
-            logger.warning("Structured output failed (%s); falling back to text", e)
+            logger.warning("Structured summary failed (%s); falling back to text", e)
 
     raw = provider.complete(prompt, system_prompt=SYSTEM_INSTRUCTIONS)
     return _parse_explanation(raw)
 
 
-def _refine_explanation(original_prompt: str, draft: Explanation, provider) -> Explanation:
-    """Self-critique then revise. Returns the draft unchanged on PASS or any error."""
-    refine_prompt = (
-        f"{original_prompt}\n\n"
-        f"--- Your Previous Draft ---\n"
-        f"TLDR: {draft.summary}\n\n"
-        f"DETAIL:\n{draft.detail}\n\n"
-        f"{REFINE_TASK}"
-    )
+def _refine_summary(original_prompt: str, draft: Explanation, provider: LLMProvider) -> Explanation:
+    """Self-critique the summary then revise. Returns the draft unchanged on PASS or any error.
+
+    Runs before detail expansion: the summary is authoritative, so it's the artifact
+    we refine. Only the summary text is rewritten; detail is produced afterward.
+    """
+    refine_prompt = f"{original_prompt}\n\n--- Your Previous Draft ---\nTLDR: {draft.summary}\n\n{SUMMARY_REFINE_TASK}"
 
     try:
         raw = provider.complete(refine_prompt, system_prompt=SYSTEM_INSTRUCTIONS)
     except LLMError as e:
-        logger.warning("Refine pass failed (%s); keeping draft", e)
+        logger.warning("Summary refine failed (%s); keeping draft", e)
         return draft
 
-    if not raw or not raw.strip():
-        return draft
-
-    if raw.strip().upper().startswith("PASS"):
-        logger.info("Refine pass: PASS (no changes)")
+    if not raw or not raw.strip() or raw.strip().upper().startswith("PASS"):
+        logger.info("Summary refine: PASS (no changes)")
         return draft
 
     revised = _parse_explanation(raw)
     if not revised.summary:
-        logger.warning("Refine pass returned empty summary; keeping draft")
+        logger.warning("Summary refine returned empty summary; keeping draft")
         return draft
 
-    logger.info("Refine pass produced a revision (TLDR %d→%d chars)", len(draft.summary), len(revised.summary))
-    return revised
+    logger.info("Summary refine produced a revision (TLDR %d→%d chars)", len(draft.summary), len(revised.summary))
+    return Explanation(summary=revised.summary, detail="")
+
+
+def _expand_detail(provider: LLMProvider, prompt: str, summary: str) -> str:
+    """Stage 2: write the full report *from* the confirmed summary so the two can't disagree.
+
+    Returns the detail text (no TLDR/DETAIL headers). Empty string on any LLM error —
+    the alert then ships the summary alone, which is the artifact that matters.
+    """
+    detail_prompt = f"{prompt}\n\n{DETAIL_EXPANSION_TASK.format(summary=summary)}"
+    try:
+        raw = provider.complete(detail_prompt, system_prompt=SYSTEM_PROMPT)
+    except LLMError as e:
+        logger.warning("Detail expansion failed (%s); leaving detail empty", e)
+        return ""
+    if not raw or not raw.strip():
+        return ""
+    # The model is told to emit bare detail text, but strip stray headers just in case.
+    parsed = _parse_explanation(raw)
+    return parsed.detail or raw.strip()
+
+
+def _generate_explanation(provider: LLMProvider, prompt: str, refine: bool = False) -> Explanation:
+    """Two-stage generation: authoritative summary first, then a detail expanded from it.
+
+    The Telegram-visible summary is the single source of truth; the linked full report
+    is derived from it (stage 2), so the headline number and risk verdict in the two
+    artifacts can never diverge — the failure mode that showed ~50.8k in the summary
+    while the report had the correct figure. ``refine`` adds a summary self-critique
+    pass before expansion (~1 extra call).
+    """
+    summary_draft = _generate_summary(provider, prompt)
+    if not summary_draft.summary:
+        return summary_draft
+
+    if refine:
+        summary_draft = _refine_summary(prompt, summary_draft, provider)
+
+    # Structured stage 1 (the production path) yields no detail, so we expand it from
+    # the confirmed summary — that's the derive-from-summary guarantee. The text
+    # fallback instead parses a joint TLDR+DETAIL from a single completion; we keep that
+    # detail as-is rather than paying a second call for the degraded path.
+    detail = summary_draft.detail
+    if not detail and provider.supports_structured_output:
+        detail = _expand_detail(provider, prompt, summary_draft.summary)
+    return Explanation(summary=summary_draft.summary, detail=detail)
 
 
 def explain_transaction(
@@ -1104,9 +1161,7 @@ def explain_transaction(
 
     try:
         provider = get_llm_provider()
-        explanation = _generate_draft(provider, prompt)
-        if refine:
-            explanation = _refine_explanation(prompt, explanation, provider)
+        explanation = _generate_explanation(provider, prompt, refine=refine)
         logger.info("AI summary using %s:\n%s", provider.model_name, explanation.summary)
         if explanation.detail:
             logger.info("AI detail:\n%s", explanation.detail)
@@ -1226,9 +1281,7 @@ def explain_batch_transaction(
 
     try:
         provider = get_llm_provider()
-        explanation = _generate_draft(provider, prompt)
-        if refine:
-            explanation = _refine_explanation(prompt, explanation, provider)
+        explanation = _generate_explanation(provider, prompt, refine=refine)
         logger.info("Batch AI summary using %s:\n%s", provider.model_name, explanation.summary)
         if explanation.detail:
             logger.info("Batch AI detail:\n%s", explanation.detail)
