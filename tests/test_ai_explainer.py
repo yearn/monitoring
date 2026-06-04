@@ -4,12 +4,15 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from utils.calldata.decoder import DecodedCall
+from utils.erc20_metadata import ERC20Metadata
 from utils.llm.ai_explainer import (
     SYSTEM_INSTRUCTIONS,
     Explanation,
     _build_prompt,
     _collect_safety_checks,
+    _collect_token_flows,
     _explanation_from_json,
+    _format_decimal,
     _generate_draft,
     _parse_explanation,
     _refine_explanation,
@@ -1197,6 +1200,84 @@ class TestAddressLabels(unittest.TestCase):
         # Resolver called exactly once — for the target, not for the zero arg.
         addresses_queried = {call.args[1].lower() for call in mock_label.call_args_list}
         self.assertNotIn(zero, addresses_queried)
+
+
+class TestTokenFlows(unittest.TestCase):
+    """Tests for deterministic token-flow normalization."""
+
+    USDC = "0xa0b86991c6218b3e0d4f0d4e0f1b8f7a8e8c0d4e"
+    R1 = "0x1111111111111111111111111111111111111111"
+    R2 = "0x2222222222222222222222222222222222222222"
+
+    def test_format_decimal_no_float_error(self) -> None:
+        from decimal import Decimal
+
+        # 50_780000 raw / 1e6 == exactly 50.78, not 50.78000001 or 50.8k.
+        self.assertEqual(_format_decimal(Decimal(50_780000) / Decimal(10**6)), "50.78")
+        self.assertEqual(_format_decimal(Decimal(1_000_000_000000) / Decimal(10**6)), "1,000,000")
+        self.assertEqual(_format_decimal(Decimal(0)), "0")
+
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata")
+    def test_transfer_amounts_normalized_with_total(self, mock_meta: MagicMock) -> None:
+        mock_meta.return_value = ERC20Metadata(symbol="yvUSDC-1", decimals=6)
+        calls = [
+            (
+                self.USDC,
+                DecodedCall("transfer", "transfer(address,uint256)", [("address", self.R1), ("uint256", 50_000000)]),
+            ),
+            (
+                self.USDC,
+                DecodedCall("transfer", "transfer(address,uint256)", [("address", self.R2), ("uint256", 780000)]),
+            ),
+        ]
+        out = _collect_token_flows(calls, chain_id=1)
+        self.assertIn("transfer 50 yvUSDC-1", out)
+        self.assertIn("transfer 0.78 yvUSDC-1", out)
+        # Total of the two flows, computed deterministically — never the raw-unit sum.
+        self.assertIn("Total moved: 50.78 yvUSDC-1", out)
+        self.assertNotIn("50780000", out)
+
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata")
+    def test_non_erc20_target_skipped(self, mock_meta: MagicMock) -> None:
+        mock_meta.return_value = None  # decimals not discoverable
+        calls = [
+            (
+                self.USDC,
+                DecodedCall("transfer", "transfer(address,uint256)", [("address", self.R1), ("uint256", 50_000000)]),
+            ),
+        ]
+        self.assertEqual(_collect_token_flows(calls, chain_id=1), "")
+
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata")
+    def test_approve_listed_but_not_summed(self, mock_meta: MagicMock) -> None:
+        mock_meta.return_value = ERC20Metadata(symbol="USDC", decimals=6)
+        calls = [
+            (
+                self.USDC,
+                DecodedCall("approve", "approve(address,uint256)", [("address", self.R1), ("uint256", 5_000000)]),
+            ),
+        ]
+        out = _collect_token_flows(calls, chain_id=1)
+        self.assertIn("approve 5 USDC", out)
+        self.assertNotIn("Total moved", out)  # allowance isn't a balance move
+
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata")
+    def test_token_flows_section_in_prompt(self, mock_meta: MagicMock) -> None:
+        mock_meta.return_value = ERC20Metadata(symbol="yvUSDC-1", decimals=6)
+        flows = _collect_token_flows(
+            [
+                (
+                    self.USDC,
+                    DecodedCall(
+                        "transfer", "transfer(address,uint256)", [("address", self.R1), ("uint256", 50_780000)]
+                    ),
+                )
+            ],
+            chain_id=1,
+        )
+        prompt = _build_prompt(target=self.USDC, value=0, decoded_calls=[], simulation=None, token_flows=flows)
+        self.assertIn("Token Flows (computed", prompt)
+        self.assertIn("50.78 yvUSDC-1", prompt)
 
 
 if __name__ == "__main__":

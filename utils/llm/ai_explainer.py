@@ -6,6 +6,7 @@ transactions (timelocks and Safe multisigs).
 """
 
 from dataclasses import dataclass
+from decimal import Decimal
 
 from eth_utils import to_checksum_address
 
@@ -65,6 +66,10 @@ Critical rules for parameter interpretation:
   State section is present, describe only the NEW value being set — never phrase it as
   "from X to Y", "lowers/raises from X", or "no change", since you don't know the prior
   value. Saying "current value not provided" is correct; guessing it is not.
+- When a Token Flows section is provided, its amounts are already decimal-normalized
+  and are AUTHORITATIVE. Use those numbers (and the per-token "Total moved") verbatim
+  for any magnitude you report — do NOT re-derive amounts from raw calldata units or
+  do your own decimal division, and make sure the TLDR and DETAIL agree with it.
 - If a unit is ambiguous and no source context resolves it, say so explicitly rather than
   guessing. Quote the raw value plus its 1e18-normalized form.
 - Never assign HIGH/CRITICAL risk on the basis of a guessed unit interpretation.
@@ -129,8 +134,10 @@ Check the draft above against this checklist. Each item is a yes/no question:
    beat? (Single-sentence TLDRs that omit impact/magnitude are too terse — flag
    for revision. TLDRs longer than 10 sentences should be tightened.)
 3. Does the TLDR end with a risk tag in CAPS (LOW / MEDIUM / HIGH / CRITICAL)?
-4. Are all numeric magnitudes/units in the draft supported by either the
-   Contract Source Context section or the Current State section above? Or
+4. Are all numeric magnitudes/units in the draft supported by the Token Flows
+   section, the Contract Source Context section, or the Current State section
+   above? If a Token Flows section is present, do the TLDR and DETAIL amounts
+   match its normalized values and "Total moved" exactly (no mis-scaling)? Or
    does the draft explicitly say the unit cannot be confirmed?
 5. If a Current State section showed before→after values, does the DETAIL
    quote the concrete delta (e.g., "10× relaxation", "20% reduction")?
@@ -691,6 +698,100 @@ def _format_simulation_context(sim: SimulationResult) -> str:
     return "\n".join(parts)
 
 
+# Standard ERC20 movement functions: signature -> (label, recipient_param_index,
+# amount_param_index, is_flow). `recipient_param_index` is None when there is no
+# single recipient. `is_flow` marks calls that actually move a balance (summed into
+# the per-token total); approve only sets an allowance, so it's listed but not summed.
+_TOKEN_MOVE_SIGS: dict[str, tuple[str, int | None, int, bool]] = {
+    "transfer(address,uint256)": ("transfer", 0, 1, True),
+    "transferFrom(address,address,uint256)": ("transferFrom", 1, 2, True),
+    "mint(address,uint256)": ("mint", 0, 1, True),
+    "burn(address,uint256)": ("burn", 0, 1, True),
+    "approve(address,uint256)": ("approve", 0, 1, False),
+}
+
+
+def _format_decimal(value: Decimal) -> str:
+    """Render a normalized token amount: trim trailing zeros, group the integer part.
+
+    Uses ``Decimal`` end-to-end so a 6-decimal amount like ``50_780000`` formats as
+    ``50.78`` exactly, with no float rounding error.
+    """
+    s = format(value, "f")
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    int_part, _, frac = s.partition(".")
+    int_fmt = f"{int(int_part):,}"
+    return f"{int_fmt}.{frac}" if frac else int_fmt
+
+
+def _collect_token_flows(
+    targets_and_calls: list[tuple[str, DecodedCall]],
+    chain_id: int,
+    address_labels: dict[str, str] | None = None,
+) -> str:
+    """Deterministically normalize ERC20 transfer/approve amounts for the prompt.
+
+    The LLM is unreliable at decimal arithmetic. On Safe batches we pass
+    ``skip_simulation=True``, so there are no Tenderly asset-change rows with
+    pre-normalized amounts and the model has to divide raw calldata values by
+    ``10**decimals`` itself — which it has gotten wrong in the short summary
+    (e.g. reporting ~50.8k for a ~50.78-token transfer while the detail was
+    correct). For every call whose signature is a known ERC20 movement on a
+    token with discoverable decimals, we compute the human-readable amount here
+    and hand it to the LLM as ground truth, plus a per-token total of the
+    balance-moving calls. Returns "" when nothing matches.
+    """
+    labels = address_labels or {}
+    lines_by_token: dict[str, list[str]] = {}
+    total_by_token: dict[str, Decimal] = {}
+    symbol_by_token: dict[str, str] = {}
+    token_order: list[str] = []
+
+    for target, decoded in targets_and_calls:
+        spec = _TOKEN_MOVE_SIGS.get(decoded.signature)
+        if not spec or not target:
+            continue
+        _kind, recipient_idx, amount_idx, is_flow = spec
+        if amount_idx >= len(decoded.params):
+            continue
+        amount = decoded.params[amount_idx][1]
+        if not isinstance(amount, int) or isinstance(amount, bool):
+            continue
+        meta = fetch_erc20_metadata(chain_id, target)
+        if meta is None:
+            continue  # no decimals -> can't normalize, leave it to the raw calldata section
+
+        token_key = (target or "").lower()
+        if token_key not in lines_by_token:
+            lines_by_token[token_key] = []
+            total_by_token[token_key] = Decimal(0)
+            symbol_by_token[token_key] = meta.symbol
+            token_order.append(token_key)
+
+        normalized = Decimal(amount) / (Decimal(10) ** meta.decimals)
+        human = f"{_format_decimal(normalized)} {meta.symbol}"
+        if recipient_idx is not None and recipient_idx < len(decoded.params):
+            recipient = _annotate_address(decoded.params[recipient_idx][1], labels)
+            lines_by_token[token_key].append(f"  {_kind} {human} -> {recipient}")
+        else:
+            lines_by_token[token_key].append(f"  {_kind} {human}")
+        if is_flow:
+            total_by_token[token_key] += normalized
+
+    if not token_order:
+        return ""
+
+    out: list[str] = []
+    for token_key in token_order:
+        out.append(f"{_annotate_address(token_key, labels)}:")
+        out.extend(lines_by_token[token_key])
+        total = total_by_token[token_key]
+        if total > 0 and len(lines_by_token[token_key]) > 1:
+            out.append(f"  Total moved: {_format_decimal(total)} {symbol_by_token[token_key]}")
+    return "\n".join(out)
+
+
 def _build_prompt(
     target: str,
     value: int,
@@ -698,6 +799,7 @@ def _build_prompt(
     simulation: SimulationResult | None,
     protocol: str = "",
     label: str = "",
+    token_flows: str = "",
     proxy_upgrade_info: str = "",
     source_contexts: list[SourceContext] | None = None,
     context_note: str = "",
@@ -739,6 +841,13 @@ def _build_prompt(
     constants_note = _format_batch_param_constants(decoded_calls)
     if constants_note:
         parts.append(f"\n--- Shared Across Batch ---\n{constants_note}")
+
+    if token_flows:
+        parts.append(
+            "\n--- Token Flows (computed — authoritative amounts) ---\n"
+            "These amounts are already decimal-normalized. Use them verbatim; do NOT "
+            "re-derive magnitudes from the raw calldata values.\n" + token_flows
+        )
 
     if source_contexts:
         rendered = "\n\n".join(format_source_context(ctx) for ctx in source_contexts)
@@ -951,6 +1060,7 @@ def explain_transaction(
     address_labels = _collect_address_labels([(target, decoded)], chain_id)
     param_names = _collect_param_names([(target, decoded)], chain_id)
     safety_notes = _collect_safety_checks([(target, decoded, value)], chain_id)
+    token_flows = _collect_token_flows([(target, decoded)], chain_id, address_labels)
 
     simulation: SimulationResult | None = None
     if not skip_simulation:
@@ -980,6 +1090,7 @@ def explain_transaction(
         simulation=simulation,
         protocol=protocol,
         label=label,
+        token_flows=token_flows,
         proxy_upgrade_info=proxy_upgrade_info,
         source_contexts=source_contexts,
         context_note=context_note,
@@ -1089,6 +1200,7 @@ def explain_batch_transaction(
     address_labels = _collect_address_labels(decoded_with_target, chain_id)
     param_names = _collect_param_names(decoded_with_target, chain_id)
     safety_notes = _collect_safety_checks(targets_calls_values, chain_id)
+    token_flows = _collect_token_flows(decoded_with_target, chain_id, address_labels)
 
     targets = ", ".join(c.get("target", "?") for c in calls)
     total_value = sum(int(c.get("value", "0")) for c in calls)
@@ -1100,6 +1212,7 @@ def explain_batch_transaction(
         simulation=simulation,
         protocol=protocol,
         label=label,
+        token_flows=token_flows,
         proxy_upgrade_info=proxy_upgrade_info,
         source_contexts=source_contexts,
         context_note=context_note,
