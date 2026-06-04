@@ -129,6 +129,12 @@ The structural diff is injected into the prompt under `--- Implementation Diff -
 
 The system prompt instructs the LLM to treat each item as verified and reflect it in the verdict (e.g. an unverified target is at least MEDIUM).
 
+### 5c. Deterministic Token Flows (`utils/llm/ai_explainer.py`)
+
+`_collect_token_flows()` normalizes ERC20 movement amounts in Python so the LLM never has to do decimal arithmetic — the source of a real bug where a Safe-batch summary reported `~50.8k` for a `~50.78`-token transfer while the detail was correct. For each call whose signature is a known movement (`transfer`, `transferFrom`, `mint`, `burn`, `approve`) on a token with discoverable decimals, it divides the raw amount by `10**decimals` using `Decimal` (exact, no float error) and emits a `--- Token Flows (computed — authoritative amounts) ---` section with per-recipient amounts and a per-token **Total moved** (`approve` is listed but not summed — it's an allowance). The system prompt marks these amounts authoritative: the model must quote them verbatim rather than re-derive from raw units.
+
+This matters most on Safe multisig alerts, which run with `skip_simulation=True` (DELEGATECALL batches our plain-CALL simulator can't model) and so have no Tenderly asset-change rows with pre-normalized amounts.
+
 ### 6. LLM Prompt & Completion (`utils/llm/ai_explainer.py`)
 
 The prompt is split into a **system** prompt (static instructions) and a **user** prompt (per-tx context). `complete(prompt, system_prompt=...)` passes the system block via the provider's native system role, which improves instruction-following and lets the Anthropic provider mark it `cache_control: ephemeral` — repeated alerts within the cache window pay for the (large) instruction prompt only once. The static block (`SYSTEM_INSTRUCTIONS`) enforces brevity:
@@ -202,27 +208,25 @@ Gas used: 50,000
 
 The full prompt is logged at INFO level for debugging.
 
-### 7. Optional Refine Pass
+### 7. Two-Stage Generation: Summary, then Detail Derived From It
 
-When `refine=True` is passed to `explain_transaction` / `explain_batch_transaction`, a second LLM call critiques the draft against a checklist (verb-leading TLDR, supported units, risk-magnitude consistency) and revises only if it finds concrete issues. Hard rules forbid introducing new unit assumptions, removing hedges, escalating LOW out of caution, or style-only churn. Falls back to the draft on `PASS`, on any `LLMError`, or on an empty revision.
+`_generate_explanation()` produces the `Explanation` dataclass (`summary` → Telegram, `detail` → paste service) in two stages so the two artifacts the team sees can never disagree on the headline number or risk verdict:
 
-Cost: ~2× LLM calls per alert when enabled. Default is **off**.
+1. **Summary (authoritative).** `_generate_summary()` produces just the `summary` + `risk_tag`.
+2. **Detail (derived).** `_expand_detail()` then writes the full report *from* the confirmed summary (`DETAIL_EXPANSION_TASK`), required to stay consistent with its magnitudes and risk level.
 
-### 8. Dual-Output: Structured or Text
+This fixes a failure mode where the model, generating both fields jointly, did the same decimal arithmetic twice and disagreed — e.g. a `~50.8k` summary while the report correctly showed `~50.78`. With the summary fixed first and the detail expanded from it, the linked report can elaborate the reasoning but cannot contradict the headline. (The deterministic **Token Flows** section makes the number correct in the first place; this stage keeps the two outputs in sync.)
 
-`_generate_draft()` produces the `Explanation` dataclass (`summary` → Telegram, `detail` → paste service) via one of two paths:
-
-**Structured output (preferred).** When the provider advertises `supports_structured_output`, the draft is requested as JSON matching `EXPLANATION_SCHEMA`:
+**Structured summary (preferred).** When the provider advertises `supports_structured_output`, stage 1 is requested as JSON matching `SUMMARY_SCHEMA`:
 
 ```json
 { "summary": "Upgrades AAVE pool impl 0xOld → 0xNew. Verify audited.",
-  "detail": "Calls upgradeTo(address) on the AAVE pool proxy...",
   "risk_tag": "MEDIUM" }
 ```
 
-`risk_tag` is `enum`-constrained to `LOW/MEDIUM/HIGH/CRITICAL`, so the Telegram tag is always valid — no regex extraction. OpenAI-compatible providers use `response_format: json_schema`; the Anthropic provider uses a forced tool call. `_explanation_from_json` maps the object to `Explanation`, appending `risk_tag` to the summary if the model didn't inline it.
+`risk_tag` is `enum`-constrained to `LOW/MEDIUM/HIGH/CRITICAL`, so the Telegram tag is always valid — no regex extraction. OpenAI-compatible providers use `response_format: json_schema`; the Anthropic provider uses a forced tool call. `_explanation_from_json` maps the object to `Explanation`, appending `risk_tag` to the summary if the model didn't inline it. Stage 2 (`_expand_detail`) is a plain `complete()` call whose prompt carries the confirmed summary.
 
-**Text fallback.** If structured output is disabled, fails, or returns an empty summary, the draft falls back to a plain `complete()` call returning:
+**Text fallback.** If structured output is disabled, fails, or returns an empty summary, stage 1 falls back to a single `complete()` call returning a joint `TLDR:`/`DETAIL:` block:
 
 ```
 TLDR: Upgrades AAVE pool impl 0xOld → 0xNew. Verify audited. MEDIUM.
@@ -231,9 +235,15 @@ DETAIL:
 Calls upgradeTo(address) on the AAVE pool proxy...
 ```
 
-`_parse_explanation()` splits this with tolerant regex (handles `### DETAIL`, `**TLDR:**`, etc.); if the format isn't followed, the whole response becomes the summary (backward compatible).
+`_parse_explanation()` splits this with tolerant regex (handles `### DETAIL`, `**TLDR:**`, etc.); if the format isn't followed, the whole response becomes the summary (backward compatible). This degraded path keeps both fields from one completion and skips the separate expansion, so the derive-from-summary guarantee applies to the structured (production) path only.
 
-Structured output is controlled by `LLM_STRUCTURED_OUTPUT` (per-provider default: on for `anthropic`/`openai`/`venice` — all verified live — off for `groq`/custom, since JSON-schema support varies by backend). The refine pass (step 7) always uses the text path.
+Structured output is controlled by `LLM_STRUCTURED_OUTPUT` (per-provider default: on for `anthropic`/`openai`/`venice` — all verified live — off for `groq`/custom, since JSON-schema support varies by backend).
+
+### 8. Optional Refine Pass
+
+When `refine=True` is passed to `explain_transaction` / `explain_batch_transaction`, a second LLM call (`_refine_summary`) critiques the **summary** against a checklist (verb-leading TLDR, supported units, risk-magnitude consistency) and revises only if it finds concrete issues. It runs *before* detail expansion — the summary is authoritative, so it's the artifact worth refining; the detail is then derived from the revised summary. Hard rules forbid introducing new unit assumptions, removing hedges, escalating LOW out of caution, or style-only churn. Falls back to the draft on `PASS`, on any `LLMError`, or on an empty revision. Always uses the text path.
+
+Cost: ~1 extra LLM call per alert when enabled. Default is **off**.
 
 ### 9. Output Formatting
 
