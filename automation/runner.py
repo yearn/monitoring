@@ -18,7 +18,7 @@ from pathlib import Path
 
 from automation import git_sync
 from automation.config import Profile, Task
-from utils.telegram import TelegramError, send_telegram_message
+from utils.telegram import TelegramError, escape_markdown, send_telegram_message
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,44 @@ logger = logging.getLogger(__name__)
 # TELEGRAM_BOT_TOKEN_DEFAULT / TELEGRAM_CHAT_ID_DEFAULT, mirroring how scripts without a
 # dedicated channel are routed today.
 TELEGRAM_PROTOCOL: str = "automation"
+
+# How much of a failing task's output to carry into the Telegram digest. The full output is
+# still re-emitted to the daemon logs (journald); this is just the tail that makes the alert
+# actionable without an SSH round-trip.
+_ERROR_TAIL_LINES: int = 4
+_ERROR_TAIL_CHARS: int = 500
+
+
+def _error_tail(stdout: str | None, stderr: str | None) -> str | None:
+    """Extract a short, human-readable error tail from a failed task's output.
+
+    Prefers stderr — uncaught tracebacks and the interpreter's own error output land there —
+    and falls back to stdout (where `utils.logging` handlers write). Returns the last few
+    non-empty lines, char-capped, or None when the task produced no output at all (the caller
+    then falls back to the bare exit code).
+    """
+    for stream in (stderr, stdout):
+        if not stream:
+            continue
+        lines = [ln.rstrip() for ln in stream.splitlines() if ln.strip()]
+        if not lines:
+            continue
+        tail = "\n".join(lines[-_ERROR_TAIL_LINES:])
+        if len(tail) > _ERROR_TAIL_CHARS:
+            tail = "…" + tail[-_ERROR_TAIL_CHARS:]
+        return tail
+    return None
+
+
+def _md_code_block(text: str) -> str:
+    """Wrap captured error output in a Telegram Markdown V1 fenced code block.
+
+    Content inside a ``` fence is rendered literally, so a traceback full of Markdown
+    metacharacters (`_` `*` `[`, e.g. a module path like `check_stuck_triggers`) can't trip
+    the parser and silently drop the whole digest. The only thing that *can* close the fence
+    early is a stray backtick, so neutralize those first.
+    """
+    return "```\n" + text.replace("`", "'") + "\n```"
 
 
 @dataclass
@@ -63,14 +101,21 @@ class ProfileResult:
         return self.finished_at - self.started_at
 
     def telegram_summary(self) -> str:
+        """Render the failure digest as Telegram Markdown V1.
+
+        Each failing task gets a one-line header (escaped name + exit code + duration) and,
+        when output was captured, its error tail in a fenced code block beneath it so
+        multi-line tracebacks stay readable and can't break Markdown parsing.
+        """
         lines = [
-            f"*automation: {self.profile}*",
+            f"*automation: {escape_markdown(self.profile)}*",
             f"duration: {self.duration_s:.1f}s",
             f"tasks: {len(self.tasks)} ({len(self.failures)} failed)",
         ]
         for failure in self.failures:
-            detail = failure.error or f"exit {failure.returncode}"
-            lines.append(f"- {failure.name}: {detail}")
+            lines.append(f"❌ *{escape_markdown(failure.name)}* (exit {failure.returncode}, {failure.duration_s:.1f}s)")
+            if failure.error:
+                lines.append(_md_code_block(failure.error))
         return "\n".join(lines)
 
 
@@ -142,7 +187,7 @@ def _run_task(task: Task, *, profile: Profile, repo_root: Path, dry_run: bool) -
     logger.info("running task %s: %s", task.name, " ".join(argv))
     start = time.monotonic()
     try:
-        completed = subprocess.run(argv, cwd=repo_root, env=env, check=False)
+        completed = subprocess.run(argv, cwd=repo_root, env=env, check=False, capture_output=True, text=True)
     except OSError as exc:
         duration = time.monotonic() - start
         logger.exception("task %s failed to spawn", task.name)
@@ -155,10 +200,32 @@ def _run_task(task: Task, *, profile: Profile, repo_root: Path, dry_run: bool) -
         )
     duration = time.monotonic() - start
 
+    # `_Result`-style fakes in tests only carry `returncode`; getattr keeps them working.
+    stdout = getattr(completed, "stdout", None)
+    stderr = getattr(completed, "stderr", None)
+
     if completed.returncode != 0:
-        logger.warning("task %s exited %d after %.1fs", task.name, completed.returncode, duration)
-    else:
-        logger.info("task %s ok in %.1fs", task.name, duration)
+        # Re-emit the captured output to the daemon logs so journald keeps full parity with the
+        # old inherited-stdio behavior; the Telegram digest only carries the short tail.
+        combined = f"{stderr or ''}{stdout or ''}".rstrip()
+        logger.warning(
+            "task %s exited %d after %.1fs%s",
+            task.name,
+            completed.returncode,
+            duration,
+            f"\n{combined}" if combined else "",
+        )
+        return TaskResult(
+            name=task.name,
+            script=task.script,
+            returncode=completed.returncode,
+            duration_s=duration,
+            error=_error_tail(stdout, stderr),
+        )
+
+    if stdout and stdout.strip():
+        logger.debug("task %s output:\n%s", task.name, stdout.rstrip())
+    logger.info("task %s ok in %.1fs", task.name, duration)
     return TaskResult(
         name=task.name,
         script=task.script,

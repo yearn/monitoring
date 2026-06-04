@@ -62,7 +62,9 @@ profiles:
 
 ## Failure handling
 
-The runner runs every task in declared order, capturing each subprocess's exit code without aborting the profile. After all tasks finish, if any failed, a single Markdown digest is posted to Telegram via `utils.telegram.send_telegram_message` with `protocol="automation"` — set `TELEGRAM_BOT_TOKEN_AUTOMATION` / `TELEGRAM_CHAT_ID_AUTOMATION` in `.env` to route it to a dedicated channel, otherwise it falls back to `TELEGRAM_BOT_TOKEN_DEFAULT` / `TELEGRAM_CHAT_ID_DEFAULT`.
+The runner runs every task in declared order, capturing each subprocess's exit code (and its stdout/stderr) without aborting the profile. After all tasks finish, if any failed, a single Markdown digest is posted to Telegram via `utils.telegram.send_telegram_message` with `protocol="automation"` — set `TELEGRAM_BOT_TOKEN_AUTOMATION` / `TELEGRAM_CHAT_ID_AUTOMATION` in `.env` to route it to a dedicated channel, otherwise it falls back to `TELEGRAM_BOT_TOKEN_DEFAULT` / `TELEGRAM_CHAT_ID_DEFAULT`.
+
+Each failing task contributes a header line (`❌ *name* (exit N, Ds)`) and, when the script produced output, the last few lines of its error tail in a fenced code block — so the alert is actionable without an SSH/`journalctl` round-trip. The tail prefers stderr (uncaught tracebacks) and falls back to stdout (`utils.logging` output). The full captured output is still re-emitted to the daemon logs at `warning` level; only the short tail (4 lines / 500 chars) travels to Telegram. Because the tail lives inside a `` ``` `` fence, tracebacks containing Markdown metacharacters (`_`, `*`, `[`) can't break parsing and silently drop the digest.
 
 The profile's exit code is non-zero if any task failed, which supercronic surfaces in the journald logs (`journalctl -u yearn-monitor`).
 

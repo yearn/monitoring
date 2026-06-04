@@ -109,6 +109,49 @@ class TestTelegramSummary(unittest.TestCase):
         self.assertIn("bad", body)
         self.assertIn("exit 3", body)
 
+    def test_error_tail_rendered_in_fenced_block(self):
+        result = ProfileResult(
+            profile="hourly",
+            started_at=0.0,
+            finished_at=3.0,
+            tasks=[
+                TaskResult(
+                    name="yearn-check-stuck-triggers",
+                    script="yearn/check_stuck_triggers.py",
+                    returncode=1,
+                    duration_s=2.0,
+                    error="RuntimeError: RPC timeout on mainnet",
+                ),
+            ],
+        )
+        body = result.telegram_summary()
+        # The actionable tail is carried, not just the exit code.
+        self.assertIn("RuntimeError: RPC timeout on mainnet", body)
+        # It lives inside a code fence so Markdown metacharacters can't break parsing.
+        self.assertIn("```", body)
+
+    def test_summary_is_markdown_parse_safe(self):
+        """A traceback full of Markdown metacharacters must not produce unbalanced entities.
+
+        The tail goes inside a ``` fence (literal content), so the only fence-relevant
+        character is the backtick — which must be neutralized, leaving exactly the two
+        fence markers we emit.
+        """
+        nasty = "File `check_stuck_triggers.py`, line 42: a*b _c_ [d]"
+        result = ProfileResult(
+            profile="hourly",
+            started_at=0.0,
+            finished_at=1.0,
+            tasks=[
+                TaskResult(name="bad", script="bad.py", returncode=1, duration_s=1.0, error=nasty),
+            ],
+        )
+        body = result.telegram_summary()
+        # Backticks in the tail are neutralized; only our two fence markers remain.
+        self.assertEqual(body.count("```"), 2)
+        # Bold/italic markers from the captured text survive verbatim inside the fence.
+        self.assertIn("a*b _c_ [d]", body)
+
 
 if __name__ == "__main__":
     unittest.main()
