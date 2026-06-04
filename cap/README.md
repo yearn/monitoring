@@ -10,7 +10,7 @@ For more info about CAP protocol check [the docs](https://docs.cap.app/).
 
 ## Data Monitoring
 
-The script [liquidity.py](./liquidity.py) is run [daily by Github actions](../.github/workflows/daily.yml#L84).
+The script [liquidity.py](./liquidity.py) is run daily via the [monitoring runner](../automation/jobs.yaml).
 
 It monitors withdrawable liquidity for the CAP protocol's cUSD contract [`0xcCcc62962d17b8914c62D74FfB843d73B2a3cccC`](https://etherscan.io/address/0xcCcc62962d17b8914c62D74FfB843d73B2a3cccC#code):
 

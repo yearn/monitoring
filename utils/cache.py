@@ -5,13 +5,30 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# CACHE_DIR is the single knob for where all on-disk dedupe/cache state lives.
+# Default "" → the current working directory, so local runs drop files in the
+# repo as before. On the VPS the systemd unit sets CACHE_DIR=/srv/cache (the one
+# writable path under the hardened service); see deploy/systemd/yearn-monitor.service.
+CACHE_DIR: str = os.getenv("CACHE_DIR", "")
+
+
+def cache_path(filename: str) -> str:
+    """Resolve a cache ``filename`` against ``CACHE_DIR``.
+
+    An absolute ``filename`` is returned unchanged (``os.path.join`` semantics), so an
+    explicit override always wins over ``CACHE_DIR``.
+    """
+    return os.path.join(CACHE_DIR, filename)
+
+
 # format of the data: "protocol:value"
-cache_filename: str = os.getenv("CACHE_FILENAME", "cache-id.txt")
+cache_filename: str = cache_path(os.getenv("CACHE_FILENAME", "cache-id.txt"))
 # format of the data: "address:nonce"
-nonces_filename: str = os.getenv("NONCE_FILENAME", "nonces.txt")
+nonces_filename: str = cache_path(os.getenv("NONCE_FILENAME", "nonces.txt"))
 # format of the data: "vault_address+market_id+type_value:cap_timestamp"
-morpho_filename: str = os.getenv("MORPHO_FILENAME", "cache-id.txt")
-# use the same cache file because it is run in the same hourly workflow
+# Same default basename as cache_filename — hourly shares one file across alert
+# dedupe and morpho rows; the daily profile overrides MORPHO_FILENAME to isolate.
+morpho_filename: str = cache_path(os.getenv("MORPHO_FILENAME", "cache-id.txt"))
 
 
 def get_last_queued_id_from_file(protocol: str) -> int:

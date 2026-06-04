@@ -9,14 +9,14 @@ Monitors:
 - Withdrawal queue vs liquid funds — alerts when pending exit value > 80% of liquid funds (Aave + Sky)
 - Pool liquidity — cash and withdrawal queue depth
 - Loan collateral risk — weighted risk score based on collateral asset types
-- Collateralization ratio (via syrupGlobals) — alerts when combined ratio drops below 140%
+- Collateralization ratio (via syrupGlobals) — alerts when combined ratio drops below 135%
 - Pool Delegate Cover — alerts when delegate cover balance drops to zero
 """
 
 from maple.collateral import check_collateral_risk
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
-from utils.cache import get_last_value_for_key_from_file, write_last_value_to_file
+from utils.cache import cache_path, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import Chain
 from utils.formatting import format_usd
 from utils.logging import get_logger
@@ -25,7 +25,7 @@ from utils.web3_wrapper import ChainManager
 PROTOCOL = "maple"
 logger = get_logger(PROTOCOL)
 
-CACHE_FILENAME = "cache-id.txt"
+CACHE_FILENAME = cache_path("cache-id.txt")
 
 # --- ABIs ---
 ABI_POOL = load_abi("maple/abi/SyrupUSDCPool.json")

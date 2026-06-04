@@ -101,6 +101,27 @@ class TestTelegram(unittest.TestCase):
             self.assertEqual(kwargs["json"]["text"], "Test message")
             self.assertEqual(kwargs["json"]["parse_mode"], "Markdown")
 
+    @patch("utils.telegram.requests.post")
+    def test_send_telegram_message_plain_text_omits_parse_mode(self, mock_post):
+        mock_response = unittest.mock.Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_post.return_value = mock_response
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN_TEST": "test_token",
+                "TELEGRAM_CHAT_ID_TEST": "test_chat_id",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_telegram_message("Test message", "test", plain_text=True)
+
+            kwargs = mock_post.call_args[1]
+            self.assertEqual(kwargs["json"]["text"], "Test message")
+            self.assertNotIn("parse_mode", kwargs["json"])
+
     @patch("utils.telegram.requests.get")
     def test_send_telegram_message_missing_credentials(self, mock_get):
         # Test with missing environment variables
@@ -202,6 +223,72 @@ class TestTelegram(unittest.TestCase):
             kwargs = mock_post.call_args[1]
             self.assertEqual(kwargs["json"]["chat_id"], "aave_chat_id")
             self.assertNotIn("message_thread_id", kwargs["json"])
+
+    @patch("utils.telegram.requests.post")
+    def test_send_telegram_message_test_override(self, mock_post):
+        """TELEGRAM_TEST_CHAT_ID forces every message to one chat via the default bot.
+
+        It overrides both topic and legacy routing, prepends a [protocol] label
+        (Markdown-escaped so protocol names with `_` and the brackets don't trip a
+        400 parse error), and never applies topic threading.
+        """
+        mock_response = unittest.mock.Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_post.return_value = mock_response
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TEST_CHAT_ID": "dummy_group",
+                "TELEGRAM_BOT_TOKEN_DEFAULT": "default_token",
+                # Production routing that must be ignored while the override is set:
+                "TELEGRAM_BOT_TOKEN_AAVE": "aave_token",
+                "TELEGRAM_CHAT_ID_TOPICS": "topics_chat_id",
+                "TELEGRAM_TOPIC_ID_AAVE": "42",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_telegram_message("Test message", "aave")
+
+            url = mock_post.call_args[0][0]
+            kwargs = mock_post.call_args[1]
+            self.assertIn("default_token", url)
+            self.assertNotIn("aave_token", url)
+            self.assertEqual(kwargs["json"]["chat_id"], "dummy_group")
+            self.assertEqual(kwargs["json"]["text"], "\\[aave] Test message")
+            self.assertNotIn("message_thread_id", kwargs["json"])
+
+        # A protocol name with an underscore is the case the escaping protects:
+        # unescaped, `[yearn_timelock]` is parsed as Markdown and 400s.
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TEST_CHAT_ID": "dummy_group",
+                "TELEGRAM_BOT_TOKEN_DEFAULT": "default_token",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_telegram_message("Test message", "yearn_timelock")
+            self.assertEqual(
+                mock_post.call_args[1]["json"]["text"],
+                "\\[yearn\\_timelock] Test message",
+            )
+
+        # plain_text sends keep the label literal (no parse_mode → nothing to escape).
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TEST_CHAT_ID": "dummy_group",
+                "TELEGRAM_BOT_TOKEN_DEFAULT": "default_token",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_telegram_message("Test message", "yearn_timelock", plain_text=True)
+            self.assertEqual(
+                mock_post.call_args[1]["json"]["text"],
+                "[yearn_timelock] Test message",
+            )
 
 
 class TestAlert(unittest.TestCase):
@@ -621,6 +708,23 @@ class TestRetryWithProviderRotation(unittest.TestCase):
         slept = [call.args[0] for call in mock_sleep.call_args_list]
         self.assertTrue(slept)
         self.assertTrue(all(s <= MAX_BACKOFF_SECONDS for s in slept))
+
+
+class TestUstbCachePath(unittest.TestCase):
+    """Tests for USTB cache path handling under the hardened service."""
+
+    def test_ustb_cache_file_respects_cache_dir(self):
+        for module_name in ("ustb.main", "utils.cache"):
+            sys.modules.pop(module_name, None)
+
+        with patch.dict(os.environ, {"CACHE_DIR": "/srv/cache"}):
+            ustb_main = importlib.import_module("ustb.main")
+
+        try:
+            self.assertEqual(ustb_main.CACHE_FILE, "/srv/cache/cache-id.txt")
+        finally:
+            for module_name in ("ustb.main", "utils.cache"):
+                sys.modules.pop(module_name, None)
 
 
 if __name__ == "__main__":

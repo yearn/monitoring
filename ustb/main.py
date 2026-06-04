@@ -14,7 +14,7 @@ Run hourly via GitHub Actions.
 
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
-from utils.cache import get_last_value_for_key_from_file, write_last_value_to_file
+from utils.cache import cache_path, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import Chain
 from utils.formatting import format_usd
 from utils.logging import get_logger
@@ -40,7 +40,7 @@ STALENESS_THRESHOLD = 345_600  # 4 days in seconds (revert at 5 days / 432_000s)
 # ---------------------------------------------------------------------------
 # Cache keys (shared cache-id.txt used by the hourly workflow)
 # ---------------------------------------------------------------------------
-CACHE_FILE = "cache-id.txt"
+CACHE_FILE = cache_path("cache-id.txt")
 CACHE_KEY_SUPPLY = "ustb_total_supply"
 CACHE_KEY_CHAINLINK_NAV = "ustb_chainlink_nav"
 

@@ -126,7 +126,10 @@ def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]
 
     baseline = last_cached_nonce
     if current_safe_nonce is not None:
-        baseline = max(baseline, current_safe_nonce - 1)
+        chain_baseline = current_safe_nonce - 1
+        if chain_baseline > last_cached_nonce:
+            write_last_executed_nonce_to_file(safe_address, chain_baseline)
+        baseline = max(baseline, chain_baseline)
 
     return [tx for tx in pending_txs if int(tx["nonce"]) > baseline]
 

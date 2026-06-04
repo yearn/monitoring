@@ -10,7 +10,7 @@ For more information on RToken, see the [Reserve Protocol risk overview](https:/
 
 ### Data Monitoring
 
-The script `rtoken/monitor_rtoken.py` runs [hourly via GitHub Actions](.github/workflows/hourly.yml) to monitor key health indicators of the RToken ETH+ system using on-chain data.
+The script `rtoken/monitor_rtoken.py` runs hourly via the [monitoring runner](../automation/jobs.yaml) to monitor key health indicators of the RToken ETH+ system using on-chain data.
 
 - **RToken Collateral Coverage**: Alerts if the `totalSupply` of the RToken drops below 104% of the required backing (`basketNeeded`), indicating potential undercollateralization. Threshold defined [in code](monitor_rtoken.py#L11).
 - **StRSR Exchange Rate Stability**: Fetches the `exchangeRate` from the StRSR contract. On the first run, it caches this rate. On subsequent runs, it alerts if the current rate falls below the initial cached value, signalling potential depegging or risk. Caching logic [in code](monitor_rtoken.py#L148-L157).
@@ -28,7 +28,7 @@ The script `rtoken/monitor_rtoken.py` runs [hourly via GitHub Actions](.github/w
 
 ### Data Monitoring
 
-The script `rtoken/monitor_rtoken.py` runs [hourly via GitHub Actions](.github/workflows/hourly.yml) to monitor key health indicators of the RToken Based ETH system using on-chain data.
+The script `rtoken/monitor_rtoken.py` runs hourly via the [monitoring runner](../automation/jobs.yaml) to monitor key health indicators of the RToken Based ETH system using on-chain data.
 
 - **RToken Collateral Coverage**: Alerts if the `totalSupply` of the RToken drops below 103% of the required backing (`basketNeeded`), indicating potential undercollateralization. Threshold defined [in code](monitor_rtoken.py#L11).
 - **StRSR Exchange Rate Stability**: Fetches the `exchangeRate` from the StRSR contract. On the first run, it caches this rate. On subsequent runs, it alerts if the current rate falls below the initial cached value, signalling potential depegging or risk. Caching logic [in code](monitor_rtoken.py#L148-L157).

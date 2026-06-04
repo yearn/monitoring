@@ -46,6 +46,7 @@ dependencies = [
     "python-dateutil==2.9.0.post0",
     "python-dotenv==1.2.2",
     "pyunormalize==17.0.0",
+    "pyyaml==6.0.2",
     "regex==2026.4.4",
     "requests==2.33.1",
     "rlp==4.1.0",
@@ -94,7 +95,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = [
     "apyusd",
-    "aave", "bad-debt", "cap", "compound", "ethena", "euler",
+    "aave", "automation", "bad-debt", "cap", "compound", "ethena", "euler",
     "fluid", "infinifi", "lido", "lrt-pegs", "maker",
     "maple", "morpho", "pendle", "rtoken",
     "safe", "spark", "stargate", "timelock", "usdai",

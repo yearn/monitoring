@@ -1,0 +1,98 @@
+# Drop in /etc/systemd/system/monitoring.service then:
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now monitoring
+#   sudo systemctl status monitoring
+#
+# Native systemd-managed cron runner. supercronic runs in the foreground and
+# systemd owns the lifecycle. No container, no compose, no Caddy, no autoheal
+# sidecar. supercronic itself is the scheduler: ExecStartPre renders the
+# crontab from automation/jobs.yaml, ExecStart hands it to supercronic, which
+# spawns `python -m automation run <profile>` on each tick.
+#
+# There is no HTTP surface and nothing to expose. A crashed supercronic is
+# restarted by systemd (Restart=on-failure); there's no event loop that can
+# wedge while the process stays alive, so no /healthz watchdog is needed
+# (unlike the liquidity-monitor daemon).
+
+[Unit]
+Description=yearn monitoring cron runner (supercronic + automation)
+Documentation=https://github.com/yearn/monitoring
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=__MONITOR_USER__
+Group=__MONITOR_USER__
+WorkingDirectory=__REPO_DIR__
+
+# automation.config reads REPO_ROOT to locate jobs.yaml and to set each task's
+# subprocess cwd. PATH puts the project venv first so `python` in the rendered
+# crontab resolves to .venv/bin/python; flock (util-linux) and supercronic live
+# in the system paths after it.
+Environment=REPO_ROOT=__REPO_DIR__
+Environment=PATH=__REPO_DIR__/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LOG_LEVEL=INFO
+Environment=PYTHONUNBUFFERED=1
+# Single knob for all on-disk cache/dedupe state. utils.cache.cache_path()
+# resolves every cache file against this; it's the one writable path below
+# (ReadWritePaths=__CACHE_DIR__), created by deploy/install.sh.
+Environment=CACHE_DIR=__CACHE_DIR__
+
+# Require the operator-supplied env file before starting. The operator drops
+# __ETC_DIR__/.env (RPC URLs, Telegram tokens, API keys) once, mode
+# 0640 root:__MONITOR_USER__ — see deploy/runbook.md. Refuse to start blind
+# rather than silently run with no credentials. The `+` prefix runs as root so
+# the dir can be created with root ownership regardless of User= above.
+ExecStartPre=+/bin/bash -c '\
+  install -m 750 -o root -g __MONITOR_USER__ -d __ETC_DIR__; \
+  if [ ! -f __ETC_DIR__/.env ]; then \
+    echo "monitoring: __ETC_DIR__/.env missing — drop the production env there (0640 root:__MONITOR_USER__) before starting" >&2; \
+    exit 1; \
+  fi'
+
+# Load the env (RPC URLs, Telegram tokens, API keys) into supercronic; it passes
+# the environment through to every `python -m automation run` child.
+EnvironmentFile=__ETC_DIR__/.env
+
+# Render the crontab from jobs.yaml, then run supercronic against it. Rendering
+# in its own step means a malformed jobs.yaml fails the unit start loudly
+# instead of becoming a silent no-op. /tmp is per-service (PrivateTmp=yes), and
+# it also holds the flock lock files render-crontab points at (/tmp/automation.<profile>.lock).
+ExecStartPre=/bin/bash -c '__REPO_DIR__/.venv/bin/python -m automation render-crontab > /tmp/crontab && echo "[monitoring] rendered crontab:" && sed "s/^/  /" /tmp/crontab'
+ExecStart=/usr/local/bin/supercronic /tmp/crontab
+
+# Restart on crash; cap at 5 restarts per 60s window to surface a wedged runner
+# to the operator instead of crash-looping silently.
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Hardening — cheap wins now that there's no container boundary. __CACHE_DIR__ is
+# the scripts' state path (dedupe caches, nonces). The repo tree is also writable
+# because the multisig profile fast-forwards the checkout in-process before each
+# run (sync_before_run in jobs.yaml → git pull --ff-only, which writes .git/ and
+# the working tree); ProtectSystem=strict would otherwise make it read-only and
+# fail the pull. The venv and the rest of the system stay read-only.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__CACHE_DIR__ __REPO_DIR__
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+# stdout/stderr → journald. supercronic logs one structured line per job start
+# and exit; `journalctl -u monitoring -f` is the live feed.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=monitoring
+
+[Install]
+WantedBy=multi-user.target

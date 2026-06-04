@@ -43,7 +43,7 @@ It runs cached `totalSupply` delta checks and alerts when the increase is above:
 
 - `USDAI_LARGE_MINT_THRESHOLD_PERCENT` (default: `0.05`, i.e. `5%` of previous `totalSupply`)
 
-The GitHub workflow `.github/workflows/hourly.yml` runs this monitor hourly.
+The monitoring runner runs this monitor hourly (see `automation/jobs.yaml`).
 
 ## Price Monitoring Scope
 

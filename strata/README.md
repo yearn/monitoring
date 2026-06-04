@@ -32,9 +32,9 @@ Reference report: https://curation.yearn.fi/report/strata-srusde/
   - monitor cooldown period changes
 
 ## Frequency
-- Timelock scheduled calls: hourly (`hourly.yml`, shared timelock monitor)
+- Timelock scheduled calls: hourly (shared timelock monitor)
 - Proxy upgrade events: hourly via safe/timelock queue monitoring
-- srUSDe exchange rate: daily (`daily.yml`)
-- Senior coverage ratio: daily (`daily.yml`)
-- Strategy sUSDe balance: daily (`daily.yml`)
-- Protocol TVL changes: daily (`daily.yml`)
+- srUSDe exchange rate: daily
+- Senior coverage ratio: daily
+- Strategy sUSDe balance: daily
+- Protocol TVL changes: daily

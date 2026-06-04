@@ -13,6 +13,7 @@ from typing import Any
 from eth_abi import decode
 from eth_utils import to_checksum_address
 
+from utils.cache import cache_path
 from utils.calldata.known_selectors import KNOWN_SELECTORS
 from utils.http import fetch_json
 from utils.logging import get_logger
@@ -27,7 +28,7 @@ _SELECTOR_LOOKUP_URL = "https://api.4byte.sourcify.dev/signature-database/v1/loo
 # results are stored too (Sourcify miss → __NONE__ sentinel) so we don't retry
 # selectors that aren't in any database. Format: one `selector|signature` per
 # line, pipe-delimited because ABI signatures don't contain pipes.
-_SELECTOR_CACHE_FILE = os.getenv("SELECTOR_CACHE_FILENAME", "selector-cache.txt")
+_SELECTOR_CACHE_FILE = cache_path(os.getenv("SELECTOR_CACHE_FILENAME", "selector-cache.txt"))
 _NEGATIVE_SENTINEL = "__NONE__"
 
 

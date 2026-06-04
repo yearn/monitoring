@@ -20,14 +20,6 @@ THRESHOLD_RATIO = 90.0
 
 # Pool configurations
 POOL_CONFIGS = [
-    # name, pool address, index of lrt, index of other asset, peg threshold
-    (
-        "rsETH/ETH Fluid Pool",
-        "0x276084527B801e00Db8E4410504F9BaF93f72C67",
-        0,
-        1,
-        THRESHOLD_RATIO,
-    ),
     (
         "weETH / ETH FLUID Pool",
         "0x86f874212335Af27C41cDb855C2255543d1499cE",

@@ -70,6 +70,9 @@ def get_proposals():
             return
 
         proposals = data["data"]
+        if not isinstance(proposals, list):
+            raise ValueError("Fluid API returned invalid proposals payload")
+
         logger.info("Found %s queued proposals", len(proposals))
 
         # Sort proposals by id from lowest to highest
@@ -84,6 +87,7 @@ def get_proposals():
 
         message = "🏛️ Fluid Protocol Governance Proposals 🏛️\n"
         new_proposals_found = False
+        newest_reported_proposal_id = last_reported_id
 
         for proposal in proposals:
             proposal_id = int(proposal["id"])
@@ -91,6 +95,7 @@ def get_proposals():
                 continue
 
             new_proposals_found = True
+            newest_reported_proposal_id = max(newest_reported_proposal_id, proposal_id)
             link = FLUID_PROPOSAL_URL + str(proposal_id)
             message += f"📗 Proposal ID: {proposal_id}\n"
             message += f"🔗 Link: [Proposal {proposal_id}]({link})\n"
@@ -119,7 +124,7 @@ def get_proposals():
 
         if new_proposals_found:
             send_telegram_message(message, PROTOCOL)
-            write_last_queued_id_to_file(PROTOCOL, newest_proposal_id)
+            write_last_queued_id_to_file(PROTOCOL, newest_reported_proposal_id)
         else:
             logger.info("No new proposals to report")
 

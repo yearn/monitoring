@@ -42,6 +42,48 @@ class TelegramError(Exception):
     pass
 
 
+def _post_message(
+    bot_token: str,
+    chat_id: str,
+    message: str,
+    plain_text: bool,
+    disable_notification: bool,
+    topic_id: str | None = None,
+) -> None:
+    """Send a single message to Telegram, raising TelegramError on failure."""
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload: dict[str, object] = {
+        "chat_id": chat_id,
+        "text": message,
+        "disable_notification": disable_notification,
+    }
+    if not plain_text:
+        payload["parse_mode"] = "Markdown"
+    if topic_id:
+        payload["message_thread_id"] = int(topic_id)
+
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        # Telegram's response body carries the real failure reason
+        # (e.g. "can't parse entities", invalid message_thread_id). Surface it
+        # so callers don't have to debug from just an HTTP status.
+        body = ""
+        err_response = getattr(e, "response", None)
+        if err_response is not None:
+            try:
+                body = f" body={err_response.text}"
+            except Exception:
+                pass
+        raise TelegramError(_redact_bot_token(f"Failed to send telegram message: {e}{body}"))
+
+    if response.status_code != 200:
+        raise TelegramError(
+            _redact_bot_token(f"Failed to send telegram message: {response.status_code} - {response.text}")
+        )
+
+
 def send_telegram_message(
     message: str,
     protocol: str,
@@ -70,6 +112,27 @@ def send_telegram_message(
         message = message[: MAX_MESSAGE_LENGTH - 3] + "..."
         plain_text = True
 
+    # Test/staging override: route every message to one chat for comparison runs.
+    # Set TELEGRAM_TEST_CHAT_ID to a dummy group id; unset to restore prod routing.
+    # The DEFAULT bot must be a member of that group. The per-protocol label is
+    # prepended so the merged feed shows which monitor produced each message, and
+    # no topic threading is applied (the dummy group has no per-protocol topics).
+    test_chat_id = os.getenv("TELEGRAM_TEST_CHAT_ID")
+    if test_chat_id:
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN_DEFAULT")
+        if not bot_token:
+            logger.warning("TELEGRAM_TEST_CHAT_ID set but TELEGRAM_BOT_TOKEN_DEFAULT missing")
+            return
+        # Escape the label for Markdown sends — protocol names contain `_`
+        # (e.g. yearn_timelock) and the brackets are link syntax in V1, either of
+        # which would trip a 400 parse error and drop the comparison alert. The
+        # message body is left as-is (it's already valid Markdown or plain).
+        label = f"[{protocol}] "
+        if not plain_text:
+            label = escape_markdown(label)
+        _post_message(bot_token, test_chat_id, f"{label}{message}", plain_text, disable_notification)
+        return
+
     # Check if this protocol has a topic ID configured (forum-style group)
     topic_id = os.getenv(f"TELEGRAM_TOPIC_ID_{protocol.upper()}")
 
@@ -88,36 +151,7 @@ def send_telegram_message(
         logger.warning("Missing Telegram credentials for %s", protocol)
         return
 
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload: dict[str, object] = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "Markdown" if not plain_text else None,
-        "disable_notification": disable_notification,
-    }
-    if topic_id:
-        payload["message_thread_id"] = int(topic_id)
-
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        # Telegram's response body carries the real failure reason
-        # (e.g. "can't parse entities", invalid message_thread_id). Surface it
-        # so callers don't have to debug from just an HTTP status.
-        body = ""
-        err_response = getattr(e, "response", None)
-        if err_response is not None:
-            try:
-                body = f" body={err_response.text}"
-            except Exception:
-                pass
-        raise TelegramError(_redact_bot_token(f"Failed to send telegram message: {e}{body}"))
-
-    if response.status_code != 200:
-        raise TelegramError(
-            _redact_bot_token(f"Failed to send telegram message: {response.status_code} - {response.text}")
-        )
+    _post_message(bot_token, chat_id, message, plain_text, disable_notification, topic_id)
 
 
 def get_github_run_url() -> str:
