@@ -77,27 +77,43 @@ Available profiles: `hourly`, `yearn-stuck-triggers`, `daily`, `weekly`,
 
 ## Propagating code or config edits
 
-supercronic re-spawns `python -m automation run …` fresh on every tick, so for
-any Python-only change (a script, `automation/jobs.yaml`, a config module):
+Contributors merge to `main` through PRs; nobody normally SSHes in to ship code.
+Two things move `main` onto the box, split on *"does the change need the
+scheduler restarted to take effect?"*
+
+**Auto-sync (no restart, the common case).** The `multisig` profile runs
+`git pull --ff-only` before its tasks every 10 minutes (`sync_before_run: true`
+in `jobs.yaml`). Since supercronic re-spawns every profile fresh against the
+on-disk tree, that one pull keeps the whole checkout current for *all* profiles
+within ~10 minutes — every other profile rides along for free. The pull is
+best-effort: a failure is logged (`journalctl -u monitoring | grep 'pre-run git
+sync'`) and the multisig checks run against the existing checkout anyway, so a
+git hiccup never silences an alert. This covers **scripts, config modules, data,
+and `jobs.yaml` task bodies** — anything read fresh by a subprocess.
+
+So for the common case — a script tweak, a new task in a profile — **merge the
+PR and the next ~10-min multisig tick pulls it in; no SSH needed.**
+
+**Manual restart (cadence + deps).** Two kinds of change land on disk via the
+auto-sync but stay inert until a restart, because they're read once at scheduler
+boot, not per-tick:
+
+- a `cron:` *cadence* change in `jobs.yaml` (the crontab is rendered at unit
+  start by `ExecStartPre`), and
+- a `pyproject.toml` / `uv.lock` change (the venv).
+
+For those, after the PR merges:
 
 ```sh
 cd /srv/monitoring
-git pull --ff-only
-sudo systemctl restart monitoring   # re-renders the crontab from jobs.yaml
+git pull --ff-only            # or just let the next multisig tick land it
+uv sync --frozen --extra ai   # only if pyproject.toml / uv.lock changed (--extra ai: openai client for the AI explainer)
+sudo systemctl restart monitoring   # re-renders the crontab and re-points supercronic at the tree
 ```
 
-The restart re-renders the crontab (picking up cron/profile changes) and points
-supercronic at the freshly-pulled tree. Total downtime is a few seconds and
-only affects the scheduler, not an in-flight job.
-
-For dependency changes (`pyproject.toml` / `uv.lock`), re-sync the venv first:
-
-```sh
-cd /srv/monitoring
-git pull --ff-only
-uv sync --frozen --extra ai   # --extra ai: openai client for the AI explainer
-sudo systemctl restart monitoring
-```
+The restart re-renders the crontab and points supercronic at the freshly-pulled
+tree. Total downtime is a few seconds and only affects the scheduler, not an
+in-flight job.
 
 ---
 
@@ -203,3 +219,7 @@ skipped, not queued) — the others keep ticking.
 - systemd unit: `/etc/systemd/system/monitoring.service`.
 - Rendered crontab: `/tmp/crontab` (per-service `PrivateTmp`; regenerated on
   every start).
+- Code sync: no separate unit — the `multisig` profile's pre-run `git pull
+  --ff-only` (`sync_before_run` in `jobs.yaml`) every 10 min. The unit grants
+  the repo write access via `ReadWritePaths=/srv/cache /srv/monitoring` so the
+  pull can update `.git/` under `ProtectSystem=strict`.

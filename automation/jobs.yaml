@@ -5,8 +5,10 @@
 #   - the yearn-monitor systemd unit, whose ExecStartPre renders this into a supercronic
 #     crontab on start (see deploy/runbook.md).
 #
-# Adding or removing a script: edit the relevant profile's `tasks:`, then `git pull` on the
-# VPS and `sudo systemctl restart yearn-monitor` to re-render the crontab.
+# Adding or removing a script: edit the relevant profile's `tasks:` and merge to main. The
+# multisig profile's pre-run `git pull` (sync_before_run, below) lands it on the box within
+# ~10 min — no restart needed. Only a `cron:` cadence change requires `git pull` +
+# `sudo systemctl restart monitoring` to re-render the crontab (see deploy/runbook.md).
 #
 # Each task invokes one script. CLI flags go under `args:` as `key: value` and are emitted as
 # `--key=value` in the declared order. Cache files resolve against $CACHE_DIR (set to
@@ -21,8 +23,10 @@ profiles:
     # No env override: alert dedupe and morpho rows share the default cache-id.txt
     # under $CACHE_DIR.
     tasks:
+      - { name: "apyusd",                 script: apyusd/main.py }
       - { name: "3jane",                  script: 3jane/main.py }
       - { name: "morpho-markets",         script: morpho/markets.py }
+      - { name: "morpho-markets-v2",      script: morpho/markets_v2.py }
       - { name: "aave",                   script: aave/main.py }
       - { name: "lido-steth",             script: lido/steth/main.py }
       - { name: "lrt-pegs-curve",         script: lrt-pegs/curve/main.py }
@@ -32,6 +36,7 @@ profiles:
       - { name: "infinifi",               script: infinifi/main.py }
       - { name: "usdai",                  script: usdai/main.py }
       - { name: "usdai-large-mints",      script: usdai/large_mints.py }
+      - { name: "stables-dune-large-transfers", script: stables/dune_large_transfers.py }
       - { name: "yearn-alert-large-flows", script: yearn/alert_large_flows.py }
       - { name: "maple",                  script: maple/main.py }
       - { name: "timelock-alerts",        script: timelock/timelock_alerts.py }
@@ -60,6 +65,7 @@ profiles:
       MORPHO_FILENAME: cache-id-daily.txt
     tasks:
       - { name: "morpho-governance",    script: morpho/governance.py }
+      - { name: "morpho-governance-v2", script: morpho/governance_v2.py }
       - { name: "ethena",               script: ethena/ethena.py }
       - { name: "strata",               script: strata/main.py }
       - { name: "cap-liquidity",        script: cap/liquidity.py }
@@ -72,11 +78,22 @@ profiles:
     description: "Weekly monitoring (was .github/workflows/weekly.yml)."
     tasks:
       - { name: "yearn-check-endorsed", script: yearn/check_endorsed.py }
+      - { name: "yearn-check-timelock-delay", script: yearn/check_timelock_delay.py }
 
   multisig:
     cron: "0/10 * * * *"
     description: "Safe multisig polling every 10 minutes (was multisig-checker.yml)."
     # No env override: nonces land in the default nonces.txt under $CACHE_DIR.
+    #
+    # This is the box's code-sync heartbeat. Being the most frequent profile, a
+    # `git pull --ff-only` before it (sync_before_run) keeps the whole checkout
+    # current at a 10-min cadence — every other profile re-spawns fresh against
+    # whatever is on disk, so they ride along for free. Best-effort: a failed
+    # pull is logged and the checks run anyway (see automation/git_sync.py).
+    # NOTE: this lands new *code/config* only. Cron-cadence changes in this file
+    # and dependency changes (pyproject.toml/uv.lock) still need a manual
+    # `uv sync --frozen --extra ai` + `systemctl restart monitoring`.
+    sync_before_run: true
     tasks:
       - { name: "safe",    script: safe/main.py }
       - { name: "stables", script: stables/main.py }

@@ -37,6 +37,7 @@ class Profile:
     tasks: list[Task]
     env: dict[str, str] = field(default_factory=dict)
     enabled: bool = True
+    sync_before_run: bool = False
 
     @property
     def enabled_tasks(self) -> list[Task]:
@@ -56,7 +57,7 @@ class JobsConfig:
 _TASK_REQUIRED = ("name", "script")
 _TASK_ALLOWED = (*_TASK_REQUIRED, "args", "enabled")
 _PROFILE_REQUIRED = ("cron",)
-_PROFILE_ALLOWED = (*_PROFILE_REQUIRED, "tasks", "env", "enabled", "description")
+_PROFILE_ALLOWED = (*_PROFILE_REQUIRED, "tasks", "env", "enabled", "description", "sync_before_run")
 
 
 def load_jobs_config(path: Path | str | None = None) -> JobsConfig:
@@ -102,6 +103,7 @@ def _parse_profile(name: str, body: Any, source: Path) -> Profile:
         tasks=tasks,
         env=env,
         enabled=bool(body.get("enabled", True)),
+        sync_before_run=bool(body.get("sync_before_run", False)),
     )
 
 

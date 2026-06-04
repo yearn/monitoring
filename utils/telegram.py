@@ -123,7 +123,14 @@ def send_telegram_message(
         if not bot_token:
             logger.warning("TELEGRAM_TEST_CHAT_ID set but TELEGRAM_BOT_TOKEN_DEFAULT missing")
             return
-        _post_message(bot_token, test_chat_id, f"[{protocol}] {message}", plain_text, disable_notification)
+        # Escape the label for Markdown sends — protocol names contain `_`
+        # (e.g. yearn_timelock) and the brackets are link syntax in V1, either of
+        # which would trip a 400 parse error and drop the comparison alert. The
+        # message body is left as-is (it's already valid Markdown or plain).
+        label = f"[{protocol}] "
+        if not plain_text:
+            label = escape_markdown(label)
+        _post_message(bot_token, test_chat_id, f"{label}{message}", plain_text, disable_notification)
         return
 
     # Check if this protocol has a topic ID configured (forum-style group)

@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from automation import git_sync
 from automation.config import Profile, Task
 from utils.telegram import TelegramError, send_telegram_message
 
@@ -103,6 +104,9 @@ def run_profile(
     started_wall = time.time()
     result = ProfileResult(profile=profile.name, started_at=started_wall, finished_at=started_wall, dry_run=dry_run)
 
+    if profile.sync_before_run and not dry_run:
+        _sync_repo(repo_root)
+
     for task in profile.enabled_tasks:
         result.tasks.append(_run_task(task, profile=profile, repo_root=repo_root, dry_run=dry_run))
 
@@ -111,6 +115,20 @@ def run_profile(
     if send_digest and result.failures and not dry_run:
         _send_failure_digest(result)
     return result
+
+
+def _sync_repo(repo_root: Path) -> None:
+    """Fast-forward the checkout to origin before running the profile's tasks.
+
+    Best-effort: a failed pull is logged but never blocks the run — these are
+    read-only checks, so running slightly older code is harmless, and we never
+    want a transient git hiccup to silence an alert. See `automation.git_sync`.
+    """
+    result = git_sync.pull_ff_only(repo_root)
+    if result.ok:
+        logger.info("pre-run git sync: %s", result.output or "already up to date")
+    else:
+        logger.warning("pre-run git sync failed (running existing checkout): %s", result.output)
 
 
 def _run_task(task: Task, *, profile: Profile, repo_root: Path, dry_run: bool) -> TaskResult:

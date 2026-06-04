@@ -37,24 +37,24 @@ Environment=LOG_LEVEL=INFO
 Environment=PYTHONUNBUFFERED=1
 # Single knob for all on-disk cache/dedupe state. utils.cache.cache_path()
 # resolves every cache file against this; it's the one writable path below
-# (ReadWritePaths=/srv/cache), created by deploy/install.sh.
-Environment=CACHE_DIR=/srv/cache
+# (ReadWritePaths=__CACHE_DIR__), created by deploy/install.sh.
+Environment=CACHE_DIR=__CACHE_DIR__
 
 # Require the operator-supplied env file before starting. The operator drops
-# /etc/monitoring/.env (RPC URLs, Telegram tokens, API keys) once, mode
+# __ETC_DIR__/.env (RPC URLs, Telegram tokens, API keys) once, mode
 # 0640 root:__MONITOR_USER__ — see deploy/runbook.md. Refuse to start blind
 # rather than silently run with no credentials. The `+` prefix runs as root so
 # the dir can be created with root ownership regardless of User= above.
 ExecStartPre=+/bin/bash -c '\
-  install -m 750 -o root -g __MONITOR_USER__ -d /etc/monitoring; \
-  if [ ! -f /etc/monitoring/.env ]; then \
-    echo "monitoring: /etc/monitoring/.env missing — drop the production env there (0640 root:__MONITOR_USER__) before starting" >&2; \
+  install -m 750 -o root -g __MONITOR_USER__ -d __ETC_DIR__; \
+  if [ ! -f __ETC_DIR__/.env ]; then \
+    echo "monitoring: __ETC_DIR__/.env missing — drop the production env there (0640 root:__MONITOR_USER__) before starting" >&2; \
     exit 1; \
   fi'
 
 # Load the env (RPC URLs, Telegram tokens, API keys) into supercronic; it passes
 # the environment through to every `python -m automation run` child.
-EnvironmentFile=/etc/monitoring/.env
+EnvironmentFile=__ETC_DIR__/.env
 
 # Render the crontab from jobs.yaml, then run supercronic against it. Rendering
 # in its own step means a malformed jobs.yaml fails the unit start loudly
@@ -70,14 +70,17 @@ RestartSec=10
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
-# Hardening — cheap wins now that there's no container boundary. /srv/cache is
-# the only writable path the scripts need (dedupe caches, nonces); the repo tree
-# and venv are read-only at runtime.
+# Hardening — cheap wins now that there's no container boundary. __CACHE_DIR__ is
+# the scripts' state path (dedupe caches, nonces). The repo tree is also writable
+# because the multisig profile fast-forwards the checkout in-process before each
+# run (sync_before_run in jobs.yaml → git pull --ff-only, which writes .git/ and
+# the working tree); ProtectSystem=strict would otherwise make it read-only and
+# fail the pull. The venv and the rest of the system stay read-only.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/srv/cache
+ReadWritePaths=__CACHE_DIR__ __REPO_DIR__
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

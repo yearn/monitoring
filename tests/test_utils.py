@@ -228,8 +228,9 @@ class TestTelegram(unittest.TestCase):
     def test_send_telegram_message_test_override(self, mock_post):
         """TELEGRAM_TEST_CHAT_ID forces every message to one chat via the default bot.
 
-        It overrides both topic and legacy routing, prepends a [protocol] label,
-        and never applies topic threading.
+        It overrides both topic and legacy routing, prepends a [protocol] label
+        (Markdown-escaped so protocol names with `_` and the brackets don't trip a
+        400 parse error), and never applies topic threading.
         """
         mock_response = unittest.mock.Mock()
         mock_response.status_code = 200
@@ -255,8 +256,39 @@ class TestTelegram(unittest.TestCase):
             self.assertIn("default_token", url)
             self.assertNotIn("aave_token", url)
             self.assertEqual(kwargs["json"]["chat_id"], "dummy_group")
-            self.assertEqual(kwargs["json"]["text"], "[aave] Test message")
+            self.assertEqual(kwargs["json"]["text"], "\\[aave] Test message")
             self.assertNotIn("message_thread_id", kwargs["json"])
+
+        # A protocol name with an underscore is the case the escaping protects:
+        # unescaped, `[yearn_timelock]` is parsed as Markdown and 400s.
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TEST_CHAT_ID": "dummy_group",
+                "TELEGRAM_BOT_TOKEN_DEFAULT": "default_token",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_telegram_message("Test message", "yearn_timelock")
+            self.assertEqual(
+                mock_post.call_args[1]["json"]["text"],
+                "\\[yearn\\_timelock] Test message",
+            )
+
+        # plain_text sends keep the label literal (no parse_mode → nothing to escape).
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TEST_CHAT_ID": "dummy_group",
+                "TELEGRAM_BOT_TOKEN_DEFAULT": "default_token",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_telegram_message("Test message", "yearn_timelock", plain_text=True)
+            self.assertEqual(
+                mock_post.call_args[1]["json"]["text"],
+                "[yearn_timelock] Test message",
+            )
 
 
 class TestAlert(unittest.TestCase):
