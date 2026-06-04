@@ -6,33 +6,33 @@ Monitoring scripts for DeFi protocols to track key metrics and send alerts. Join
 
 ## Supported Protocols
 
-- [Aave V3](./aave/README.md)
-- [APYUSD](./apyusd/README.md)
-- [Bad Debt](./bad-debt/)
-- [Cap](./cap/README.md)
-- [Compound V3](./compound/README.md)
-- [Ethena](./ethena/README.md)
-- [Euler](./euler/README.md) — _monitoring disabled_
-- [Fluid](./fluid/README.md)
-- [Infinifi](./infinifi/README.md)
-- [Lido](./lido/README.md)
-- [LRTs](./lrt-pegs/README.md)
-- [Maple](./maple/README.md)
-- [Maker DAO](./maker/README.md)
-- [Morpho](./morpho/README.md)
-- [Pendle](./pendle/README.md)
-- [RTokens - ETH+](./rtoken/README.md)
-- [Spark](./spark/README.md)
-- [Strata](./strata/README.md)
-- [Stargate](./stargate/README.md) — _monitoring disabled_
-- [USDAI](./usdai/README.md)
-- [USTB - Superstate](./ustb/README.md)
-- [Yearn](./yearn/README.md)
+- [Aave V3](./protocols/aave/README.md)
+- [APYUSD](./protocols/apyusd/README.md)
+- [Bad Debt](./protocols/bad-debt/)
+- [Cap](./protocols/cap/README.md)
+- [Compound V3](./protocols/compound/README.md)
+- [Ethena](./protocols/ethena/README.md)
+- [Euler](./protocols/euler/README.md) — _monitoring disabled_
+- [Fluid](./protocols/fluid/README.md)
+- [Infinifi](./protocols/infinifi/README.md)
+- [Lido](./protocols/lido/README.md)
+- [LRTs](./protocols/lrt-pegs/README.md)
+- [Maple](./protocols/maple/README.md)
+- [Maker DAO](./protocols/maker/README.md)
+- [Morpho](./protocols/morpho/README.md)
+- [Pendle](./protocols/pendle/README.md)
+- [RTokens - ETH+](./protocols/rtoken/README.md)
+- [Spark](./protocols/spark/README.md)
+- [Strata](./protocols/strata/README.md)
+- [Stargate](./protocols/stargate/README.md) — _monitoring disabled_
+- [USDAI](./protocols/usdai/README.md)
+- [USTB - Superstate](./protocols/ustb/README.md)
+- [Yearn](./protocols/yearn/README.md)
 
 ## Cross-Protocol Monitoring
 
-- [Timelock Alerts](./timelock/README.md) — monitors OpenZeppelin `TimelockController` contracts for `CallScheduled` events across multiple protocols and sends Telegram alerts to protocol-specific channels.
-- [Safe Multisigs](./safe/main.py) — monitors Safe multisig wallets for queued transactions across multiple protocols.
+- [Timelock Alerts](./protocols/timelock/README.md) — monitors OpenZeppelin `TimelockController` contracts for `CallScheduled` events across multiple protocols and sends Telegram alerts to protocol-specific channels.
+- [Safe Multisigs](./protocols/safe/main.py) — monitors Safe multisig wallets for queued transactions across multiple protocols.
 
 ## Telegram Alerts
 
@@ -75,7 +75,7 @@ cp .env.example .env
 Run a specific script for a protocol. Example:
 
 ```bash
-uv run aave/main.py
+uv run protocols/aave/main.py
 ```
 
 ## Deployment

@@ -11,8 +11,8 @@
 - Environment setup: `cp .env.example .env` (then edit with your API keys)
 
 ### Usage
-- Run script: `python <protocol>/main.py`
-  - Example: `python aave/main.py`
+- Run script: `python protocols/<protocol>/main.py`
+  - Example: `python protocols/aave/main.py`
 
 ### Development
 - Format code: `uv run ruff format .`

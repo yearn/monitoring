@@ -23,31 +23,31 @@ profiles:
     # No env override: alert dedupe and morpho rows share the default cache-id.txt
     # under $CACHE_DIR.
     tasks:
-      - { name: "apyusd",                 script: apyusd/main.py }
-      - { name: "3jane",                  script: 3jane/main.py }
-      - { name: "morpho-markets",         script: morpho/markets.py }
-      - { name: "morpho-markets-v2",      script: morpho/markets_v2.py }
-      - { name: "aave",                   script: aave/main.py }
-      - { name: "lido-steth",             script: lido/steth/main.py }
-      - { name: "lrt-pegs-curve",         script: lrt-pegs/curve/main.py }
-      - { name: "lrt-pegs-fluid",         script: lrt-pegs/fluid/main.py }
-      - { name: "rtoken",                 script: rtoken/monitor_rtoken.py }
-      - { name: "lrt-pegs-origin",        script: lrt-pegs/origin_protocol.py }
-      - { name: "infinifi",               script: infinifi/main.py }
-      - { name: "usdai",                  script: usdai/main.py }
-      - { name: "usdai-large-mints",      script: usdai/large_mints.py }
-      - { name: "stables-dune-large-transfers", script: stables/dune_large_transfers.py }
-      - { name: "yearn-alert-large-flows", script: yearn/alert_large_flows.py }
+      - { name: "apyusd",                 script: protocols/apyusd/main.py }
+      - { name: "3jane",                  script: protocols/3jane/main.py }
+      - { name: "morpho-markets",         script: protocols/morpho/markets.py }
+      - { name: "morpho-markets-v2",      script: protocols/morpho/markets_v2.py }
+      - { name: "aave",                   script: protocols/aave/main.py }
+      - { name: "lido-steth",             script: protocols/lido/steth/main.py }
+      - { name: "lrt-pegs-curve",         script: protocols/lrt-pegs/curve/main.py }
+      - { name: "lrt-pegs-fluid",         script: protocols/lrt-pegs/fluid/main.py }
+      - { name: "rtoken",                 script: protocols/rtoken/monitor_rtoken.py }
+      - { name: "lrt-pegs-origin",        script: protocols/lrt-pegs/origin_protocol.py }
+      - { name: "infinifi",               script: protocols/infinifi/main.py }
+      - { name: "usdai",                  script: protocols/usdai/main.py }
+      - { name: "usdai-large-mints",      script: protocols/usdai/large_mints.py }
+      - { name: "stables-dune-large-transfers", script: protocols/stables/dune_large_transfers.py }
+      - { name: "yearn-alert-large-flows", script: protocols/yearn/alert_large_flows.py }
       # Cache: tks-trigger-cache.json under $CACHE_DIR (check_stuck_triggers.DEFAULT_CACHE_FILE).
-      - { name: "yearn-check-stuck-triggers", script: yearn/check_stuck_triggers.py, enabled: false }
-      - { name: "maple",                  script: maple/main.py }
-      - { name: "timelock-alerts",        script: timelock/timelock_alerts.py }
+      - { name: "yearn-check-stuck-triggers", script: protocols/yearn/check_stuck_triggers.py, enabled: false }
+      - { name: "maple",                  script: protocols/maple/main.py }
+      - { name: "timelock-alerts",        script: protocols/timelock/timelock_alerts.py }
       # proposals scripts must run AFTER timelock-alerts (cache dedupe ordering).
-      - { name: "aave-proposals",         script: aave/proposals.py }
-      - { name: "ustb",                   script: ustb/main.py }
-      - { name: "compound-proposals",     script: compound/proposals.py }
-      - { name: "fluid-proposals",        script: fluid/proposals.py }
-      - { name: "maker-proposals",        script: maker/proposals.py }
+      - { name: "aave-proposals",         script: protocols/aave/proposals.py }
+      - { name: "ustb",                   script: protocols/ustb/main.py }
+      - { name: "compound-proposals",     script: protocols/compound/proposals.py }
+      - { name: "fluid-proposals",        script: protocols/fluid/proposals.py }
+      - { name: "maker-proposals",        script: protocols/maker/proposals.py }
 
   daily:
     cron: "19 8 * * *"
@@ -58,16 +58,16 @@ profiles:
       CACHE_FILENAME: cache-id-daily.txt
       MORPHO_FILENAME: cache-id-daily.txt
     tasks:
-      - { name: "morpho-governance",    script: morpho/governance.py }
-      - { name: "morpho-governance-v2", script: morpho/governance_v2.py }
-      - { name: "ethena",               script: ethena/ethena.py }
-      - { name: "strata",               script: strata/main.py }
-      - { name: "cap-liquidity",        script: cap/liquidity.py }
+      - { name: "morpho-governance",    script: protocols/morpho/governance.py }
+      - { name: "morpho-governance-v2", script: protocols/morpho/governance_v2.py }
+      - { name: "ethena",               script: protocols/ethena/ethena.py }
+      - { name: "strata",               script: protocols/strata/main.py }
+      - { name: "cap-liquidity",        script: protocols/cap/liquidity.py }
       - { name: "tenderly",             script: utils/tenderly/tenderly.py }
-      - { name: "yearn-check-shadow-debt", script: yearn/check_shadow_debt.py, enabled: false }
-      - { name: "compound",             script: compound/main.py }
-      - { name: "yearn-check-endorsed", script: yearn/check_endorsed.py }
-      - { name: "yearn-check-timelock-delay", script: yearn/check_timelock_delay.py }
+      - { name: "yearn-check-shadow-debt", script: protocols/yearn/check_shadow_debt.py, enabled: false }
+      - { name: "compound",             script: protocols/compound/main.py }
+      - { name: "yearn-check-endorsed", script: protocols/yearn/check_endorsed.py }
+      - { name: "yearn-check-timelock-delay", script: protocols/yearn/check_timelock_delay.py }
 
   multisig:
     cron: "0/10 * * * *"
@@ -84,5 +84,5 @@ profiles:
     # `uv sync --frozen --extra ai` + `systemctl restart monitoring`.
     sync_before_run: true
     tasks:
-      - { name: "safe",    script: safe/main.py }
-      - { name: "stables", script: stables/main.py }
+      - { name: "safe",    script: protocols/safe/main.py }
+      - { name: "stables", script: protocols/stables/main.py }

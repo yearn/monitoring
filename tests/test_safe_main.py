@@ -7,7 +7,7 @@ from unittest.mock import patch
 class TestSafePendingTransactions(unittest.TestCase):
     def _import_safe_main(self):
         with patch.dict(os.environ, {"SAFE_API_KEY": "test-key"}):
-            import safe.main as safe_main
+            import protocols.safe.main as safe_main
 
             return importlib.reload(safe_main)
 

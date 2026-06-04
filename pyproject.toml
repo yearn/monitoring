@@ -92,15 +92,15 @@ exclude-newer = "1 week"
 requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = [
-    "apyusd",
-    "aave", "automation", "bad-debt", "cap", "compound", "ethena", "euler",
-    "fluid", "infinifi", "lido", "lrt-pegs", "maker",
-    "maple", "morpho", "pendle", "rtoken",
-    "safe", "spark", "stargate", "timelock", "usdai",
-    "utils", "yearn",
-]
+# Protocol monitors live under `protocols/`; shared code under `utils/` and `automation/`.
+# Namespace discovery keeps the editable-install finder in sync as protocols come and go.
+# Dirs whose names aren't valid Python identifiers (e.g. `3jane`, `lrt-pegs`, `bad-debt`,
+# `common-abi`) are never imported — they're reached via cwd-relative script/ABI paths — so
+# they don't need a finder entry.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["protocols*", "utils*", "automation*"]
+namespaces = true
 
 [tool.ruff]
 # Longer line length for better readability

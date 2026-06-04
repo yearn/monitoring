@@ -2,7 +2,7 @@ from unittest.mock import patch
 
 import requests
 
-from compound.proposals import get_proposals
+from protocols.compound.proposals import get_proposals
 
 
 class _Response:
@@ -37,10 +37,10 @@ def test_compound_alert_uses_timeout_escapes_title_and_updates_reported_id():
     }
 
     with (
-        patch("compound.proposals.requests.post", return_value=_Response(payload)) as mock_post,
-        patch("compound.proposals.get_last_queued_id_from_file", return_value=40),
-        patch("compound.proposals.send_telegram_message") as mock_send,
-        patch("compound.proposals.write_last_queued_id_to_file") as mock_write,
+        patch("protocols.compound.proposals.requests.post", return_value=_Response(payload)) as mock_post,
+        patch("protocols.compound.proposals.get_last_queued_id_from_file", return_value=40),
+        patch("protocols.compound.proposals.send_telegram_message") as mock_send,
+        patch("protocols.compound.proposals.write_last_queued_id_to_file") as mock_write,
     ):
         get_proposals()
 
@@ -55,8 +55,8 @@ def test_compound_alert_uses_timeout_escapes_title_and_updates_reported_id():
 
 def test_compound_processing_error_alert_uses_plain_text():
     with (
-        patch("compound.proposals.requests.post", return_value=_Response({"data": {}})),
-        patch("compound.proposals.send_telegram_message") as mock_send,
+        patch("protocols.compound.proposals.requests.post", return_value=_Response({"data": {}})),
+        patch("protocols.compound.proposals.send_telegram_message") as mock_send,
     ):
         get_proposals()
 
@@ -69,8 +69,8 @@ def test_compound_processing_error_alert_uses_plain_text():
 
 def test_compound_fetch_error_alert_uses_plain_text():
     with (
-        patch("compound.proposals.requests.post", side_effect=requests.Timeout("timed out")),
-        patch("compound.proposals.send_telegram_message") as mock_send,
+        patch("protocols.compound.proposals.requests.post", side_effect=requests.Timeout("timed out")),
+        patch("protocols.compound.proposals.send_telegram_message") as mock_send,
     ):
         get_proposals()
 

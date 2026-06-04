@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from aave.proposals import fetch_queued_proposals, handle_governance_proposals, has_pending_payload
+from protocols.aave.proposals import fetch_queued_proposals, handle_governance_proposals, has_pending_payload
 
 
 def _payload(chain_id: int = 1, payload_id: int = 1) -> dict:
@@ -25,7 +25,7 @@ def _proposal(
 def test_aave_fetches_executed_governance_proposals_with_payloads():
     payload = {"data": {"proposals": [_proposal(12, 1), _proposal(10, 1)]}}
 
-    with patch("aave.proposals.run_query", return_value=payload) as mock_run_query:
+    with patch("protocols.aave.proposals.run_query", return_value=payload) as mock_run_query:
         proposals = fetch_queued_proposals(9)
 
     query, variables = mock_run_query.call_args.args
@@ -44,11 +44,11 @@ def test_aave_handler_alerts_governance_executed_proposals_with_pending_payloads
     ]
 
     with (
-        patch("aave.proposals.get_last_queued_id_from_file", return_value=487),
-        patch("aave.proposals.fetch_queued_proposals", return_value=proposals),
-        patch("aave.proposals.has_pending_payload", side_effect=[True, False]),
-        patch("aave.proposals.send_telegram_message") as mock_send,
-        patch("aave.proposals.write_last_queued_id_to_file") as mock_write,
+        patch("protocols.aave.proposals.get_last_queued_id_from_file", return_value=487),
+        patch("protocols.aave.proposals.fetch_queued_proposals", return_value=proposals),
+        patch("protocols.aave.proposals.has_pending_payload", side_effect=[True, False]),
+        patch("protocols.aave.proposals.send_telegram_message") as mock_send,
+        patch("protocols.aave.proposals.write_last_queued_id_to_file") as mock_write,
     ):
         handle_governance_proposals()
 
@@ -67,7 +67,7 @@ def test_aave_has_pending_payload_is_true_when_any_payload_is_not_executed():
         {"payloadId": "4", "chainId": "196", "state": "created"},
     ]
 
-    with patch("aave.proposals.fetch_payload_states", return_value=payload_states):
+    with patch("protocols.aave.proposals.fetch_payload_states", return_value=payload_states):
         assert has_pending_payload(proposal)
 
 
@@ -75,5 +75,5 @@ def test_aave_has_pending_payload_is_false_when_all_payloads_are_executed():
     proposal = _proposal(488, 1)
     payload_states = [{"payloadId": "443", "chainId": "1", "state": "executed"}]
 
-    with patch("aave.proposals.fetch_payload_states", return_value=payload_states):
+    with patch("protocols.aave.proposals.fetch_payload_states", return_value=payload_states):
         assert not has_pending_payload(proposal)
