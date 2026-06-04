@@ -78,6 +78,10 @@ Run a specific script for a protocol. Example:
 uv run aave/main.py
 ```
 
+## Deployment
+
+In production the scripts run on a schedule via supercronic on a VPS, defined in [`automation/jobs.yaml`](./automation/jobs.yaml). See [`deploy/`](./deploy/) — [`install.sh`](./deploy/install.sh) provisions a host and [`runbook.md`](./deploy/runbook.md) covers operations.
+
 ## Code Style
 
 Format and lint code with ruff:
