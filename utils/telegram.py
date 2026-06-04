@@ -55,9 +55,10 @@ def _post_message(
     payload: dict[str, object] = {
         "chat_id": chat_id,
         "text": message,
-        "parse_mode": "Markdown" if not plain_text else None,
         "disable_notification": disable_notification,
     }
+    if not plain_text:
+        payload["parse_mode"] = "Markdown"
     if topic_id:
         payload["message_thread_id"] = int(topic_id)
 

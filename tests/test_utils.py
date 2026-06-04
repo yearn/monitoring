@@ -101,6 +101,27 @@ class TestTelegram(unittest.TestCase):
             self.assertEqual(kwargs["json"]["text"], "Test message")
             self.assertEqual(kwargs["json"]["parse_mode"], "Markdown")
 
+    @patch("utils.telegram.requests.post")
+    def test_send_telegram_message_plain_text_omits_parse_mode(self, mock_post):
+        mock_response = unittest.mock.Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_post.return_value = mock_response
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN_TEST": "test_token",
+                "TELEGRAM_CHAT_ID_TEST": "test_chat_id",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_telegram_message("Test message", "test", plain_text=True)
+
+            kwargs = mock_post.call_args[1]
+            self.assertEqual(kwargs["json"]["text"], "Test message")
+            self.assertNotIn("parse_mode", kwargs["json"])
+
     @patch("utils.telegram.requests.get")
     def test_send_telegram_message_missing_credentials(self, mock_get):
         # Test with missing environment variables
