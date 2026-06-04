@@ -11,7 +11,9 @@ def _payload(chain_id: int = 1, payload_id: int = 1) -> dict:
     }
 
 
-def _proposal(proposal_id: int, timestamp: int, title: str = "Test Proposal", payloads: list[dict] | None = None) -> dict:
+def _proposal(
+    proposal_id: int, timestamp: int, title: str = "Test Proposal", payloads: list[dict] | None = None
+) -> dict:
     return {
         "proposalId": str(proposal_id),
         "proposalMetadata": {"title": title},

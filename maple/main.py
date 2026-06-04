@@ -9,7 +9,7 @@ Monitors:
 - Withdrawal queue vs liquid funds — alerts when pending exit value > 80% of liquid funds (Aave + Sky)
 - Pool liquidity — cash and withdrawal queue depth
 - Loan collateral risk — weighted risk score based on collateral asset types
-- Collateralization ratio (via syrupGlobals) — alerts when combined ratio drops below 140%
+- Collateralization ratio (via syrupGlobals) — alerts when combined ratio drops below 135%
 - Pool Delegate Cover — alerts when delegate cover balance drops to zero
 """
 

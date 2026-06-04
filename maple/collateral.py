@@ -55,7 +55,7 @@ DEFAULT_RISK_SCORE = 5
 RISK_SCORE_THRESHOLD = 1.5
 
 # Alert if collateralization ratio drops below this threshold
-COLLATERALIZATION_RATIO_THRESHOLD = 1.4  # 140%
+COLLATERALIZATION_RATIO_THRESHOLD = 1.35  # 135%
 
 # Alert if unrealized losses exceed this % of pool total assets
 UNREALIZED_LOSSES_THRESHOLD = 0.005  # 0.5%
