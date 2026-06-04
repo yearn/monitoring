@@ -1,6 +1,6 @@
 # Monitoring Tools
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/yearn/monitoring-scripts-py)
+[![CI](https://github.com/yearn/monitoring/actions/workflows/ci.yml/badge.svg)](https://github.com/yearn/monitoring/actions/workflows/ci.yml)
 
 Monitoring scripts for DeFi protocols to track key metrics and send alerts. Join the Telegram group to receive alerts: `@yearn_curation_alerts`
 
