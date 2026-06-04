@@ -227,6 +227,107 @@ class TestAnthropicProvider(unittest.TestCase):
         self.assertEqual(kwargs["tool_choice"]["type"], "tool")
 
 
+class TestCodexProvider(unittest.TestCase):
+    """Tests for the OpenAI Codex Python SDK provider."""
+
+    @patch("openai_codex.Codex")
+    def test_complete_success(self, mock_codex_cls: MagicMock) -> None:
+        mock_client = MagicMock()
+        mock_codex_cls.return_value = mock_client
+
+        mock_thread = MagicMock()
+        mock_client.thread_start.return_value = mock_thread
+        mock_result = MagicMock()
+        mock_result.final_response = "  Updates the cap. LOW.  "
+        mock_thread.run.return_value = mock_result
+
+        from utils.llm.codex_provider import CodexProvider
+
+        provider = CodexProvider(api_key="sk-test", model="gpt-5.2-codex", model_provider="openai")
+        result = provider.complete("prompt", system_prompt="sys")
+
+        self.assertEqual(result, "Updates the cap. LOW.")
+        mock_client.login_api_key.assert_called_once_with("sk-test")
+        thread_kwargs = mock_client.thread_start.call_args.kwargs
+        self.assertEqual(thread_kwargs["model"], "gpt-5.2-codex")
+        self.assertEqual(thread_kwargs["model_provider"], "openai")
+        self.assertTrue(thread_kwargs["ephemeral"])
+        self.assertIn("sys", thread_kwargs["developer_instructions"])
+        self.assertEqual(thread_kwargs["approval_mode"].value, "deny_all")
+        self.assertEqual(thread_kwargs["sandbox"].value, "read-only")
+        run_kwargs = mock_thread.run.call_args.kwargs
+        self.assertEqual(run_kwargs["model"], "gpt-5.2-codex")
+        self.assertIsNone(run_kwargs["output_schema"])
+        self.assertEqual(run_kwargs["approval_mode"].value, "deny_all")
+        self.assertEqual(run_kwargs["sandbox"].value, "read-only")
+
+    @patch("openai_codex.Codex")
+    def test_complete_without_api_key_reuses_existing_auth(self, mock_codex_cls: MagicMock) -> None:
+        mock_client = MagicMock()
+        mock_codex_cls.return_value = mock_client
+        mock_thread = MagicMock()
+        mock_client.thread_start.return_value = mock_thread
+        mock_result = MagicMock()
+        mock_result.final_response = "OK"
+        mock_thread.run.return_value = mock_result
+
+        from utils.llm.codex_provider import CodexProvider
+
+        provider = CodexProvider(api_key=None, model="gpt-5.2-codex")
+        self.assertEqual(provider.complete("prompt"), "OK")
+        mock_client.login_api_key.assert_not_called()
+
+    @patch("openai_codex.Codex")
+    def test_complete_empty_response_raises(self, mock_codex_cls: MagicMock) -> None:
+        mock_client = MagicMock()
+        mock_codex_cls.return_value = mock_client
+        mock_thread = MagicMock()
+        mock_client.thread_start.return_value = mock_thread
+        mock_result = MagicMock()
+        mock_result.final_response = None
+        mock_thread.run.return_value = mock_result
+
+        from utils.llm.codex_provider import CodexProvider
+
+        provider = CodexProvider(api_key=None, model="gpt-5.2-codex")
+        with self.assertRaises(LLMError):
+            provider.complete("prompt")
+
+    @patch("openai_codex.Codex")
+    def test_complete_structured_parses_json(self, mock_codex_cls: MagicMock) -> None:
+        mock_client = MagicMock()
+        mock_codex_cls.return_value = mock_client
+        mock_thread = MagicMock()
+        mock_client.thread_start.return_value = mock_thread
+        mock_result = MagicMock()
+        mock_result.final_response = '{"summary": "Updates. LOW.", "detail": "d", "risk_tag": "LOW"}'
+        mock_thread.run.return_value = mock_result
+
+        from utils.llm.codex_provider import CodexProvider
+
+        provider = CodexProvider(api_key=None, model="gpt-5.2-codex")
+        result = provider.complete_structured("prompt", {"type": "object"})
+
+        self.assertEqual(result["risk_tag"], "LOW")
+        self.assertEqual(mock_thread.run.call_args.kwargs["output_schema"], {"type": "object"})
+
+    @patch("openai_codex.Codex")
+    def test_complete_structured_invalid_json_raises(self, mock_codex_cls: MagicMock) -> None:
+        mock_client = MagicMock()
+        mock_codex_cls.return_value = mock_client
+        mock_thread = MagicMock()
+        mock_client.thread_start.return_value = mock_thread
+        mock_result = MagicMock()
+        mock_result.final_response = "not json"
+        mock_thread.run.return_value = mock_result
+
+        from utils.llm.codex_provider import CodexProvider
+
+        provider = CodexProvider(api_key=None, model="gpt-5.2-codex")
+        with self.assertRaises(LLMError):
+            provider.complete_structured("prompt", {"type": "object"})
+
+
 class TestFactory(unittest.TestCase):
     """Tests for the LLM provider factory."""
 
@@ -263,6 +364,15 @@ class TestFactory(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             provider = get_llm_provider()
             self.assertEqual(provider.model_name, "claude-haiku-4-5-20251001")
+
+    @patch("openai_codex.Codex")
+    def test_codex_defaults_without_api_key(self, mock_codex_cls: MagicMock) -> None:
+        env = {"LLM_PROVIDER": "codex"}
+        with patch.dict(os.environ, env, clear=True):
+            provider = get_llm_provider()
+            self.assertEqual(provider.model_name, "gpt-5.2-codex")
+            self.assertTrue(provider.supports_structured_output)
+            mock_codex_cls.return_value.login_api_key.assert_not_called()
 
     @patch("anthropic.Anthropic")
     def test_anthropic_custom_model(self, mock_anthropic_cls: MagicMock) -> None:
@@ -323,6 +433,12 @@ class TestFactory(unittest.TestCase):
     @patch("anthropic.Anthropic")
     def test_structured_output_on_by_default_for_anthropic(self, mock_anthropic_cls: MagicMock) -> None:
         env = {"LLM_PROVIDER": "anthropic", "LLM_API_KEY": "sk-ant-test"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertTrue(get_llm_provider().supports_structured_output)
+
+    @patch("openai_codex.Codex")
+    def test_structured_output_on_by_default_for_codex(self, mock_codex_cls: MagicMock) -> None:
+        env = {"LLM_PROVIDER": "codex"}
         with patch.dict(os.environ, env, clear=True):
             self.assertTrue(get_llm_provider().supports_structured_output)
 

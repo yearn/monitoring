@@ -233,7 +233,7 @@ Calls upgradeTo(address) on the AAVE pool proxy...
 
 `_parse_explanation()` splits this with tolerant regex (handles `### DETAIL`, `**TLDR:**`, etc.); if the format isn't followed, the whole response becomes the summary (backward compatible).
 
-Structured output is controlled by `LLM_STRUCTURED_OUTPUT` (per-provider default: on for `anthropic`/`openai`/`venice` — all verified live — off for `groq`/custom, since JSON-schema support varies by backend). The refine pass (step 7) always uses the text path.
+Structured output is controlled by `LLM_STRUCTURED_OUTPUT` (per-provider default: on for `anthropic`/`codex`/`openai`/`venice`; off for `groq`/custom, since JSON-schema support varies by backend). The refine pass (step 7) always uses the text path.
 
 ### 9. Output Formatting
 
@@ -253,11 +253,13 @@ All configuration is via environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLM_PROVIDER` | `venice` | Provider name: `venice`, `groq`, `openai`, `anthropic`, or custom |
-| `LLM_API_KEY` | *(required)* | API key for the LLM provider |
+| `LLM_PROVIDER` | `venice` | Provider name: `venice`, `groq`, `openai`, `anthropic`, `codex`, or custom |
+| `LLM_API_KEY` | *(required except codex)* | API key for the LLM provider. For `codex`, omitted means reuse existing Codex auth |
 | `LLM_MODEL` | `deepseek-v4-flash` | Model identifier |
 | `LLM_BASE_URL` | *(per provider)* | API base URL (not needed for anthropic) |
-| `LLM_STRUCTURED_OUTPUT` | *(per provider)* | `true`/`false` to force JSON-schema output. Default: on for anthropic/openai/venice (all verified live), off for groq/custom |
+| `LLM_STRUCTURED_OUTPUT` | *(per provider)* | `true`/`false` to force JSON-schema output. Default: on for anthropic/codex/openai/venice, off for groq/custom |
+| `LLM_CODEX_MODEL_PROVIDER` | *(unset)* | Optional Codex SDK model-provider override |
+| `LLM_CODEX_CWD` | *(current process cwd)* | Optional Codex runtime working directory |
 | `ETHERSCAN_TOKEN` | *(optional)* | Etherscan v2 multichain API key for source context |
 | `TENDERLY_API_KEY` | *(optional)* | Tenderly API key for simulation |
 | `TENDERLY_ACCOUNT` | `yearn` | Tenderly account slug |
@@ -271,9 +273,10 @@ All configuration is via environment variables:
 | Groq | `https://api.groq.com/openai/v1` | `openai/gpt-oss-safeguard-20b` | `openai` |
 | OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` | `openai` |
 | Anthropic | *(native API)* | `claude-haiku-4-5-20251001` | `anthropic` |
+| Codex | *(native SDK)* | `gpt-5.2-codex` | `openai-codex` |
 | Custom | Set `LLM_BASE_URL` | Set `LLM_MODEL` | `openai` |
 
-The `openai` and `anthropic` packages are optional dependencies. Install with:
+The `openai`, `anthropic`, and `openai-codex` packages are optional dependencies. Install with:
 
 ```bash
 uv pip install 'monitoring-scripts-py[ai]'
@@ -287,6 +290,7 @@ utils/llm/
 ├── ai_explainer.py          # Orchestrator: decode → fetch context → prompt → explain
 ├── anthropic_provider.py    # Anthropic (Claude) native API provider
 ├── base.py                  # Abstract LLMProvider base class + LLMError
+├── codex_provider.py        # OpenAI Codex Python SDK provider
 ├── factory.py               # Provider factory with env-based config + singleton
 ├── openai_compat.py         # OpenAI-compatible provider (Venice, OpenAI, etc.)
 └── README.md                # This file
