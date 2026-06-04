@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
 from utils.logging import get_logger
-from utils.telegram import send_telegram_message
+from utils.telegram import escape_markdown, send_telegram_message
 
 load_dotenv()
 
@@ -89,6 +89,7 @@ def get_proposals():
             TALLY_API_URL,
             json={"query": query, "variables": variables},
             headers=headers,
+            timeout=30,
         )
         response.raise_for_status()
         data = response.json()
@@ -114,12 +115,14 @@ def get_proposals():
             return
 
         message = "🖋️ Compound Governance Proposals 🖋️\n"
+        newest_reported_proposal_id = last_reported_id
         for proposal in queued_proposals:
             proposal_id = int(proposal["onchainId"])
             if proposal_id <= last_reported_id:
                 # use continue instead of break because Comp can have unordered proposal ids
                 continue
 
+            newest_reported_proposal_id = max(newest_reported_proposal_id, proposal_id)
             link = COMPOUND_TALLY_URL + str(proposal_id)
             message += f"📗 Proposal ID: {proposal_id}\n"
             message += f"🔗 Link to Proposal: {link}\n"
@@ -127,7 +130,7 @@ def get_proposals():
             metadata = proposal["metadata"]
             title = extract_title_from_metadata(metadata["title"])
             if title:
-                message += f"📝 Title: {title}\n"
+                message += f"📝 Title: {escape_markdown(title)}\n"
             # if description:
             #     summary = extract_summary_from_description(description)
             #     if summary:
@@ -135,10 +138,14 @@ def get_proposals():
 
         send_telegram_message(message, PROTOCOL)
         # write the last reported id (highest ID since we sorted ascending)
-        write_last_queued_id_to_file(PROTOCOL, newest_queued_proposal_id)
+        write_last_queued_id_to_file(PROTOCOL, newest_reported_proposal_id)
 
     except requests.RequestException as e:
         message = f"Failed to fetch compound proposals: {e}"
+        send_telegram_message(message, PROTOCOL, disable_notification=True, plain_text=True)
+    except Exception as e:
+        message = f"Error processing compound proposals: {e}"
+        logger.error("%s", message)
         send_telegram_message(message, PROTOCOL, disable_notification=True, plain_text=True)
 
 
