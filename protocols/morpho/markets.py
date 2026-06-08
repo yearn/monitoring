@@ -25,7 +25,9 @@ BAD_DEBT_RATIO = 0.005  # 0.5% of total borrowed tvl
 LIQUIDITY_THRESHOLD = 0.01  # 1% of total assets
 YV_COLLATERAL_LIQUIDATION_BUFFER = 1.25  # require 25% more withdrawable liquidity than collateral at risk
 YV_COLLATERAL_MIN_BORROW_USD = 10_000  # skip dust markets
-YV_COLLATERAL_AT_RISK_POINTS = 20  # 5% increments in Morpho's collateral-at-risk curve
+YV_COLLATERAL_MIN_GROUP_ASSETS_USD = 10_000  # skip liquidity groups with negligible assets
+YV_COLLATERAL_MIN_AT_RISK_USD = 10_000  # skip markets with negligible collateral at risk
+YV_COLLATERAL_AT_RISK_POINTS = 20  # requested granularity for Morpho's collateral-at-risk curve
 YV_COLLATERAL_STABLE_PRICE_SHOCK = 0.05
 YV_COLLATERAL_VOLATILE_PRICE_SHOCK = 0.15
 YV_COLLATERAL_FALLBACK_PRICE_SHOCK = 0.10
@@ -146,6 +148,26 @@ VAULTS_WITH_YV_COLLATERAL_BY_ASSET = {
         #     ["SteakhousePrime AUSD", "0x82c4C641CCc38719ae1f0FBd16A64808d838fDfD"],
         #     ["Gauntlet AUSD", "0x9540441C503D763094921dbE4f13268E6d1d3B56"],
         # ],
+    },
+}
+
+
+# Direct Yearn vault collateral markets to check for unwind liquidity.
+# Keys are underlying asset addresses used in VAULTS_WITH_YV_COLLATERAL_BY_ASSET.
+YV_COLLATERAL_MARKETS_BY_ASSET = {
+    Chain.KATANA: {
+        "0x203A662b0BD271A6ed5a60EdFbd04bFce608FD36": [
+            "0x6691cdcadd5d23ac68d2c1cf54dc97ab8242d2a888230de411094480252c2ed3",  # yvvbUSDC/vbUSDT
+        ],
+        "0x2DCa96907fde857dd3D816880A0df407eeB2D2F2": [
+            "0xcdaf57d98c2f75bffb8f0d3f7aa79bbacda4a479c47e316aab14af1ca6d85ffc",  # yvvbUSDT/vbUSDC
+        ],
+        "0xEE7D8BCFb72bC1880D0Cf19822eB0A2e6577aB62": [
+            "0x08f67ef41398456dbc5ff72d43c8b6f7917abfd01498a9fc6c89dabe6eb78b8c",  # yvvbETH/vbUSDC
+        ],
+        "0x0913DA6Da4b42f538B445599b46Bb4622342Cf52": [
+            "0x3a22063bd258f3f75e3135cac4ec53435dfa5b47b3d5173bb8fd5278e6c1b305",  # yvvbWBTC/vbUSDC
+        ],
     },
 }
 
@@ -673,20 +695,14 @@ def normalize_asset_symbol(symbol: str) -> str:
     return normalized
 
 
-def is_yearn_vault_collateral_symbol(symbol: str) -> bool:
-    """Return True for direct Yearn vault collateral symbols such as yvvbUSDC."""
-    normalized = "".join(char for char in symbol.upper() if char.isalnum())
-    return normalized.startswith("YV")
-
-
 def parse_lltv(lltv: str | int | None) -> float:
     """Convert Morpho's WAD-scaled LLTV into a decimal ratio."""
     if lltv is None:
-        return 0
+        return 0.0
     try:
         return int(lltv) / 1e18
     except (TypeError, ValueError):
-        return 0
+        return 0.0
 
 
 def get_yv_collateral_price_shock(asset_symbol: str, lltv: str | int | None) -> float:
@@ -723,7 +739,7 @@ def get_yv_collateral_liquidity_by_asset(chain: Chain, chain_vaults: List[Dict[s
             vault_names,
         ) = calculate_combined_metrics(asset_yv_vaults)
 
-        if combined_total_assets < 10_000:
+        if combined_total_assets < YV_COLLATERAL_MIN_GROUP_ASSETS_USD:
             logger.info(
                 "Skipping %s YV collateral liquidity group: total assets $%s below threshold",
                 asset_symbol,
@@ -731,15 +747,29 @@ def get_yv_collateral_liquidity_by_asset(chain: Chain, chain_vaults: List[Dict[s
             )
             continue
 
-        asset_key = normalize_asset_symbol(asset_symbol)
-        liquidity_by_asset[asset_key] = {
+        asset_key = asset_address.lower()
+        group_data = {
             "asset_symbol": asset_symbol,
-            "asset_address": asset_address,
+            "asset_address": asset_key,
             "combined_total_assets": combined_total_assets,
             "combined_liquidity": combined_liquidity,
             "vault_names": vault_names,
             "vault_count": len(asset_yv_vaults),
         }
+        if asset_key in liquidity_by_asset:
+            existing = liquidity_by_asset[asset_key]
+            logger.warning(
+                "Duplicate YV collateral liquidity group for %s on %s; aggregating %s into existing group",
+                asset_symbol,
+                chain.name,
+                asset_address,
+            )
+            existing["combined_total_assets"] += group_data["combined_total_assets"]
+            existing["combined_liquidity"] += group_data["combined_liquidity"]
+            existing["vault_names"].extend(group_data["vault_names"])
+            existing["vault_count"] += group_data["vault_count"]
+        else:
+            liquidity_by_asset[asset_key] = group_data
 
         liquidity_ratio = combined_liquidity / combined_total_assets
         logger.info(
@@ -755,23 +785,18 @@ def get_yv_collateral_liquidity_by_asset(chain: Chain, chain_vaults: List[Dict[s
     return liquidity_by_asset
 
 
-def get_matching_yv_liquidity_group(
-    market: Dict[str, Any], liquidity_by_asset: Dict[str, Dict[str, Any]]
-) -> Dict[str, Any] | None:
-    """Find the underlying liquidity group for a direct Yearn-vault collateral market."""
-    collateral_asset = market.get("collateralAsset") or {}
-    collateral_symbol = collateral_asset.get("symbol", "")
-    if not is_yearn_vault_collateral_symbol(collateral_symbol):
-        return None
-
-    collateral_key = normalize_asset_symbol(collateral_symbol)
-    return liquidity_by_asset.get(collateral_key)
-
-
 def collect_yv_collateral_markets(
-    chain_vaults: List[Dict[str, Any]], liquidity_by_asset: Dict[str, Dict[str, Any]]
+    chain: Chain,
+    chain_vaults: List[Dict[str, Any]],
+    liquidity_by_asset: Dict[str, Dict[str, Any]],
 ) -> Dict[str, tuple[Dict[str, Any], Dict[str, Any]]]:
-    """Collect unique markets that use direct Yearn vault tokens as collateral."""
+    """Collect configured direct Yearn vault collateral markets."""
+    configured_markets_by_asset = YV_COLLATERAL_MARKETS_BY_ASSET.get(chain, {})
+    market_to_asset = {
+        market_id.lower(): asset_address.lower()
+        for asset_address, market_ids in configured_markets_by_asset.items()
+        for market_id in market_ids
+    }
     markets: Dict[str, tuple[Dict[str, Any], Dict[str, Any]]] = {}
 
     for vault_data in chain_vaults:
@@ -780,81 +805,122 @@ def collect_yv_collateral_markets(
             if market.get("collateralAsset") is None:
                 continue
 
+            market_id = market["marketId"]
+            asset_address = market_to_asset.get(market_id.lower())
+            if asset_address is None:
+                continue
+
             market_state = market.get("state") or {}
             borrow_usd = market_state.get("borrowAssetsUsd") or 0
             if borrow_usd < YV_COLLATERAL_MIN_BORROW_USD:
                 continue
 
-            liquidity_group = get_matching_yv_liquidity_group(market, liquidity_by_asset)
+            liquidity_group = liquidity_by_asset.get(asset_address)
             if liquidity_group is None:
+                logger.warning(
+                    "Skipping configured YV collateral market %s on %s: no liquidity group for asset %s",
+                    market_id,
+                    chain.name,
+                    asset_address,
+                )
                 continue
 
-            markets[market["marketId"]] = (market, liquidity_group)
+            markets[market_id] = (market, liquidity_group)
 
     return markets
 
 
-def get_market_collateral_at_risk_usd(market_id: str, chain: Chain, price_shock: float) -> float | None:
-    """Fetch Morpho collateral at risk for a target adverse price move."""
-    target_price_ratio = 1 - price_shock
-    query = """
-    query GetMarketCollateralAtRisk($marketId: String!, $chainId: Int!, $numberOfPoints: Int!) {
-        marketCollateralAtRisk(uniqueKey: $marketId, chainId: $chainId, numberOfPoints: $numberOfPoints) {
-            collateralAtRisk {
-                collateralPriceRatio
-                collateralUsd
-            }
-        }
-    }
+def get_markets_collateral_at_risk_usd(market_shocks: Dict[str, float], chain: Chain) -> Dict[str, float] | None:
+    """Fetch Morpho collateral at risk for many markets in a single aliased request.
+
+    Args:
+        market_shocks: Mapping of market id to the adverse price move to evaluate for that market.
+        chain: Chain the markets live on.
+
+    Returns:
+        Mapping of market id to collateral-at-risk USD at its target price, or None if the request fails.
     """
-    json_data = {
-        "query": query,
-        "variables": {
-            "marketId": market_id,
-            "chainId": chain.chain_id,
-            "numberOfPoints": YV_COLLATERAL_AT_RISK_POINTS,
-        },
+    if not market_shocks:
+        return {}
+
+    alias_to_market = {f"m{index}": market_id for index, market_id in enumerate(market_shocks)}
+    variable_definitions = ["$chainId: Int!", "$numberOfPoints: Int!"]
+    variables: Dict[str, Any] = {
+        "chainId": chain.chain_id,
+        "numberOfPoints": YV_COLLATERAL_AT_RISK_POINTS,
     }
+    query_fields = []
+    for alias, market_id in alias_to_market.items():
+        variable_definitions.append(f"${alias}: String!")
+        variables[alias] = market_id
+        query_fields.append(
+            f"{alias}: marketCollateralAtRisk(uniqueKey: ${alias}, chainId: $chainId, numberOfPoints: $numberOfPoints) {{"
+            " collateralAtRisk { collateralPriceRatio collateralUsd } }"
+        )
+
+    query = (
+        "query GetMarketsCollateralAtRisk("
+        + ", ".join(variable_definitions)
+        + ") {\n"
+        + "\n".join(query_fields)
+        + "\n}"
+    )
+    json_data = {"query": query, "variables": variables}
 
     try:
         response = request_with_retry("post", API_URL, json=json_data)
     except requests.RequestException as e:
-        logger.error("Failed to fetch collateral at risk for market %s on %s: %s", market_id, chain.name, e)
+        logger.error("Failed to fetch collateral at risk on %s: %s", chain.name, e)
         return None
 
     data = response.json()
     if "errors" in data:
-        logger.error("GraphQL error fetching collateral at risk for market %s on %s: %s", market_id, chain.name, data)
+        logger.error("GraphQL error fetching collateral at risk on %s: %s", chain.name, data)
         return None
 
-    collateral_at_risk_data = data.get("data", {}).get("marketCollateralAtRisk") or {}
-    points = collateral_at_risk_data.get("collateralAtRisk", [])
-    if not points:
-        return 0
+    response_data = data.get("data") or {}
+    collateral_at_risk_by_market: Dict[str, float] = {}
+    for alias, market_id in alias_to_market.items():
+        market_data = response_data.get(alias) or {}
+        points = market_data.get("collateralAtRisk", [])
+        if not points:
+            collateral_at_risk_by_market[market_id] = 0
+            continue
 
-    target_point = min(points, key=lambda point: abs((point.get("collateralPriceRatio") or 0) - target_price_ratio))
-    return target_point.get("collateralUsd") or 0
+        target_price_ratio = 1 - market_shocks[market_id]
+        target_point = min(points, key=lambda point: abs((point.get("collateralPriceRatio") or 0) - target_price_ratio))
+        collateral_at_risk_by_market[market_id] = target_point.get("collateralUsd") or 0
+
+    return collateral_at_risk_by_market
 
 
 def check_yv_collateral_market_liquidity(
     chain: Chain, chain_vaults: List[Dict[str, Any]], liquidity_by_asset: Dict[str, Dict[str, Any]]
 ) -> None:
     """Alert only when underlying liquidity cannot cover risky direct YV collateral liquidations."""
-    markets = collect_yv_collateral_markets(chain_vaults, liquidity_by_asset)
+    markets = collect_yv_collateral_markets(chain, chain_vaults, liquidity_by_asset)
+    if not markets:
+        return
 
-    for market, liquidity_group in markets.values():
-        market_id = market["marketId"]
-        market_state = market.get("state") or {}
-        market_borrow_usd = market_state.get("borrowAssetsUsd") or 0
+    market_shocks = {
+        market_id: get_yv_collateral_price_shock(liquidity_group["asset_symbol"], market.get("lltv"))
+        for market_id, (market, liquidity_group) in markets.items()
+    }
+    collateral_at_risk_by_market = get_markets_collateral_at_risk_usd(market_shocks, chain)
+    if collateral_at_risk_by_market is None:
+        return
+
+    checks_by_asset: Dict[str, Dict[str, Any]] = {}
+    for market_id, (market, liquidity_group) in markets.items():
         collateral_asset = market["collateralAsset"]
         loan_asset = market["loanAsset"]
         asset_symbol = liquidity_group["asset_symbol"]
-        price_shock = get_yv_collateral_price_shock(asset_symbol, market.get("lltv"))
-        collateral_at_risk = get_market_collateral_at_risk_usd(market_id, chain, price_shock)
+        price_shock = market_shocks[market_id]
+        collateral_at_risk = collateral_at_risk_by_market.get(market_id)
 
         if collateral_at_risk is None:
             continue
-        if collateral_at_risk < 10_000:
+        if collateral_at_risk < YV_COLLATERAL_MIN_AT_RISK_USD:
             logger.info(
                 "Skipping %s/%s YV liquidity check on %s: collateral at risk $%s below threshold",
                 collateral_asset["symbol"],
@@ -864,35 +930,54 @@ def check_yv_collateral_market_liquidity(
             )
             continue
 
-        combined_liquidity = liquidity_group["combined_liquidity"]
+        asset_address = liquidity_group["asset_address"]
         required_liquidity = collateral_at_risk * YV_COLLATERAL_LIQUIDATION_BUFFER
-        coverage = combined_liquidity / required_liquidity if required_liquidity else float("inf")
+        group_check = checks_by_asset.setdefault(
+            asset_address,
+            {
+                "liquidity_group": liquidity_group,
+                "total_collateral_at_risk": 0.0,
+                "total_required_liquidity": 0.0,
+                "market_lines": [],
+            },
+        )
+        group_check["total_collateral_at_risk"] += collateral_at_risk
+        group_check["total_required_liquidity"] += required_liquidity
+        market_url = get_market_url(market)
+        market_name = f"{collateral_asset['symbol']}/{loan_asset['symbol']}"
+        group_check["market_lines"].append(
+            f"- [{market_name}]({market_url}): ${collateral_at_risk:,.2f} at risk "
+            f"({price_shock:.0%} shock, LLTV {parse_lltv(market.get('lltv')):.1%})"
+        )
+
+    for group_check in checks_by_asset.values():
+        liquidity_group = group_check["liquidity_group"]
+        combined_liquidity = liquidity_group["combined_liquidity"]
+        required_liquidity = group_check["total_required_liquidity"]
+        coverage = combined_liquidity / required_liquidity
+        asset_symbol = liquidity_group["asset_symbol"]
 
         logger.info(
-            "YV collateral market liquidity check %s/%s on %s: $%s %s liquidity, $%s collateral at risk, %sx coverage",
-            collateral_asset["symbol"],
-            loan_asset["symbol"],
+            "YV collateral liquidity check for %s on %s: $%s liquidity, $%s collateral at risk, %sx coverage",
+            asset_symbol,
             chain.name,
             f"{combined_liquidity:,.2f}",
-            asset_symbol,
-            f"{collateral_at_risk:,.2f}",
+            f"{group_check['total_collateral_at_risk']:,.2f}",
             f"{coverage:.2f}",
         )
 
         if combined_liquidity >= required_liquidity:
             continue
 
-        market_url = get_market_url(market)
-        market_name = f"{collateral_asset['symbol']}/{loan_asset['symbol']}"
         vault_list = ", ".join(liquidity_group["vault_names"])
-        lltv_ratio = parse_lltv(market.get("lltv"))
+        market_lines = "\n".join(group_check["market_lines"])
         message = (
-            f"⚠️ Insufficient {collateral_asset['symbol']} unwind liquidity for [{market_name}]({market_url}) on {chain.name}\n"
+            f"⚠️ Insufficient {asset_symbol} unwind liquidity for YV collateral markets on {chain.name}\n"
             f"🏦 Vaults: {vault_list}\n"
             f"💰 Withdrawable {asset_symbol}: ${combined_liquidity:,.2f}\n"
-            f"🔥 Collateral at risk ({price_shock:.0%} price shock): ${collateral_at_risk:,.2f}\n"
+            f"🔥 Total collateral at risk: ${group_check['total_collateral_at_risk']:,.2f}\n"
             f"📊 Required with buffer: ${required_liquidity:,.2f} ({coverage:.2f}x coverage)\n"
-            f"🏷️ LLTV: {lltv_ratio:.1%}, market borrows: ${market_borrow_usd:,.2f}\n"
+            f"💹 Markets:\n{market_lines}\n"
         )
         send_telegram_message(message, PROTOCOL)
 
