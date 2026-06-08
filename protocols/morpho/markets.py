@@ -705,9 +705,7 @@ def get_yv_collateral_price_shock(asset_symbol: str, lltv: str | int | None) -> 
     return YV_COLLATERAL_FALLBACK_PRICE_SHOCK
 
 
-def get_yv_collateral_liquidity_by_asset(
-    chain: Chain, chain_vaults: List[Dict[str, Any]]
-) -> Dict[str, Dict[str, Any]]:
+def get_yv_collateral_liquidity_by_asset(chain: Chain, chain_vaults: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """Build withdrawable liquidity groups for Yearn-vault collateral underlying assets."""
     yv_vaults_by_asset = get_yv_collateral_vaults_by_asset(chain)
     liquidity_by_asset = {}
