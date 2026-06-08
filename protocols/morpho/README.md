@@ -54,23 +54,25 @@ The utilization ratio for each market is calculated as the ratio of borrowed ass
 
 #### YV Collateral Vault Liquidity Monitoring
 
-For vaults that are used as collateral in Yearn v3 strategies (YV collateral vaults), the system implements combined liquidity monitoring. Instead of checking each vault individually, vaults with the same underlying asset are grouped together and their liquidity is aggregated.
+For vaults that are used as collateral in Yearn v3 strategies (YV collateral vaults), the system implements market-aware unwind liquidity monitoring. Instead of checking each vault individually, vaults with the same underlying asset are grouped together and their withdrawable liquidity is aggregated.
 
-**Configuration:** YV collateral vaults are defined in the `VAULTS_WITH_YV_COLLATERAL_BY_ASSET` mapping in [markets.py](./markets.py), organized by chain and asset address.
+**Configuration:** YV collateral vaults are defined in the `VAULTS_WITH_YV_COLLATERAL_BY_ASSET` mapping in [markets.py](./markets.py), organized by chain and asset address. Watched direct YV-collateral markets are explicitly defined in `YV_COLLATERAL_MARKETS_BY_ASSET`, using the same underlying asset addresses.
 
 **Thresholds:**
 
-- **Regular vaults:** Defined in [markets.py#24](./markets.py#24) variable.
-- **YV collateral vaults:** Defined in [markets.py#25](./markets.py#25) variable, more conservative due to their use as collateral and more liquidity is needed for liquidating YV tokens as collateral.
+- **Regular vaults:** Defined in the `LIQUIDITY_THRESHOLD` variable in [markets.py#L25](./markets.py#L25).
+- **YV collateral vaults:** Require enough combined withdrawable liquidity to cover collateral at risk in direct YV-collateral Morpho markets, plus a liquidation buffer (`YV_COLLATERAL_*` constants in [markets.py#L26](./markets.py#L26)). Price shock is selected from market LLTV: 5% for LLTV >= 86%, 15% for LLTV <= 77%, otherwise 10%.
 
 **Logic:** For each asset group (e.g., all USDC vaults at one chain), the system:
 
 1. Calculates combined total assets across all vaults with the same asset
 2. Calculates combined available liquidity across all vaults with the same asset
-3. Checks if combined liquidity ratio falls below the 15% threshold
-4. Sends alerts if the combined liquidity is insufficient
+3. Finds configured direct Yearn vault collateral markets such as `yvvbUSDC/vbUSDT`
+4. Fetches Morpho collateral-at-risk data at the configured adverse price shock
+5. Sums collateral at risk per underlying asset group
+6. Sends alerts only if combined withdrawable liquidity is below total collateral at risk plus buffer
 
-This approach provides a more accurate assessment of liquidity risk for YV collateral tokens where the available liquidity is spread across multiple vault strategies.
+This approach alerts on liquidation coverage risk instead of low liquidity as a percentage of all assets, which avoids noise when a vault group is highly utilized but still has enough liquidity to unwind risky positions.
 
 ### Vault Risk Level
 
