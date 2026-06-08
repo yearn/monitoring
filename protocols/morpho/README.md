@@ -61,7 +61,7 @@ For vaults that are used as collateral in Yearn v3 strategies (YV collateral vau
 **Thresholds:**
 
 - **Regular vaults:** Defined in the `LIQUIDITY_THRESHOLD` variable in [markets.py#L25](./markets.py#L25).
-- **YV collateral vaults:** Require enough combined withdrawable liquidity to cover collateral at risk in direct YV-collateral Morpho markets, plus a liquidation buffer (`YV_COLLATERAL_*` constants in [markets.py#L26](./markets.py#L26)). Stable collateral groups use a 5% adverse price shock, volatile ETH/BTC groups use 15%, and unknown groups fall back to the market LLTV.
+- **YV collateral vaults:** Require enough combined withdrawable liquidity to cover collateral at risk in direct YV-collateral Morpho markets, plus a liquidation buffer (`YV_COLLATERAL_*` constants in [markets.py#L26](./markets.py#L26)). Price shock is selected from market LLTV: 5% for LLTV >= 86%, 15% for LLTV <= 77%, otherwise 10%.
 
 **Logic:** For each asset group (e.g., all USDC vaults at one chain), the system:
 

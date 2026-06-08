@@ -31,8 +31,6 @@ YV_COLLATERAL_AT_RISK_POINTS = 20  # requested granularity for Morpho's collater
 YV_COLLATERAL_STABLE_PRICE_SHOCK = 0.05
 YV_COLLATERAL_VOLATILE_PRICE_SHOCK = 0.15
 YV_COLLATERAL_FALLBACK_PRICE_SHOCK = 0.10
-YV_COLLATERAL_STABLE_SYMBOLS = {"AUSD", "DAI", "USDC", "USDS", "USDT"}
-YV_COLLATERAL_VOLATILE_SYMBOLS = {"BTC", "CBETH", "ETH", "LBTC", "WBTC", "WETH"}
 
 # Map vaults by chain
 VAULTS_BY_CHAIN = {
@@ -685,16 +683,6 @@ def calculate_combined_metrics(asset_yv_vaults: List[Dict[str, Any]]) -> tuple[f
     return combined_total_assets, combined_liquidity, vault_names
 
 
-def normalize_asset_symbol(symbol: str) -> str:
-    """Normalize symbols so yvvbUSDC, vbUSDC, and USDC match the same liquidity group."""
-    normalized = "".join(char for char in symbol.upper() if char.isalnum())
-    while normalized.startswith("YV"):
-        normalized = normalized[2:]
-    if normalized.startswith("VB"):
-        normalized = normalized[2:]
-    return normalized
-
-
 def parse_lltv(lltv: str | int | None) -> float:
     """Convert Morpho's WAD-scaled LLTV into a decimal ratio."""
     if lltv is None:
@@ -705,14 +693,8 @@ def parse_lltv(lltv: str | int | None) -> float:
         return 0.0
 
 
-def get_yv_collateral_price_shock(asset_symbol: str, lltv: str | int | None) -> float:
-    """Pick the adverse price move used for collateral-at-risk checks."""
-    normalized_symbol = normalize_asset_symbol(asset_symbol)
-    if normalized_symbol in YV_COLLATERAL_STABLE_SYMBOLS:
-        return YV_COLLATERAL_STABLE_PRICE_SHOCK
-    if normalized_symbol in YV_COLLATERAL_VOLATILE_SYMBOLS:
-        return YV_COLLATERAL_VOLATILE_PRICE_SHOCK
-
+def get_yv_collateral_price_shock(lltv: str | int | None) -> float:
+    """Pick the adverse price move used for collateral-at-risk checks from LLTV."""
     lltv_ratio = parse_lltv(lltv)
     if lltv_ratio >= 0.86:
         return YV_COLLATERAL_STABLE_PRICE_SHOCK
@@ -903,7 +885,7 @@ def check_yv_collateral_market_liquidity(
         return
 
     market_shocks = {
-        market_id: get_yv_collateral_price_shock(liquidity_group["asset_symbol"], market.get("lltv"))
+        market_id: get_yv_collateral_price_shock(market.get("lltv"))
         for market_id, (market, liquidity_group) in markets.items()
     }
     collateral_at_risk_by_market = get_markets_collateral_at_risk_usd(market_shocks, chain)
