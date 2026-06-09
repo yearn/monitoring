@@ -47,3 +47,7 @@ tks-trigger-cache.json
 selector-cache.txt
 *.cache
 .uv/
+
+# File-backed disk caches (utils/disk_cache.py)
+source-cache/
+label-cache/
