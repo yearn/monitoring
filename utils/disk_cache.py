@@ -19,8 +19,12 @@ multisig cron profiles overlap. Eviction and reads are best-effort: any
 filesystem error degrades to a cache miss rather than raising.
 
 Sizing: each cache is bounded by ``max_entries`` and/or ``max_bytes``. When a
-write pushes a namespace over either cap, the oldest entries (by mtime) are
-removed until both caps are satisfied again.
+write pushes a namespace over either cap, least-recently-used entries are evicted
+until both caps are satisfied. Recency is tracked by file mtime: a write sets it
+and a successful :meth:`DiskCache.get` touches it (:func:`os.utime`), so an entry
+re-read every cron run is kept even if it was written long ago. TTL is computed
+from the stored write time, not mtime, so touching on read never extends a
+negative entry's lifetime.
 """
 
 import json
@@ -109,6 +113,16 @@ class DiskCache:
             except OSError:
                 pass
             return MISS
+
+        # LRU: bump the file mtime so eviction (which sorts by mtime) treats this
+        # as recently used — an entry re-read every cron run survives even if it
+        # was written long ago. TTL is unaffected: expiry keys off the JSON "t"
+        # field, not mtime, so a read never extends a negative entry's lifetime.
+        # Best-effort; a failed touch only means slightly staler eviction order.
+        try:
+            os.utime(path, None)
+        except OSError:
+            pass
         return entry["v"]
 
     def set(self, key: str, value: Any, *, ttl: float | None) -> None:
@@ -154,7 +168,11 @@ class DiskCache:
             pass
 
     def _evict_if_needed(self, directory: str) -> None:
-        """Drop oldest-by-mtime entries until both size caps are satisfied."""
+        """Drop least-recently-used (oldest mtime) entries until size caps hold.
+
+        ``get`` refreshes mtime on read, so oldest-mtime is least-recently-used
+        rather than merely oldest-written.
+        """
         if self.max_entries is None and self.max_bytes is None:
             return
         try:

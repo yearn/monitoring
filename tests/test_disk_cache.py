@@ -75,6 +75,21 @@ class TestDiskCacheEviction(unittest.TestCase):
         self.assertEqual(cache.get("b"), 2)
         self.assertEqual(cache.get("c"), 3)
 
+    def test_read_refreshes_lru_recency(self) -> None:
+        # Reading "a" before inserting "c" must keep "a" and evict the unread "b",
+        # even though "a" was written first. (Guards against FIFO-by-write-time.)
+        cache = DiskCache(namespace="lru", max_entries=2)
+        cache.set_positive("a", 1)
+        cache.set_positive("b", 2)
+        os.utime(cache._path("a"), (100, 100))  # a oldest-written
+        os.utime(cache._path("b"), (200, 200))  # b newer
+        cache.get("a")  # LRU touch bumps "a" above the unread "b"
+        cache.set_positive("c", 3)  # over cap → evict least-recently-used ("b")
+
+        self.assertEqual(cache.get("a"), 1)  # kept: recently read
+        self.assertIs(cache.get("b"), MISS)  # evicted: never read, oldest use
+        self.assertEqual(cache.get("c"), 3)
+
     def test_evicts_to_max_bytes(self) -> None:
         big = "x" * 2000
         cache = DiskCache(namespace="bytes", max_bytes=3000)
