@@ -30,7 +30,7 @@ VAULTS_V2_BY_CHAIN: Dict[Chain, List[List[Any]]] = {
             2,
         ],
         ["Sentora RLUSD Main", "0x6dC58a0FdfC8D694e571DC59B9A52EEEa780E6bf", 2],
-        ["Sentora PaypalUSD Main", "0xb576765fB15505433aF24FEe2c0325895C559FB2", 2],
+        # ["Sentora PaypalUSD Main", "0xb576765fB15505433aF24FEe2c0325895C559FB2", 2],  # TODO: enable after they switch to v2 adapter
     ],
     Chain.BASE: [
         ["Yearn OG USDC V2", "0xe7D0DBE3493830e2Ab62619211A2BfF0Fc60dB42", 2],
