@@ -210,7 +210,7 @@ The full prompt is logged at INFO level for debugging.
 
 ### 7. Two-Stage Generation: Summary, then Detail Derived From It
 
-`_generate_explanation()` produces the `Explanation` dataclass (`summary` → Telegram, `detail` → paste service) in two stages so the two artifacts the team sees can never disagree on the headline number or risk verdict:
+`_generate_explanation()` produces the `Explanation` dataclass (`summary` → Telegram, `detail` → Wavey Gist) in two stages so the two artifacts the team sees can never disagree on the headline number or risk verdict:
 
 1. **Summary (authoritative).** `_generate_summary()` produces just the `summary` + `risk_tag`.
 2. **Detail (derived).** `_expand_detail()` then writes the full report *from* the confirmed summary (`DETAIL_EXPANSION_TASK`), required to stay consistent with its magnitudes and risk level.
@@ -252,10 +252,10 @@ Cost: ~1 extra LLM call per alert when enabled. Default is **off**.
 ```
 🤖 *AI Summary:*
 Upgrades AAVE pool impl 0xOld → 0xNew. Verify audited. MEDIUM.
-[Full details](https://dpaste.org/abc123)
+[Full details](https://gist.wavey.info/abc123)
 ```
 
-The "Full details" link points to a dpaste.org upload with the detailed analysis.
+The "Full details" link points to a Wavey Gist upload with the detailed analysis.
 
 ## Configuration
 
@@ -268,6 +268,7 @@ All configuration is via environment variables:
 | `LLM_MODEL` | `deepseek-v4-flash` | Model identifier |
 | `LLM_BASE_URL` | *(per provider)* | API base URL (not needed for anthropic) |
 | `LLM_STRUCTURED_OUTPUT` | *(per provider)* | `true`/`false` to force JSON-schema output. Default: on for anthropic/openai/venice (all verified live), off for groq/custom |
+| `WAVEY_GIST_API_KEY` | *(required for detail links)* | API key for publishing detailed AI reports to Wavey Gist |
 | `ETHERSCAN_TOKEN` | *(optional)* | Etherscan v2 multichain API key for source context |
 | `TENDERLY_API_KEY` | *(optional)* | Tenderly API key for simulation |
 | `TENDERLY_ACCOUNT` | `yearn` | Tenderly account slug |
