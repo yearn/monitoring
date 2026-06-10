@@ -11,7 +11,7 @@ import requests
 
 from utils.alert import Alert, AlertSeverity, register_alert_hook, send_alert
 from utils.config import Config, ProtocolConfig
-from utils.telegram import TelegramError, send_telegram_message
+from utils.telegram import TelegramError, send_error_message, send_telegram_message
 from utils.web3_wrapper import (
     MAX_BACKOFF_SECONDS,
     ProviderConnectionError,
@@ -289,6 +289,97 @@ class TestTelegram(unittest.TestCase):
                 mock_post.call_args[1]["json"]["text"],
                 "[yearn_timelock] Test message",
             )
+
+
+class TestSendErrorMessage(unittest.TestCase):
+    """Tests for utils.telegram.send_error_message (dedicated errors channel)."""
+
+    @patch("utils.telegram.requests.post")
+    def test_routes_to_errors_chat_with_label_silent_plain(self, mock_post):
+        """With an errors chat configured, the message goes there labelled, silent, plain."""
+        mock_response = unittest.mock.Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_post.return_value = mock_response
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TEST_CHAT_ID": "",
+                "TELEGRAM_TOPIC_ID_ERRORS": "",
+                "TELEGRAM_CHAT_ID_ERRORS": "errors_chat_id",
+                "TELEGRAM_BOT_TOKEN_DEFAULT": "default_token",
+                # Aave's own routing must be ignored — the error goes to the errors chat.
+                "TELEGRAM_BOT_TOKEN_AAVE": "aave_token",
+                "TELEGRAM_CHAT_ID_AAVE": "aave_chat_id",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_error_message("GraphQL boom", "aave")
+
+        url = mock_post.call_args[0][0]
+        json_body = mock_post.call_args[1]["json"]
+        self.assertIn("default_token", url)
+        self.assertEqual(json_body["chat_id"], "errors_chat_id")
+        self.assertEqual(json_body["text"], "[aave] GraphQL boom")
+        self.assertTrue(json_body["disable_notification"])
+        self.assertNotIn("parse_mode", json_body)  # plain text
+
+    @patch("utils.telegram.requests.post")
+    def test_errors_topic_takes_precedence(self, mock_post):
+        """TELEGRAM_TOPIC_ID_ERRORS routes to the topics group on the errors thread."""
+        mock_response = unittest.mock.Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_post.return_value = mock_response
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TEST_CHAT_ID": "",
+                "TELEGRAM_TOPIC_ID_ERRORS": "99",
+                "TELEGRAM_CHAT_ID_ERRORS": "errors_chat_id",
+                "TELEGRAM_CHAT_ID_TOPICS": "topics_chat_id",
+                "TELEGRAM_BOT_TOKEN_DEFAULT": "default_token",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_error_message("boom", "morpho")
+
+        json_body = mock_post.call_args[1]["json"]
+        self.assertEqual(json_body["chat_id"], "topics_chat_id")
+        self.assertEqual(json_body["message_thread_id"], 99)
+        self.assertEqual(json_body["text"], "[morpho] boom")
+
+    @patch("utils.telegram.requests.post")
+    def test_falls_back_to_protocol_channel_when_unconfigured(self, mock_post):
+        """With no errors destination set, the error routes to the protocol's own chat (no label)."""
+        mock_response = unittest.mock.Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_post.return_value = mock_response
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TEST_CHAT_ID": "",
+                "TELEGRAM_TOPIC_ID_ERRORS": "",
+                "TELEGRAM_CHAT_ID_ERRORS": "",
+                "TELEGRAM_TOPIC_ID_AAVE": "",
+                "TELEGRAM_BOT_TOKEN_AAVE": "aave_token",
+                "TELEGRAM_CHAT_ID_AAVE": "aave_chat_id",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_error_message("GraphQL boom", "aave")
+
+        url = mock_post.call_args[0][0]
+        json_body = mock_post.call_args[1]["json"]
+        self.assertIn("aave_token", url)
+        self.assertEqual(json_body["chat_id"], "aave_chat_id")
+        self.assertEqual(json_body["text"], "GraphQL boom")  # no [label] prefix on fallback
+        self.assertTrue(json_body["disable_notification"])
+        self.assertNotIn("parse_mode", json_body)  # plain text
 
 
 class TestAlert(unittest.TestCase):
