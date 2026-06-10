@@ -4,7 +4,7 @@ import requests
 
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
 from utils.logging import get_logger
-from utils.telegram import escape_markdown, send_telegram_message
+from utils.telegram import escape_markdown, send_error_message, send_telegram_message
 
 PROTOCOL = "fluid"
 logger = get_logger(PROTOCOL)
@@ -131,11 +131,11 @@ def get_proposals():
     except requests.RequestException as e:
         error_message = f"Failed to fetch Fluid proposals: {e}"
         logger.error("%s", error_message)
-        send_telegram_message(error_message, PROTOCOL, disable_notification=True, plain_text=True)
+        send_error_message(error_message, PROTOCOL)
     except Exception as e:
         error_message = f"Error processing Fluid proposals: {e}"
         logger.error("%s", error_message)
-        send_telegram_message(error_message, PROTOCOL, disable_notification=True, plain_text=True)
+        send_error_message(error_message, PROTOCOL)
 
 
 if __name__ == "__main__":

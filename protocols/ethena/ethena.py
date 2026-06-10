@@ -6,6 +6,7 @@ import requests
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.logging import get_logger
+from utils.telegram import send_error_message
 from utils.web3_wrapper import Chain, ChainManager
 
 PROTOCOL = "ethena"
@@ -208,7 +209,7 @@ def get_tokens_supply() -> tuple[float, float] | tuple[None, None]:
                 raise Exception(f"Batch Call: Expected 3 responses, got {len(responses)}")
 
     except Exception:
-        send_alert(Alert(AlertSeverity.LOW, "Error during batch blockchain calls", PROTOCOL))
+        send_error_message("Error during batch blockchain calls", PROTOCOL)
         return None, None  # Cannot proceed if batch fails
 
     return usde_supply, susde_supply
@@ -218,7 +219,7 @@ def llama_risk_check():
     llama_risk = get_llamarisk_data()
 
     if llama_risk is None:
-        send_alert(Alert(AlertSeverity.LOW, "⚠️ Failed to fetch data", PROTOCOL))
+        send_error_message("⚠️ Failed to fetch data", PROTOCOL)
         return
 
     # NOTE: ethena data is not available, so we use llama_risk data only
@@ -327,7 +328,7 @@ class ChaosLabsAttestation:
 def chaos_labs_check():
     data = fetch_json(CHAOS_LABS_URL)
     if not data or not isinstance(data, list) or len(data) == 0:
-        send_alert(Alert(AlertSeverity.LOW, "⚠️ ETHENA: Failed to fetch Chaos Labs attestation data", PROTOCOL))
+        send_error_message("⚠️ ETHENA: Failed to fetch Chaos Labs attestation data", PROTOCOL)
         return
 
     # Get the latest attestation (last item in the list)
@@ -345,7 +346,7 @@ def chaos_labs_check():
             signature=latest_attestation_raw.get("signature"),
         )
     except KeyError as e:
-        send_alert(Alert(AlertSeverity.LOW, f"⚠️ ETHENA: Missing field in Chaos Labs data: {e}", PROTOCOL))
+        send_error_message(f"⚠️ ETHENA: Missing field in Chaos Labs data: {e}", PROTOCOL)
         return
 
     attestation_time = datetime.fromisoformat(attestation.timestamp.replace("Z", "+00:00"))
