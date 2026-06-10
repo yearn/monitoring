@@ -1,6 +1,6 @@
 from utils.abi import load_abi
 from utils.chains import Chain
-from utils.telegram import send_telegram_message
+from utils.telegram import send_error_message, send_telegram_message
 from utils.web3_wrapper import ChainManager
 
 PROTOCOL = "lido"
@@ -55,11 +55,11 @@ def main():
             curve_rates = client.execute_batch(batch)
             if len(curve_rates) != len(amounts):
                 error_message = f"Batch response length mismatch. Expected: {len(amounts)}, Got: {len(curve_rates)}"
-                send_telegram_message(error_message, PROTOCOL, True, True)
+                send_error_message(error_message, PROTOCOL)
                 return
         except Exception as e:
             error_message = f"Error executing batch curve pool calls: {e}"
-            send_telegram_message(error_message, PROTOCOL, True, True)
+            send_error_message(error_message, PROTOCOL)
             return
 
         for amount, curve_rate in zip(amounts, curve_rates):
@@ -72,7 +72,7 @@ def main():
                     send_telegram_message(message, PROTOCOL)
             except Exception as e:
                 error_message = f"Error processing curve pool rate for amount {amount / 1e18:.2f}: {e}"
-                send_telegram_message(error_message, PROTOCOL, True, True)
+                send_error_message(error_message, PROTOCOL)
 
 
 if __name__ == "__main__":

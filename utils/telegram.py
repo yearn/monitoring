@@ -13,6 +13,13 @@ logger = get_logger("utils.telegram")
 # Maximum message length allowed by Telegram API
 MAX_MESSAGE_LENGTH = 4096
 
+# Channel key for operational errors/diagnostics (GraphQL/fetch failures, retries,
+# crashes). Routed to a dedicated chat so transient noise doesn't spam the
+# per-protocol alert groups. Resolves via the same env-var scheme as any other
+# channel: TELEGRAM_TOPIC_ID_ERRORS (topics group) or TELEGRAM_CHAT_ID_ERRORS +
+# optional TELEGRAM_BOT_TOKEN_ERRORS (falls back to the DEFAULT bot).
+ERROR_CHANNEL = "errors"
+
 # Matches `bot<digits>:<token>` in Telegram API URLs. Used to scrub the bot
 # token out of exception messages — `requests.HTTPError.__str__()` includes
 # the full URL, so without this the token leaks into any log or alert that
@@ -152,6 +159,35 @@ def send_telegram_message(
         return
 
     _post_message(bot_token, chat_id, message, plain_text, disable_notification, topic_id)
+
+
+def _error_channel_configured() -> bool:
+    """Return True if a dedicated errors destination (topic or chat id) is set."""
+    return bool(os.getenv("TELEGRAM_TOPIC_ID_ERRORS") or os.getenv("TELEGRAM_CHAT_ID_ERRORS"))
+
+
+def send_error_message(message: str, protocol: str, disable_notification: bool = True) -> None:
+    """Route an operational error/diagnostic to the dedicated errors channel.
+
+    Keeps transient failures (GraphQL/fetch errors, retries, crashes) out of the
+    per-protocol alert groups. The originating ``protocol`` is prefixed as a
+    ``[label]`` so the merged errors feed shows which monitor produced each line.
+
+    Falls back to the protocol's own channel when no errors destination is
+    configured, so error visibility is never silently lost. Always sent as plain
+    text (error strings routinely contain Markdown-breaking characters) and
+    silently by default.
+
+    Args:
+        message: The error/diagnostic text.
+        protocol: Originating protocol/channel, used as the ``[label]`` prefix
+            and as the fallback channel when no errors destination is configured.
+        disable_notification: If True (default), send silently.
+    """
+    if _error_channel_configured():
+        send_telegram_message(f"[{protocol}] {message}", ERROR_CHANNEL, disable_notification, plain_text=True)
+    else:
+        send_telegram_message(message, protocol, disable_notification, plain_text=True)
 
 
 def get_github_run_url() -> str:

@@ -4,7 +4,7 @@ from utils.abi import load_abi
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import Chain
 from utils.logging import get_logger
-from utils.telegram import send_telegram_message
+from utils.telegram import send_error_message, send_telegram_message
 from utils.web3_wrapper import ChainManager
 
 PROTOCOL = "strata"
@@ -220,7 +220,7 @@ def main() -> None:
 
     except Exception as e:
         logger.error("Error: %s", e)
-        send_telegram_message(f"⚠️ Strata monitoring failed: {e}", PROTOCOL, False, True)
+        send_error_message(f"⚠️ Strata monitoring failed: {e}", PROTOCOL)
 
 
 if __name__ == "__main__":

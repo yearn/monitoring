@@ -20,7 +20,7 @@ from utils.llm.ai_explainer import explain_batch_transaction, explain_transactio
 from utils.logging import get_logger
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
 from utils.safe_tx import unwrap_safe_exec_transaction
-from utils.telegram import MAX_MESSAGE_LENGTH, escape_markdown, send_telegram_message
+from utils.telegram import MAX_MESSAGE_LENGTH, escape_markdown, send_error_message, send_telegram_message
 from utils.web3_wrapper import ChainManager
 
 load_dotenv()
@@ -618,19 +618,15 @@ def main() -> None:
     if response is None:
         msg = "⚠️ Timelock alerts: Envio API is unreachable after 3 retries"
         _logger.error(msg)
-        protocols = {t.protocol for t in (filtered_timelocks or TIMELOCK_LIST)}
-        if "YEARN_TIMELOCK" in protocols:
-            protocols.add(YEARN_TIMELOCK_INTERNAL_PROTOCOL)
-        for protocol in protocols:
-            try:
-                send_telegram_message(msg, protocol)
-            except Exception:
-                _logger.exception("Failed to send Envio error alert for protocol %s", protocol)
+        try:
+            send_error_message(msg, "timelock")
+        except Exception:
+            _logger.exception("Failed to send Envio error alert")
         return
     if "errors" in response:
         msg = f"Timelock alerts: GraphQL errors: {response['errors']}"
         _logger.error(msg)
-        send_telegram_message(msg, protocol, plain_text=True)
+        send_error_message(msg, "timelock")
         return
 
     data = response.get("data", {})

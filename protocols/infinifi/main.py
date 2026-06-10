@@ -9,6 +9,7 @@ from utils.cache import cache_filename, get_last_value_for_key_from_file, write_
 from utils.chains import Chain
 from utils.config import Config
 from utils.logging import get_logger
+from utils.telegram import send_error_message
 from utils.web3_wrapper import ChainManager
 
 # Constants
@@ -411,7 +412,7 @@ def main():
 
     except Exception as e:
         logger.error("Error: %s", e)
-        send_alert(Alert(AlertSeverity.LOW, f"Infinifi monitoring failed: {e}", PROTOCOL))
+        send_error_message(f"Infinifi monitoring failed: {e}", PROTOCOL)
 
 
 if __name__ == "__main__":

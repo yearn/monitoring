@@ -6,7 +6,7 @@ import requests
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
 from utils.http import request_with_retry
 from utils.logging import get_logger
-from utils.telegram import send_telegram_message
+from utils.telegram import send_error_message, send_telegram_message
 
 PROTOCOL = "aave"
 logger = get_logger(PROTOCOL)
@@ -33,13 +33,13 @@ def run_query(query: str, variables: dict) -> dict | None:
         response = request_with_retry("post", url, json=request_body)
     except requests.RequestException as e:
         logger.error("Graph API query failed after retries: %s", e)
-        send_telegram_message(f"Graph API query failed after retries: {e}", PROTOCOL, True, plain_text=True)
+        send_error_message(f"Graph API query failed after retries: {e}", PROTOCOL)
         return None
 
     data = response.json()
     if "errors" in data:
         logger.error("GraphQL error in response: %s", data["errors"])
-        send_telegram_message(f"GraphQL error in response: {data['errors']}", PROTOCOL, True, plain_text=True)
+        send_error_message(f"GraphQL error in response: {data['errors']}", PROTOCOL)
         return None
 
     return data

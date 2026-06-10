@@ -14,7 +14,7 @@ import requests
 from utils.chains import Chain
 from utils.http import request_with_retry
 from utils.logging import get_logger
-from utils.telegram import send_telegram_message
+from utils.telegram import send_error_message, send_telegram_message
 
 # Configuration constants
 API_URL = "https://api.morpho.org/graphql"
@@ -1076,21 +1076,17 @@ def main() -> None:
     try:
         response = request_with_retry("post", API_URL, json=json_data)
     except requests.RequestException as e:
-        send_telegram_message(
+        send_error_message(
             f"🚨 Problem with fetching data for Morpho markets: {e.response.status_code} 🚨",
             PROTOCOL,
-            True,
-            True,
         )
         return
 
     data = response.json()
     if "errors" in data:
-        send_telegram_message(
+        send_error_message(
             f"🚨 GraphQL error when fetching Morpho data. Response code: {response.status_code} 🚨",
             PROTOCOL,
-            True,
-            True,
         )
         return
 
