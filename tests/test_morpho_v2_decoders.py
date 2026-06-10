@@ -211,7 +211,9 @@ class TestDecodeIdData(unittest.TestCase):
         with patch("protocols.morpho.v2_decoders.fetch_market_metadata", return_value=metadata):
             decoded = decode_submit(data, Chain.MAINNET)
 
-        self.assertRegex(decoded, r"market \[wstUSR/RLUSD\]\(https://app\.morpho\.org/ethereum/market/0x[0-9a-f]{64}/\)")
+        self.assertRegex(
+            decoded, r"market \[wstUSR/RLUSD\]\(https://app\.morpho\.org/ethereum/market/0x[0-9a-f]{64}/\)"
+        )
         self.assertNotIn("lltv", decoded)
         self.assertNotIn(f"loan {Web3.to_checksum_address(A1)}", decoded)
         self.assertNotIn(f"adapter {Web3.to_checksum_address(A5)}", decoded)
