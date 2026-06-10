@@ -1,52 +1,63 @@
 from unittest.mock import patch
 
-from protocols.aave.proposals import fetch_queued_proposals, handle_governance_proposals, has_pending_payload
+from protocols.aave.proposals import (
+    earliest_queued_at,
+    fetch_queued_proposals,
+    handle_governance_proposals,
+    has_pending_payload,
+)
 
 
-def _payload(chain_id: int = 1, payload_id: int = 1) -> dict:
-    return {
-        "id": f"{chain_id}_{payload_id}",
-        "chainId": str(chain_id),
-        "payloadsController": "0xdabad81af85554e9ae636395611c58f7ec1aaec5",
-    }
+def _proposal(proposal_id: int, title: str = "Test Proposal", state: str = "executed") -> dict:
+    return {"proposalId": str(proposal_id), "title": title, "state": state}
 
 
-def _proposal(
-    proposal_id: int, timestamp: int, title: str = "Test Proposal", payloads: list[dict] | None = None
+def _payload_state(
+    state: str = "executed",
+    queued_at: str | None = "2026-05-26T10:30:35+00:00",
+    payload_id: int = 1,
+    chain_id: int = 1,
 ) -> dict:
     return {
-        "proposalId": str(proposal_id),
-        "proposalMetadata": {"title": title},
-        "transactions": {"executed": {"timestamp": str(timestamp)}},
-        "payloads": payloads or [_payload(payload_id=proposal_id)],
+        "proposalId": "1",
+        "payloadId": str(payload_id),
+        "chainId": str(chain_id),
+        "state": state,
+        "queuedAt": queued_at,
+        "executedAt": None,
+        "cancelledAt": None,
     }
 
 
-def test_aave_fetches_executed_governance_proposals_with_payloads():
-    payload = {"data": {"proposals": [_proposal(12, 1), _proposal(10, 1)]}}
+def test_aave_fetches_executed_governance_proposals():
+    payload = {"data": {"getProposalsByState": {"nodes": [_proposal(12), _proposal(10), _proposal(9)]}}}
 
     with patch("protocols.aave.proposals.run_query", return_value=payload) as mock_run_query:
         proposals = fetch_queued_proposals(9)
 
     query, variables = mock_run_query.call_args.args
-    assert "state:$executedState" in query
-    assert "orderDirection: desc" in query
-    assert "first: 10" in query
-    assert "payloads" in query
-    assert variables == {"lastId": 9, "executedState": 4}
+    assert "getProposalsByState" in query
+    assert "stateFilter: $state" in query
+    assert variables == {"state": "executed", "limit": 10}
+    # id 9 is filtered out (not > 9); remainder sorted ascending.
     assert [proposal["proposalId"] for proposal in proposals] == ["10", "12"]
 
 
 def test_aave_handler_alerts_governance_executed_proposals_with_pending_payloads():
     proposals = [
-        _proposal(489, 1_800_000_000 - 60, "Passed Proposal"),
-        _proposal(488, 1_800_000_000 - 120, "Already Executed Proposal"),
+        _proposal(488, "Already Executed Proposal"),
+        _proposal(489, "Passed Proposal"),
+    ]
+    fully_executed = [_payload_state(state="executed")]
+    still_pending = [
+        _payload_state(state="executed", chain_id=1),
+        _payload_state(state="created", chain_id=196, payload_id=4, queued_at="2026-05-27T08:00:00+00:00"),
     ]
 
     with (
         patch("protocols.aave.proposals.get_last_queued_id_from_file", return_value=487),
         patch("protocols.aave.proposals.fetch_queued_proposals", return_value=proposals),
-        patch("protocols.aave.proposals.has_pending_payload", side_effect=[True, False]),
+        patch("protocols.aave.proposals.fetch_payload_states", side_effect=[fully_executed, still_pending]),
         patch("protocols.aave.proposals.send_telegram_message") as mock_send,
         patch("protocols.aave.proposals.write_last_queued_id_to_file") as mock_write,
     ):
@@ -57,23 +68,32 @@ def test_aave_handler_alerts_governance_executed_proposals_with_pending_payloads
     assert protocol == "aave"
     assert "Passed Proposal" in message
     assert "Already Executed Proposal" not in message
+    assert "2026-05-26 10:30:35 UTC" in message
     mock_write.assert_called_once_with("aave", 489)
 
 
 def test_aave_has_pending_payload_is_true_when_any_payload_is_not_executed():
-    proposal = _proposal(489, 1)
     payload_states = [
         {"payloadId": "442", "chainId": "1", "state": "executed"},
         {"payloadId": "4", "chainId": "196", "state": "created"},
     ]
-
-    with patch("protocols.aave.proposals.fetch_payload_states", return_value=payload_states):
-        assert has_pending_payload(proposal)
+    assert has_pending_payload(payload_states)
 
 
 def test_aave_has_pending_payload_is_false_when_all_payloads_are_executed():
-    proposal = _proposal(488, 1)
-    payload_states = [{"payloadId": "443", "chainId": "1", "state": "executed"}]
+    assert not has_pending_payload([{"payloadId": "443", "chainId": "1", "state": "executed"}])
 
-    with patch("protocols.aave.proposals.fetch_payload_states", return_value=payload_states):
-        assert not has_pending_payload(proposal)
+
+def test_aave_has_pending_payload_is_false_when_no_payloads():
+    assert not has_pending_payload([])
+
+
+def test_aave_earliest_queued_at_returns_min_timestamp():
+    states = [
+        _payload_state(queued_at="2026-05-27T08:00:00+00:00"),
+        _payload_state(queued_at="2026-05-26T10:30:35+00:00"),
+        _payload_state(queued_at=None),
+    ]
+    queued = earliest_queued_at(states)
+    assert queued is not None
+    assert queued.strftime("%Y-%m-%d %H:%M:%S") == "2026-05-26 10:30:35"

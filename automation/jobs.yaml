@@ -43,11 +43,7 @@ profiles:
       - { name: "maple",                  script: protocols/maple/main.py }
       - { name: "timelock-alerts",        script: protocols/timelock/timelock_alerts.py }
       # proposals scripts must run AFTER timelock-alerts (cache dedupe ordering).
-      # Disabled 2026-06-10: Graph subgraph A7QMsz… has no healthy indexers
-      # (gateway returns BadResponse 400 / Unavailable) — errors hourly. Re-enable
-      # when the decentralized network recovers, or after migrating to
-      # governance-cache-api.aave.com.
-      - { name: "aave-proposals",         script: protocols/aave/proposals.py, enabled: false }
+      - { name: "aave-proposals",         script: protocols/aave/proposals.py }
       - { name: "ustb",                   script: protocols/ustb/main.py }
       - { name: "compound-proposals",     script: protocols/compound/proposals.py }
       - { name: "fluid-proposals",        script: protocols/fluid/proposals.py }
