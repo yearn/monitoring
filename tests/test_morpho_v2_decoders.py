@@ -6,6 +6,7 @@ each timelocked selector on VaultV2 and MorphoMarketV1AdapterV2.
 """
 
 import unittest
+from unittest.mock import patch
 
 from eth_abi import encode as abi_encode
 from web3 import Web3
@@ -17,6 +18,7 @@ from protocols.morpho.v2_decoders import (
     selector_function_name,
     submit_data_key,
 )
+from utils.chains import Chain
 
 ZERO_ADDR = "0x" + "00" * 20
 A1 = "0x" + "11" * 20
@@ -191,6 +193,31 @@ class TestDecodeIdData(unittest.TestCase):
         self.assertIn("increaseAbsoluteCap", decoded)
         self.assertIn("lltv 91.00%", decoded)
         self.assertIn(f"cap {1_000_000 * 10**6}", decoded)
+
+    def test_increase_absolute_cap_with_market_params_and_chain_links_market(self):
+        market_params = (A1, A2, A3, A4, 91 * 10**16)
+        id_data = abi_encode(
+            ["string", "address", "(address,address,address,address,uint256)"],
+            ["this/marketParams", A5, market_params],
+        )
+        new_cap = 80_000_000 * 10**18
+        data = _build(
+            "increaseAbsoluteCap(bytes,uint256)",
+            ["bytes", "uint256"],
+            [id_data, new_cap],
+        )
+
+        metadata = {"name": "wstUSR/RLUSD", "loan_symbol": "RLUSD", "loan_decimals": 18}
+        with patch("protocols.morpho.v2_decoders.fetch_market_metadata", return_value=metadata):
+            decoded = decode_submit(data, Chain.MAINNET)
+
+        self.assertRegex(
+            decoded, r"market \[wstUSR/RLUSD\]\(https://app\.morpho\.org/ethereum/market/0x[0-9a-f]{64}/\)"
+        )
+        self.assertNotIn("lltv", decoded)
+        self.assertNotIn(f"loan {Web3.to_checksum_address(A1)}", decoded)
+        self.assertNotIn(f"adapter {Web3.to_checksum_address(A5)}", decoded)
+        self.assertIn("cap 80.00M RLUSD", decoded)
 
     def test_increase_relative_cap_with_collateral_tag(self):
         id_data = abi_encode(["string", "address"], ["collateralToken", A1])

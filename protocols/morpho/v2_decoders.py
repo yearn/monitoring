@@ -18,7 +18,10 @@ from eth_abi import decode as abi_decode
 from eth_utils import to_checksum_address
 from web3 import Web3
 
+from protocols.morpho._shared import fetch_market_metadata, get_market_url
 from utils.calldata.decoder import resolve_selector
+from utils.chains import Chain
+from utils.formatting import format_token_amount, format_with_suffix
 from utils.logging import get_logger
 
 logger = get_logger("morpho.v2_decoders")
@@ -91,7 +94,19 @@ def _format_wad_pct(value: int) -> str:
     return f"{value / WAD * 100:.4f}%"
 
 
-def decode_id_data(id_data: bytes) -> str:
+def _format_cap_amount(cap: int, decimals: int | None, symbol: str | None = None) -> str:
+    if decimals is None:
+        amount = f"{cap:,}"
+    else:
+        amount = format_with_suffix(format_token_amount(cap, decimals))
+    return f"{amount} {symbol}" if symbol else amount
+
+
+def _market_id_from_params(loan: str, collateral: str, oracle: str, irm: str, lltv: int) -> str:
+    return "0x" + bytes(Web3.keccak(_encode_market_params(loan, collateral, oracle, irm, lltv))).hex()
+
+
+def decode_id_data(id_data: bytes, chain: Chain | None = None) -> str:
     """Decode a cap-setter ``bytes idData`` argument.
 
     The Morpho V2 cap system uses three id-tag prefixes, ABI-encoded as a leading
@@ -115,9 +130,13 @@ def decode_id_data(id_data: bytes) -> str:
     else:
         if tag == "this/marketParams":
             loan, collateral, oracle, irm, lltv = market_params
-            market_id_hex = bytes(Web3.keccak(_encode_market_params(loan, collateral, oracle, irm, lltv))).hex()
+            market_id = _market_id_from_params(loan, collateral, oracle, irm, lltv)
+            if chain is not None:
+                metadata = fetch_market_metadata(market_id, chain)
+                if metadata:
+                    return f"market [{metadata['name']}]({get_market_url(market_id, chain)})"
             return (
-                f"market `0x{market_id_hex}` "
+                f"market `{market_id}` "
                 f"(loan {_format_address(loan)}, collateral {_format_address(collateral)}, "
                 f"lltv {lltv / WAD * 100:.2f}%) on adapter {_format_address(adapter)}"
             )
@@ -134,6 +153,25 @@ def decode_id_data(id_data: bytes) -> str:
     return f"id tag '{tag}' addr {_format_address(addr)}"
 
 
+def _format_cap_change(id_data: bytes, new_cap: int, chain: Chain | None = None) -> str:
+    market_params_type = "(address,address,address,address,uint256)"
+    if chain is not None:
+        try:
+            tag, _adapter, market_params = abi_decode(["string", "address", market_params_type], id_data)
+        except Exception:
+            tag = None
+        else:
+            if tag == "this/marketParams":
+                loan, collateral, oracle, irm, lltv = market_params
+                market_id = _market_id_from_params(loan, collateral, oracle, irm, lltv)
+                metadata = fetch_market_metadata(market_id, chain)
+                if metadata:
+                    cap = _format_cap_amount(new_cap, metadata["loan_decimals"], metadata["loan_symbol"])
+                    return f"market [{metadata['name']}]({get_market_url(market_id, chain)}) → cap {cap}"
+
+    return f"{decode_id_data(id_data)} → cap {new_cap}"
+
+
 def _encode_market_params(loan: str, collateral: str, oracle: str, irm: str, lltv: int) -> bytes:
     """Re-encode MarketParams in the canonical Morpho Blue form for hashing."""
     from eth_abi import encode as abi_encode
@@ -144,7 +182,7 @@ def _encode_market_params(loan: str, collateral: str, oracle: str, irm: str, llt
     )
 
 
-def _format_args(sig: str, args: tuple[Any, ...]) -> str:  # noqa: PLR0911,PLR0912
+def _format_args(sig: str, args: tuple[Any, ...], chain: Chain | None = None) -> str:  # noqa: PLR0911,PLR0912
     """Render a decoded argument tuple per signature."""
     name = _function_name(sig)
 
@@ -167,7 +205,7 @@ def _format_args(sig: str, args: tuple[Any, ...]) -> str:  # noqa: PLR0911,PLR09
         return _format_address(addr)
     if name in ("increaseAbsoluteCap", "increaseRelativeCap"):
         id_data, new_cap = args
-        return f"{decode_id_data(id_data)} → cap {new_cap}"
+        return _format_cap_change(id_data, new_cap, chain)
     if name in ("increaseTimelock", "decreaseTimelock"):
         sel_bytes, duration = args
         return f"{_resolve_inner_selector(sel_bytes)} → {duration}s"
@@ -198,7 +236,7 @@ def _arg_types(sig: str) -> list[str]:
     return [t.strip() for t in inner.split(",")]
 
 
-def decode_submit(data: bytes) -> str:
+def decode_submit(data: bytes, chain: Chain | None = None) -> str:
     """Render a Submit/Accept/Revoke ``data`` payload as a function call string.
 
     Falls back to a Sourcify 4byte lookup for unknown selectors so we never
@@ -223,7 +261,7 @@ def decode_submit(data: bytes) -> str:
         logger.warning("Failed to ABI-decode %s payload: %s", sig, e)
         return f"{_function_name(sig)}(<undecoded args 0x{data[4:].hex()}>)"
 
-    return f"{_function_name(sig)}({_format_args(sig, args)})"
+    return f"{_function_name(sig)}({_format_args(sig, args, chain)})"
 
 
 def submit_data_key(data: bytes) -> str:
