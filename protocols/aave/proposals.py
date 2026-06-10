@@ -14,8 +14,13 @@ logger = get_logger(PROTOCOL)
 # subgraph (gateway-arbitrum), whose indexers stopped serving the governance
 # deployment and returned BadResponse(400)/Unavailable on every query.
 AAVE_GOVERNANCE_CACHE_API = "https://governance-cache-api.aave.com/graphql"
-# State string returned by the cache API for executed proposals/payloads.
-EXECUTED_STATE = "executed"
+# Proposal-level state in the cache API: governance execution has queued the
+# payloads, but the proposal stays "queued" until every payload has executed
+# (it only flips to "executed" once all are done). These are the proposals to
+# alert on — distinct from the payload-level "executed" check below.
+QUEUED_PROPOSAL_STATE = "queued"
+# Payload-level state: an individual payload has executed on its target chain.
+EXECUTED_PAYLOAD_STATE = "executed"
 
 
 def run_query(query: str, variables: dict) -> dict | None:
@@ -47,17 +52,18 @@ def run_query(query: str, variables: dict) -> dict | None:
 
 
 def fetch_queued_proposals(last_reported_id: int) -> list[dict]:
-    """Fetch recently executed governance proposals newer than ``last_reported_id``.
+    """Fetch queued governance proposals newer than ``last_reported_id``.
 
-    A proposal reaches the ``executed`` state once governance execution queues its
-    payloads in the PayloadsController of each target chain; ``has_pending_payload``
-    then decides whether any of those payloads is still awaiting execution.
+    A proposal is ``queued`` once governance execution has queued its payloads in
+    the PayloadsController of each target chain and at least one payload is still
+    awaiting execution; once every payload executes it flips to ``executed``.
+    ``has_pending_payload`` re-confirms a payload is still pending before alerting.
 
     Args:
         last_reported_id: Highest proposal id already reported.
 
     Returns:
-        Executed proposals with id greater than ``last_reported_id``, sorted by
+        Queued proposals with id greater than ``last_reported_id``, sorted by
         ascending proposal id. Each dict carries ``proposalId``, ``title`` and ``state``.
     """
     query = """
@@ -72,7 +78,7 @@ def fetch_queued_proposals(last_reported_id: int) -> list[dict]:
         }
     """
 
-    variables = {"state": EXECUTED_STATE, "limit": 10}
+    variables = {"state": QUEUED_PROPOSAL_STATE, "limit": 10}
     response = run_query(query, variables)
     if response is None:
         return []
@@ -130,7 +136,7 @@ def has_pending_payload(payload_states: list[dict]) -> bool:
     """
     if not payload_states:
         return False
-    return any(payload.get("state") != EXECUTED_STATE for payload in payload_states)
+    return any(payload.get("state") != EXECUTED_PAYLOAD_STATE for payload in payload_states)
 
 
 def earliest_queued_at(payload_states: list[dict]) -> datetime | None:

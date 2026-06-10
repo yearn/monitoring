@@ -8,7 +8,7 @@ from protocols.aave.proposals import (
 )
 
 
-def _proposal(proposal_id: int, title: str = "Test Proposal", state: str = "executed") -> dict:
+def _proposal(proposal_id: int, title: str = "Test Proposal", state: str = "queued") -> dict:
     return {"proposalId": str(proposal_id), "title": title, "state": state}
 
 
@@ -29,7 +29,7 @@ def _payload_state(
     }
 
 
-def test_aave_fetches_executed_governance_proposals():
+def test_aave_fetches_queued_governance_proposals():
     payload = {"data": {"getProposalsByState": {"nodes": [_proposal(12), _proposal(10), _proposal(9)]}}}
 
     with patch("protocols.aave.proposals.run_query", return_value=payload) as mock_run_query:
@@ -38,7 +38,7 @@ def test_aave_fetches_executed_governance_proposals():
     query, variables = mock_run_query.call_args.args
     assert "getProposalsByState" in query
     assert "stateFilter: $state" in query
-    assert variables == {"state": "executed", "limit": 10}
+    assert variables == {"state": "queued", "limit": 10}
     # id 9 is filtered out (not > 9); remainder sorted ascending.
     assert [proposal["proposalId"] for proposal in proposals] == ["10", "12"]
 
