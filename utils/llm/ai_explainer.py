@@ -17,7 +17,6 @@ from utils.llm import get_llm_provider
 from utils.llm.base import LLMError, LLMProvider
 from utils.logging import get_logger
 from utils.on_chain_state import StateRead, format_state_reads, read_before_state
-from utils.paste import upload_to_paste
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
 from utils.risk_anchors import format_anchors_block
 from utils.risk_anchors import lookup as lookup_risk_anchor
@@ -32,6 +31,7 @@ from utils.source_context import (
 )
 from utils.telegram import escape_markdown
 from utils.tenderly.simulation import SimulationResult, simulate_transaction
+from utils.wavey_gist import upload_to_gist
 
 logger = get_logger("utils.llm.ai_explainer")
 
@@ -1300,7 +1300,7 @@ def format_explanation_line(explanation: Explanation) -> str:
     """
     line = f"\n🤖 *AI Summary:*\n{escape_markdown(explanation.summary)}"
     if explanation.detail:
-        detail_url = upload_to_paste(explanation.detail, title=DETAIL_REPORT_TITLE)
+        detail_url = upload_to_gist(explanation.detail, title=DETAIL_REPORT_TITLE)
         if detail_url:
             line += f"\n[Full details]({detail_url})"
         else:

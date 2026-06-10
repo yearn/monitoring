@@ -1,4 +1,4 @@
-"""Upload markdown text to Wavey Gist and return the public URL."""
+"""Publish markdown text to Wavey Gist and return the public URL."""
 
 import os
 
@@ -6,20 +6,21 @@ import requests
 
 from utils.logging import get_logger
 
-logger = get_logger("utils.paste")
+logger = get_logger("utils.wavey_gist")
 
 WAVEY_GIST_API_URL = "https://api.wavey.info/api/v1/gists"
+DEFAULT_GIST_TITLE = "Monitoring Details"
 
 
-def upload_to_paste(content: str, title: str = "") -> str:
-    """Upload markdown ``content`` to Wavey Gist and return the rendered-page URL.
+def upload_to_gist(content: str, title: str = "") -> str:
+    """Publish markdown ``content`` to Wavey Gist and return the rendered-page URL.
 
     Args:
         content: The markdown text to upload.
         title: Optional title, prepended as a top-level markdown heading.
 
     Returns:
-        The URL of the created paste, or an empty string on failure.
+        The URL of the created gist, or an empty string on failure.
     """
     if not content:
         return ""
@@ -34,7 +35,7 @@ def upload_to_paste(content: str, title: str = "") -> str:
     try:
         response = requests.post(
             WAVEY_GIST_API_URL,
-            json={"title": title or "Monitoring Details", "markdown": markdown},
+            json={"title": title or DEFAULT_GIST_TITLE, "markdown": markdown},
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             timeout=10,
         )
@@ -49,5 +50,5 @@ def upload_to_paste(content: str, title: str = "") -> str:
         logger.warning("Wavey Gist response did not include a URL: %s", payload)
         return ""
 
-    logger.info("Uploaded paste to %s", url)
+    logger.info("Uploaded gist to %s", url)
     return url

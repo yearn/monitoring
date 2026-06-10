@@ -33,7 +33,6 @@ MAINNET = r"""⏰ *TIMELOCK: New Operation Scheduled*
 
 🤖 *AI Summary:*
 Adds a new CCTPStrategy to the Yearn V3 yvUSD vault and caps its debt at 100,000 USDC (6-decimal). Strategy inclusion without a prior safety review is routine for Yearn, and the max debt limit is moderate. No funds move immediately; the strategy becomes available for future deposits. LOW
-[Full details](https://dpaste.com/HFHDQLQD3)
 🔗 Tx: [0xa6e8a54c3ff514951bca921cc38af55278980937816e5d04cd2d88fcf406199c](https://etherscan.io/tx/0xa6e8a54c3ff514951bca921cc38af55278980937816e5d04cd2d88fcf406199c)"""
 
 # Base — scheduled 2026-05-27 18:04 UTC, op 0xe8c04f74b9b8bd6687
@@ -48,7 +47,6 @@ BASE = r"""⏰ *TIMELOCK: New Operation Scheduled*
 
 🤖 *AI Summary:*
 Sets the minimum timelock delay to 604800 seconds (7 days). This applies to all future scheduled operations, slowing the pace at which any governance action can be executed. No assets are moved and no roles are changed. LOW
-[Full details](https://dpaste.com/6HXK57BEG)
 🔗 Tx: [0x7c03e52b297ffc6d73ddcc7ed14621295f76d058f82d96b734185c182b717a7a](https://basescan.org/tx/0x7c03e52b297ffc6d73ddcc7ed14621295f76d058f82d96b734185c182b717a7a)"""
 
 bot_token = os.environ["TELEGRAM_BOT_TOKEN_DEFAULT"]
