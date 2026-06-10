@@ -251,11 +251,11 @@ def _explorer_link(chain: Chain, tx_hash: str) -> str:
 
 
 def _alert_pending_new(snapshot: V2GovernanceSnapshot, pc: PendingConfig) -> None:
-    decoded = decode_submit(pc.data)
+    decoded = decode_submit(pc.data, snapshot.chain)
     send_telegram_message(
         f"⏳ V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
         f"on {snapshot.chain.name}\n"
-        f"📥 Submitted: `{decoded}`\n"
+        f"📥 Submitted: {decoded}\n"
         f"⏰ Executable at: {_format_ts(pc.valid_at)}\n"
         f"🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}",
         PROTOCOL,
