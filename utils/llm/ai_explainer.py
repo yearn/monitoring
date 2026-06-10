@@ -114,6 +114,7 @@ The summary need not repeat the risk tag; the risk_tag field carries it."""
 SYSTEM_INSTRUCTIONS_SUMMARY_JSON = SYSTEM_PROMPT + JSON_SUMMARY_NOTE
 
 _RISK_TAGS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+DETAIL_REPORT_TITLE = "AI Transaction Analysis"
 
 # JSON Schema for stage 1 (summary + risk_tag only). risk_tag is enum-constrained so
 # the Telegram tag is always valid — no regex extraction or fallback parsing needed.
@@ -1295,13 +1296,13 @@ def format_explanation_line(explanation: Explanation) -> str:
     """Format the AI explanation for inclusion in a Telegram alert message.
 
     Uses the short summary for the Telegram message. The detailed analysis
-    is uploaded to a paste service (rentry.co) for easy access.
+    is uploaded to Wavey Gist for easy access.
     """
     line = f"\n🤖 *AI Summary:*\n{escape_markdown(explanation.summary)}"
     if explanation.detail:
-        paste_url = upload_to_paste(explanation.detail, title="AI Transaction Analysis")
-        if paste_url:
-            line += f"\n[Full details]({paste_url})"
+        detail_url = upload_to_paste(explanation.detail, title=DETAIL_REPORT_TITLE)
+        if detail_url:
+            line += f"\n[Full details]({detail_url})"
         else:
             line += "\n⚠️ Couldn't post full report"
     return line

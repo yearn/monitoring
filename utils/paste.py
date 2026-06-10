@@ -1,9 +1,6 @@
-"""Upload markdown text to rentry.co and return the URL.
+"""Upload markdown text to Wavey Gist and return the public URL."""
 
-rentry.co renders markdown and accepts anonymous pastes through a small CSRF
-flow: fetch the ``csrftoken`` cookie from the site, then POST the content with
-the matching ``csrfmiddlewaretoken`` field and a ``Referer`` header.
-"""
+import os
 
 import requests
 
@@ -11,12 +8,11 @@ from utils.logging import get_logger
 
 logger = get_logger("utils.paste")
 
-RENTRY_BASE_URL = "https://rentry.co"
-RENTRY_API_NEW_URL = f"{RENTRY_BASE_URL}/api/new"
+WAVEY_GIST_API_URL = "https://api.wavey.info/api/v1/gists"
 
 
 def upload_to_paste(content: str, title: str = "") -> str:
-    """Upload markdown ``content`` to rentry.co and return the rendered-page URL.
+    """Upload markdown ``content`` to Wavey Gist and return the rendered-page URL.
 
     Args:
         content: The markdown text to upload.
@@ -28,35 +24,30 @@ def upload_to_paste(content: str, title: str = "") -> str:
     if not content:
         return ""
 
-    text = f"# {title}\n\n{content}" if title else content
-
-    try:
-        with requests.Session() as session:
-            # Priming GET sets the csrftoken cookie that the POST must echo back.
-            session.get(RENTRY_BASE_URL, timeout=10).raise_for_status()
-            csrftoken = session.cookies.get("csrftoken")
-            if not csrftoken:
-                logger.warning("Failed to upload to paste service: no csrftoken cookie from rentry")
-                return ""
-
-            response = session.post(
-                RENTRY_API_NEW_URL,
-                data={"csrfmiddlewaretoken": csrftoken, "text": text},
-                headers={"Referer": RENTRY_BASE_URL},
-                timeout=10,
-            )
-            response.raise_for_status()
-            payload = response.json()
-    except (requests.RequestException, ValueError) as e:
-        logger.warning("Failed to upload to paste service: %s", e)
+    api_key = os.getenv("WAVEY_GIST_API_KEY")
+    if not api_key:
+        logger.warning("Failed to upload to Wavey Gist: WAVEY_GIST_API_KEY is not set")
         return ""
 
-    # rentry signals success with status "200" in the JSON body; anything else
-    # carries the reason in "errors"/"content".
-    if str(payload.get("status")) != "200":
-        logger.warning("Paste service rejected upload: %s", payload.get("errors") or payload.get("content") or payload)
+    markdown = f"# {title}\n\n{content}" if title else content
+
+    try:
+        response = requests.post(
+            WAVEY_GIST_API_URL,
+            json={"title": title or "Monitoring Details", "markdown": markdown},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError) as e:
+        logger.warning("Failed to upload to Wavey Gist: %s", e)
         return ""
 
     url = payload.get("url", "")
+    if not url:
+        logger.warning("Wavey Gist response did not include a URL: %s", payload)
+        return ""
+
     logger.info("Uploaded paste to %s", url)
     return url
