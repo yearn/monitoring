@@ -10,10 +10,10 @@
 # crontab from automation/jobs.yaml, ExecStart hands it to supercronic, which
 # spawns `python -m automation run <profile>` on each tick.
 #
-# There is no HTTP surface and nothing to expose. A crashed supercronic is
-# restarted by systemd (Restart=on-failure); there's no event loop that can
-# wedge while the process stays alive, so no /healthz watchdog is needed
-# (unlike the liquidity-monitor daemon).
+# The optional HTTP alerts API lives in monitoring-api.service. A crashed
+# supercronic is restarted by systemd (Restart=on-failure); there's no event
+# loop that can wedge while the process stays alive, so no /healthz watchdog is
+# needed for this scheduler unit.
 
 [Unit]
 Description=yearn monitoring cron runner (supercronic + automation)

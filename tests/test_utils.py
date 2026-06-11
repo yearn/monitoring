@@ -400,25 +400,61 @@ class TestAlert(unittest.TestCase):
     def test_emoji_prefix_low(self, mock_send):
         alert = Alert(severity=AlertSeverity.LOW, message="info msg", protocol="test")
         send_alert(alert)
-        mock_send.assert_called_once_with("ℹ️ info msg", "test", True, False)
+        mock_send.assert_called_once_with(
+            "ℹ️ info msg",
+            "test",
+            True,
+            False,
+            severity="LOW",
+            source="protocol",
+            origin_protocol="test",
+            channel="test",
+        )
 
     @patch("utils.alert.send_telegram_message")
     def test_emoji_prefix_medium(self, mock_send):
         alert = Alert(severity=AlertSeverity.MEDIUM, message="warn msg", protocol="test")
         send_alert(alert)
-        mock_send.assert_called_once_with("⚠️ warn msg", "test", False, False)
+        mock_send.assert_called_once_with(
+            "⚠️ warn msg",
+            "test",
+            False,
+            False,
+            severity="MEDIUM",
+            source="protocol",
+            origin_protocol="test",
+            channel="test",
+        )
 
     @patch("utils.alert.send_telegram_message")
     def test_emoji_prefix_high(self, mock_send):
         alert = Alert(severity=AlertSeverity.HIGH, message="high msg", protocol="test")
         send_alert(alert)
-        mock_send.assert_called_once_with("🚨 high msg", "test", False, False)
+        mock_send.assert_called_once_with(
+            "🚨 high msg",
+            "test",
+            False,
+            False,
+            severity="HIGH",
+            source="protocol",
+            origin_protocol="test",
+            channel="test",
+        )
 
     @patch("utils.alert.send_telegram_message")
     def test_emoji_prefix_critical(self, mock_send):
         alert = Alert(severity=AlertSeverity.CRITICAL, message="crit msg", protocol="test")
         send_alert(alert)
-        mock_send.assert_called_once_with("🔴 crit msg", "test", False, False)
+        mock_send.assert_called_once_with(
+            "🔴 crit msg",
+            "test",
+            False,
+            False,
+            severity="CRITICAL",
+            source="protocol",
+            origin_protocol="test",
+            channel="test",
+        )
 
     @patch("utils.alert.send_telegram_message")
     def test_silent_default_low(self, mock_send):
@@ -463,14 +499,32 @@ class TestAlert(unittest.TestCase):
         """When channel is set, Telegram message goes to channel, not protocol."""
         alert = Alert(severity=AlertSeverity.HIGH, message="peg alert", protocol="origin", channel="pegs")
         send_alert(alert)
-        mock_send.assert_called_once_with("🚨 peg alert", "pegs", False, False)
+        mock_send.assert_called_once_with(
+            "🚨 peg alert",
+            "pegs",
+            False,
+            False,
+            severity="HIGH",
+            source="protocol",
+            origin_protocol="origin",
+            channel="pegs",
+        )
 
     @patch("utils.alert.send_telegram_message")
     def test_channel_fallback_to_protocol(self, mock_send):
         """When channel is empty, Telegram message goes to protocol."""
         alert = Alert(severity=AlertSeverity.HIGH, message="reserves low", protocol="infinifi")
         send_alert(alert)
-        mock_send.assert_called_once_with("🚨 reserves low", "infinifi", False, False)
+        mock_send.assert_called_once_with(
+            "🚨 reserves low",
+            "infinifi",
+            False,
+            False,
+            severity="HIGH",
+            source="protocol",
+            origin_protocol="infinifi",
+            channel="infinifi",
+        )
 
     @patch("utils.alert.send_telegram_message")
     def test_hook_invoked_for_high(self, mock_send):

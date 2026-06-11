@@ -104,7 +104,7 @@ log "installing apt prerequisites…"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq \
-  ca-certificates curl git jq util-linux
+  ca-certificates curl git jq sqlite3 util-linux
 
 # ─── uv (manages Python + venvs) ──────────────────────────────────────
 if ! command -v uv >/dev/null; then
@@ -172,6 +172,10 @@ as_user bash -c "cd '${REPO_DIR}' && uv sync --frozen --extra ai"
 log "ensuring ${CACHE_DIR} exists (owned by ${TARGET_USER})…"
 install -m 0755 -o "$TARGET_USER" -g "$TARGET_USER" -d "$CACHE_DIR"
 
+log "initializing ${CACHE_DIR}/monitoring.db and importing legacy text caches…"
+as_user env CACHE_DIR="${CACHE_DIR}" LOG_LEVEL=INFO bash -c \
+  "cd '${REPO_DIR}' && '${REPO_DIR}/.venv/bin/python' -m utils.migrate_cache_to_db --checkpoint"
+
 # ─── /etc/monitoring scaffolding ─────────────────────────────────
 log "ensuring ${ETC_DIR} exists with the right perms…"
 install -m 0750 -o root -g "$TARGET_USER" -d "$ETC_DIR"
@@ -195,7 +199,7 @@ else
 fi
 
 # ─── systemd unit ──────────────────────────────────────────────────────
-log "installing systemd unit (User=${TARGET_USER})…"
+log "installing systemd units (User=${TARGET_USER})…"
 sed -e "s|__MONITOR_USER__|${TARGET_USER}|g" \
     -e "s|__REPO_DIR__|${REPO_DIR}|g" \
     -e "s|__ETC_DIR__|${ETC_DIR}|g" \
@@ -203,6 +207,13 @@ sed -e "s|__MONITOR_USER__|${TARGET_USER}|g" \
   "${REPO_DIR}/deploy/systemd/monitoring.service" \
   > /etc/systemd/system/monitoring.service
 chmod 0644 /etc/systemd/system/monitoring.service
+sed -e "s|__MONITOR_USER__|${TARGET_USER}|g" \
+    -e "s|__REPO_DIR__|${REPO_DIR}|g" \
+    -e "s|__ETC_DIR__|${ETC_DIR}|g" \
+    -e "s|__CACHE_DIR__|${CACHE_DIR}|g" \
+  "${REPO_DIR}/deploy/systemd/monitoring-api.service" \
+  > /etc/systemd/system/monitoring-api.service
+chmod 0644 /etc/systemd/system/monitoring-api.service
 systemctl daemon-reload
 
 cat <<NEXT
@@ -219,6 +230,14 @@ cat <<NEXT
   2. Start the runner:
        sudo systemctl enable --now monitoring
        systemctl status monitoring
+
+     Optional alerts API, bound to localhost:
+       sudo systemctl enable --now monitoring-api
+       systemctl status monitoring-api
+
+     Existing legacy cache files are imported into ${CACHE_DIR}/monitoring.db by
+     install.sh. To rerun manually:
+       sudo REPO_DIR=${REPO_DIR} CACHE_DIR=${CACHE_DIR} ${REPO_DIR}/deploy/migrate-file-cache-to-db.sh
 
   3. Watch the first ticks:
        journalctl -u monitoring -f
