@@ -198,7 +198,8 @@ skipped, not queued) — the others keep ticking.
 
 The alerts API is a separate service. It reads the SQLite alert database under
 `/srv/cache` and binds to `127.0.0.1:8923` by default, so stopping it does not
-stop scheduled monitoring.
+stop scheduled monitoring. See [`alerts-api.md`](./alerts-api.md) for endpoint
+examples and response shapes.
 
 ```sh
 sudo systemctl enable --now monitoring-api
