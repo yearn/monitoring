@@ -332,6 +332,7 @@ MARKETS_RISK_3 = {
     Chain.KATANA: [
         "0xd8a93a4cd16f843c385391e208a9a9f2fd75aedfcca05e4810e5fbfcaa6baec6",  # wsrUSD/vbUSDC -> lltv 91.5%, oracle: API3 wsrUSD/rUSD Exchange Rate, rUSD = vbUSDC.
         "0xf7fc5cc82200ddf8f23188ddbd6727eda2c8bc41863e91fb767bbc6e4f71890e",  # siUSD/vbUSDC -> lltv 86%, oracle: MorphoChainlinkOracleV2, Chainlink SIUSD/USD; no quote feed (vbUSDC = USD).
+        "0xea8f588be62079a1ad874bf7c7217166b323e0fe8ea3e59b584430ed1b859ace",  # stcUSD/vbUSDC -> lltv 86%, oracle: MorphoChainlinkOracleV2, Chainlink STCAPUSD/CAPUSD exchange rate, Chainlink CAPUSD/USD and Chainlink USDC/USD.
     ],
     Chain.ARBITRUM: [
         "0x71c2954e00c8f72864600c9d1d1cd70fa15202c4294cd938d80add3be2eced26",  # sUSDai/USDC -> lltv 91.5%, oracle: Chronicle sUSDai/USD and Chainlink USDC/USD.

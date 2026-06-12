@@ -43,6 +43,7 @@ VAULTS_V2_BY_CHAIN: Dict[Chain, List[List[Any]]] = {
         ["Yearn OG WBTC", "0x22c01834e1A261F8BebCa7D7B459db2F389785FF", 1],
         ["Yearn OG ETH", "0x5920A6FC553af799542EDA628AdfCc9eA52e141C", 1],
         ["Yearn KAT", "0x9b1aE9548E4B46cEB6650f6CEc702bAf5CF2b8CC", 1],
+        ["Yearn Degen USDC", "0xA2d38c8A3D810EBcF4C2075821c5eC8F976bb692", 3],
     ],
 }
 
