@@ -59,7 +59,21 @@ def get_safe_transactions(
     }
 
     for attempt in range(max_retries):
-        response = requests.get(endpoint, params=params, headers=headers)
+        try:
+            response = requests.get(endpoint, params=params, headers=headers, timeout=10)
+        except requests.exceptions.RequestException as e:
+            # Transient transport failure (connection reset, read timeout, DNS).
+            # Retry with backoff instead of letting it bubble up and crash the run.
+            wait_time = 2**attempt
+            logger.warning(
+                "Request error talking to Safe API (%s), waiting %ss before retry (attempt %s/%s)...",
+                e,
+                wait_time,
+                attempt + 1,
+                max_retries,
+            )
+            time.sleep(wait_time)
+            continue
 
         if response.status_code == 200:
             return response.json()["results"]
