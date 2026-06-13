@@ -3,13 +3,12 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from utils.logging import get_logger
-from utils.store import AlertEvent, get_alert, query_alerts
+from utils.store import AlertEvent, get_alert, normalize_timestamp, query_alerts
 
 logger = get_logger("api.server")
 
@@ -40,16 +39,11 @@ def _one(params: dict[str, list[str]], key: str) -> str | None:
 
 
 def parse_timestamp(value: str, name: str) -> str:
-    raw = value
-    if raw.endswith("Z"):
-        raw = f"{raw[:-1]}+00:00"
     try:
-        parsed = datetime.fromisoformat(raw)
+        return normalize_timestamp(value)
     except ValueError as exc:
-        raise BadRequest(f"invalid {name} timestamp") from exc
-    if parsed.tzinfo is None:
-        raise BadRequest(f"{name} timestamp must include timezone")
-    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        message = f"{name} timestamp must include timezone" if "timezone" in str(exc) else f"invalid {name} timestamp"
+        raise BadRequest(message) from exc
 
 
 def parse_alert_query(query: str) -> AlertQuery:

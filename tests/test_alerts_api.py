@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
@@ -36,7 +37,7 @@ def _server():
 
 def test_parse_alert_query_validates_timestamps():
     parsed = parse_alert_query("since=2026-06-11T01:00:00%2B01:00&to=2026-06-11T02:00:00Z&limit=999")
-    assert parsed.from_ts == "2026-06-11T00:00:00Z"
+    assert parsed.from_ts == "2026-06-11T00:00:00.000000Z"
     assert parsed.limit == 500
 
 
@@ -93,5 +94,27 @@ def test_alerts_routes_filters_and_errors(monkeypatch, tmp_path):
 
         status, _ = _request(server, "POST", "/v1/alerts")
         assert status == 405
+    finally:
+        server.shutdown()
+
+
+def test_alerts_route_normalizes_second_precision_timestamp_bounds(monkeypatch, tmp_path):
+    _use_cache_dir(monkeypatch, tmp_path)
+    alert_id = store.record_alert(message="same second", protocol="aave")
+    with sqlite3.connect(store.db_path()) as conn:
+        conn.execute(
+            "UPDATE alert_events SET created_at = ? WHERE id = ?",
+            ("2026-06-11T00:00:00.123456Z", alert_id),
+        )
+
+    server = _server()
+    try:
+        status, body = _request(server, "GET", "/v1/alerts?from=2026-06-11T00:00:00Z")
+        assert status == 200
+        assert [row["id"] for row in body["data"]] == [alert_id]
+
+        status, body = _request(server, "GET", "/v1/alerts?to=2026-06-11T00:00:00Z")
+        assert status == 200
+        assert body["data"] == []
     finally:
         server.shutdown()

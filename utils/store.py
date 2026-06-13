@@ -29,8 +29,24 @@ class AlertEvent(TypedDict):
     metadata: dict[str, Any]
 
 
+def format_utc_iso(value: datetime) -> str:
+    """Return a fixed-width UTC ISO-8601 timestamp suitable for TEXT comparisons."""
+    if value.tzinfo is None:
+        raise ValueError("timestamp must include timezone")
+    return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def normalize_timestamp(value: str) -> str:
+    """Normalize an ISO-8601 timestamp to fixed-width UTC."""
+    raw = value
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    parsed = datetime.fromisoformat(raw)
+    return format_utc_iso(parsed)
+
+
 def utc_now_iso() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return format_utc_iso(datetime.now(UTC))
 
 
 def db_path() -> str:
@@ -188,6 +204,8 @@ def update_alert_delivery(
     """Update Telegram delivery fields for an alert event."""
     if delivered_at is None and status == "delivered":
         delivered_at = utc_now_iso()
+    elif delivered_at is not None:
+        delivered_at = normalize_timestamp(delivered_at)
     with _connect() as conn:
         conn.execute(
             """
@@ -226,10 +244,10 @@ def query_alerts(
             params.append(value)
     if from_ts is not None:
         clauses.append("created_at >= ?")
-        params.append(from_ts)
+        params.append(normalize_timestamp(from_ts))
     if to_ts is not None:
         clauses.append("created_at < ?")
-        params.append(to_ts)
+        params.append(normalize_timestamp(to_ts))
     if cursor is not None:
         clauses.append("id < ?")
         params.append(cursor)
@@ -244,7 +262,7 @@ def query_alerts(
 
 def prune_alerts(older_than_days: int) -> int:
     """Delete old alert events and return the number of deleted rows."""
-    cutoff = (datetime.now(UTC) - timedelta(days=older_than_days)).isoformat().replace("+00:00", "Z")
+    cutoff = format_utc_iso(datetime.now(UTC) - timedelta(days=older_than_days))
     with _connect() as conn:
         cursor = conn.execute("DELETE FROM alert_events WHERE created_at < ?", (cutoff,))
         return cursor.rowcount

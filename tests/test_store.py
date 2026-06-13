@@ -40,7 +40,7 @@ def test_record_get_update_and_metadata(monkeypatch, tmp_path):
     assert row["plain_text"] is True
     assert row["silent"] is True
     assert row["delivery_status"] == "delivered"
-    assert row["delivered_at"] == "2026-06-11T10:00:00Z"
+    assert row["delivered_at"] == "2026-06-11T10:00:00.000000Z"
     assert row["metadata"] == {"tx": "0xabc"}
 
 
@@ -66,6 +66,20 @@ def test_query_filters_order_cursor_and_limit(monkeypatch, tmp_path):
     assert [row["id"] for row in store.query_alerts(to_ts="2026-06-10T12:00:00Z")] == [old_id]
     assert [row["id"] for row in store.query_alerts(cursor=new_id)] == [old_id]
     assert len(store.query_alerts(limit=5000)) == 2
+
+
+def test_query_timestamp_filters_normalize_second_precision_bounds(monkeypatch, tmp_path):
+    _use_cache_dir(monkeypatch, tmp_path)
+    alert_id = store.record_alert(message="same second", protocol="aave")
+
+    with sqlite3.connect(store.db_path()) as conn:
+        conn.execute(
+            "UPDATE alert_events SET created_at = ? WHERE id = ?",
+            ("2026-06-11T00:00:00.123456Z", alert_id),
+        )
+
+    assert [row["id"] for row in store.query_alerts(from_ts="2026-06-11T00:00:00Z")] == [alert_id]
+    assert store.query_alerts(to_ts="2026-06-11T00:00:00Z") == []
 
 
 def test_prune_alerts(monkeypatch, tmp_path):
