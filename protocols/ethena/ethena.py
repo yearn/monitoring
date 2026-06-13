@@ -325,10 +325,62 @@ class ChaosLabsAttestation:
     signature: str | None
 
 
+def ethena_native_backing_check() -> bool:
+    """Fallback backing-ratio check using Ethena's own transparency API.
+
+    Used when the Chaos Labs / Oracle Security attestation endpoint is unreachable
+    (e.g. provider outage). Only the quantitative backing ratio is checked here; the
+    Chaos-specific flags (delta-neutral, approved-assets-only, signed attestation) have
+    no equivalent on this source and are skipped.
+
+    Returns:
+        True if backing data was available and the check ran, False if Ethena's API
+        could not be reached either (so the caller can escalate to a hard alert).
+    """
+    supply = get_usde_supply()
+    collateral = get_total_collateral_usd()
+    if supply is None or collateral is None or supply == 0:
+        return False
+
+    # Mirror the Chaos Labs check's semantics: alert only when collateral no longer covers
+    # supply (ratio < 1). USDe targets ~1:1 collateral backing with a SEPARATE reserve fund as
+    # the buffer, so collateral-only ratios sit just above 1.0 in normal operation — applying
+    # COLLATERAL_RATIO_TRIGGER (which assumes reserve fund is included) here would false-positive.
+    backing_ratio = collateral / supply
+    if backing_ratio < 1:
+        send_alert(
+            Alert(
+                AlertSeverity.CRITICAL,
+                f"🚨 USDe NOT FULLY BACKED (Ethena API fallback)!\n"
+                f"Backing Assets: ${collateral:,.2f}\nTotal Supply: {supply:,.2f}\n"
+                f"Backing Ratio: {backing_ratio:.4f} ({backing_ratio * 100 - 100:+.2f}%)",
+                PROTOCOL,
+            )
+        )
+
+    logger.info(
+        "Ethena native API fallback – backing: $%s | supply: %s | ratio: %s",
+        f"{collateral:,.2f}",
+        f"{supply:,.2f}",
+        f"{backing_ratio:.4f}",
+    )
+    return True
+
+
 def chaos_labs_check():
     data = fetch_json(CHAOS_LABS_URL)
     if not data or not isinstance(data, list) or len(data) == 0:
-        send_error_message("⚠️ ETHENA: Failed to fetch Chaos Labs attestation data", PROTOCOL)
+        # Oracle Security / Chaos Labs PoR endpoint is unreachable (e.g. provider outage).
+        # Don't page on every run for an upstream outage we can't fix: log it and fall back
+        # to Ethena's own transparency API for the critical backing-ratio check. Only escalate
+        # to a hard alert if that fallback is also unavailable — meaning we have no backing
+        # data from any source. The Chaos-specific flags (delta-neutral, approved-assets,
+        # signature) are unavoidably skipped until the attestation endpoint recovers.
+        logger.warning("Chaos Labs attestation endpoint unavailable; falling back to Ethena native API")
+        if not ethena_native_backing_check():
+            send_error_message(
+                "⚠️ ETHENA: Failed to fetch Chaos Labs attestation data and Ethena API fallback", PROTOCOL
+            )
         return
 
     # Get the latest attestation (last item in the list)
