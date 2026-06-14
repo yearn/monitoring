@@ -34,6 +34,28 @@ class TestSafePendingTransactions(unittest.TestCase):
         mock_write.assert_called_once_with(safe_address, 22)
         self.assertEqual(pending, [{"nonce": 23}])
 
+    def test_executed_rows_are_filtered_even_when_api_returns_them(self):
+        safe_main = self._import_safe_main()
+        safe_address = "0xSafe"
+
+        txs = [
+            {"nonce": 30, "isExecuted": True},
+            {"nonce": 31, "executionDate": "2026-06-14T21:00:00Z"},
+            {"nonce": 32, "transactionHash": "0x" + "ab" * 32},
+            {"nonce": 33, "isExecuted": False, "executionDate": None, "transactionHash": None},
+        ]
+
+        with (
+            patch.object(safe_main, "get_last_executed_nonce_from_file", return_value=0),
+            patch.object(safe_main, "get_safe_current_nonce", return_value=None),
+            patch.object(safe_main, "get_safe_transactions", return_value=txs),
+            patch.object(safe_main, "write_last_executed_nonce_to_file") as mock_write,
+        ):
+            pending = safe_main.get_pending_transactions(safe_address, "mainnet")
+
+        mock_write.assert_not_called()
+        self.assertEqual(pending, [{"nonce": 33, "isExecuted": False, "executionDate": None, "transactionHash": None}])
+
 
 class TestCheckForPendingTransactions(unittest.TestCase):
     """Regression tests for the dedupe write and dead-slot / stale-snapshot behavior.
