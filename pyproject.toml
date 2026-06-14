@@ -99,7 +99,7 @@ build-backend = "setuptools.build_meta"
 # they don't need a finder entry.
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["protocols*", "utils*", "automation*"]
+include = ["protocols*", "utils*", "automation*", "api*"]
 namespaces = true
 
 [tool.ruff]

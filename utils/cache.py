@@ -3,22 +3,12 @@ from typing import Union
 
 from dotenv import load_dotenv
 
+from utils import paths, store
+
 load_dotenv()
 
-# CACHE_DIR is the single knob for where all on-disk dedupe/cache state lives.
-# Default "" → the current working directory, so local runs drop files in the
-# repo as before. On the VPS the systemd unit sets CACHE_DIR=/srv/cache (the one
-# writable path under the hardened service); see deploy/systemd/yearn-monitor.service.
-CACHE_DIR: str = os.getenv("CACHE_DIR", "")
-
-
-def cache_path(filename: str) -> str:
-    """Resolve a cache ``filename`` against ``CACHE_DIR``.
-
-    An absolute ``filename`` is returned unchanged (``os.path.join`` semantics), so an
-    explicit override always wins over ``CACHE_DIR``.
-    """
-    return os.path.join(CACHE_DIR, filename)
+CACHE_DIR = paths.CACHE_DIR
+cache_path = paths.cache_path
 
 
 # format of the data: "protocol:value"
@@ -62,26 +52,50 @@ def morpho_key(vault_address: str, market_id: str, value_type: str) -> str:
 
 
 def get_last_value_for_key_from_file(filename: str, wanted_key: str) -> Union[str, int]:
-    if not os.path.exists(filename):
-        return 0
-    else:
-        with open(filename, "r") as f:
-            # read line by line in format "key:value"
-            lines = f.readlines()
-            for line in lines:
-                key, value = line.strip().split(":")
-                if key == wanted_key:
-                    return value
-    return 0
+    if os.getenv("CACHE_BACKEND", "sqlite") == "file":
+        return _get_last_value_from_legacy_file(filename, wanted_key)
+
+    namespace = os.path.basename(filename)
+    value = store.state_get(namespace, wanted_key)
+    if value is not None:
+        return value
+
+    legacy_value = _get_last_value_from_legacy_file(filename, wanted_key)
+    if legacy_value != 0:
+        store.state_set(namespace, wanted_key, str(legacy_value))
+    return legacy_value
 
 
 def write_last_value_to_file(filename: str, write_key: str, write_value: Union[int, str, float]) -> None:
+    if os.getenv("CACHE_BACKEND", "sqlite") == "file":
+        _write_last_value_to_legacy_file(filename, write_key, write_value)
+        return
+
+    store.state_set(os.path.basename(filename), write_key, str(write_value))
+    if os.getenv("CACHE_DUAL_WRITE_LEGACY") == "1":
+        _write_last_value_to_legacy_file(filename, write_key, write_value)
+
+
+def _get_last_value_from_legacy_file(filename: str, wanted_key: str) -> Union[str, int]:
+    if not os.path.exists(filename):
+        return 0
+    with open(filename, "r") as f:
+        # read line by line in format "key:value"
+        lines = f.readlines()
+        for line in lines:
+            key, value = line.strip().split(":", 1)
+            if key == wanted_key:
+                return value
+    return 0
+
+
+def _write_last_value_to_legacy_file(filename: str, write_key: str, write_value: Union[int, str, float]) -> None:
     # check if the proposal ud is already in the file, then update the id else append
     if os.path.exists(filename):
         with open(filename, "r") as f:
             lines = f.readlines()
             for i, line in enumerate(lines):
-                key, _ = line.strip().split(":")
+                key, _ = line.strip().split(":", 1)
                 if key == write_key:
                     lines[i] = f"{write_key}:{write_value}\n"
                     break

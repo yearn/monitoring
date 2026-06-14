@@ -45,6 +45,6 @@ def run_with_alert(entrypoint: Callable[[], None], protocol: str, name: str | No
         if run_url:
             lines.append(f"Run: {run_url}")
         try:
-            send_error_message("\n".join(lines), protocol)
+            send_error_message("\n".join(lines), protocol, source="crash")
         except Exception:  # noqa: BLE001 - alerting must not itself crash the wrapper
             logger.exception("Failed to send crash alert for %s", script)
