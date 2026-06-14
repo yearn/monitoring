@@ -11,7 +11,13 @@ import requests
 
 from utils.alert import Alert, AlertSeverity, register_alert_hook, send_alert
 from utils.config import Config, ProtocolConfig
-from utils.telegram import TelegramError, send_error_message, send_telegram_message
+from utils.telegram import (
+    TelegramError,
+    format_rich_table,
+    send_error_message,
+    send_telegram_message,
+    send_telegram_rich_message,
+)
 from utils.web3_wrapper import (
     MAX_BACKOFF_SECONDS,
     ProviderConnectionError,
@@ -289,6 +295,126 @@ class TestTelegram(unittest.TestCase):
                 mock_post.call_args[1]["json"]["text"],
                 "[yearn_timelock] Test message",
             )
+
+    def test_format_rich_table(self):
+        table = format_rich_table(
+            ["Market", "Utilization"],
+            [["ETH < WETH", "97.4%"], ["USDC", "95.1%"]],
+            caption="Aave & Morpho",
+            alignments=["left", "right"],
+        )
+
+        self.assertEqual(
+            table,
+            '<table bordered striped><caption>Aave &amp; Morpho</caption>'
+            '<tr><th align="left">Market</th><th align="right">Utilization</th></tr>'
+            '<tr><td align="left">ETH &lt; WETH</td><td align="right">97.4%</td></tr>'
+            '<tr><td align="left">USDC</td><td align="right">95.1%</td></tr>'
+            "</table>",
+        )
+
+    def test_format_rich_table_rejects_mismatched_rows(self):
+        with self.assertRaises(ValueError):
+            format_rich_table(["Market", "Utilization"], [["ETH"]])
+
+    @patch("utils.telegram.requests.post")
+    def test_send_telegram_rich_message_success(self, mock_post):
+        mock_response = unittest.mock.Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_post.return_value = mock_response
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN_TEST": "test_token",
+                "TELEGRAM_CHAT_ID_TEST": "test_chat_id",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_telegram_rich_message("<p>Test</p>", "test")
+
+        url = mock_post.call_args[0][0]
+        payload = mock_post.call_args[1]["json"]
+        self.assertIn("sendRichMessage", url)
+        self.assertEqual(payload["chat_id"], "test_chat_id")
+        self.assertEqual(payload["rich_message"], {"html": "<p>Test</p>", "skip_entity_detection": True})
+        self.assertNotIn("parse_mode", payload)
+
+    @patch("utils.telegram.requests.post")
+    def test_send_telegram_rich_message_with_topic(self, mock_post):
+        mock_response = unittest.mock.Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_post.return_value = mock_response
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN_DEFAULT": "default_token",
+                "TELEGRAM_CHAT_ID_TOPICS": "topics_chat_id",
+                "TELEGRAM_TOPIC_ID_AAVE": "42",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_telegram_rich_message("<table><tr><td>ok</td></tr></table>", "aave", disable_notification=True)
+
+        url = mock_post.call_args[0][0]
+        payload = mock_post.call_args[1]["json"]
+        self.assertIn("default_token", url)
+        self.assertEqual(payload["chat_id"], "topics_chat_id")
+        self.assertEqual(payload["message_thread_id"], 42)
+        self.assertTrue(payload["disable_notification"])
+
+    @patch("utils.telegram.requests.post")
+    def test_send_telegram_rich_message_test_override_labels_protocol(self, mock_post):
+        mock_response = unittest.mock.Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_post.return_value = mock_response
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TEST_CHAT_ID": "dummy_group",
+                "TELEGRAM_BOT_TOKEN_DEFAULT": "default_token",
+                "TELEGRAM_BOT_TOKEN_AAVE": "aave_token",
+                "TELEGRAM_CHAT_ID_TOPICS": "topics_chat_id",
+                "TELEGRAM_TOPIC_ID_AAVE": "42",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_telegram_rich_message("<p>Test</p>", "aave")
+
+        url = mock_post.call_args[0][0]
+        payload = mock_post.call_args[1]["json"]
+        self.assertIn("default_token", url)
+        self.assertNotIn("aave_token", url)
+        self.assertEqual(payload["chat_id"], "dummy_group")
+        self.assertEqual(payload["rich_message"]["html"], "<p>[aave]</p><p>Test</p>")
+        self.assertNotIn("message_thread_id", payload)
+
+    @patch("utils.telegram.requests.post")
+    def test_send_telegram_rich_message_falls_back_to_plain_text(self, mock_post):
+        failure = requests.RequestException("Connection error")
+        mock_response = unittest.mock.Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_post.side_effect = [failure, mock_response]
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN_TEST": "test_token",
+                "TELEGRAM_CHAT_ID_TEST": "test_chat_id",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_telegram_rich_message("<p>Test</p>", "test", fallback_message="Fallback")
+
+        fallback_payload = mock_post.call_args_list[1][1]["json"]
+        self.assertEqual(fallback_payload["text"], "Fallback")
+        self.assertNotIn("parse_mode", fallback_payload)
 
 
 class TestSendErrorMessage(unittest.TestCase):
