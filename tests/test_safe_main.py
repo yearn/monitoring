@@ -41,8 +41,8 @@ class TestCheckForPendingTransactions(unittest.TestCase):
     The Safe tx-service returns pending txs in descending nonce order
     (ordering=-nonce). The original loop wrote the cache to each nonce in
     turn, so the cache ended at the *lowest* nonce and re-fired the highest
-    one next run. We now write the highest alerted nonce once, after the
-    loop, and add a per-call diagnostic log.
+    one next run. We now write progress after each delivered alert without
+    ever moving the scalar cache backwards.
     """
 
     _DIAG = {
@@ -90,7 +90,6 @@ class TestCheckForPendingTransactions(unittest.TestCase):
             safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
 
         self.assertEqual(mock_send.call_count, 2)
-        # The fix: exactly one cache write, with the HIGHEST nonce.
         mock_write.assert_called_once_with(safe_address, 2281)
 
     def test_cache_write_single_call_even_for_single_tx(self):
@@ -105,6 +104,22 @@ class TestCheckForPendingTransactions(unittest.TestCase):
             patch.object(safe_main, "write_last_executed_nonce_to_file") as mock_write,
         ):
             safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+
+        mock_write.assert_called_once_with(safe_address, 2281)
+
+    def test_cache_progress_survives_later_send_failure(self):
+        safe_main = self._import_safe_main()
+        safe_address = "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52"
+
+        with (
+            patch.object(safe_main, "get_pending_transactions", return_value=[self._tx(2281), self._tx(2280)]),
+            patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
+            patch.object(safe_main, "_pending_filter_diag", return_value=self._DIAG),
+            patch.object(safe_main, "send_telegram_message", side_effect=[None, RuntimeError("telegram down")]),
+            patch.object(safe_main, "write_last_executed_nonce_to_file") as mock_write,
+        ):
+            with self.assertRaises(RuntimeError):
+                safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
 
         mock_write.assert_called_once_with(safe_address, 2281)
 

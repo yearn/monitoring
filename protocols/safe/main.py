@@ -236,7 +236,7 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
             diag["baseline"],
             len(pending_transactions),
         )
-        max_nonce = max(int(tx["nonce"]) for tx in pending_transactions)
+        highest_alerted_nonce = None
         for tx in pending_transactions:
             nonce = int(tx["nonce"])
 
@@ -341,11 +341,13 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
             # for unexpected proposers and for all non-Yearn protocol alerts.
             disable_notification = is_yearn_multisig and not unexpected_proposer
             send_telegram_message(message, protocol, disable_notification)
-        # Write the highest alerted nonce once at the end. The Safe tx-service
-        # returns pending txs in DESCENDING nonce order, so writing inside
-        # the loop would end with the *lowest* nonce and re-fire the highest
-        # one next run.
-        write_last_executed_nonce_to_file(safe_address, max_nonce)
+            if highest_alerted_nonce is None or nonce > highest_alerted_nonce:
+                highest_alerted_nonce = nonce
+                # Persist progress after each delivered alert, but never move
+                # the scalar nonce cache backwards. The Safe tx-service returns
+                # pending txs in DESCENDING nonce order, so a lower nonce must
+                # not overwrite a higher nonce already alerted in this batch.
+                write_last_executed_nonce_to_file(safe_address, highest_alerted_nonce)
     else:
         logger.info("No pending transactions found with higher nonce than the last executed transaction.")
 
