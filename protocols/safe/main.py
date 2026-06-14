@@ -111,6 +111,16 @@ def get_safe_current_nonce(safe_address: str, network_name: str) -> int | None:
         return None
 
 
+def _is_executed_safe_tx(tx: dict) -> bool:
+    """Return True for tx-service rows that are already executed.
+
+    The API request asks for ``executed=false``, but the monitor treats the
+    response defensively: if an item carries any executed marker, it must never
+    reach the alert path.
+    """
+    return tx.get("isExecuted") is True or bool(tx.get("executionDate")) or bool(tx.get("transactionHash"))
+
+
 def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]:
     """Fetch pending transactions worth alerting on.
 
@@ -119,6 +129,8 @@ def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]
     - Dead-slot: nonce < safe.currentNonce. These remain in the API as
       ``executed=false`` because a competing tx at the same nonce executed
       first, but they will never run themselves.
+    - Executed rows: any tx-service row with executed markers. These must never
+      alert even if the API includes them in an ``executed=false`` response.
 
     The baseline is the higher of (a) the last nonce we already alerted on
     and (b) ``currentNonce - 1`` (the last *executed* nonce, when we could
@@ -141,7 +153,7 @@ def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]
             write_last_executed_nonce_to_file(safe_address, chain_baseline)
         baseline = max(baseline, chain_baseline)
 
-    return [tx for tx in pending_txs if int(tx["nonce"]) > baseline]
+    return [tx for tx in pending_txs if not _is_executed_safe_tx(tx) and int(tx["nonce"]) > baseline]
 
 
 def _pending_filter_diag(safe_address: str, network_name: str) -> dict:
