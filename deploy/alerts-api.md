@@ -92,6 +92,44 @@ curl http://127.0.0.1:8923/v1/alerts/5021
 
 Missing alerts return `404`.
 
+### `GET /v1/protocols`
+
+Returns enabled protocol objects from `automation/jobs.yaml`, with the tasks
+that monitor each protocol.
+
+```sh
+curl http://127.0.0.1:8923/v1/protocols
+```
+
+Example response:
+
+```json
+{
+  "data": [
+    {
+      "name": "aave",
+      "tasks": [
+        {
+          "name": "aave",
+          "script": "protocols/aave/main.py",
+          "args": {},
+          "profile": "hourly",
+          "cron": "5 * * * *"
+        },
+        {
+          "name": "aave-proposals",
+          "script": "protocols/aave/proposals.py",
+          "args": {},
+          "profile": "hourly",
+          "cron": "5 * * * *"
+        }
+      ]
+    }
+  ],
+  "count": 1
+}
+```
+
 ## Delivery Status
 
 An alert row means a monitor generated an alert. Telegram delivery is tracked

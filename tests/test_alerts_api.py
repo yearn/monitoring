@@ -5,8 +5,10 @@ import sqlite3
 import threading
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 
 from api.server import AlertsHandler, parse_alert_query
+from automation.config import JobsConfig, Profile, Task
 from utils import paths, store
 
 
@@ -50,6 +52,76 @@ def test_healthz(monkeypatch, tmp_path):
         server.shutdown()
     assert status == 200
     assert body == {"status": "ok"}
+
+
+def test_protocols_route(monkeypatch, tmp_path):
+    _use_cache_dir(monkeypatch, tmp_path)
+    config = JobsConfig(
+        profiles={
+            "hourly": Profile(
+                name="hourly",
+                cron="5 * * * *",
+                tasks=[
+                    Task(name="aave", script="protocols/aave/main.py"),
+                    Task(name="aave-proposals", script="protocols/aave/proposals.py"),
+                    Task(name="lido-steth", script="protocols/lido/steth/main.py"),
+                    Task(name="prune-alerts", script="utils/prune_alerts.py"),
+                    Task(name="off", script="protocols/off/main.py", enabled=False),
+                ],
+            ),
+            "disabled": Profile(
+                name="disabled",
+                cron="0 * * * *",
+                tasks=[Task(name="disabled-task", script="disabled.py")],
+                enabled=False,
+            ),
+        },
+        path=Path("jobs.yaml"),
+    )
+    monkeypatch.setattr("api.server.load_jobs_config", lambda: config)
+    server = _server()
+    try:
+        status, body = _request(server, "GET", "/v1/protocols")
+    finally:
+        server.shutdown()
+
+    assert status == 200
+    assert body == {
+        "data": [
+            {
+                "name": "aave",
+                "tasks": [
+                    {
+                        "name": "aave",
+                        "script": "protocols/aave/main.py",
+                        "args": {},
+                        "profile": "hourly",
+                        "cron": "5 * * * *",
+                    },
+                    {
+                        "name": "aave-proposals",
+                        "script": "protocols/aave/proposals.py",
+                        "args": {},
+                        "profile": "hourly",
+                        "cron": "5 * * * *",
+                    },
+                ],
+            },
+            {
+                "name": "lido",
+                "tasks": [
+                    {
+                        "name": "lido-steth",
+                        "script": "protocols/lido/steth/main.py",
+                        "args": {},
+                        "profile": "hourly",
+                        "cron": "5 * * * *",
+                    }
+                ],
+            },
+        ],
+        "count": 2,
+    }
 
 
 def test_alerts_routes_filters_and_errors(monkeypatch, tmp_path):

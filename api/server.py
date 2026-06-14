@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from automation.config import JobsConfig, load_jobs_config
 from utils.logging import get_logger
 from utils.store import AlertEvent, get_alert, normalize_timestamp, query_alerts
 
@@ -109,6 +110,32 @@ def alert_to_json(row: AlertEvent) -> dict[str, object]:
     }
 
 
+def _protocol_from_script(script: str) -> str | None:
+    parts = script.split("/")
+    if len(parts) < 2 or parts[0] != "protocols" or not parts[1]:
+        return None
+    return parts[1]
+
+
+def protocols_to_json(config: JobsConfig) -> dict[str, object]:
+    protocols: dict[str, list[dict[str, object]]] = {}
+    for profile in config.enabled_profiles:
+        for task in profile.enabled_tasks:
+            protocol = _protocol_from_script(task.script)
+            if protocol is not None:
+                protocols.setdefault(protocol, []).append(
+                    {
+                        "name": task.name,
+                        "script": task.script,
+                        "args": task.args,
+                        "profile": profile.name,
+                        "cron": profile.cron,
+                    }
+                )
+    data = [{"name": protocol, "tasks": tasks} for protocol, tasks in sorted(protocols.items())]
+    return {"data": data, "count": len(data)}
+
+
 def write_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, object]) -> None:
     body = json.dumps(payload, separators=(",", ":")).encode()
     handler.send_response(status)
@@ -129,6 +156,9 @@ class AlertsHandler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/healthz":
                 write_json(self, 200, {"status": "ok"})
+                return
+            if parsed.path == "/v1/protocols":
+                write_json(self, 200, protocols_to_json(load_jobs_config()))
                 return
             if parsed.path == "/v1/alerts":
                 alert_query = parse_alert_query(parsed.query)
