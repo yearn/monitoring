@@ -119,6 +119,16 @@ def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]
     - Dead-slot: nonce < safe.currentNonce. These remain in the API as
       ``executed=false`` because a competing tx at the same nonce executed
       first, but they will never run themselves.
+
+    The baseline is the higher of (a) the last nonce we already alerted on
+    and (b) ``currentNonce - 1`` (the last *executed* nonce, when we could
+    fetch it). A tx is eligible iff ``nonce > baseline``.
+
+    When ``currentNonce`` is unknown (e.g. Safe v1 endpoint 429'd), the
+    chain baseline can't be computed and we degrade to last_cached_nonce.
+    That can admit a few dead-slot txs if the multisig raced ahead between
+    the last successful nonce fetch and now — see
+    ``check_for_pending_transactions`` for the per-call diagnostic log.
     """
     last_cached_nonce = get_last_executed_nonce_from_file(safe_address)
     current_safe_nonce = get_safe_current_nonce(safe_address, network_name)
@@ -132,6 +142,26 @@ def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]
         baseline = max(baseline, chain_baseline)
 
     return [tx for tx in pending_txs if int(tx["nonce"]) > baseline]
+
+
+def _pending_filter_diag(safe_address: str, network_name: str) -> dict:
+    """Snapshot the filter inputs for diagnostic logging.
+
+    Re-reads the on-disk cache and the live ``currentNonce`` so
+    ``check_for_pending_transactions`` can log the exact numbers that
+    decided what to alert on, without leaking them through the
+    ``get_pending_transactions`` return value.
+    """
+    last_cached = get_last_executed_nonce_from_file(safe_address)
+    current = get_safe_current_nonce(safe_address, network_name)
+    chain_baseline = (current - 1) if current is not None else None
+    baseline = max(last_cached, chain_baseline) if chain_baseline is not None else last_cached
+    return {
+        "last_cached_nonce": last_cached,
+        "current_safe_nonce": current,
+        "chain_baseline": chain_baseline,
+        "baseline": baseline,
+    }
 
 
 def get_safe_url(safe_address: str, network_name: str) -> str:
@@ -195,6 +225,18 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
     expected_proposers = YEARN_EXPECTED_PROPOSERS.get((network_name, safe_address.lower()), set())
 
     if pending_transactions:
+        diag = _pending_filter_diag(safe_address, network_name)
+        logger.info(
+            "safe %s on %s: last_cached=%s currentNonce=%s chain_baseline=%s baseline=%s pending=%d",
+            safe_address,
+            network_name,
+            diag["last_cached_nonce"],
+            diag["current_safe_nonce"],
+            diag["chain_baseline"],
+            diag["baseline"],
+            len(pending_transactions),
+        )
+        max_nonce = max(int(tx["nonce"]) for tx in pending_transactions)
         for tx in pending_transactions:
             nonce = int(tx["nonce"])
 
@@ -299,8 +341,11 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
             # for unexpected proposers and for all non-Yearn protocol alerts.
             disable_notification = is_yearn_multisig and not unexpected_proposer
             send_telegram_message(message, protocol, disable_notification)
-            # write the last executed nonce to file
-            write_last_executed_nonce_to_file(safe_address, nonce)
+        # Write the highest alerted nonce once at the end. The Safe tx-service
+        # returns pending txs in DESCENDING nonce order, so writing inside
+        # the loop would end with the *lowest* nonce and re-fire the highest
+        # one next run.
+        write_last_executed_nonce_to_file(safe_address, max_nonce)
     else:
         logger.info("No pending transactions found with higher nonce than the last executed transaction.")
 
