@@ -40,7 +40,7 @@ uv run python -m automation run daily --dry-run
        cache-file: /srv/cache/my-protocol.json
    ```
 3. `uv run python -m automation render-crontab` — confirm the line you expect appears.
-4. Merge to `main`, then on the VPS `git pull` and `sudo systemctl restart yearn-monitor` to
+4. Merge to `main`, then on the VPS sync to `origin/main` and restart `monitoring` to
    re-render the crontab (see [deploy/runbook.md](../deploy/runbook.md)).
 
 ## Profile shape

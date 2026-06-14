@@ -9,8 +9,14 @@ from automation.config import Profile, Task
 from automation.runner import ProfileResult, TaskResult, build_argv, run_profile
 
 
-def _profile(tasks: list[Task], env: dict[str, str] | None = None) -> Profile:
-    return Profile(name="hourly", cron="26 * * * *", tasks=tasks, env=env or {})
+def _profile(tasks: list[Task], env: dict[str, str] | None = None, sync_before_run: bool = False) -> Profile:
+    return Profile(
+        name="hourly",
+        cron="26 * * * *",
+        tasks=tasks,
+        env=env or {},
+        sync_before_run=sync_before_run,
+    )
 
 
 class TestBuildArgv(unittest.TestCase):
@@ -62,6 +68,20 @@ class TestRunProfileSuccess(unittest.TestCase):
         self.assertEqual(kwargs["cwd"], Path("/srv/repo"))
         self.assertEqual(kwargs["env"]["CACHE_FILENAME"], "/srv/cache/foo.txt")
         self.assertFalse(kwargs["check"])
+
+    def test_sync_before_run_forces_remote_main_sync(self):
+        profile = _profile([Task(name="x", script="x.py")], sync_before_run=True)
+
+        class _Result:
+            returncode = 0
+
+        with (
+            patch("automation.runner.git_sync.sync_to_remote_main") as mock_sync,
+            patch("automation.runner.subprocess.run", return_value=_Result()),
+        ):
+            run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
+
+        mock_sync.assert_called_once_with(Path("/srv/repo"))
 
 
 class TestRunProfileContinuesOnFailure(unittest.TestCase):

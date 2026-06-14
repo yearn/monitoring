@@ -72,10 +72,11 @@ StartLimitBurst=5
 
 # Hardening — cheap wins now that there's no container boundary. __CACHE_DIR__ is
 # the scripts' state path (dedupe caches, nonces). The repo tree is also writable
-# because the multisig profile fast-forwards the checkout in-process before each
-# run (sync_before_run in jobs.yaml → git pull --ff-only, which writes .git/ and
-# the working tree); ProtectSystem=strict would otherwise make it read-only and
-# fail the pull. The venv and the rest of the system stay read-only.
+# because the multisig profile syncs the checkout in-process before each run
+# (sync_before_run in jobs.yaml → git fetch + git reset --hard origin/main,
+# which writes .git/ and the working tree); ProtectSystem=strict would otherwise
+# make it read-only and fail the sync. The venv and the rest of the system stay
+# read-only.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
