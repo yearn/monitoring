@@ -163,13 +163,13 @@ def run_profile(
 
 
 def _sync_repo(repo_root: Path) -> None:
-    """Fast-forward the checkout to origin before running the profile's tasks.
+    """Force the checkout to origin/main before running the profile's tasks.
 
-    Best-effort: a failed pull is logged but never blocks the run — these are
+    Best-effort: a failed sync is logged but never blocks the run — these are
     read-only checks, so running slightly older code is harmless, and we never
     want a transient git hiccup to silence an alert. See `automation.git_sync`.
     """
-    result = git_sync.pull_ff_only(repo_root)
+    result = git_sync.sync_to_remote_main(repo_root)
     if result.ok:
         logger.info("pre-run git sync: %s", result.output or "already up to date")
     else:
