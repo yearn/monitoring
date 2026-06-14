@@ -28,11 +28,13 @@ FARM_RATIO_ACTIVATION_ALERT_THRESHOLD = 0.03
 FARM_RATIO_MIN_TVL_ALERT = 0.01
 SAFE_FARM_IDENTIFIERS = [
     "sentora pyusd",
+    "sentora prime main",
     "sgho",
     "maple",
     "cap",
     "aave horizon",
     "aave usdc",
+    "aave usdg",
     "syrupusdc",
     "autousd",
     "spark susdc",
