@@ -45,6 +45,38 @@ class TestFetchSwissKnifeLabels(unittest.TestCase):
         fetch_swiss_knife_labels(addr, 1)
         self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]
 
+    @patch("utils.swiss_knife.fetch_json")
+    def test_labels_persist_across_process_restart(self, mock_fetch: object) -> None:
+        # Disk cache should serve labels after the in-memory layer is dropped.
+        mock_fetch.return_value = ["Curve.fi: 3pool"]  # type: ignore[attr-defined]
+        addr = "0x" + "d0" * 20
+        fetch_swiss_knife_labels(addr, 1)
+        reset_cache()  # clears in-memory only
+        self.assertEqual(fetch_swiss_knife_labels(addr, 1), ["Curve.fi: 3pool"])
+        self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]  # served from disk
+
+    @patch("utils.swiss_knife.fetch_json")
+    def test_empty_negative_persists_across_process_restart(self, mock_fetch: object) -> None:
+        # An unknown address (dict error body = a real 200 response) is cached as
+        # an empty negative so we don't re-query it every run.
+        mock_fetch.return_value = {"error": "Error fetching data"}  # type: ignore[attr-defined]
+        addr = "0x" + "e0" * 20
+        self.assertEqual(fetch_swiss_knife_labels(addr, 1), [])
+        reset_cache()
+        self.assertEqual(fetch_swiss_knife_labels(addr, 1), [])
+        self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]  # negative cached on disk
+
+    @patch("utils.swiss_knife.fetch_json")
+    def test_transient_error_is_not_persisted(self, mock_fetch: object) -> None:
+        # fetch_json -> None is a network/HTTP failure, not "no labels"; never persist.
+        mock_fetch.return_value = None  # type: ignore[attr-defined]
+        addr = "0x" + "f0" * 20
+        self.assertEqual(fetch_swiss_knife_labels(addr, 1), [])
+        reset_cache()
+        mock_fetch.return_value = ["Aave: Pool"]  # type: ignore[attr-defined]
+        self.assertEqual(fetch_swiss_knife_labels(addr, 1), ["Aave: Pool"])
+        self.assertEqual(mock_fetch.call_count, 2)  # type: ignore[attr-defined]
+
 
 class TestPickDisplayName(unittest.TestCase):
     """Sanity-check that we only use Swiss Knife's first label when it looks like a name."""

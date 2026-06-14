@@ -12,6 +12,7 @@ import os
 import re
 from dataclasses import dataclass
 
+from utils.disk_cache import MISS, DiskCache
 from utils.http import fetch_json
 from utils.logging import get_logger
 
@@ -25,10 +26,27 @@ ETHERSCAN_V2_API_URL = "https://api.etherscan.io/v2/api"
 MAX_SNIPPET_CHARS = 4000
 
 # Per-process cache: (chain_id, address_lower) -> (contract_name, source, abi_json_string)
-# or None for miss. Workflows are short-lived so a process-lifetime dict is sufficient.
+# or None for miss. Backed by an on-disk cache (below) so the same verified source is
+# not re-fetched from Etherscan on every cron run; the in-memory dict still serves repeat
+# lookups within a single process for free.
 # The ABI is stored as the raw JSON string from Etherscan and parsed lazily by callers
 # that need it — keeps the cache small for the common case where only source is read.
 _source_cache: dict[tuple[int, str], tuple[str, str, str] | None] = {}
+
+# On-disk layer keyed by "chain_id-address". Verified source is immutable per address, so
+# positive entries never expire; "unverified" misses get the short negative TTL so a
+# contract verified later is picked up. Source can be large (~500KB) — bound the namespace
+# by total bytes as well as entry count. All tunable via env.
+_source_disk_cache = DiskCache(
+    namespace="source-cache",
+    max_entries=int(os.getenv("SOURCE_CACHE_MAX_ENTRIES", "5000")),
+    max_bytes=int(os.getenv("SOURCE_CACHE_MAX_BYTES", str(256 * 1024 * 1024))),
+)
+
+
+def _disk_key(chain_id: int, address: str) -> str:
+    return f"{chain_id}-{address.lower()}"
+
 
 _NATSPEC_LINE = r"(?:[ \t]*///.*\n|[ \t]*\*[^/].*\n|[ \t]*/\*\*[\s\S]*?\*/[ \t]*\n)"
 _NATSPEC_BLOCK = rf"(?:(?:{_NATSPEC_LINE})+)?"
@@ -83,6 +101,19 @@ def _fetch_etherscan_contract(chain_id: int, address: str) -> tuple[str, str, st
     if cache_key in _source_cache:
         return _source_cache[cache_key]
 
+    disk_key = _disk_key(chain_id, address)
+    disk_val = _source_disk_cache.get(disk_key)
+    if disk_val is not MISS:
+        if disk_val is None:
+            # Cached negative: a prior run saw this contract unverified.
+            _source_cache[cache_key] = None
+            return None
+        if isinstance(disk_val, (list, tuple)) and len(disk_val) == 3:
+            record = (disk_val[0], disk_val[1], disk_val[2])
+            _source_cache[cache_key] = record
+            return record
+        # Unexpected shape — fall through to a live fetch.
+
     params = {
         "chainid": str(chain_id),
         "module": "contract",
@@ -91,12 +122,18 @@ def _fetch_etherscan_contract(chain_id: int, address: str) -> tuple[str, str, st
         "apikey": api_key,
     }
     data = fetch_json(ETHERSCAN_V2_API_URL, params=params)
-    results = (data or {}).get("result") or [] if (data or {}).get("status") == "1" else []
+    # A clean response is status "1" with a result array; anything else (None on a
+    # request error, or status "0") is treated as transient and not persisted, so an
+    # Etherscan blip can't poison the disk cache as a day-long "unverified".
+    status_ok = data is not None and data.get("status") == "1"
+    results = (data or {}).get("result") or [] if status_ok else []
     entry = results[0] if results else {}
     raw_source = entry.get("SourceCode") or ""
 
     if not raw_source:
         _source_cache[cache_key] = None
+        if status_ok:
+            _source_disk_cache.set_negative(disk_key)
         return None
 
     result = (
@@ -105,6 +142,7 @@ def _fetch_etherscan_contract(chain_id: int, address: str) -> tuple[str, str, st
         entry.get("ABI") or "",
     )
     _source_cache[cache_key] = result
+    _source_disk_cache.set_positive(disk_key, list(result))
     return result
 
 
