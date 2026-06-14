@@ -136,22 +136,28 @@ def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]
     and (b) ``currentNonce - 1`` (the last *executed* nonce, when we could
     fetch it). A tx is eligible iff ``nonce > baseline``.
 
-    When ``currentNonce`` is unknown (e.g. Safe v1 endpoint 429'd), the
-    chain baseline can't be computed and we degrade to last_cached_nonce.
-    That can admit a few dead-slot txs if the multisig raced ahead between
-    the last successful nonce fetch and now — see
-    ``check_for_pending_transactions`` for the per-call diagnostic log.
+    When ``currentNonce`` is unknown (e.g. Safe v1 endpoint 429'd), the chain
+    baseline can't be computed safely, so we fail closed and skip alerts for
+    this safe until the next run. That prevents dead-slot txs from alerting as
+    queued after a competing tx at the same nonce has already executed.
     """
     last_cached_nonce = get_last_executed_nonce_from_file(safe_address)
     current_safe_nonce = get_safe_current_nonce(safe_address, network_name)
     pending_txs = get_safe_transactions(safe_address, network_name, executed=False)
 
+    if current_safe_nonce is None:
+        logger.warning(
+            "Skipping pending tx alerts for %s on %s because currentNonce could not be fetched",
+            safe_address,
+            network_name,
+        )
+        return []
+
     baseline = last_cached_nonce
-    if current_safe_nonce is not None:
-        chain_baseline = current_safe_nonce - 1
-        if chain_baseline > last_cached_nonce:
-            write_last_executed_nonce_to_file(safe_address, chain_baseline)
-        baseline = max(baseline, chain_baseline)
+    chain_baseline = current_safe_nonce - 1
+    if chain_baseline > last_cached_nonce:
+        write_last_executed_nonce_to_file(safe_address, chain_baseline)
+    baseline = max(baseline, chain_baseline)
 
     return [tx for tx in pending_txs if not _is_executed_safe_tx(tx) and int(tx["nonce"]) > baseline]
 
