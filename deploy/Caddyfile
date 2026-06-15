@@ -40,6 +40,10 @@
 {$ALERTS_API_DOMAIN} {
 	encode gzip
 
+	# Don't advertise the upstream server (Python BaseHTTP) or Caddy in
+	# responses — applies to proxied and Caddy-generated (e.g. 401) responses.
+	header -Server
+
 	# GET-only API; reject anything trying to push a body.
 	request_body {
 		max_size 4KB
