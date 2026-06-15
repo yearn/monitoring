@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from typing import Any, NotRequired, TypedDict
 
@@ -56,13 +57,13 @@ def db_path() -> str:
 
 def initialize_database() -> None:
     """Create the SQLite database schema if needed."""
-    with _connect():
+    with closing(_connect()):
         pass
 
 
 def checkpoint_wal() -> None:
     """Checkpoint and truncate SQLite WAL files."""
-    with _connect() as conn:
+    with closing(_connect()) as conn:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
 
@@ -164,7 +165,9 @@ def record_alert(
     fingerprint: str | None = None,
 ) -> int:
     """Insert an alert event and return its id."""
-    with _connect() as conn:
+    # `closing(...)` closes the connection (sqlite3's own `with` only manages the
+    # transaction, never closes); the trailing `conn` commits/rolls back the write.
+    with closing(_connect()) as conn, conn:
         cursor = conn.execute(
             """
             INSERT INTO alert_events (
@@ -206,7 +209,7 @@ def update_alert_delivery(
         delivered_at = utc_now_iso()
     elif delivered_at is not None:
         delivered_at = normalize_timestamp(delivered_at)
-    with _connect() as conn:
+    with closing(_connect()) as conn, conn:
         conn.execute(
             """
             UPDATE alert_events
@@ -219,7 +222,7 @@ def update_alert_delivery(
 
 def get_alert(alert_id: int) -> AlertEvent | None:
     """Return one alert event by id."""
-    with _connect() as conn:
+    with closing(_connect()) as conn:
         row = conn.execute("SELECT * FROM alert_events WHERE id = ?", (alert_id,)).fetchone()
     return _row_to_alert(row) if row else None
 
@@ -255,7 +258,7 @@ def query_alerts(
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     sql = f"SELECT * FROM alert_events {where} ORDER BY id DESC LIMIT ?"
     params.append(limit)
-    with _connect() as conn:
+    with closing(_connect()) as conn:
         rows = conn.execute(sql, params).fetchall()
     return [_row_to_alert(row) for row in rows]
 
@@ -263,14 +266,14 @@ def query_alerts(
 def prune_alerts(older_than_days: int) -> int:
     """Delete old alert events and return the number of deleted rows."""
     cutoff = format_utc_iso(datetime.now(UTC) - timedelta(days=older_than_days))
-    with _connect() as conn:
+    with closing(_connect()) as conn, conn:
         cursor = conn.execute("DELETE FROM alert_events WHERE created_at < ?", (cutoff,))
         return cursor.rowcount
 
 
 def state_get(namespace: str, key: str) -> str | None:
     """Return a stored monitor state value."""
-    with _connect() as conn:
+    with closing(_connect()) as conn:
         row = conn.execute(
             "SELECT value FROM monitor_state WHERE namespace = ? AND key = ?",
             (namespace, key),
@@ -280,7 +283,7 @@ def state_get(namespace: str, key: str) -> str | None:
 
 def state_set(namespace: str, key: str, value: str) -> None:
     """Upsert a monitor state value."""
-    with _connect() as conn:
+    with closing(_connect()) as conn, conn:
         conn.execute(
             """
             INSERT INTO monitor_state (namespace, key, value, updated_at)

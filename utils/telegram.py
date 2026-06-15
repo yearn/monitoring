@@ -126,7 +126,8 @@ def send_telegram_message(
     delivery_channel = channel or protocol
 
     if os.getenv("LOG_LEVEL", "INFO").upper() == "DEBUG":
-        alert_id = _record_alert_safe(
+        # Terminal status recorded in the single insert; no delivery update needed.
+        _record_alert_safe(
             message=message,
             protocol=logical_protocol,
             channel=delivery_channel,
@@ -137,7 +138,6 @@ def send_telegram_message(
             delivery_status="skipped_debug",
             metadata=metadata,
         )
-        _update_alert_delivery_safe(alert_id, status="skipped_debug")
         logger.debug("Skipping Telegram send (LOG_LEVEL=DEBUG)")
         return
 

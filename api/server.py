@@ -172,7 +172,8 @@ class AlertsHandler(BaseHTTPRequestHandler):
                     limit=alert_query.limit,
                 )
                 data = [alert_to_json(row) for row in rows]
-                next_cursor = str(min(row["id"] for row in rows)) if len(rows) == alert_query.limit else None
+                # Rows are ordered id DESC, so the last row carries the smallest id.
+                next_cursor = str(rows[-1]["id"]) if len(rows) == alert_query.limit else None
                 write_json(self, 200, {"data": data, "next_cursor": next_cursor, "limit": alert_query.limit})
                 return
             if parsed.path.startswith("/v1/alerts/"):
