@@ -128,7 +128,16 @@ def send_alert(
     if silent is None:
         silent = _SEVERITY_SILENT_DEFAULT[alert.severity.value]
 
-    send_telegram_message(message, alert.channel or alert.protocol, silent, plain_text)
+    send_telegram_message(
+        message,
+        alert.channel or alert.protocol,
+        silent,
+        plain_text,
+        severity=alert.severity.value,
+        source="protocol",
+        origin_protocol=alert.protocol,
+        channel=alert.channel or alert.protocol,
+    )
 
     # Invoke hook for HIGH and CRITICAL alerts
     if alert.severity in (AlertSeverity.HIGH, AlertSeverity.CRITICAL) and _alert_hook is not None:

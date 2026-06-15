@@ -43,7 +43,14 @@ htmlcov/
 
 # Cache files
 cache-id.txt
+cache-id-daily.txt
+nonces.txt
 tks-trigger-cache.json
 selector-cache.txt
 *.cache
 .uv/
+
+# SQLite state (alerts + migrated monitor state); resolved under CACHE_DIR
+monitoring.db
+monitoring.db-wal
+monitoring.db-shm

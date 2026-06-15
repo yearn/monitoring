@@ -237,6 +237,13 @@ def _run_task(task: Task, *, profile: Profile, repo_root: Path, dry_run: bool) -
 def _send_failure_digest(result: ProfileResult) -> None:
     message = result.telegram_summary()
     try:
-        send_telegram_message(message, protocol=TELEGRAM_PROTOCOL, plain_text=False)
+        send_telegram_message(
+            message,
+            protocol=TELEGRAM_PROTOCOL,
+            plain_text=False,
+            source="automation_digest",
+            origin_protocol=TELEGRAM_PROTOCOL,
+            channel=TELEGRAM_PROTOCOL,
+        )
     except TelegramError as exc:
         logger.error("failed to send automation digest for %s: %s", result.profile, exc)
