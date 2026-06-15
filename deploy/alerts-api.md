@@ -145,5 +145,51 @@ separately:
 ## Public Access
 
 Do not expose the Python service directly. Keep it bound to `127.0.0.1` and put
-a reverse proxy in front of it. The proxy should enforce authentication, rate
-limits, and request/response timeouts.
+a reverse proxy in front of it. The proxy enforces TLS, authentication, rate
+limits, and request/response timeouts — the stdlib server does none of these and
+uses one thread per connection, so an unshielded slowloris/connection flood
+would wedge it.
+
+### Caddy (Hetzner VPS)
+
+[`Caddyfile`](./Caddyfile) is a ready-to-use config: it terminates TLS
+(auto-provisioned by Caddy), exposes `GET /healthz` publicly for uptime checks,
+and gates everything else behind an `Authorization: Bearer <token>` header.
+
+```sh
+# 1. DNS: point an A record (e.g. alerts.example.com) at the VPS public IP.
+
+# 2. Install Caddy (official apt repo) and drop in the config:
+sudo cp /srv/monitoring/deploy/Caddyfile /etc/caddy/Caddyfile
+
+# 3. Provide domain + token + ACME email to the caddy service:
+sudo systemctl edit caddy        # add, then save:
+#   [Service]
+#   Environment=ALERTS_API_DOMAIN=alerts.example.com
+#   Environment=ALERTS_API_TOKEN=<openssl rand -hex 32>
+#   Environment=ACME_EMAIL=you@example.com
+sudo systemctl restart caddy
+
+# 4. Verify:
+curl https://alerts.example.com/healthz                                   # public -> {"status":"ok"}
+curl https://alerts.example.com/v1/alerts?limit=5                         # 401 (no token)
+curl -H "Authorization: Bearer <token>" https://alerts.example.com/v1/alerts?limit=5
+```
+
+### Firewall (Hetzner)
+
+Hetzner includes baseline L3/L4 DDoS protection at its network edge for free, so
+volumetric floods are largely absorbed before reaching the box. Layer the rest:
+
+- **Hetzner Cloud Firewall** (console): allow inbound `22` (SSH), `80` + `443`
+  (Caddy/ACME) only. Never open `8923` — the API must stay localhost-only so the
+  only path in is through Caddy's auth.
+- On-box `ufw` as defense-in-depth: `ufw allow 22,80,443/tcp && ufw enable`.
+- **Rate limiting**: enable the commented `rate_limit` blocks in the Caddyfile
+  (needs the `caddy-ratelimit` plugin — see the file header), and/or add
+  `fail2ban` on `/var/log/caddy/alerts.log` to ban IPs that repeatedly 401 or
+  flood.
+- Optional: front it with Cloudflare (proxied DNS) for L7 WAF + IP hiding if you
+  expect hostile traffic; then restrict the firewall to Cloudflare IP ranges and
+  rate-limit on `{http.request.header.CF-Connecting-IP}` instead of
+  `{remote_host}`.
