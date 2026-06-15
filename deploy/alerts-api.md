@@ -162,11 +162,11 @@ and gates everything else behind an `Authorization: Bearer <token>` header.
 # 2. Install Caddy (official apt repo) and drop in the config:
 sudo cp /srv/monitoring/deploy/Caddyfile /etc/caddy/Caddyfile
 
-# 3. Provide domain + token + ACME email to the caddy service:
+# 3. Provide domain + tokens + ACME email to the caddy service:
 sudo systemctl edit caddy        # add, then save:
 #   [Service]
 #   Environment=ALERTS_API_DOMAIN=alerts.example.com
-#   Environment=ALERTS_API_TOKEN=<openssl rand -hex 32>
+#   Environment=ALERTS_API_TOKENS=<token1>|<token2>     # pipe-separated, one per consumer
 #   Environment=ACME_EMAIL=you@example.com
 sudo systemctl restart caddy
 
@@ -175,6 +175,46 @@ curl https://alerts.example.com/healthz                                   # publ
 curl https://alerts.example.com/v1/alerts?limit=5                         # 401 (no token)
 curl -H "Authorization: Bearer <token>" https://alerts.example.com/v1/alerts?limit=5
 ```
+
+### Generating and storing API tokens
+
+`/v1/*` is gated by a bearer token. Any value in the pipe-separated
+`ALERTS_API_TOKENS` list is accepted, so each consumer gets its own token and
+you revoke one by dropping it from the list.
+
+```sh
+openssl rand -hex 32     # generate one token per consumer (run once each)
+```
+
+Use hex (`openssl rand -hex`) — it contains only `[0-9a-f]`, so it needs no
+escaping inside Caddy's matcher regex. ~32 bytes (256 bits) is plenty.
+
+**Where to store them:**
+
+- **Source of truth**: your team password manager / secrets vault, one entry per
+  consumer labelled with who holds it (the proxy can't tell tokens apart, so this
+  label is how you know which to revoke). Never commit a token to git or write it
+  into `deploy/Caddyfile`.
+- **On the box**: the pipe-joined list lives only in the caddy systemd override
+  (`sudo systemctl edit caddy` → `Environment=ALERTS_API_TOKENS=...`), which is
+  root-owned. It is visible via `systemctl show caddy` to root, which is fine for
+  an admin-only host. For stricter isolation, put it in a `0600 root:root`
+  `EnvironmentFile=` instead.
+- **To each consumer**: hand over only their single token, over a secure channel.
+
+**Add / rotate / revoke** — edit the list, then restart Caddy:
+
+```sh
+sudo systemctl edit caddy        # add or remove a token in ALERTS_API_TOKENS
+sudo systemctl daemon-reload
+sudo systemctl restart caddy
+```
+
+A `restart` (not `reload`) is required because the tokens live in Caddy's process
+environment, which is only read at start — `reload` just re-reads the Caddyfile
+from disk. The restart is sub-second; this is a read API and clients retry, so
+the blip is harmless. Removing a token invalidates it immediately; the others
+keep working.
 
 ### Firewall (Hetzner)
 

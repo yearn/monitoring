@@ -2,7 +2,7 @@
 #
 # Routes:
 #   GET /healthz  -> public (uptime checks); returns {"status":"ok"}
-#   everything else -> requires  Authorization: Bearer <ALERTS_API_TOKEN>
+#   everything else -> requires  Authorization: Bearer <one of ALERTS_API_TOKENS>
 #
 # Caddy provisions and renews TLS automatically once DNS for $ALERTS_API_DOMAIN
 # points at this box and ports 80 + 443 are reachable.
@@ -17,10 +17,12 @@
 #
 #   [Service]
 #   Environment=ALERTS_API_DOMAIN=alerts.example.com
-#   Environment=ALERTS_API_TOKEN=<paste output of: openssl rand -hex 32>
+#   Environment=ALERTS_API_TOKENS=<token1>|<token2>   (pipe-separated; one per consumer)
 #   Environment=ACME_EMAIL=you@example.com
 #
-# Clients then call the API with:  -H "Authorization: Bearer <ALERTS_API_TOKEN>"
+# Generate each token with `openssl rand -hex 32` (hex => safe inside the regex
+# below, nothing to escape) and join multiple with `|`. Clients then call the
+# API with:  -H "Authorization: Bearer <their-token>"
 #
 # Rate limiting (the commented `rate_limit` blocks) needs the caddy-ratelimit
 # plugin, which is NOT in the stock apt build. Either build it once with
@@ -65,7 +67,10 @@
 
 	# --- token-gated API (everything else) ---
 	handle {
-		@unauthorized not header Authorization "Bearer {$ALERTS_API_TOKEN}"
+		# Accept any token in the pipe-separated ALERTS_API_TOKENS list.
+		@unauthorized {
+			not header_regexp Authorization "^Bearer ({$ALERTS_API_TOKENS})$"
+		}
 		error @unauthorized "unauthorized" 401
 
 		# rate_limit {
