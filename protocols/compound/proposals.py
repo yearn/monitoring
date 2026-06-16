@@ -4,7 +4,7 @@ import requests
 from dotenv import load_dotenv
 
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.telegram import escape_markdown, send_telegram_message
 
 load_dotenv()

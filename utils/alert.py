@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
 
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.telegram import send_telegram_message
 
 logger = get_logger("utils.alert")

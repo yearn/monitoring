@@ -22,7 +22,7 @@ from protocols.morpho._shared import fetch_market_metadata, get_market_url
 from utils.calldata.decoder import resolve_selector
 from utils.chains import Chain
 from utils.formatting import format_token_amount, format_with_suffix
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 logger = get_logger("morpho.v2_decoders")
 

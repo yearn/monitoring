@@ -9,7 +9,7 @@ from utils.assets import (
     get_market_allocation_threshold,
 )
 from utils.formatting import format_usd
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 logger = get_logger("utils.gauntlet")
 

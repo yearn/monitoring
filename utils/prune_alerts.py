@@ -1,6 +1,6 @@
 import os
 
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.runner import run_with_alert
 from utils.store import checkpoint_wal, prune_alerts
 

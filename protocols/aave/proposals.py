@@ -3,8 +3,8 @@ from datetime import datetime
 import requests
 
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
-from utils.http import request_with_retry
-from utils.logging import get_logger
+from utils.http_client import request_with_retry
+from utils.logger import get_logger
 from utils.telegram import send_error_message, send_telegram_message
 
 PROTOCOL = "aave"

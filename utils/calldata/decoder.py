@@ -15,8 +15,8 @@ from eth_utils import to_checksum_address
 
 from utils.cache import cache_path
 from utils.calldata.known_selectors import KNOWN_SELECTORS
-from utils.http import fetch_json
-from utils.logging import get_logger
+from utils.http_client import fetch_json
+from utils.logger import get_logger
 
 logger = get_logger("calldata_decoder")
 

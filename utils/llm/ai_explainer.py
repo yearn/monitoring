@@ -15,7 +15,7 @@ from utils.erc20_metadata import fetch_erc20_metadata
 from utils.impl_diff import diff_implementations, format_impl_diff
 from utils.llm import get_llm_provider
 from utils.llm.base import LLMError, LLMProvider
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.on_chain_state import StateRead, format_state_reads, read_before_state
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
 from utils.risk_anchors import format_anchors_block

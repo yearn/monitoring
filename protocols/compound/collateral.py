@@ -24,7 +24,7 @@ from utils.assets import (
 )
 from utils.chains import Chain
 from utils.formatting import format_usd
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.telegram import send_telegram_message
 from utils.web3_wrapper import ChainManager, Web3Client
 

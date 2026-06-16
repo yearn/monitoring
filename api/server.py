@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from automation.config import JobsConfig, load_jobs_config
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.store import AlertEvent, get_alert, normalize_timestamp, query_alerts
 
 logger = get_logger("api.server")

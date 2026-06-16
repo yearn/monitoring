@@ -17,7 +17,7 @@ from utils.cache import cache_filename, get_last_value_for_key_from_file, write_
 from utils.calldata.decoder import decode_calldata, format_call_lines
 from utils.chains import EXPLORER_URLS, Chain
 from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
 from utils.safe_tx import unwrap_safe_exec_transaction
 from utils.telegram import MAX_MESSAGE_LENGTH, escape_markdown, send_error_message, send_telegram_message
