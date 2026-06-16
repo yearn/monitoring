@@ -58,7 +58,7 @@ Shared utilities live in `utils/`:
 Use structured logging everywhere — never use `print()`.
 
 ```python
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 logger = get_logger("protocol_name")
 

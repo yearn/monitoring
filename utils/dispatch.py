@@ -16,7 +16,7 @@ import requests
 
 from utils.alert import Alert, AlertSeverity
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 logger = get_logger("utils.dispatch")
 

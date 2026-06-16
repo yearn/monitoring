@@ -11,7 +11,7 @@ Usage:
 
 from typing import Callable
 
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.telegram import get_github_run_url, send_error_message
 
 logger = get_logger("utils.runner")

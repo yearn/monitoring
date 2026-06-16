@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from utils.chains import Chain
-from utils.http import request_with_retry
-from utils.logging import get_logger
+from utils.http_client import request_with_retry
+from utils.logger import get_logger
 
 API_URL = "https://api.morpho.org/graphql"
 MORPHO_URL = "https://app.morpho.org"

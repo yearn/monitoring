@@ -4,7 +4,7 @@ import os
 
 import requests
 
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 logger = get_logger("utils.wavey_gist")
 

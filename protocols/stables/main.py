@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.defillama import fetch_prices
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 logger = get_logger("stables")
 

@@ -12,8 +12,8 @@ import os
 import re
 from dataclasses import dataclass
 
-from utils.http import fetch_json
-from utils.logging import get_logger
+from utils.http_client import fetch_json
+from utils.logger import get_logger
 
 logger = get_logger("utils.source_context")
 

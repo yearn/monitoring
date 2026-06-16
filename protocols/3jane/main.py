@@ -21,7 +21,7 @@ from utils.abi import load_abi
 from utils.cache import cache_path, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import Chain
 from utils.formatting import format_usd
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.telegram import send_telegram_message
 from utils.web3_wrapper import ChainManager
 

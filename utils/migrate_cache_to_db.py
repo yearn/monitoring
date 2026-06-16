@@ -8,7 +8,7 @@ from typing import Iterable
 
 from automation.config import load_jobs_config
 from utils import paths, store
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 logger = get_logger("utils.migrate_cache_to_db")
 

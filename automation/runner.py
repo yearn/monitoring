@@ -38,7 +38,7 @@ def _error_tail(stdout: str | None, stderr: str | None) -> str | None:
     """Extract a short, human-readable error tail from a failed task's output.
 
     Prefers stderr — uncaught tracebacks and the interpreter's own error output land there —
-    and falls back to stdout (where `utils.logging` handlers write). Returns the last few
+    and falls back to stdout (where `utils.logger` handlers write). Returns the last few
     non-empty lines, char-capped, or None when the task produced no output at all (the caller
     then falls back to the bare exit code).
     """

@@ -12,8 +12,8 @@ from typing import Any, Dict, List
 import requests
 
 from utils.chains import Chain
-from utils.http import request_with_retry
-from utils.logging import get_logger
+from utils.http_client import request_with_retry
+from utils.logger import get_logger
 from utils.telegram import send_error_message, send_telegram_message
 
 # Configuration constants

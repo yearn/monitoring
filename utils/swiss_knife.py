@@ -8,8 +8,8 @@ enrich the LLM prompt so the model can say "Circle: USDC Token" instead
 of a bare address.
 """
 
-from utils.http import fetch_json
-from utils.logging import get_logger
+from utils.http_client import fetch_json
+from utils.logger import get_logger
 
 logger = get_logger("utils.swiss_knife")
 

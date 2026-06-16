@@ -5,7 +5,7 @@ from eth_abi import decode
 from eth_utils import to_checksum_address
 from web3 import Web3
 
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 logger = get_logger("safe.specific")
 

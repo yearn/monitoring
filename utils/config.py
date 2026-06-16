@@ -11,7 +11,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 # Load environment variables from .env file
 load_dotenv()

@@ -15,7 +15,7 @@ from eth_utils import function_signature_to_4byte_selector, to_checksum_address
 
 from utils.abi import load_abi
 from utils.chains import Chain
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.proxy import get_current_implementation
 from utils.web3_wrapper import ChainManager
 
