@@ -1,9 +1,5 @@
 # Aave V3 Monitoring
 
-## Bad Debt
-
-[Github actions bot](https://github.com/tapired/monitoring-scripts-py/blob/main/.github/workflows/bad-debt.yml) for bad debt in the protocol. Uses [Risk DAO](https://bad-debt.riskdao.org/) data. Sends telegram message if the bad debt ratio is above `0.1%`.
-
 ## Utilization
 
 Github actions run hourly and send telegram message if there is a market with utilization above `96%`. [Python script code](https://github.com/tapired/monitoring-scripts-py/blob/main/aave/main.py).
