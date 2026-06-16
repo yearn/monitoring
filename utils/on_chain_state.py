@@ -21,7 +21,7 @@ from eth_utils import function_signature_to_4byte_selector, to_checksum_address
 
 from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.source_context import (
     extract_state_var_snippet,
     fetch_source,

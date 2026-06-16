@@ -5,7 +5,7 @@ import requests
 from dotenv import load_dotenv
 
 from utils import store
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 load_dotenv()
 

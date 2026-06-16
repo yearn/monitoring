@@ -50,8 +50,8 @@ from utils.cache import (
     write_last_value_to_file,
 )
 from utils.chains import Chain
-from utils.http import request_with_retry
-from utils.logging import get_logger
+from utils.http_client import request_with_retry
+from utils.logger import get_logger
 from utils.telegram import send_telegram_message
 from utils.web3_wrapper import ChainManager, Web3Client
 

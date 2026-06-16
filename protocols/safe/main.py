@@ -20,7 +20,7 @@ from utils.cache import (
 )
 from utils.chains import safe_network_to_chain_id
 from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.telegram import escape_markdown, send_telegram_message
 
 load_dotenv()

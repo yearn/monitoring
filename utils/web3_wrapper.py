@@ -11,7 +11,7 @@ from web3.exceptions import ProviderConnectionError
 from web3.providers.rpc import HTTPProvider
 from web3.types import RPCResponse
 
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 from .chains import Chain
 

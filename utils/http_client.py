@@ -6,9 +6,9 @@ from typing import Any
 import requests
 
 from utils.config import Config
-from utils.logging import get_logger
+from utils.logger import get_logger
 
-logger = get_logger("utils.http")
+logger = get_logger("utils.http_client")
 
 
 def request_with_retry(

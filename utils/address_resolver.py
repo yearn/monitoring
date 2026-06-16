@@ -12,7 +12,7 @@ backend can't take down the chain.
 
 from typing import Callable
 
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 logger = get_logger("utils.address_resolver")
 
