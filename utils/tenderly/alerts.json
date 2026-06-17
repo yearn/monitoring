@@ -298,64 +298,6 @@
       ]
     },
     {
-      "id": "8e577a18-92b2-4cab-86b8-53c7c3025a00",
-      "project_id": "6932cbec-2970-425a-a734-cb8374d95744",
-      "name": "Event StartVote emitted in Lido DAO Voting",
-      "description": "Using event to cover both `newVote()` function",
-      "enabled": true,
-      "color": "#eeeeee",
-      "severity": "default",
-      "created_at": "2024-08-19T14:16:54.683101Z",
-      "delivery_channels": [
-        {
-          "delivery_channel_id": "1e67aaa6-6f1d-4154-8072-b6b233d88705",
-          "delivery_channel": {
-            "id": "1e67aaa6-6f1d-4154-8072-b6b233d88705",
-            "type": "telegram",
-            "owner_id": "1f750734-c720-4fde-9d60-d7edd0c04d91",
-            "project_id": null,
-            "label": "Lido Alerts SAM",
-            "reference_id": "bfe7315c-8394-4c79-96c9-90df8d157f48",
-            "enabled": true,
-            "created_at": "2024-08-07T23:10:59.132381Z",
-            "information": {
-              "chat_id": -1002163597367
-            }
-          },
-          "enabled": true,
-          "created_at": "2024-09-02T12:16:56.058401Z"
-        }
-      ],
-      "is_editable": true,
-      "updated_at": "2024-09-02T12:16:56.079856Z",
-      "expressions": [
-        {
-          "type": "contract_address",
-          "expression": {
-            "address": "0x2e59a20f205bb85a89c53f1936454680651e618e",
-            "transaction_type": null
-          }
-        },
-        {
-          "type": "network",
-          "expression": {
-            "network_id": "1"
-          }
-        },
-        {
-          "type": "emitted_log",
-          "expression": {
-            "address": "0x2e59a20f205bb85a89c53f1936454680651e618e",
-            "match_any": false,
-            "match_non_project_contracts": false,
-            "event_name": "StartVote",
-            "event_id": "0x4d72fe0577a3a3f7da968d7b892779dde102519c25527b29cf7054f245c791b9",
-            "decode_events": false
-          }
-        }
-      ]
-    },
-    {
       "id": "c8108fff-b1f4-4cb0-abd3-c37ad541e6aa",
       "project_id": "6932cbec-2970-425a-a734-cb8374d95744",
       "name": "Event CallScheduled emitted in KelpDAO(rsETH) Timelock",
