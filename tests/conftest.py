@@ -18,7 +18,7 @@ def _isolate_from_live_apis(monkeypatch: pytest.MonkeyPatch) -> None:
     """Block accidental live API/RPC calls and reset cross-test singletons.
 
     Strips `ETHERSCAN_TOKEN`, every `PROVIDER_URL_*`, every `TELEGRAM_*`
-    credential, and `PAT_DISPATCH` so a missing mock short-circuits cheaply via
+    credential, and emergency webhook credentials so a missing mock short-circuits cheaply via
     the "no token / no provider / no credentials" code paths that already exist
     for production use. Forces `LOG_LEVEL=INFO` so a developer's `.env`
     `LOG_LEVEL=DEBUG` (which skips Telegram sends) can't change tested behavior.
@@ -30,7 +30,9 @@ def _isolate_from_live_apis(monkeypatch: pytest.MonkeyPatch) -> None:
     one test can't leak into the next.
     """
     for key in list(os.environ):
-        if key in {"ETHERSCAN_TOKEN", "PAT_DISPATCH"} or key.startswith(("PROVIDER_URL_", "TELEGRAM_")):
+        if key in {"ETHERSCAN_TOKEN", "LIQUIDITY_WEBHOOK_SECRET"} or key.startswith(
+            ("PROVIDER_URL_", "TELEGRAM_", "LIQUIDITY_WEBHOOK_")
+        ):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("LOG_LEVEL", "INFO")
     try:

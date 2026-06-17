@@ -1,6 +1,9 @@
 """Tests for utility functions."""
 
+import hashlib
+import hmac
 import importlib
+import json
 import os
 import sys
 import types
@@ -590,12 +593,17 @@ class TestDispatch(unittest.TestCase):
 
         alert = Alert(severity=AlertSeverity.HIGH, message="Reserves low", protocol="infinifi")
 
-        with patch.dict(os.environ, {"PAT_DISPATCH": "ghp_test_token", "LOG_LEVEL": "INFO"}):
+        with patch.dict(os.environ, {"LIQUIDITY_WEBHOOK_SECRET": "test_secret", "LOG_LEVEL": "INFO"}):
             dispatch_emergency_withdrawal(alert)
 
         mock_post.assert_called_once()
+        call_args = mock_post.call_args[0]
         call_kwargs = mock_post.call_args[1]
-        payload = call_kwargs["json"]
+        self.assertEqual(call_args[0], "http://127.0.0.1:8080/webhook/emergency")
+        body = call_kwargs["data"]
+        self.assertIsInstance(body, bytes)
+        self.assertNotIn("json", call_kwargs)
+        payload = json.loads(body.decode("utf-8"))
         self.assertEqual(payload["event_type"], "emergency_withdrawal")
         self.assertEqual(payload["client_payload"]["protocol"], "infinifi")
         self.assertEqual(payload["client_payload"]["severity"], "HIGH")
@@ -603,11 +611,36 @@ class TestDispatch(unittest.TestCase):
         # Payload should only contain protocol, severity, and message (no markets/vault/chain)
         self.assertEqual(set(payload["client_payload"].keys()), {"protocol", "severity", "message"})
 
-        # Verify auth header
         headers = call_kwargs["headers"]
-        self.assertEqual(headers["Authorization"], "Bearer ghp_test_token")
+        expected_hmac = hmac.new(b"test_secret", body, hashlib.sha256).hexdigest()
+        self.assertEqual(headers["X-Hub-Signature-256"], f"sha256={expected_hmac}")
+        self.assertEqual(headers["Content-Type"], "application/json")
 
         mock_record.assert_called_once_with("infinifi")
+
+    @patch("utils.dispatch.requests.post")
+    @patch("utils.dispatch._record_dispatch")
+    @patch("utils.dispatch._is_on_cooldown", return_value=False)
+    def test_dispatch_uses_configured_webhook_url(self, mock_cooldown, mock_record, mock_post):
+        from utils.dispatch import dispatch_emergency_withdrawal
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_post.return_value = mock_response
+
+        alert = Alert(severity=AlertSeverity.HIGH, message="Reserves low", protocol="infinifi")
+
+        with patch.dict(
+            os.environ,
+            {
+                "LIQUIDITY_WEBHOOK_SECRET": "test_secret",
+                "LIQUIDITY_WEBHOOK_URL": "http://localhost:9000/webhook/emergency",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            dispatch_emergency_withdrawal(alert)
+
+        self.assertEqual(mock_post.call_args[0][0], "http://localhost:9000/webhook/emergency")
 
     @patch("utils.dispatch.requests.post")
     def test_dispatch_skips_low_severity(self, mock_post):
@@ -632,7 +665,7 @@ class TestDispatch(unittest.TestCase):
 
         alert = Alert(severity=AlertSeverity.HIGH, message="alert", protocol="unknown_protocol")
 
-        with patch.dict(os.environ, {"PAT_DISPATCH": "ghp_test_token"}):
+        with patch.dict(os.environ, {"LIQUIDITY_WEBHOOK_SECRET": "test_secret"}):
             dispatch_emergency_withdrawal(alert)
 
         mock_post.assert_not_called()
@@ -644,14 +677,14 @@ class TestDispatch(unittest.TestCase):
 
         alert = Alert(severity=AlertSeverity.HIGH, message="alert", protocol="infinifi")
 
-        with patch.dict(os.environ, {"PAT_DISPATCH": "ghp_test_token"}):
+        with patch.dict(os.environ, {"LIQUIDITY_WEBHOOK_SECRET": "test_secret"}):
             dispatch_emergency_withdrawal(alert)
 
         mock_post.assert_not_called()
 
     @patch("utils.dispatch.requests.post")
     @patch("utils.dispatch._is_on_cooldown", return_value=False)
-    def test_dispatch_skips_missing_pat(self, mock_cooldown, mock_post):
+    def test_dispatch_skips_missing_webhook_secret(self, mock_cooldown, mock_post):
         from utils.dispatch import dispatch_emergency_withdrawal
 
         alert = Alert(severity=AlertSeverity.HIGH, message="alert", protocol="infinifi")
@@ -673,10 +706,10 @@ class TestDispatch(unittest.TestCase):
 
         alert = Alert(severity=AlertSeverity.CRITICAL, message="total failure", protocol="infinifi")
 
-        with patch.dict(os.environ, {"PAT_DISPATCH": "ghp_test_token", "LOG_LEVEL": "INFO"}):
+        with patch.dict(os.environ, {"LIQUIDITY_WEBHOOK_SECRET": "test_secret", "LOG_LEVEL": "INFO"}):
             dispatch_emergency_withdrawal(alert)
 
-        payload = mock_post.call_args[1]["json"]
+        payload = json.loads(mock_post.call_args[1]["data"].decode("utf-8"))
         self.assertEqual(payload["client_payload"]["severity"], "CRITICAL")
 
     @patch("utils.dispatch.requests.post")
@@ -689,7 +722,7 @@ class TestDispatch(unittest.TestCase):
 
         alert = Alert(severity=AlertSeverity.HIGH, message="alert", protocol="infinifi")
 
-        with patch.dict(os.environ, {"PAT_DISPATCH": "ghp_test_token", "LOG_LEVEL": "INFO"}):
+        with patch.dict(os.environ, {"LIQUIDITY_WEBHOOK_SECRET": "test_secret", "LOG_LEVEL": "INFO"}):
             # Should not raise
             dispatch_emergency_withdrawal(alert)
 
@@ -708,10 +741,10 @@ class TestDispatch(unittest.TestCase):
 
         alert = Alert(severity=AlertSeverity.HIGH, message="redeem value dropped", protocol="origin", channel="pegs")
 
-        with patch.dict(os.environ, {"PAT_DISPATCH": "ghp_test_token", "LOG_LEVEL": "INFO"}):
+        with patch.dict(os.environ, {"LIQUIDITY_WEBHOOK_SECRET": "test_secret", "LOG_LEVEL": "INFO"}):
             dispatch_emergency_withdrawal(alert)
 
-        payload = mock_post.call_args[1]["json"]
+        payload = json.loads(mock_post.call_args[1]["data"].decode("utf-8"))
         self.assertEqual(payload["client_payload"]["protocol"], "origin")
         mock_record.assert_called_once_with("origin")
 
@@ -723,7 +756,7 @@ class TestDispatch(unittest.TestCase):
 
         alert = Alert(severity=AlertSeverity.HIGH, message="peg alert", protocol="puffer", channel="pegs")
 
-        with patch.dict(os.environ, {"PAT_DISPATCH": "ghp_test_token"}):
+        with patch.dict(os.environ, {"LIQUIDITY_WEBHOOK_SECRET": "test_secret"}):
             dispatch_emergency_withdrawal(alert)
 
         mock_post.assert_not_called()
@@ -734,7 +767,7 @@ class TestDispatch(unittest.TestCase):
 
         alert = Alert(severity=AlertSeverity.HIGH, message="alert", protocol="infinifi")
 
-        with patch.dict(os.environ, {"PAT_DISPATCH": "ghp_test_token", "LOG_LEVEL": "DEBUG"}):
+        with patch.dict(os.environ, {"LIQUIDITY_WEBHOOK_SECRET": "test_secret", "LOG_LEVEL": "DEBUG"}):
             dispatch_emergency_withdrawal(alert)
 
         mock_post.assert_not_called()
