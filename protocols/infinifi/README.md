@@ -30,15 +30,17 @@ It compares cached `totalSupply` deltas and alerts when the increase is above:
 
 ### Emergency dispatch
 
-HIGH and CRITICAL alerts automatically trigger a `repository_dispatch` to
+HIGH and CRITICAL alerts automatically trigger a signed webhook to
 [liquidity-monitoring](https://github.com/tapired/liquidity-monitoring) to
 zero Morpho market caps for siUSD collateral:
 
 - **CRITICAL** — caps are zeroed and reallocation runs immediately
 - **HIGH** — a PR is opened with zeroed caps for team review; after merging, trigger reallocation manually
 
-Dispatch is rate-limited to once per 60 minutes per protocol. See
-`utils/dispatch.py` and `liquidity-monitoring/hooks.md` for details.
+Dispatch is rate-limited to once per 60 minutes per protocol. The dispatcher
+sends the exact JSON body to `http://127.0.0.1:8080/webhook/emergency` with
+`X-Hub-Signature-256: sha256=<hmac>` using `LIQUIDITY_WEBHOOK_SECRET`. See
+`utils/dispatch.py` for details.
 
 ### Alerts disabled ⚠️
 
