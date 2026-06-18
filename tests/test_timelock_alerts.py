@@ -4,8 +4,15 @@ import unittest
 import unittest.mock
 from unittest.mock import patch
 
-from protocols.timelock.timelock_alerts import TimelockConfig, build_alert_message
+from protocols.timelock.timelock_alerts import TIMELOCKS, TimelockConfig, build_alert_message
 from utils.telegram import MAX_MESSAGE_LENGTH
+
+
+def test_3jane_seven_day_timelock_is_monitored() -> None:
+    timelock = TIMELOCKS[("0x3d3c41419ab401cd25055e8f9421d7d96d887885", 1)]
+
+    assert timelock.protocol == "3JANE"
+    assert timelock.label == "3Jane 7d TimelockController"
 
 
 def _make_event(

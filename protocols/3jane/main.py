@@ -9,6 +9,7 @@ Monitors:
 - PPS (Price Per Share) for USD3 and sUSD3 — alerts on any decrease
 - TVL (Total Value Locked) via totalAssets() — alerts on >15% change
 - Junior tranche buffer — alerts when sUSD3 coverage drops below threshold
+- Insurance fund — alerts on waUSDC outflows of at least $50k
 - Vault shutdown status — alerts once if either vault enters emergency shutdown
 - Debt cap changes — alerts when ProtocolConfig debt cap is modified
 - Nominal sUSD3 backing floor — alerts on change and when floor > sUSD3 backing
@@ -39,6 +40,7 @@ USD3_ADDRESS = "0x056B269Eb1f75477a8666ae8C7fE01b64dD55eCc"
 SUSD3_ADDRESS = "0xf689555121e529Ff0463e191F9Bd9d1E496164a7"
 PROTOCOL_CONFIG_ADDRESS = "0x6b276A2A7dd8b629adBA8A06AD6573d01C84f34E"
 WAUSDC_ADDRESS = "0xD4fa2D31b7968E448877f69A96DE69f5de8cD23E"
+INSURANCE_FUND_ADDRESS = "0x4507B5B23340D248457d955a211C8B0634D29935"
 
 # USDC has 6 decimals, USD3 and sUSD3 inherit this
 DECIMALS = 6
@@ -55,6 +57,7 @@ CACHE_KEY_DEBT_CAP = "3JANE_DEBT_CAP"
 CACHE_KEY_NOMINAL_FLOOR = "3JANE_NOMINAL_FLOOR"
 CACHE_KEY_FLOOR_BREACH = "3JANE_FLOOR_BREACH"
 CACHE_KEY_IS_PAUSED = "3JANE_IS_PAUSED"
+CACHE_KEY_INSURANCE_FUND_SHARES = "3JANE_INSURANCE_FUND_SHARES"
 
 # --- ProtocolConfig keys (keccak256 of the string label) ---
 CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR = Web3.keccak(text="SUSD3_NOMINAL_BACKING_FLOOR")
@@ -62,7 +65,8 @@ CFG_KEY_IS_PAUSED = Web3.keccak(text="IS_PAUSED")
 
 # --- Thresholds ---
 TVL_CHANGE_THRESHOLD = 0.15  # 15% TVL change alert
-JUNIOR_BUFFER_THRESHOLD = 0.15  # Alert when sUSD3 buffer < 15% of USD3 TVL
+JUNIOR_BUFFER_THRESHOLD = 0.15  # Alert when sUSD3 backing < 15% of deployed credit
+INSURANCE_FUND_OUTFLOW_THRESHOLD = 50_000  # USDC
 
 
 def get_cache_value(key: str) -> float:
@@ -208,6 +212,34 @@ def check_junior_buffer(susd3_backing: float, deployed_credit: float) -> None:
             f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
         )
         send_telegram_message(message, PROTOCOL)
+
+
+def check_insurance_fund(current_shares: int, current_assets: float, outflow_assets: float) -> None:
+    """Alert when the insurance fund loses at least $50k of waUSDC shares.
+
+    The raw share balance is cached so normal waUSDC appreciation cannot hide an
+    outflow. The caller values both the current balance and share delta in USDC.
+    """
+    previous_shares = int(get_cache_value(CACHE_KEY_INSURANCE_FUND_SHARES))
+    logger.info(
+        "Insurance fund — balance: %s USDC, shares: %d (previous: %d)",
+        format_usd(current_assets),
+        current_shares,
+        previous_shares,
+    )
+
+    if previous_shares > current_shares and outflow_assets >= INSURANCE_FUND_OUTFLOW_THRESHOLD:
+        message = (
+            f"🚨 *3Jane Insurance Fund Outflow*\n"
+            f"📉 Outflow: {format_usd(outflow_assets)}\n"
+            f"💰 Remaining balance: {format_usd(current_assets)}\n"
+            f"⚠️ First-loss insurance available for debt settlement decreased\n"
+            f"🔗 [Insurance Fund](https://etherscan.io/address/{INSURANCE_FUND_ADDRESS})"
+        )
+        send_telegram_message(message, PROTOCOL)
+
+    if current_shares != previous_shares:
+        set_cache_value(CACHE_KEY_INSURANCE_FUND_SHARES, float(current_shares))
 
 
 def check_vault_shutdown(client, usd3_vault, susd3_vault) -> None:  # type: ignore[no-untyped-def]
@@ -392,9 +424,10 @@ def main() -> None:
             batch.add(usd3_vault.functions.getMarketLiquidity())
             batch.add(protocol_config.functions.config(CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR))
             batch.add(protocol_config.functions.config(CFG_KEY_IS_PAUSED))
+            batch.add(wausdc_vault.functions.balanceOf(INSURANCE_FUND_ADDRESS))
             responses = client.execute_batch(batch)
-            if len(responses) != 10:
-                raise ValueError(f"Expected 10 responses, got {len(responses)}")
+            if len(responses) != 11:
+                raise ValueError(f"Expected 11 responses, got {len(responses)}")
 
         usd3_total_assets = responses[0]
         usd3_total_supply = responses[1]
@@ -406,22 +439,29 @@ def main() -> None:
         market_liquidity = responses[7]
         nominal_floor_raw = responses[8]
         is_paused = bool(responses[9])
+        insurance_fund_shares = responses[10]
 
         if len(market_liquidity) != 4:
             raise ValueError(f"Expected 4 market liquidity values, got {len(market_liquidity)}")
         total_borrow_wausdc = market_liquidity[2]
+        previous_insurance_shares = int(get_cache_value(CACHE_KEY_INSURANCE_FUND_SHARES))
+        insurance_outflow_shares = max(previous_insurance_shares - insurance_fund_shares, 0)
 
         # Value the USD3 shares held by sUSD3 through USD3, and convert borrowed
         # waUSDC shares to USDC, matching the protocol's loss-buffer accounting.
         with client.batch_requests() as batch:
             batch.add(usd3_vault.functions.convertToAssets(susd3_usd3_balance))
             batch.add(wausdc_vault.functions.convertToAssets(total_borrow_wausdc))
+            batch.add(wausdc_vault.functions.convertToAssets(insurance_fund_shares))
+            batch.add(wausdc_vault.functions.convertToAssets(insurance_outflow_shares))
             backing_responses = client.execute_batch(batch)
-            if len(backing_responses) != 2:
-                raise ValueError(f"Expected 2 backing responses, got {len(backing_responses)}")
+            if len(backing_responses) != 4:
+                raise ValueError(f"Expected 4 backing responses, got {len(backing_responses)}")
 
         susd3_backing_raw = backing_responses[0]
         deployed_credit_raw = backing_responses[1]
+        insurance_fund_assets_raw = backing_responses[2]
+        insurance_outflow_assets_raw = backing_responses[3]
 
         # Convert to human-readable floats
         usd3_tvl = usd3_total_assets / ONE_SHARE
@@ -432,6 +472,8 @@ def main() -> None:
         susd3_pps = susd3_pps_raw / ONE_SHARE
         susd3_backing = susd3_backing_raw / ONE_SHARE
         deployed_credit = deployed_credit_raw / ONE_SHARE
+        insurance_fund_assets = insurance_fund_assets_raw / ONE_SHARE
+        insurance_outflow_assets = insurance_outflow_assets_raw / ONE_SHARE
         nominal_floor = nominal_floor_raw / ONE_SHARE
 
         logger.info(
@@ -456,6 +498,7 @@ def main() -> None:
         check_pps(usd3_pps, susd3_pps)
         check_tvl(usd3_tvl, susd3_tvl)
         check_junior_buffer(susd3_backing, deployed_credit)
+        check_insurance_fund(insurance_fund_shares, insurance_fund_assets, insurance_outflow_assets)
         check_vault_shutdown(client, usd3_vault, susd3_vault)
         check_debt_cap(client)
         check_nominal_backing_floor(nominal_floor, susd3_backing)

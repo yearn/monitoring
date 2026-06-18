@@ -91,7 +91,8 @@ For complete field mapping details, see [`detils.md`](./detils.md).
 | [0x2386dc45added673317ef068992f19421b481f4c](https://etherscan.io/address/0x2386dc45added673317ef068992f19421b481f4c) | Mainnet | FLUID | Fluid Timelock |
 | [0x2e59a20f205bb85a89c53f1936454680651e618e](https://etherscan.io/address/0x2e59a20f205bb85a89c53f1936454680651e618e) | Mainnet | LIDO | Lido Timelock |
 | [0x2efff88747eb5a3ff00d4d8d0f0800e306c0426b](https://etherscan.io/address/0x2efff88747eb5a3ff00d4d8d0f0800e306c0426b) | Mainnet | MAPLE | Maple GovernorTimelock |
-| [0x1dccd4628d48a50c1a7adea3848bcc869f08f8c2](https://etherscan.io/address/0x1dccd4628d48a50c1a7adea3848bcc869f08f8c2) | Mainnet | 3JANE | 3Jane TimelockController |
+| [0x1dccd4628d48a50c1a7adea3848bcc869f08f8c2](https://etherscan.io/address/0x1dccd4628d48a50c1a7adea3848bcc869f08f8c2) | Mainnet | 3JANE | 3Jane 24h TimelockController |
+| [0x3d3c41419ab401cd25055e8f9421d7d96d887885](https://etherscan.io/address/0x3d3c41419ab401cd25055e8f9421d7d96d887885) | Mainnet | 3JANE | 3Jane 7d TimelockController |
 | [0xf817cb3092179083c48c014688d98b72fb61464f](https://basescan.org/address/0xf817cb3092179083c48c014688d98b72fb61464f) | Base | LRT | superOETH Timelock |
 | [0x88ba032be87d5ef1fbe87336b7090767f367bf73](https://etherscan.io/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) | Mainnet | YEARN | Yearn TimelockController |
 | [0x88ba032be87d5ef1fbe87336b7090767f367bf73](https://basescan.org/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) | Base | YEARN | Yearn TimelockController |

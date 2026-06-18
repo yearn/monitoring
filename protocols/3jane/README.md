@@ -7,6 +7,7 @@
 - **PPS (Price Per Share):** `convertToAssets(1e6)` on USD3 and sUSD3 vs cached prior run. Alerts on any decrease — indicates loan markdowns or defaults (critical since loans are unsecured).
 - **TVL (Total Value Locked):** `totalAssets()` on both vaults vs cached prior run. Alerts when absolute change is **≥15%**.
 - **Junior Buffer Ratio:** USD3 held by sUSD3, valued in USDC, as a percentage of deployed credit (`getMarketLiquidity().totalBorrowAssets` converted from waUSDC to USDC). Alerts below **15%** — thin first-loss coverage puts the senior tranche at risk. This matches the 3Jane backing UI's `sUSD3 / Deployed` loss-buffer metric.
+- **Insurance Fund:** Tracks the fund's raw waUSDC share balance and alerts when an outflow is worth **≥$50k USDC**. Caching shares instead of asset value prevents waUSDC yield from masking withdrawals.
 - **Vault Shutdown:** `isShutdown()` on both vaults. Alert-once when either vault enters emergency shutdown.
 - **Debt Cap:** `ProtocolConfig.getDebtCap()` vs cached prior. Alerts on any change — signals governance scaling the protocol up or down.
 - **Nominal sUSD3 Backing Floor:** `ProtocolConfig.config(keccak256("SUSD3_NOMINAL_BACKING_FLOOR"))` vs cached prior. Alerts on any change (governance lever). Separate alert-once when the floor exceeds sUSD3's USD3 holdings valued in USDC — sUSD3 redemptions can be blocked while floor > backing.
@@ -19,6 +20,7 @@
 | USD3 Vault | [`0x056B269Eb1f75477a8666ae8C7fE01b64dD55eCc`](https://etherscan.io/address/0x056B269Eb1f75477a8666ae8C7fE01b64dD55eCc) | Senior tranche ERC-4626 vault |
 | sUSD3 Vault | [`0xf689555121e529Ff0463e191F9Bd9d1E496164a7`](https://etherscan.io/address/0xf689555121e529Ff0463e191F9Bd9d1E496164a7) | Junior (first-loss) tranche |
 | ProtocolConfig | [`0x6b276A2A7dd8b629adBA8A06AD6573d01C84f34E`](https://etherscan.io/address/0x6b276A2A7dd8b629adBA8A06AD6573d01C84f34E) | Governance config: debt cap, pause, sUSD3 floor |
+| Insurance Fund | [`0x4507B5B23340D248457d955a211C8B0634D29935`](https://etherscan.io/address/0x4507B5B23340D248457d955a211C8B0634D29935) | waUSDC reserve used for debt settlement |
 
 ## Alert Thresholds
 
@@ -27,16 +29,17 @@
 | PPS decrease | Any decrease vs cached prior (USD3 or sUSD3) | HIGH |
 | TVL change | ≥15% absolute change vs prior run | HIGH |
 | Junior buffer ratio | sUSD3 backing < 15% of deployed credit | MEDIUM |
+| Insurance fund outflow | ≥$50k USDC since prior run | HIGH |
 | Vault shutdown | `isShutdown()` transitions to true (alert-once) | HIGH |
 | Debt cap change | Any change to `getDebtCap()` | MEDIUM |
 | Nominal backing floor change | Any change to `SUSD3_NOMINAL_BACKING_FLOOR` | MEDIUM |
-| Nominal floor breach | Floor > sUSD3 `totalAssets()` (alert-once) | HIGH |
+| Nominal floor breach | Floor > sUSD3 backing valued in USDC (alert-once) | HIGH |
 | Protocol paused | `IS_PAUSED` transitions to true (alert-once) | HIGH |
 | Monitoring run failure | Uncaught exception in `main()` | LOW |
 
 ## Governance
 
-[Internal timelock monitoring](../timelock/README.md) for CallScheduled events on the [3Jane TimelockController](https://etherscan.io/address/0x1dccd4628d48a50c1a7adea3848bcc869f08f8c2) on Mainnet.
+[Internal timelock monitoring](../timelock/README.md) covers CallScheduled events from the [3Jane 24-hour timelock](https://etherscan.io/address/0x1dccd4628d48a50c1a7adea3848bcc869f08f8c2) and [7-day upgrade timelock](https://etherscan.io/address/0x3d3c41419ab401cd25055e8f9421d7d96d887885) on Mainnet.
 
 ## Running
 

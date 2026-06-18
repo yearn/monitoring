@@ -62,7 +62,8 @@ TIMELOCK_LIST: list[TimelockConfig] = [
     TimelockConfig("0x2efff88747eb5a3ff00d4d8d0f0800e306c0426b", 1, "MAPLE", "Maple GovernorTimelock"),
     TimelockConfig("0xb2a3cf69c97afd4de7882e5fee120e4efc77b706", 1, "STRATA", "Strata 48h Timelock"),
     TimelockConfig("0x4f2682b78f37910704fb1aff29358a1da07e022d", 1, "STRATA", "Strata 24h Timelock"),
-    TimelockConfig("0x1dccd4628d48a50c1a7adea3848bcc869f08f8c2", 1, "3JANE", "3Jane TimelockController"),
+    TimelockConfig("0x1dccd4628d48a50c1a7adea3848bcc869f08f8c2", 1, "3JANE", "3Jane 24h TimelockController"),
+    TimelockConfig("0x3d3c41419ab401cd25055e8f9421d7d96d887885", 1, "3JANE", "3Jane 7d TimelockController"),
     # Chain 8453 - Base
     TimelockConfig("0xf817cb3092179083c48c014688d98b72fb61464f", 8453, "LRT", "superOETH Timelock"),
     # Yearn Timelock (0x88Ba032be87d5EF1fbE87336B7090767F367BF73) - all chains
