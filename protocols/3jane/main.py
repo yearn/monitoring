@@ -38,6 +38,7 @@ ABI_PROTOCOL_CONFIG = load_abi("protocols/3jane/abi/ProtocolConfig.json")
 USD3_ADDRESS = "0x056B269Eb1f75477a8666ae8C7fE01b64dD55eCc"
 SUSD3_ADDRESS = "0xf689555121e529Ff0463e191F9Bd9d1E496164a7"
 PROTOCOL_CONFIG_ADDRESS = "0x6b276A2A7dd8b629adBA8A06AD6573d01C84f34E"
+WAUSDC_ADDRESS = "0xD4fa2D31b7968E448877f69A96DE69f5de8cD23E"
 
 # USDC has 6 decimals, USD3 and sUSD3 inherit this
 DECIMALS = 6
@@ -175,36 +176,34 @@ def check_tvl(usd3_tvl: float, susd3_tvl: float) -> None:
         set_cache_value(CACHE_KEY_SUSD3_TVL, susd3_tvl)
 
 
-def check_junior_buffer(usd3_tvl: float, susd3_tvl: float, susd3_pps_float: float) -> None:
+def check_junior_buffer(susd3_backing: float, deployed_credit: float) -> None:
     """Check if sUSD3 junior tranche provides adequate first-loss coverage.
 
     The sUSD3 junior tranche absorbs losses before the senior USD3 tranche.
     A thin buffer means USD3 holders are closer to bearing losses directly.
-    We convert sUSD3 TVL to USDC terms using its PPS for accurate comparison.
+    This matches the protocol's backing metric: sUSD3 backing value divided by
+    deployed credit. The caller supplies both values converted to USDC.
 
     Args:
-        usd3_tvl: USD3 totalAssets in USDC.
-        susd3_tvl: sUSD3 totalAssets in USD3 terms.
-        susd3_pps_float: sUSD3 price per share (USD3 per sUSD3 share).
+        susd3_backing: USD3 held by sUSD3, valued in USDC.
+        deployed_credit: Borrowed waUSDC in the credit market, converted to USDC.
     """
-    if usd3_tvl <= 0:
+    if deployed_credit <= 0:
         return
 
-    # sUSD3 totalAssets is in USD3 terms; USD3 PPS converts to USDC
-    # But for buffer ratio, USD3-denominated value is sufficient since USD3 ≈ USDC
-    buffer_ratio = susd3_tvl / usd3_tvl
+    buffer_ratio = susd3_backing / deployed_credit
     logger.info(
-        "Junior buffer ratio: %.2f%% (sUSD3: %s / USD3: %s)",
+        "Junior buffer ratio: %.2f%% (sUSD3 backing: %s / deployed credit: %s)",
         buffer_ratio * 100,
-        format_usd(susd3_tvl),
-        format_usd(usd3_tvl),
+        format_usd(susd3_backing),
+        format_usd(deployed_credit),
     )
 
     if buffer_ratio < JUNIOR_BUFFER_THRESHOLD:
         message = (
             f"⚠️ *3Jane Junior Buffer Low*\n"
-            f"📊 sUSD3 buffer: {buffer_ratio:.2%} of USD3 TVL\n"
-            f"💰 sUSD3: {format_usd(susd3_tvl)} | USD3: {format_usd(usd3_tvl)}\n"
+            f"📊 sUSD3 buffer: {buffer_ratio:.2%} of deployed credit\n"
+            f"💰 sUSD3 backing: {format_usd(susd3_backing)} | Deployed: {format_usd(deployed_credit)}\n"
             f"⚠️ First-loss coverage is thin — USD3 holders at higher risk\n"
             f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
         )
@@ -377,6 +376,7 @@ def main() -> None:
     client = ChainManager.get_client(Chain.MAINNET)
     usd3_vault = client.eth.contract(address=USD3_ADDRESS, abi=ABI_VAULT)
     susd3_vault = client.eth.contract(address=SUSD3_ADDRESS, abi=ABI_VAULT)
+    wausdc_vault = client.eth.contract(address=WAUSDC_ADDRESS, abi=ABI_VAULT)
     protocol_config = client.eth.contract(address=PROTOCOL_CONFIG_ADDRESS, abi=ABI_PROTOCOL_CONFIG)
 
     try:
@@ -388,11 +388,13 @@ def main() -> None:
             batch.add(susd3_vault.functions.totalAssets())
             batch.add(susd3_vault.functions.totalSupply())
             batch.add(susd3_vault.functions.convertToAssets(ONE_SHARE))
+            batch.add(usd3_vault.functions.balanceOf(SUSD3_ADDRESS))
+            batch.add(usd3_vault.functions.getMarketLiquidity())
             batch.add(protocol_config.functions.config(CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR))
             batch.add(protocol_config.functions.config(CFG_KEY_IS_PAUSED))
             responses = client.execute_batch(batch)
-            if len(responses) != 8:
-                raise ValueError(f"Expected 8 responses, got {len(responses)}")
+            if len(responses) != 10:
+                raise ValueError(f"Expected 10 responses, got {len(responses)}")
 
         usd3_total_assets = responses[0]
         usd3_total_supply = responses[1]
@@ -400,8 +402,26 @@ def main() -> None:
         susd3_total_assets = responses[3]
         susd3_total_supply = responses[4]
         susd3_pps_raw = responses[5]
-        nominal_floor_raw = responses[6]
-        is_paused = bool(responses[7])
+        susd3_usd3_balance = responses[6]
+        market_liquidity = responses[7]
+        nominal_floor_raw = responses[8]
+        is_paused = bool(responses[9])
+
+        if len(market_liquidity) != 4:
+            raise ValueError(f"Expected 4 market liquidity values, got {len(market_liquidity)}")
+        total_borrow_wausdc = market_liquidity[2]
+
+        # Value the USD3 shares held by sUSD3 through USD3, and convert borrowed
+        # waUSDC shares to USDC, matching the protocol's loss-buffer accounting.
+        with client.batch_requests() as batch:
+            batch.add(usd3_vault.functions.convertToAssets(susd3_usd3_balance))
+            batch.add(wausdc_vault.functions.convertToAssets(total_borrow_wausdc))
+            backing_responses = client.execute_batch(batch)
+            if len(backing_responses) != 2:
+                raise ValueError(f"Expected 2 backing responses, got {len(backing_responses)}")
+
+        susd3_backing_raw = backing_responses[0]
+        deployed_credit_raw = backing_responses[1]
 
         # Convert to human-readable floats
         usd3_tvl = usd3_total_assets / ONE_SHARE
@@ -410,6 +430,8 @@ def main() -> None:
         susd3_tvl = susd3_total_assets / ONE_SHARE
         susd3_supply = susd3_total_supply / ONE_SHARE
         susd3_pps = susd3_pps_raw / ONE_SHARE
+        susd3_backing = susd3_backing_raw / ONE_SHARE
+        deployed_credit = deployed_credit_raw / ONE_SHARE
         nominal_floor = nominal_floor_raw / ONE_SHARE
 
         logger.info(
@@ -424,14 +446,19 @@ def main() -> None:
             format_usd(susd3_supply),
             susd3_pps,
         )
+        logger.info(
+            "Junior backing — sUSD3: %s USDC, deployed credit: %s USDC",
+            format_usd(susd3_backing),
+            format_usd(deployed_credit),
+        )
 
         # Run all checks
         check_pps(usd3_pps, susd3_pps)
         check_tvl(usd3_tvl, susd3_tvl)
-        check_junior_buffer(usd3_tvl, susd3_tvl, susd3_pps)
+        check_junior_buffer(susd3_backing, deployed_credit)
         check_vault_shutdown(client, usd3_vault, susd3_vault)
         check_debt_cap(client)
-        check_nominal_backing_floor(nominal_floor, susd3_tvl)
+        check_nominal_backing_floor(nominal_floor, susd3_backing)
         check_protocol_paused(is_paused)
 
         logger.info(

@@ -6,10 +6,10 @@
 
 - **PPS (Price Per Share):** `convertToAssets(1e6)` on USD3 and sUSD3 vs cached prior run. Alerts on any decrease — indicates loan markdowns or defaults (critical since loans are unsecured).
 - **TVL (Total Value Locked):** `totalAssets()` on both vaults vs cached prior run. Alerts when absolute change is **≥15%**.
-- **Junior Buffer Ratio:** sUSD3 TVL as a percentage of USD3 TVL. Alerts when sUSD3 buffer drops below **15%** of USD3 TVL — thin first-loss coverage puts senior tranche at risk.
+- **Junior Buffer Ratio:** USD3 held by sUSD3, valued in USDC, as a percentage of deployed credit (`getMarketLiquidity().totalBorrowAssets` converted from waUSDC to USDC). Alerts below **15%** — thin first-loss coverage puts the senior tranche at risk. This matches the 3Jane backing UI's `sUSD3 / Deployed` loss-buffer metric.
 - **Vault Shutdown:** `isShutdown()` on both vaults. Alert-once when either vault enters emergency shutdown.
 - **Debt Cap:** `ProtocolConfig.getDebtCap()` vs cached prior. Alerts on any change — signals governance scaling the protocol up or down.
-- **Nominal sUSD3 Backing Floor:** `ProtocolConfig.config(keccak256("SUSD3_NOMINAL_BACKING_FLOOR"))` vs cached prior. Alerts on any change (governance lever). Separate alert-once when floor exceeds sUSD3 `totalAssets()` — sUSD3 redemptions can be blocked while floor > backing.
+- **Nominal sUSD3 Backing Floor:** `ProtocolConfig.config(keccak256("SUSD3_NOMINAL_BACKING_FLOOR"))` vs cached prior. Alerts on any change (governance lever). Separate alert-once when the floor exceeds sUSD3's USD3 holdings valued in USDC — sUSD3 redemptions can be blocked while floor > backing.
 - **Protocol Pause:** `ProtocolConfig.config(keccak256("IS_PAUSED"))`. Alert-once on transition to true. Distinct from per-vault `isShutdown()` — pauses the underlying credit market.
 
 ## Key Contracts
@@ -26,7 +26,7 @@
 |--------|-----------|----------|
 | PPS decrease | Any decrease vs cached prior (USD3 or sUSD3) | HIGH |
 | TVL change | ≥15% absolute change vs prior run | HIGH |
-| Junior buffer ratio | sUSD3 < 15% of USD3 TVL | MEDIUM |
+| Junior buffer ratio | sUSD3 backing < 15% of deployed credit | MEDIUM |
 | Vault shutdown | `isShutdown()` transitions to true (alert-once) | HIGH |
 | Debt cap change | Any change to `getDebtCap()` | MEDIUM |
 | Nominal backing floor change | Any change to `SUSD3_NOMINAL_BACKING_FLOOR` | MEDIUM |
