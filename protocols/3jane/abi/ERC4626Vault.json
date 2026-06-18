@@ -82,5 +82,17 @@
     "outputs": [{"name": "", "type": "uint256"}],
     "stateMutability": "view",
     "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "getMarketLiquidity",
+    "outputs": [
+      {"name": "totalSupplyAssets", "type": "uint256"},
+      {"name": "totalShares", "type": "uint256"},
+      {"name": "totalBorrowAssets", "type": "uint256"},
+      {"name": "waUSDCLiquidity", "type": "uint256"}
+    ],
+    "stateMutability": "view",
+    "type": "function"
   }
 ]

@@ -47,6 +47,7 @@ monitoring-scripts-py                    liquidity-monitoring
 | ethplus | rtoken | Coverage below threshold, StRSR rate drop |
 | origin | pegs | Wrapped OETH redeem value drop, backing ratio drop |
 | usdai | usdai | _(hook registered)_ |
+| 3jane | 3jane | USD3/sUSD3 PPS decrease, junior buffer low, vault shutdown, protocol pause |
 
 ## Safety mechanisms
 
