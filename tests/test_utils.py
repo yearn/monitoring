@@ -584,6 +584,25 @@ class TestDispatch(unittest.TestCase):
     @patch("utils.dispatch.requests.post")
     @patch("utils.dispatch._record_dispatch")
     @patch("utils.dispatch._is_on_cooldown", return_value=False)
+    def test_dispatch_sends_for_3jane(self, mock_cooldown, mock_record, mock_post):
+        from utils.dispatch import dispatch_emergency_withdrawal
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_post.return_value = mock_response
+        alert = Alert(severity=AlertSeverity.HIGH, message="Junior buffer low", protocol="3jane")
+
+        with patch.dict(os.environ, {"LIQUIDITY_WEBHOOK_SECRET": "test_secret", "LOG_LEVEL": "INFO"}):
+            dispatch_emergency_withdrawal(alert)
+
+        payload = json.loads(mock_post.call_args[1]["data"].decode("utf-8"))
+        self.assertEqual(payload["client_payload"]["protocol"], "3jane")
+        self.assertEqual(payload["client_payload"]["severity"], "HIGH")
+        mock_record.assert_called_once_with("3jane")
+
+    @patch("utils.dispatch.requests.post")
+    @patch("utils.dispatch._record_dispatch")
+    @patch("utils.dispatch._is_on_cooldown", return_value=False)
     def test_dispatch_sends_correct_payload(self, mock_cooldown, mock_record, mock_post):
         from utils.dispatch import dispatch_emergency_withdrawal
 

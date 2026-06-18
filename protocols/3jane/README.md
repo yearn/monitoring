@@ -40,9 +40,11 @@
 
 ## Alert dispatch
 
-Alerts use the structured `send_alert` path, so HIGH and CRITICAL alerts invoke the default emergency-dispatch hook after Telegram delivery. However, 3Jane emergency actions are **not currently enabled**: `utils.dispatch.DISPATCHABLE_PROTOCOLS` does not include `3jane`, and the receiving `liquidity-monitoring` service has no 3Jane entry or USD3 market mapping in `emergency_config.json`.
+Alerts use the structured `send_alert` path. HIGH and CRITICAL alerts invoke the default emergency-dispatch hook after Telegram delivery, and `3jane` is enabled in `utils.dispatch.DISPATCHABLE_PROTOCOLS`.
 
-Until both sides are configured, HIGH and CRITICAL 3Jane alerts are recorded and sent to Telegram but do not dispatch an emergency withdrawal. Enabling dispatch requires an explicit mapping of the Yearn vaults and markets whose caps should be zeroed; adding only `3jane` to the sender whitelist would result in a rejected or no-op webhook.
+The sender posts a signed `emergency_withdrawal` webhook using protocol key `3jane`. Dispatch requires `LIQUIDITY_WEBHOOK_SECRET`, is skipped in `LOG_LEVEL=DEBUG`, and has a 60-minute per-protocol cooldown. The receiving liquidity-monitoring deployment must independently map `3jane` to the vaults, collateral names, and markets whose caps should be zeroed.
+
+Only HIGH and CRITICAL alerts dispatch. LOW and MEDIUM alerts—including insurance-fund outflows—remain Telegram/database alerts only.
 
 ## Governance
 
