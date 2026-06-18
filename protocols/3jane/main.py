@@ -79,8 +79,21 @@ def get_cache_value(key: str) -> float:
         return 0.0
 
 
-def set_cache_value(key: str, value: float) -> None:
-    """Write a float value to cache."""
+def get_cache_int(key: str) -> int:
+    """Read an integer cache value without passing it through float."""
+    val = get_last_value_for_key_from_file(CACHE_FILENAME, key)
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        # Accept values written by the previous implementation as "123.0".
+        try:
+            return int(float(val))
+        except (ValueError, TypeError):
+            return 0
+
+
+def set_cache_value(key: str, value: int | float) -> None:
+    """Write a numeric value to cache."""
     write_last_value_to_file(CACHE_FILENAME, key, value)
 
 
@@ -244,7 +257,7 @@ def check_insurance_fund(
         send_telegram_message(message, PROTOCOL)
 
     if current_shares != previous_shares:
-        set_cache_value(CACHE_KEY_INSURANCE_FUND_SHARES, float(current_shares))
+        set_cache_value(CACHE_KEY_INSURANCE_FUND_SHARES, current_shares)
 
 
 def check_vault_shutdown(client, usd3_vault, susd3_vault) -> None:  # type: ignore[no-untyped-def]
@@ -449,7 +462,7 @@ def main() -> None:
         if len(market_liquidity) != 4:
             raise ValueError(f"Expected 4 market liquidity values, got {len(market_liquidity)}")
         total_borrow_wausdc = market_liquidity[2]
-        previous_insurance_shares = int(get_cache_value(CACHE_KEY_INSURANCE_FUND_SHARES))
+        previous_insurance_shares = get_cache_int(CACHE_KEY_INSURANCE_FUND_SHARES)
         insurance_outflow_shares = max(previous_insurance_shares - insurance_fund_shares, 0)
 
         # Value the USD3 shares held by sUSD3 and fetch one high-precision waUSDC
