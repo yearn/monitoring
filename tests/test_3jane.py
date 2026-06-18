@@ -17,50 +17,52 @@ def load_3jane_module() -> ModuleType:
 
 def test_junior_buffer_uses_backing_over_deployed_credit(monkeypatch) -> None:
     module = load_3jane_module()
-    messages: list[str] = []
-    monkeypatch.setattr(module, "send_telegram_message", lambda message, _protocol: messages.append(message))
+    alerts: list = []
+    monkeypatch.setattr(module, "send_alert", alerts.append)
 
     module.check_junior_buffer(7_504_000, 37_776_000)
 
-    assert messages == []
+    assert alerts == []
 
 
 def test_junior_buffer_alert_describes_deployed_credit(monkeypatch) -> None:
     module = load_3jane_module()
-    messages: list[str] = []
-    monkeypatch.setattr(module, "send_telegram_message", lambda message, _protocol: messages.append(message))
+    alerts: list = []
+    monkeypatch.setattr(module, "send_alert", alerts.append)
 
     module.check_junior_buffer(5_000_000, 40_000_000)
 
-    assert len(messages) == 1
-    assert "12.50% of deployed credit" in messages[0]
-    assert "sUSD3 backing: $5.00M | Deployed: $40.00M" in messages[0]
+    assert len(alerts) == 1
+    assert alerts[0].severity == module.AlertSeverity.HIGH
+    assert "12.50% of deployed credit" in alerts[0].message
+    assert "sUSD3 backing: $5.00M | Deployed: $40.00M" in alerts[0].message
 
 
 def test_insurance_fund_alerts_on_large_share_outflow(monkeypatch) -> None:
     module = load_3jane_module()
-    messages: list[str] = []
+    alerts: list = []
     cached: list[tuple[str, int | float]] = []
     monkeypatch.setattr(module, "set_cache_value", lambda key, value: cached.append((key, value)))
-    monkeypatch.setattr(module, "send_telegram_message", lambda message, _protocol: messages.append(message))
+    monkeypatch.setattr(module, "send_alert", alerts.append)
 
     module.check_insurance_fund(900_000_000_000, 850_000_000_000, 1_000_000, 58_000)
 
-    assert len(messages) == 1
-    assert "Outflow: $58.00K" in messages[0]
+    assert len(alerts) == 1
+    assert alerts[0].severity == module.AlertSeverity.MEDIUM
+    assert "Outflow: $58.00K" in alerts[0].message
     assert cached == [(module.CACHE_KEY_INSURANCE_FUND_SHARES, 850_000_000_000)]
 
 
 def test_insurance_fund_ignores_yield_and_small_outflows(monkeypatch) -> None:
     module = load_3jane_module()
-    messages: list[str] = []
+    alerts: list = []
     monkeypatch.setattr(module, "set_cache_value", lambda _key, _value: None)
-    monkeypatch.setattr(module, "send_telegram_message", lambda message, _protocol: messages.append(message))
+    monkeypatch.setattr(module, "send_alert", alerts.append)
 
     module.check_insurance_fund(900_000_000_000, 901_000_000_000, 1_050_000, 0)
     module.check_insurance_fund(900_000_000_000, 899_000_000_000, 1_048_000, 1_200)
 
-    assert messages == []
+    assert alerts == []
 
 
 def test_insurance_shares_round_trip_exactly_through_sqlite(monkeypatch, tmp_path) -> None:

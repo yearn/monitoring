@@ -19,11 +19,12 @@ Monitors:
 from web3 import Web3
 
 from utils.abi import load_abi
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_path, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import Chain
 from utils.formatting import format_usd
 from utils.logger import get_logger
-from utils.telegram import send_telegram_message
+from utils.telegram import escape_markdown
 from utils.web3_wrapper import ChainManager
 
 PROTOCOL = "3jane"
@@ -120,7 +121,7 @@ def check_pps(usd3_pps_float: float, susd3_pps_float: float) -> None:
             f"⚠️ Possible loan markdown or default\n"
             f"🔗 [USD3](https://etherscan.io/address/{USD3_ADDRESS})"
         )
-        send_telegram_message(message, PROTOCOL)
+        send_alert(Alert(AlertSeverity.CRITICAL, message, PROTOCOL))
 
     if usd3_pps_float != previous_usd3_pps:
         set_cache_value(CACHE_KEY_USD3_PPS, usd3_pps_float)
@@ -138,7 +139,7 @@ def check_pps(usd3_pps_float: float, susd3_pps_float: float) -> None:
             f"⚠️ Junior tranche absorbing losses — first-loss buffer impacted\n"
             f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
         )
-        send_telegram_message(message, PROTOCOL)
+        send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
     if susd3_pps_float != previous_susd3_pps:
         set_cache_value(CACHE_KEY_SUSD3_PPS, susd3_pps_float)
@@ -168,7 +169,7 @@ def check_tvl(usd3_tvl: float, susd3_tvl: float) -> None:
                 f"📊 {format_usd(previous_usd3_tvl)} → {format_usd(usd3_tvl)}\n"
                 f"🔗 [USD3](https://etherscan.io/address/{USD3_ADDRESS})"
             )
-            send_telegram_message(message, PROTOCOL)
+            send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
 
     if usd3_tvl != previous_usd3_tvl:
         set_cache_value(CACHE_KEY_USD3_TVL, usd3_tvl)
@@ -188,7 +189,7 @@ def check_tvl(usd3_tvl: float, susd3_tvl: float) -> None:
                 f"⚠️ Junior tranche buffer size changed significantly\n"
                 f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
             )
-            send_telegram_message(message, PROTOCOL)
+            send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
 
     if susd3_tvl != previous_susd3_tvl:
         set_cache_value(CACHE_KEY_SUSD3_TVL, susd3_tvl)
@@ -225,7 +226,7 @@ def check_junior_buffer(susd3_backing: float, deployed_credit: float) -> None:
             f"⚠️ First-loss coverage is thin — USD3 holders at higher risk\n"
             f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
         )
-        send_telegram_message(message, PROTOCOL)
+        send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
 
 def check_insurance_fund(
@@ -254,7 +255,7 @@ def check_insurance_fund(
             f"⚠️ First-loss insurance available for debt settlement decreased\n"
             f"🔗 [Insurance Fund](https://etherscan.io/address/{INSURANCE_FUND_ADDRESS})"
         )
-        send_telegram_message(message, PROTOCOL)
+        send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
 
     if current_shares != previous_shares:
         set_cache_value(CACHE_KEY_INSURANCE_FUND_SHARES, current_shares)
@@ -291,7 +292,7 @@ def check_vault_shutdown(client, usd3_vault, susd3_vault) -> None:  # type: igno
             f"⚠️ USD3 vault has entered emergency shutdown\n"
             f"🔗 [USD3](https://etherscan.io/address/{USD3_ADDRESS})"
         )
-        send_telegram_message(message, PROTOCOL)
+        send_alert(Alert(AlertSeverity.CRITICAL, message, PROTOCOL))
     if float(usd3_shutdown) != previous_usd3_shutdown:
         set_cache_value(CACHE_KEY_SHUTDOWN_USD3, float(usd3_shutdown))
 
@@ -303,7 +304,7 @@ def check_vault_shutdown(client, usd3_vault, susd3_vault) -> None:  # type: igno
             f"⚠️ sUSD3 vault has entered emergency shutdown\n"
             f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
         )
-        send_telegram_message(message, PROTOCOL)
+        send_alert(Alert(AlertSeverity.CRITICAL, message, PROTOCOL))
     if float(susd3_shutdown) != previous_susd3_shutdown:
         set_cache_value(CACHE_KEY_SHUTDOWN_SUSD3, float(susd3_shutdown))
 
@@ -333,7 +334,7 @@ def check_debt_cap(client) -> None:  # type: ignore[no-untyped-def]
             f"💰 {format_usd(previous_debt_cap)} → {format_usd(debt_cap)}\n"
             f"🔗 [ProtocolConfig](https://etherscan.io/address/{PROTOCOL_CONFIG_ADDRESS})"
         )
-        send_telegram_message(message, PROTOCOL)
+        send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
 
     if debt_cap != previous_debt_cap:
         set_cache_value(CACHE_KEY_DEBT_CAP, debt_cap)
@@ -374,7 +375,7 @@ def check_nominal_backing_floor(nominal_floor: float, susd3_backing: float) -> N
             f"ℹ️ Withdrawals blocked while sUSD3 backing < floor\n"
             f"🔗 [ProtocolConfig](https://etherscan.io/address/{PROTOCOL_CONFIG_ADDRESS})"
         )
-        send_telegram_message(message, PROTOCOL)
+        send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
 
     if nominal_floor != previous_floor or first_run:
         set_cache_value(CACHE_KEY_NOMINAL_FLOOR, nominal_floor)
@@ -391,7 +392,7 @@ def check_nominal_backing_floor(nominal_floor: float, susd3_backing: float) -> N
             f"⚠️ sUSD3 redemptions may be blocked until backing recovers\n"
             f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
         )
-        send_telegram_message(message, PROTOCOL)
+        send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
     if float(breach) != previous_breach:
         set_cache_value(CACHE_KEY_FLOOR_BREACH, float(breach))
 
@@ -414,7 +415,7 @@ def check_protocol_paused(is_paused: bool) -> None:
             f"⚠️ ProtocolConfig IS_PAUSED flipped to true\n"
             f"🔗 [ProtocolConfig](https://etherscan.io/address/{PROTOCOL_CONFIG_ADDRESS})"
         )
-        send_telegram_message(message, PROTOCOL)
+        send_alert(Alert(AlertSeverity.CRITICAL, message, PROTOCOL))
     if float(is_paused) != previous_paused:
         set_cache_value(CACHE_KEY_IS_PAUSED, float(is_paused))
 
@@ -535,11 +536,7 @@ def main() -> None:
         )
     except Exception as e:
         logger.error("Error during 3Jane monitoring: %s", e)
-        send_telegram_message(
-            f"🚨 *3Jane Monitoring Error*\n❌ {e}",
-            PROTOCOL,
-            plain_text=True,
-        )
+        send_alert(Alert(AlertSeverity.LOW, f"🚨 *3Jane Monitoring Error*\n❌ {escape_markdown(str(e))}", PROTOCOL))
 
 
 if __name__ == "__main__":

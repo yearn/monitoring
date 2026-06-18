@@ -26,16 +26,23 @@
 
 | Metric | Threshold | Severity |
 |--------|-----------|----------|
-| PPS decrease | Any decrease vs cached prior (USD3 or sUSD3) | HIGH |
-| TVL change | ≥15% absolute change vs prior run | HIGH |
-| Junior buffer ratio | sUSD3 backing < 15% of deployed credit | MEDIUM |
-| Insurance fund outflow | ≥$50k USDC since prior run | HIGH |
-| Vault shutdown | `isShutdown()` transitions to true (alert-once) | HIGH |
-| Debt cap change | Any change to `getDebtCap()` | MEDIUM |
+| USD3 PPS decrease | Any decrease vs cached prior | CRITICAL |
+| sUSD3 PPS decrease | Any decrease vs cached prior | HIGH |
+| TVL change | ≥15% absolute change vs prior run | LOW |
+| Junior buffer ratio | sUSD3 backing < 15% of deployed credit | HIGH |
+| Insurance fund outflow | ≥$50k USDC since prior run | MEDIUM |
+| Vault shutdown | `isShutdown()` transitions to true (alert-once) | CRITICAL |
+| Debt cap change | Any change to `getDebtCap()` | LOW |
 | Nominal backing floor change | Any change to `SUSD3_NOMINAL_BACKING_FLOOR` | MEDIUM |
-| Nominal floor breach | Floor > sUSD3 backing valued in USDC (alert-once) | HIGH |
-| Protocol paused | `IS_PAUSED` transitions to true (alert-once) | HIGH |
+| Nominal floor breach | Floor > sUSD3 backing valued in USDC (alert-once) | MEDIUM |
+| Protocol paused | `IS_PAUSED` transitions to true (alert-once) | CRITICAL |
 | Monitoring run failure | Uncaught exception in `main()` | LOW |
+
+## Alert dispatch
+
+Alerts use the structured `send_alert` path, so HIGH and CRITICAL alerts invoke the default emergency-dispatch hook after Telegram delivery. However, 3Jane emergency actions are **not currently enabled**: `utils.dispatch.DISPATCHABLE_PROTOCOLS` does not include `3jane`, and the receiving `liquidity-monitoring` service has no 3Jane entry or USD3 market mapping in `emergency_config.json`.
+
+Until both sides are configured, HIGH and CRITICAL 3Jane alerts are recorded and sent to Telegram but do not dispatch an emergency withdrawal. Enabling dispatch requires an explicit mapping of the Yearn vaults and markets whose caps should be zeroed; adding only `3jane` to the sender whitelist would result in a rejected or no-op webhook.
 
 ## Governance
 
