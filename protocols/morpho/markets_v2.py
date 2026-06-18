@@ -70,6 +70,9 @@ ADAPTER_KIND_UNKNOWN = "Unknown"
 # without this, every hourly run would re-spam the channel.
 VAULT_ADAPTER_SEEN_TYPE = "v2_vault_adapter_seen"
 
+# Ignore wrapped-v1 adapter sanity checks when exposure is negligible.
+MIN_VAULT_ADAPTER_ALLOCATION_RATIO = 0.01
+
 
 @dataclass
 class V2Vault:
@@ -385,9 +388,25 @@ def _market_label(market: MarketMetrics, market_id: str, chain: Chain) -> str:
     return f"[{coll}/{loan}]({get_market_url(market_id, chain)})"
 
 
+def _adapter_allocation_ratio(vault: V2Vault, adapter_address: str) -> Optional[float]:
+    """Return an adapter's share of vault TVL from GraphQL ``assetsUsd`` data."""
+    if vault.total_assets_usd <= 0:
+        return None
+    addr_lc = adapter_address.lower()
+    for item in vault.graphql_adapters:
+        if (item.get("address") or "").lower() == addr_lc:
+            assets_usd = float(item.get("assetsUsd") or 0)
+            return min(assets_usd / vault.total_assets_usd, 1.0)
+    return None
+
+
 def analyze_vault_adapter(vault: V2Vault, adapter: AdapterInfo) -> None:
     """Sanity-check that a wrapped v1 vault is already monitored by markets.py."""
     if adapter.wrapped_v1_vault is None:
+        return
+
+    allocation_ratio = _adapter_allocation_ratio(vault, adapter.address)
+    if allocation_ratio is not None and allocation_ratio < MIN_VAULT_ADAPTER_ALLOCATION_RATIO:
         return
     monitored = {str(entry[1]).lower() for entry in VAULTS_BY_CHAIN.get(vault.chain, [])}
     wrapped_lc = adapter.wrapped_v1_vault.lower()

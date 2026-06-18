@@ -30,7 +30,7 @@ VAULTS_V2_BY_CHAIN: Dict[Chain, List[List[Any]]] = {
             2,
         ],
         ["Sentora RLUSD Main", "0x6dC58a0FdfC8D694e571DC59B9A52EEEa780E6bf", 2],
-        # ["Sentora PaypalUSD Main", "0xb576765fB15505433aF24FEe2c0325895C559FB2", 2],  # TODO: enable after they switch to v2 adapter
+        ["Sentora PaypalUSD Main", "0xb576765fB15505433aF24FEe2c0325895C559FB2", 2],
     ],
     Chain.BASE: [
         ["Yearn OG USDC V2", "0xe7D0DBE3493830e2Ab62619211A2BfF0Fc60dB42", 2],
@@ -38,10 +38,10 @@ VAULTS_V2_BY_CHAIN: Dict[Chain, List[List[Any]]] = {
         ["OUSD Vault V2", "0x2Ba14b2e1E7D2189D3550b708DFCA01f899f33c1", 2],
     ],
     Chain.KATANA: [
-        ["Yearn OG USDC", "0xca44cbe1FB03691d43d2d93AA460e2fCB03878fE", 1],
-        ["Yearn OG USDT", "0x4284d4F9f4d61eA57B8F0943547c7C19C5B9B249", 1],
-        ["Yearn OG WBTC", "0x22c01834e1A261F8BebCa7D7B459db2F389785FF", 1],
-        ["Yearn OG ETH", "0x5920A6FC553af799542EDA628AdfCc9eA52e141C", 1],
+        # ["Yearn OG USDC", "0xca44cbe1FB03691d43d2d93AA460e2fCB03878fE", 1],
+        # ["Yearn OG USDT", "0x4284d4F9f4d61eA57B8F0943547c7C19C5B9B249", 1],
+        # ["Yearn OG WBTC", "0x22c01834e1A261F8BebCa7D7B459db2F389785FF", 1],
+        # ["Yearn OG ETH", "0x5920A6FC553af799542EDA628AdfCc9eA52e141C", 1],
         ["Yearn KAT", "0x9b1aE9548E4B46cEB6650f6CEc702bAf5CF2b8CC", 1],
         ["Yearn Degen USDC", "0xA2d38c8A3D810EBcF4C2075821c5eC8F976bb692", 3],
     ],
