@@ -39,11 +39,10 @@ def test_insurance_fund_alerts_on_large_share_outflow(monkeypatch) -> None:
     module = load_3jane_module()
     messages: list[str] = []
     cached: list[tuple[str, float]] = []
-    monkeypatch.setattr(module, "get_cache_value", lambda _key: 900_000_000_000)
     monkeypatch.setattr(module, "set_cache_value", lambda key, value: cached.append((key, value)))
     monkeypatch.setattr(module, "send_telegram_message", lambda message, _protocol: messages.append(message))
 
-    module.check_insurance_fund(850_000_000_000, 1_000_000, 58_000)
+    module.check_insurance_fund(900_000_000_000, 850_000_000_000, 1_000_000, 58_000)
 
     assert len(messages) == 1
     assert "Outflow: $58.00K" in messages[0]
@@ -53,11 +52,10 @@ def test_insurance_fund_alerts_on_large_share_outflow(monkeypatch) -> None:
 def test_insurance_fund_ignores_yield_and_small_outflows(monkeypatch) -> None:
     module = load_3jane_module()
     messages: list[str] = []
-    monkeypatch.setattr(module, "get_cache_value", lambda _key: 900_000_000_000)
     monkeypatch.setattr(module, "set_cache_value", lambda _key, _value: None)
     monkeypatch.setattr(module, "send_telegram_message", lambda message, _protocol: messages.append(message))
 
-    module.check_insurance_fund(901_000_000_000, 1_050_000, 0)
-    module.check_insurance_fund(899_000_000_000, 1_048_000, 1_200)
+    module.check_insurance_fund(900_000_000_000, 901_000_000_000, 1_050_000, 0)
+    module.check_insurance_fund(900_000_000_000, 899_000_000_000, 1_048_000, 1_200)
 
     assert messages == []

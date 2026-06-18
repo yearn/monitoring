@@ -45,6 +45,7 @@ INSURANCE_FUND_ADDRESS = "0x4507B5B23340D248457d955a211C8B0634D29935"
 # USDC has 6 decimals, USD3 and sUSD3 inherit this
 DECIMALS = 6
 ONE_SHARE = 10**DECIMALS
+RATE_SCALE = 10**18
 
 # --- Cache Keys ---
 CACHE_KEY_USD3_PPS = "3JANE_USD3_PPS"
@@ -214,13 +215,17 @@ def check_junior_buffer(susd3_backing: float, deployed_credit: float) -> None:
         send_telegram_message(message, PROTOCOL)
 
 
-def check_insurance_fund(current_shares: int, current_assets: float, outflow_assets: float) -> None:
+def check_insurance_fund(
+    previous_shares: int,
+    current_shares: int,
+    current_assets: float,
+    outflow_assets: float,
+) -> None:
     """Alert when the insurance fund loses at least $50k of waUSDC shares.
 
     The raw share balance is cached so normal waUSDC appreciation cannot hide an
     outflow. The caller values both the current balance and share delta in USDC.
     """
-    previous_shares = int(get_cache_value(CACHE_KEY_INSURANCE_FUND_SHARES))
     logger.info(
         "Insurance fund — balance: %s USDC, shares: %d (previous: %d)",
         format_usd(current_assets),
@@ -228,7 +233,7 @@ def check_insurance_fund(current_shares: int, current_assets: float, outflow_ass
         previous_shares,
     )
 
-    if previous_shares > current_shares and outflow_assets >= INSURANCE_FUND_OUTFLOW_THRESHOLD:
+    if outflow_assets >= INSURANCE_FUND_OUTFLOW_THRESHOLD:
         message = (
             f"🚨 *3Jane Insurance Fund Outflow*\n"
             f"📉 Outflow: {format_usd(outflow_assets)}\n"
@@ -321,12 +326,12 @@ def check_debt_cap(client) -> None:  # type: ignore[no-untyped-def]
         set_cache_value(CACHE_KEY_DEBT_CAP, debt_cap)
 
 
-def check_nominal_backing_floor(nominal_floor: float, susd3_tvl: float) -> None:
+def check_nominal_backing_floor(nominal_floor: float, susd3_backing: float) -> None:
     """Check ProtocolConfig SUSD3_NOMINAL_BACKING_FLOOR.
 
     The nominal floor is an absolute USDC amount of sUSD3 backing the protocol
     requires (in addition to the ratio-based floor). When set above current
-    sUSD3 totalAssets, sUSD3 redemptions can be blocked.
+    sUSD3 backing valued in USDC, sUSD3 redemptions can be blocked.
 
     Sends two distinct alerts:
     - Any change to the floor value (governance lever).
@@ -334,7 +339,7 @@ def check_nominal_backing_floor(nominal_floor: float, susd3_tvl: float) -> None:
 
     Args:
         nominal_floor: Current SUSD3_NOMINAL_BACKING_FLOOR in USDC.
-        susd3_tvl: Current sUSD3 totalAssets in USDC.
+        susd3_backing: Current sUSD3 backing value in USDC.
     """
     # --- Alert on any change (treat first-run as a non-alert init) ---
     raw_previous = get_last_value_for_key_from_file(CACHE_FILENAME, CACHE_KEY_NOMINAL_FLOOR)
@@ -362,13 +367,13 @@ def check_nominal_backing_floor(nominal_floor: float, susd3_tvl: float) -> None:
         set_cache_value(CACHE_KEY_NOMINAL_FLOOR, nominal_floor)
 
     # --- Alert-once on breach transition (floor > backing) ---
-    breach = nominal_floor > susd3_tvl and nominal_floor > 0
+    breach = nominal_floor > susd3_backing and nominal_floor > 0
     previous_breach = get_cache_value(CACHE_KEY_FLOOR_BREACH)
     if breach and previous_breach == 0:
-        shortfall = nominal_floor - susd3_tvl
+        shortfall = nominal_floor - susd3_backing
         message = (
             f"🚨 *3Jane sUSD3 Backing Below Nominal Floor*\n"
-            f"📊 Floor: {format_usd(nominal_floor)} | sUSD3 backing: {format_usd(susd3_tvl)}\n"
+            f"📊 Floor: {format_usd(nominal_floor)} | sUSD3 backing: {format_usd(susd3_backing)}\n"
             f"💰 Shortfall: {format_usd(shortfall)}\n"
             f"⚠️ sUSD3 redemptions may be blocked until backing recovers\n"
             f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
@@ -447,21 +452,20 @@ def main() -> None:
         previous_insurance_shares = int(get_cache_value(CACHE_KEY_INSURANCE_FUND_SHARES))
         insurance_outflow_shares = max(previous_insurance_shares - insurance_fund_shares, 0)
 
-        # Value the USD3 shares held by sUSD3 through USD3, and convert borrowed
-        # waUSDC shares to USDC, matching the protocol's loss-buffer accounting.
+        # Value the USD3 shares held by sUSD3 and fetch one high-precision waUSDC
+        # conversion rate. All waUSDC values below use that same rate and block.
         with client.batch_requests() as batch:
             batch.add(usd3_vault.functions.convertToAssets(susd3_usd3_balance))
-            batch.add(wausdc_vault.functions.convertToAssets(total_borrow_wausdc))
-            batch.add(wausdc_vault.functions.convertToAssets(insurance_fund_shares))
-            batch.add(wausdc_vault.functions.convertToAssets(insurance_outflow_shares))
+            batch.add(wausdc_vault.functions.convertToAssets(RATE_SCALE))
             backing_responses = client.execute_batch(batch)
-            if len(backing_responses) != 4:
-                raise ValueError(f"Expected 4 backing responses, got {len(backing_responses)}")
+            if len(backing_responses) != 2:
+                raise ValueError(f"Expected 2 backing responses, got {len(backing_responses)}")
 
         susd3_backing_raw = backing_responses[0]
-        deployed_credit_raw = backing_responses[1]
-        insurance_fund_assets_raw = backing_responses[2]
-        insurance_outflow_assets_raw = backing_responses[3]
+        wausdc_assets_per_scale = backing_responses[1]
+        deployed_credit_raw = total_borrow_wausdc * wausdc_assets_per_scale // RATE_SCALE
+        insurance_fund_assets_raw = insurance_fund_shares * wausdc_assets_per_scale // RATE_SCALE
+        insurance_outflow_assets_raw = insurance_outflow_shares * wausdc_assets_per_scale // RATE_SCALE
 
         # Convert to human-readable floats
         usd3_tvl = usd3_total_assets / ONE_SHARE
@@ -498,7 +502,12 @@ def main() -> None:
         check_pps(usd3_pps, susd3_pps)
         check_tvl(usd3_tvl, susd3_tvl)
         check_junior_buffer(susd3_backing, deployed_credit)
-        check_insurance_fund(insurance_fund_shares, insurance_fund_assets, insurance_outflow_assets)
+        check_insurance_fund(
+            previous_insurance_shares,
+            insurance_fund_shares,
+            insurance_fund_assets,
+            insurance_outflow_assets,
+        )
         check_vault_shutdown(client, usd3_vault, susd3_vault)
         check_debt_cap(client)
         check_nominal_backing_floor(nominal_floor, susd3_backing)
