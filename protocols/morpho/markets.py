@@ -388,12 +388,12 @@ ALLOCATION_TIERS = {
     5: 0.01,  # Unknown market max allocation
 }
 
-# Define max risk thresholds by risk level
+# Define max risk thresholds by risk level (each tier is level * 1.15, capped at 5.00)
 MAX_RISK_THRESHOLDS = {
-    1: 1.10,  # Risk tier 1 max total risk
-    2: 2.20,  # Risk tier 2 max total risk
-    3: 3.30,  # Risk tier 3 max total risk
-    4: 4.40,  # Risk tier 4 max total risk
+    1: 1.15,  # Risk tier 1 max total risk
+    2: 2.30,  # Risk tier 2 max total risk
+    3: 3.45,  # Risk tier 3 max total risk
+    4: 4.60,  # Risk tier 4 max total risk
     5: 5.00,  # Risk tier 5 max total risk
 }
 

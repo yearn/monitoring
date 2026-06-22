@@ -90,11 +90,13 @@ Where:
 
 This computed risk level is compared against predefined maximum thresholds defined in [markets.py#L134](./markets.py#L134):
 
-- **Risk Level 1:** Maximum threshold of 1.10
-- **Risk Level 2:** Maximum threshold of 2.20
-- **Risk Level 3:** Maximum threshold of 3.30
-- **Risk Level 4:** Maximum threshold of 4.40
+- **Risk Level 1:** Maximum threshold of 1.15
+- **Risk Level 2:** Maximum threshold of 2.30
+- **Risk Level 3:** Maximum threshold of 3.45
+- **Risk Level 4:** Maximum threshold of 4.60
 - **Risk Level 5:** Maximum threshold of 5.00
+
+Each tier is `level × 1.15` (capped at 5.00), so a Risk-1 vault may hold up to ~15% of its assets in Risk-2 markets before an alert triggers.
 
 If a vault's total risk level exceeds its threshold, an alert is triggered via a Telegram message.
 
