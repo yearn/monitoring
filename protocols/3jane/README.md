@@ -8,6 +8,7 @@
 - **TVL (Total Value Locked):** `totalAssets()` on both vaults vs cached prior run. Alerts when absolute change is **≥15%**.
 - **Junior Buffer Ratio:** USD3 held by sUSD3, valued in USDC, as a percentage of deployed credit (`getMarketLiquidity().totalBorrowAssets` converted from waUSDC to USDC). Alerts below **15%** — thin first-loss coverage puts the senior tranche at risk. This matches the 3Jane backing UI's `sUSD3 / Deployed` loss-buffer metric.
 - **Insurance Fund:** Tracks the fund's raw waUSDC share balance and alerts when an outflow is worth **≥$50k USDC**. Caching shares instead of asset value prevents waUSDC yield from masking withdrawals.
+- **Withdraw Liquidity:** `availableWithdrawLimit()` on the USD3 vault. Alerts when it falls below **$4M** — low withdraw liquidity means senior-tranche withdrawals may queue or stall.
 - **Vault Shutdown:** `isShutdown()` on both vaults. Alert-once when either vault enters emergency shutdown.
 - **Debt Cap:** `ProtocolConfig.getDebtCap()` vs cached prior. Alerts on any change — signals governance scaling the protocol up or down.
 - **Nominal sUSD3 Backing Floor:** `ProtocolConfig.config(keccak256("SUSD3_NOMINAL_BACKING_FLOOR"))` vs cached prior. Alerts on any change (governance lever). Separate alert-once when the floor exceeds sUSD3's USD3 holdings valued in USDC — sUSD3 redemptions can be blocked while floor > backing.
@@ -31,6 +32,7 @@
 | TVL change | ≥15% absolute change vs prior run | LOW |
 | Junior buffer ratio | sUSD3 backing < 15% of deployed credit | HIGH |
 | Insurance fund outflow | ≥$50k USDC since prior run | MEDIUM |
+| Withdraw liquidity low | `availableWithdrawLimit()` < $4M | MEDIUM |
 | Vault shutdown | `isShutdown()` transitions to true (alert-once) | CRITICAL |
 | Debt cap change | Any change to `getDebtCap()` | LOW |
 | Nominal backing floor change | Any change to `SUSD3_NOMINAL_BACKING_FLOOR` | MEDIUM |
