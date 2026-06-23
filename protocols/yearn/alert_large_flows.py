@@ -483,6 +483,10 @@ def main():
         format="[%(name)s] %(levelname)s %(message)s",
         stream=sys.stderr,
     )
+    # Keep web3/urllib3 chatter out; DEP_LOG_LEVEL re-enables it when debugging.
+    from utils.logger import quiet_dependency_loggers
+
+    quiet_dependency_loggers()
     _logger.info(
         "start limit=%s threshold_usd=%s since_seconds=%s chain_ids=%s",
         args.limit,

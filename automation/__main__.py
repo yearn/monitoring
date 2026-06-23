@@ -26,8 +26,12 @@ logger = logging.getLogger(__name__)
 def _configure_logging() -> None:
     import os
 
+    from utils.logger import quiet_dependency_loggers
+
     level = os.environ.get("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # Keep web3/urllib3 chatter out of the orchestrator logs; DEP_LOG_LEVEL re-enables it.
+    quiet_dependency_loggers()
 
 
 def cmd_list(config: JobsConfig) -> int:

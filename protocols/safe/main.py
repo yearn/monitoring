@@ -98,8 +98,7 @@ def get_safe_transactions(
             time.sleep(wait_time)
             continue
         else:
-            logger.error("Error: %s", response.status_code)
-            logger.error("Response text: %s", response.text)
+            logger.error("Error: %s\nResponse text: %s", response.status_code, response.text)
             return []
 
     logger.error("Failed after %s retries for %s on %s", max_retries, safe_address, network_name)
