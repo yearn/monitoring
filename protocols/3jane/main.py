@@ -10,6 +10,7 @@ Monitors:
 - TVL (Total Value Locked) via totalAssets() — alerts on >15% change
 - Junior tranche buffer — alerts when sUSD3 coverage drops below threshold
 - Insurance fund — alerts on waUSDC outflows of at least $50k
+- Withdraw liquidity — alerts when USD3 availableWithdrawLimit falls below $4M
 - Vault shutdown status — alerts once if either vault enters emergency shutdown
 - Debt cap changes — alerts when ProtocolConfig debt cap is modified
 - Nominal sUSD3 backing floor — alerts on change and when floor > sUSD3 backing
@@ -42,6 +43,7 @@ SUSD3_ADDRESS = "0xf689555121e529Ff0463e191F9Bd9d1E496164a7"
 PROTOCOL_CONFIG_ADDRESS = "0x6b276A2A7dd8b629adBA8A06AD6573d01C84f34E"
 WAUSDC_ADDRESS = "0xD4fa2D31b7968E448877f69A96DE69f5de8cD23E"
 INSURANCE_FUND_ADDRESS = "0x4507B5B23340D248457d955a211C8B0634D29935"
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 # USDC has 6 decimals, USD3 and sUSD3 inherit this
 DECIMALS = 6
@@ -69,6 +71,7 @@ CFG_KEY_IS_PAUSED = Web3.keccak(text="IS_PAUSED")
 TVL_CHANGE_THRESHOLD = 0.15  # 15% TVL change alert
 JUNIOR_BUFFER_THRESHOLD = 0.15  # Alert when sUSD3 backing < 15% of deployed credit
 INSURANCE_FUND_OUTFLOW_THRESHOLD = 50_000  # USDC
+WITHDRAW_LIMIT_THRESHOLD = 4_000_000  # USDC, alert when USD3 availableWithdrawLimit falls below
 
 
 def get_cache_value(key: str) -> float:
@@ -261,6 +264,29 @@ def check_insurance_fund(
         set_cache_value(CACHE_KEY_INSURANCE_FUND_SHARES, current_shares)
 
 
+def check_withdraw_limit(withdraw_limit: float) -> None:
+    """Alert when USD3 withdraw liquidity drops below the safety threshold.
+
+    availableWithdrawLimit is the USDC the USD3 vault can immediately honor for
+    withdrawals. When it falls below the threshold, withdrawals may queue or
+    stall, signalling a liquidity squeeze on the senior tranche.
+
+    Args:
+        withdraw_limit: USD3 availableWithdrawLimit in USDC.
+    """
+    logger.info("USD3 available withdraw limit: %s", format_usd(withdraw_limit))
+
+    if withdraw_limit < WITHDRAW_LIMIT_THRESHOLD:
+        message = (
+            f"🚨 *3Jane USD3 Withdraw Liquidity Low*\n"
+            f"📉 Available withdraw limit: {format_usd(withdraw_limit)} "
+            f"(threshold {format_usd(WITHDRAW_LIMIT_THRESHOLD)})\n"
+            f"⚠️ Senior-tranche withdrawals may queue or stall\n"
+            f"🔗 [USD3](https://etherscan.io/address/{USD3_ADDRESS})"
+        )
+        send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
+
+
 def check_vault_shutdown(client, usd3_vault, susd3_vault) -> None:  # type: ignore[no-untyped-def]
     """Check if either vault has been emergency shut down.
 
@@ -444,9 +470,10 @@ def main() -> None:
             batch.add(protocol_config.functions.config(CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR))
             batch.add(protocol_config.functions.config(CFG_KEY_IS_PAUSED))
             batch.add(wausdc_vault.functions.balanceOf(INSURANCE_FUND_ADDRESS))
+            batch.add(usd3_vault.functions.availableWithdrawLimit(ZERO_ADDRESS))
             responses = client.execute_batch(batch)
-            if len(responses) != 11:
-                raise ValueError(f"Expected 11 responses, got {len(responses)}")
+            if len(responses) != 12:
+                raise ValueError(f"Expected 12 responses, got {len(responses)}")
 
         usd3_total_assets = responses[0]
         usd3_total_supply = responses[1]
@@ -459,6 +486,7 @@ def main() -> None:
         nominal_floor_raw = responses[8]
         is_paused = bool(responses[9])
         insurance_fund_shares = responses[10]
+        withdraw_limit_raw = responses[11]
 
         if len(market_liquidity) != 4:
             raise ValueError(f"Expected 4 market liquidity values, got {len(market_liquidity)}")
@@ -492,6 +520,7 @@ def main() -> None:
         deployed_credit = deployed_credit_raw / ONE_SHARE
         insurance_fund_assets = insurance_fund_assets_raw / ONE_SHARE
         insurance_outflow_assets = insurance_outflow_assets_raw / ONE_SHARE
+        withdraw_limit = withdraw_limit_raw / ONE_SHARE
         nominal_floor = nominal_floor_raw / ONE_SHARE
 
         logger.info(
@@ -522,6 +551,7 @@ def main() -> None:
             insurance_fund_assets,
             insurance_outflow_assets,
         )
+        check_withdraw_limit(withdraw_limit)
         check_vault_shutdown(client, usd3_vault, susd3_vault)
         check_debt_cap(client)
         check_nominal_backing_floor(nominal_floor, susd3_backing)

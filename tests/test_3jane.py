@@ -65,6 +65,30 @@ def test_insurance_fund_ignores_yield_and_small_outflows(monkeypatch) -> None:
     assert alerts == []
 
 
+def test_withdraw_limit_alerts_below_threshold(monkeypatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_withdraw_limit(3_500_000)
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == module.AlertSeverity.MEDIUM
+    assert "Available withdraw limit: $3.50M" in alerts[0].message
+    assert "threshold $4.00M" in alerts[0].message
+
+
+def test_withdraw_limit_no_alert_at_or_above_threshold(monkeypatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_withdraw_limit(module.WITHDRAW_LIMIT_THRESHOLD)
+    module.check_withdraw_limit(4_548_324)
+
+    assert alerts == []
+
+
 def test_insurance_shares_round_trip_exactly_through_sqlite(monkeypatch, tmp_path) -> None:
     module = load_3jane_module()
     monkeypatch.setattr(paths, "CACHE_DIR", str(tmp_path))
