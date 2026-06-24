@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from utils.chains import Chain
-from utils.http import request_with_retry
-from utils.logging import get_logger
+from utils.http_client import request_with_retry
+from utils.logger import get_logger
 
 API_URL = "https://api.morpho.org/graphql"
 MORPHO_URL = "https://app.morpho.org"
@@ -27,8 +27,10 @@ VAULTS_V2_BY_CHAIN: Dict[Chain, List[List[Any]]] = {
         [
             "Yearn OG USDC",
             "0xB885F6d448dA7E2C642Ec31190B629E40E87B069",
-            3,
-        ],  # TODO: lower to 2 after lowering siusd allocation
+            2,
+        ],
+        ["Sentora RLUSD Main", "0x6dC58a0FdfC8D694e571DC59B9A52EEEa780E6bf", 2],
+        ["Sentora PaypalUSD Main", "0xb576765fB15505433aF24FEe2c0325895C559FB2", 2],
     ],
     Chain.BASE: [
         ["Yearn OG USDC V2", "0xe7D0DBE3493830e2Ab62619211A2BfF0Fc60dB42", 2],
@@ -36,11 +38,12 @@ VAULTS_V2_BY_CHAIN: Dict[Chain, List[List[Any]]] = {
         ["OUSD Vault V2", "0x2Ba14b2e1E7D2189D3550b708DFCA01f899f33c1", 2],
     ],
     Chain.KATANA: [
-        ["Yearn OG USDC", "0xca44cbe1FB03691d43d2d93AA460e2fCB03878fE", 1],
-        ["Yearn OG USDT", "0x4284d4F9f4d61eA57B8F0943547c7C19C5B9B249", 1],
-        ["Yearn OG WBTC", "0x22c01834e1A261F8BebCa7D7B459db2F389785FF", 1],
-        ["Yearn OG ETH", "0x5920A6FC553af799542EDA628AdfCc9eA52e141C", 1],
+        # ["Yearn OG USDC", "0xca44cbe1FB03691d43d2d93AA460e2fCB03878fE", 1],
+        # ["Yearn OG USDT", "0x4284d4F9f4d61eA57B8F0943547c7C19C5B9B249", 1],
+        # ["Yearn OG WBTC", "0x22c01834e1A261F8BebCa7D7B459db2F389785FF", 1],
+        # ["Yearn OG ETH", "0x5920A6FC553af799542EDA628AdfCc9eA52e141C", 1],
         ["Yearn KAT", "0x9b1aE9548E4B46cEB6650f6CEc702bAf5CF2b8CC", 1],
+        ["Yearn Degen USDC", "0xA2d38c8A3D810EBcF4C2075821c5eC8F976bb692", 3],
     ],
 }
 
@@ -56,7 +59,7 @@ def get_chain_name(chain: Chain) -> str:
 
 def get_market_url(market_id: str, chain: Chain) -> str:
     """Build the Morpho UI URL for a market by its marketId."""
-    return f"{MORPHO_URL}/{get_chain_name(chain)}/market/{market_id}"
+    return f"{MORPHO_URL}/{get_chain_name(chain)}/market/{market_id}/"
 
 
 def get_vault_url(vault_address: str, chain: Chain) -> str:
@@ -64,15 +67,14 @@ def get_vault_url(vault_address: str, chain: Chain) -> str:
     return f"{MORPHO_URL}/{get_chain_name(chain)}/vault/{vault_address}"
 
 
-def fetch_market_name(market_id: str, chain: Chain) -> str:
-    """Fetch a human-readable name like 'WBTC/USDC (86.00%)' for a market_id.
+def fetch_market_metadata(market_id: str, chain: Chain) -> dict[str, Any] | None:
+    """Fetch symbols and loan decimals for a Morpho market.
 
-    Falls back to the raw market_id on error so alerts always render.
+    Returns None on error so alert rendering can fall back to decoded calldata.
     """
     query = """
     query GetMarket($marketId: String!, $chainId: Int!) {
         marketById(marketId: $marketId, chainId: $chainId) {
-            lltv
             loanAsset { symbol, decimals }
             collateralAsset { symbol }
         }
@@ -86,12 +88,24 @@ def fetch_market_name(market_id: str, chain: Chain) -> str:
         )
         market = response.json()["data"]["marketById"]
         collateral_symbol = market["collateralAsset"]["symbol"] if market.get("collateralAsset") else "idle"
-        loan_symbol = market["loanAsset"]["symbol"]
-        lltv_pct = int(market["lltv"]) / 1e18 * 100
-        return f"{collateral_symbol}/{loan_symbol} ({lltv_pct:.2f}%)"
+        loan_asset = market["loanAsset"]
+        return {
+            "name": f"{collateral_symbol}/{loan_asset['symbol']}",
+            "loan_symbol": loan_asset["symbol"],
+            "loan_decimals": int(loan_asset["decimals"]),
+        }
     except Exception as e:
-        logger.warning("Failed to fetch market name for %s: %s", market_id, e)
-        return market_id
+        logger.warning("Failed to fetch market metadata for %s: %s", market_id, e)
+        return None
+
+
+def fetch_market_name(market_id: str, chain: Chain) -> str:
+    """Fetch a human-readable name like 'WBTC/USDC' for a market_id.
+
+    Falls back to the raw market_id on error so alerts always render.
+    """
+    metadata = fetch_market_metadata(market_id, chain)
+    return metadata["name"] if metadata else market_id
 
 
 @dataclass(frozen=True)

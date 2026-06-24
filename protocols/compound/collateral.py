@@ -24,7 +24,7 @@ from utils.assets import (
 )
 from utils.chains import Chain
 from utils.formatting import format_usd
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.telegram import send_telegram_message
 from utils.web3_wrapper import ChainManager, Web3Client
 
@@ -219,12 +219,15 @@ def _analyze_market(market: MarketData) -> list[str]:
         logger.info("Market %s has no collateral", market.name)
         return alerts
 
-    logger.info("Market: %s (risk level %d)", market.name, market.risk_level)
-    logger.info("Total supply: %s", format_usd(market.total_supply_usd))
-    logger.info("Total borrow: %s", format_usd(market.total_borrow_usd))
-    logger.info("Total collateral: %s", format_usd(total_collateral_usd))
-    logger.debug("--------------------------------")
-    logger.debug("Asset | Supply | Allocation")
+    logger.info(
+        "Market: %s (risk level %d)\nTotal supply: %s\nTotal borrow: %s\nTotal collateral: %s",
+        market.name,
+        market.risk_level,
+        format_usd(market.total_supply_usd),
+        format_usd(market.total_borrow_usd),
+        format_usd(total_collateral_usd),
+    )
+    logger.debug("--------------------------------\nAsset | Supply | Allocation")
 
     total_risk_level = 0.0
     unknown_assets: list[str] = []
@@ -290,9 +293,11 @@ def _analyze_market(market: MarketData) -> list[str]:
             "Please update SUPPLY\\_ASSETS in utils/assets.py"
         )
 
-    logger.info("Total risk level: %s", f"{total_risk_level:.1%}")
-    logger.info("Reserves: %s", format_usd(market.reserves_usd))
-    logger.info("================================")
+    logger.info(
+        "Total risk level: %s\nReserves: %s\n================================",
+        f"{total_risk_level:.1%}",
+        format_usd(market.reserves_usd),
+    )
 
     return alerts
 

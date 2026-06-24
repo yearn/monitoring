@@ -5,7 +5,8 @@ import requests
 
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
-from utils.logging import get_logger
+from utils.logger import get_logger
+from utils.telegram import send_error_message
 from utils.web3_wrapper import Chain, ChainManager
 
 PROTOCOL = "ethena"
@@ -52,8 +53,7 @@ def fetch_json(url: str) -> dict | None:
     try:
         resp = requests.get(url, timeout=REQUEST_TIMEOUT)
         if resp.status_code != 200:
-            logger.error("HTTP %s for %s", resp.status_code, url)
-            logger.error("%s", resp.text)
+            logger.error("HTTP %s for %s\n%s", resp.status_code, url, resp.text)
             return None
         return resp.json()
     except Exception as e:
@@ -208,7 +208,7 @@ def get_tokens_supply() -> tuple[float, float] | tuple[None, None]:
                 raise Exception(f"Batch Call: Expected 3 responses, got {len(responses)}")
 
     except Exception:
-        send_alert(Alert(AlertSeverity.LOW, "Error during batch blockchain calls", PROTOCOL))
+        send_error_message("Error during batch blockchain calls", PROTOCOL)
         return None, None  # Cannot proceed if batch fails
 
     return usde_supply, susde_supply
@@ -218,7 +218,7 @@ def llama_risk_check():
     llama_risk = get_llamarisk_data()
 
     if llama_risk is None:
-        send_alert(Alert(AlertSeverity.LOW, "⚠️ Failed to fetch data", PROTOCOL))
+        send_error_message("⚠️ Failed to fetch data", PROTOCOL)
         return
 
     # NOTE: ethena data is not available, so we use llama_risk data only
@@ -324,10 +324,62 @@ class ChaosLabsAttestation:
     signature: str | None
 
 
+def ethena_native_backing_check() -> bool:
+    """Fallback backing-ratio check using Ethena's own transparency API.
+
+    Used when the Chaos Labs / Oracle Security attestation endpoint is unreachable
+    (e.g. provider outage). Only the quantitative backing ratio is checked here; the
+    Chaos-specific flags (delta-neutral, approved-assets-only, signed attestation) have
+    no equivalent on this source and are skipped.
+
+    Returns:
+        True if backing data was available and the check ran, False if Ethena's API
+        could not be reached either (so the caller can escalate to a hard alert).
+    """
+    supply = get_usde_supply()
+    collateral = get_total_collateral_usd()
+    if supply is None or collateral is None or supply == 0:
+        return False
+
+    # Mirror the Chaos Labs check's semantics: alert only when collateral no longer covers
+    # supply (ratio < 1). USDe targets ~1:1 collateral backing with a SEPARATE reserve fund as
+    # the buffer, so collateral-only ratios sit just above 1.0 in normal operation — applying
+    # COLLATERAL_RATIO_TRIGGER (which assumes reserve fund is included) here would false-positive.
+    backing_ratio = collateral / supply
+    if backing_ratio < 1:
+        send_alert(
+            Alert(
+                AlertSeverity.CRITICAL,
+                f"🚨 USDe NOT FULLY BACKED (Ethena API fallback)!\n"
+                f"Backing Assets: ${collateral:,.2f}\nTotal Supply: {supply:,.2f}\n"
+                f"Backing Ratio: {backing_ratio:.4f} ({backing_ratio * 100 - 100:+.2f}%)",
+                PROTOCOL,
+            )
+        )
+
+    logger.info(
+        "Ethena native API fallback – backing: $%s | supply: %s | ratio: %s",
+        f"{collateral:,.2f}",
+        f"{supply:,.2f}",
+        f"{backing_ratio:.4f}",
+    )
+    return True
+
+
 def chaos_labs_check():
     data = fetch_json(CHAOS_LABS_URL)
     if not data or not isinstance(data, list) or len(data) == 0:
-        send_alert(Alert(AlertSeverity.LOW, "⚠️ ETHENA: Failed to fetch Chaos Labs attestation data", PROTOCOL))
+        # Oracle Security / Chaos Labs PoR endpoint is unreachable (e.g. provider outage).
+        # Don't page on every run for an upstream outage we can't fix: log it and fall back
+        # to Ethena's own transparency API for the critical backing-ratio check. Only escalate
+        # to a hard alert if that fallback is also unavailable — meaning we have no backing
+        # data from any source. The Chaos-specific flags (delta-neutral, approved-assets,
+        # signature) are unavoidably skipped until the attestation endpoint recovers.
+        logger.warning("Chaos Labs attestation endpoint unavailable; falling back to Ethena native API")
+        if not ethena_native_backing_check():
+            send_error_message(
+                "⚠️ ETHENA: Failed to fetch Chaos Labs attestation data and Ethena API fallback", PROTOCOL
+            )
         return
 
     # Get the latest attestation (last item in the list)
@@ -345,7 +397,7 @@ def chaos_labs_check():
             signature=latest_attestation_raw.get("signature"),
         )
     except KeyError as e:
-        send_alert(Alert(AlertSeverity.LOW, f"⚠️ ETHENA: Missing field in Chaos Labs data: {e}", PROTOCOL))
+        send_error_message(f"⚠️ ETHENA: Missing field in Chaos Labs data: {e}", PROTOCOL)
         return
 
     attestation_time = datetime.fromisoformat(attestation.timestamp.replace("Z", "+00:00"))
@@ -389,9 +441,13 @@ def chaos_labs_check():
     # Calculate and report backing metrics for transparency
     backing_ratio = attestation.backing_assets_usd_value / attestation.total_supply
     reserve_buffer = attestation.backing_assets_and_reserve_fund_usd_value - attestation.total_supply
-    logger.info("Attestation from Chaos Labs: %s", attestation.timestamp)
-    logger.info("Backing Ratio: %s (%s%%)", f"{backing_ratio:.4f}", f"{backing_ratio * 100:,.2f}")
-    logger.info("Reserve Buffer: $%s", f"{reserve_buffer:,.2f}")
+    logger.info(
+        "Attestation from Chaos Labs: %s\nBacking Ratio: %s (%s%%)\nReserve Buffer: $%s",
+        attestation.timestamp,
+        f"{backing_ratio:.4f}",
+        f"{backing_ratio * 100:,.2f}",
+        f"{reserve_buffer:,.2f}",
+    )
 
 
 if __name__ == "__main__":

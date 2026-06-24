@@ -4,7 +4,8 @@ from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import Chain
 from utils.config import Config
-from utils.logging import get_logger
+from utils.logger import get_logger
+from utils.telegram import send_error_message
 from utils.web3_wrapper import ChainManager
 
 PROTOCOL = "apyusd"
@@ -101,7 +102,7 @@ def main() -> None:
         _set_cached_rate(current_rate)
     except Exception as e:
         logger.error("Error monitoring apxUSD rate oracle: %s", e)
-        send_alert(Alert(AlertSeverity.LOW, f"apxUSD rate oracle monitoring failed: {e}", PROTOCOL), plain_text=True)
+        send_error_message(f"apxUSD rate oracle monitoring failed: {e}", PROTOCOL)
 
 
 if __name__ == "__main__":

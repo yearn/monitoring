@@ -4,7 +4,7 @@ from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
 from utils.chains import Chain
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.web3_wrapper import ChainManager
 
 REDEEM_VALUE = int(1e18)
@@ -135,9 +135,15 @@ def process_origin(chain: Chain):
     redeem_value = metrics.redeem_value
     wrapped_oeth_redeem_value = metrics.wrapped_oeth_redeem_value
 
-    logger.info("Redeem value for OETH on %s: %s", chain.name, f"{redeem_value / 1e18:.6f}")
-    logger.info("Wrapped OETH redeem value on %s: %s", chain.name, f"{wrapped_oeth_redeem_value / 1e18:.6f}")
-    logger.info("Vault backing ratio on %s: %s", chain.name, f"{metrics.backing_ratio / 1e18:.6f}")
+    logger.info(
+        "Redeem value for OETH on %s: %s\nWrapped OETH redeem value on %s: %s\nVault backing ratio on %s: %s",
+        chain.name,
+        f"{redeem_value / 1e18:.6f}",
+        chain.name,
+        f"{wrapped_oeth_redeem_value / 1e18:.6f}",
+        chain.name,
+        f"{metrics.backing_ratio / 1e18:.6f}",
+    )
 
     # Caching for wrapped OETH redeem value, if value is lower, send telegram message
     cache_key = get_cache_key(chain)

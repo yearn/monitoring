@@ -20,7 +20,7 @@ from utils.cache import (
 )
 from utils.chains import safe_network_to_chain_id
 from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.telegram import escape_markdown, send_telegram_message
 
 load_dotenv()
@@ -59,7 +59,21 @@ def get_safe_transactions(
     }
 
     for attempt in range(max_retries):
-        response = requests.get(endpoint, params=params, headers=headers)
+        try:
+            response = requests.get(endpoint, params=params, headers=headers, timeout=10)
+        except requests.exceptions.RequestException as e:
+            # Transient transport failure (connection reset, read timeout, DNS).
+            # Retry with backoff instead of letting it bubble up and crash the run.
+            wait_time = 2**attempt
+            logger.warning(
+                "Request error talking to Safe API (%s), waiting %ss before retry (attempt %s/%s)...",
+                e,
+                wait_time,
+                attempt + 1,
+                max_retries,
+            )
+            time.sleep(wait_time)
+            continue
 
         if response.status_code == 200:
             return response.json()["results"]
@@ -84,8 +98,7 @@ def get_safe_transactions(
             time.sleep(wait_time)
             continue
         else:
-            logger.error("Error: %s", response.status_code)
-            logger.error("Response text: %s", response.text)
+            logger.error("Error: %s\nResponse text: %s", response.status_code, response.text)
             return []
 
     logger.error("Failed after %s retries for %s on %s", max_retries, safe_address, network_name)
@@ -111,6 +124,16 @@ def get_safe_current_nonce(safe_address: str, network_name: str) -> int | None:
         return None
 
 
+def _is_executed_safe_tx(tx: dict) -> bool:
+    """Return True for tx-service rows that are already executed.
+
+    The API request asks for ``executed=false``, but the monitor treats the
+    response defensively: if an item carries any executed marker, it must never
+    reach the alert path.
+    """
+    return tx.get("isExecuted") is True or bool(tx.get("executionDate")) or bool(tx.get("transactionHash"))
+
+
 def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]:
     """Fetch pending transactions worth alerting on.
 
@@ -119,19 +142,57 @@ def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]
     - Dead-slot: nonce < safe.currentNonce. These remain in the API as
       ``executed=false`` because a competing tx at the same nonce executed
       first, but they will never run themselves.
+    - Executed rows: any tx-service row with executed markers. These must never
+      alert even if the API includes them in an ``executed=false`` response.
+
+    The baseline is the higher of (a) the last nonce we already alerted on
+    and (b) ``currentNonce - 1`` (the last *executed* nonce, when we could
+    fetch it). A tx is eligible iff ``nonce > baseline``.
+
+    When ``currentNonce`` is unknown (e.g. Safe v1 endpoint 429'd), the chain
+    baseline can't be computed safely, so we fail closed and skip alerts for
+    this safe until the next run. That prevents dead-slot txs from alerting as
+    queued after a competing tx at the same nonce has already executed.
     """
     last_cached_nonce = get_last_executed_nonce_from_file(safe_address)
     current_safe_nonce = get_safe_current_nonce(safe_address, network_name)
     pending_txs = get_safe_transactions(safe_address, network_name, executed=False)
 
-    baseline = last_cached_nonce
-    if current_safe_nonce is not None:
-        chain_baseline = current_safe_nonce - 1
-        if chain_baseline > last_cached_nonce:
-            write_last_executed_nonce_to_file(safe_address, chain_baseline)
-        baseline = max(baseline, chain_baseline)
+    if current_safe_nonce is None:
+        logger.warning(
+            "Skipping pending tx alerts for %s on %s because currentNonce could not be fetched",
+            safe_address,
+            network_name,
+        )
+        return []
 
-    return [tx for tx in pending_txs if int(tx["nonce"]) > baseline]
+    baseline = last_cached_nonce
+    chain_baseline = current_safe_nonce - 1
+    if chain_baseline > last_cached_nonce:
+        write_last_executed_nonce_to_file(safe_address, chain_baseline)
+    baseline = max(baseline, chain_baseline)
+
+    return [tx for tx in pending_txs if not _is_executed_safe_tx(tx) and int(tx["nonce"]) > baseline]
+
+
+def _pending_filter_diag(safe_address: str, network_name: str) -> dict:
+    """Snapshot the filter inputs for diagnostic logging.
+
+    Re-reads the on-disk cache and the live ``currentNonce`` so
+    ``check_for_pending_transactions`` can log the exact numbers that
+    decided what to alert on, without leaking them through the
+    ``get_pending_transactions`` return value.
+    """
+    last_cached = get_last_executed_nonce_from_file(safe_address)
+    current = get_safe_current_nonce(safe_address, network_name)
+    chain_baseline = (current - 1) if current is not None else None
+    baseline = max(last_cached, chain_baseline) if chain_baseline is not None else last_cached
+    return {
+        "last_cached_nonce": last_cached,
+        "current_safe_nonce": current,
+        "chain_baseline": chain_baseline,
+        "baseline": baseline,
+    }
 
 
 def get_safe_url(safe_address: str, network_name: str) -> str:
@@ -195,6 +256,18 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
     expected_proposers = YEARN_EXPECTED_PROPOSERS.get((network_name, safe_address.lower()), set())
 
     if pending_transactions:
+        diag = _pending_filter_diag(safe_address, network_name)
+        logger.info(
+            "safe %s on %s: last_cached=%s currentNonce=%s chain_baseline=%s baseline=%s pending=%d",
+            safe_address,
+            network_name,
+            diag["last_cached_nonce"],
+            diag["current_safe_nonce"],
+            diag["chain_baseline"],
+            diag["baseline"],
+            len(pending_transactions),
+        )
+        highest_alerted_nonce = None
         for tx in pending_transactions:
             nonce = int(tx["nonce"])
 
@@ -299,8 +372,13 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
             # for unexpected proposers and for all non-Yearn protocol alerts.
             disable_notification = is_yearn_multisig and not unexpected_proposer
             send_telegram_message(message, protocol, disable_notification)
-            # write the last executed nonce to file
-            write_last_executed_nonce_to_file(safe_address, nonce)
+            if highest_alerted_nonce is None or nonce > highest_alerted_nonce:
+                highest_alerted_nonce = nonce
+                # Persist progress after each delivered alert, but never move
+                # the scalar nonce cache backwards. The Safe tx-service returns
+                # pending txs in DESCENDING nonce order, so a lower nonce must
+                # not overwrite a higher nonce already alerted in this batch.
+                write_last_executed_nonce_to_file(safe_address, highest_alerted_nonce)
     else:
         logger.info("No pending transactions found with higher nonce than the last executed transaction.")
 

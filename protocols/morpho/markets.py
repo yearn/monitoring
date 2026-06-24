@@ -12,9 +12,9 @@ from typing import Any, Dict, List
 import requests
 
 from utils.chains import Chain
-from utils.http import request_with_retry
-from utils.logging import get_logger
-from utils.telegram import send_telegram_message
+from utils.http_client import request_with_retry
+from utils.logger import get_logger
+from utils.telegram import send_error_message, send_telegram_message
 
 # Configuration constants
 API_URL = "https://api.morpho.org/graphql"
@@ -48,36 +48,20 @@ VAULTS_BY_CHAIN = {
         [
             "Yearn OG USDC",
             "0xF9bdDd4A9b3A45f980e11fDDE96e16364dDBEc49",
-            3,
-        ],  # TODO: lower to 2 after lowering siusd allocation
+            2,
+        ],
         ["OUSD", "0x5B8b9FA8e4145eE06025F642cAdB1B47e5F39F04", 2],
-        # these vaults are not used by yVaults
-        # ["Gauntlet WBTC Core", "0x443df5eEE3196e9b2Dd77CaBd3eA76C3dee8f9b2", 3],
-        # ["Gauntlet WETH Core", "0x4881Ef0BF6d2365D3dd6499ccd7532bcdBCE0658", 3],
-        # ["Gauntlet USDC Core", "0x8eB67A509616cd6A7c1B3c8C21D48FF57df3d458", 4],
-        # ["MEV Capital USDC", "0xd63070114470f685b75B74D60EEc7c1113d33a3D", 4],
         # Vault Bridge for Katana Chain
         ["Vault Bridge USDC", "0xBEefb9f61CC44895d8AEc381373555a64191A9c4", 1],
         ["Vault Bridge USDT", "0xc54b4E08C1Dcc199fdd35c6b5Ab589ffD3428a8d", 1],
         ["Vault Bridge WETH", "0x31A5684983EeE865d943A696AAC155363bA024f9", 1],
         ["Vault Bridge WBTC", "0x812B2C6Ab3f4471c0E43D4BB61098a9211017427", 2],
-        ["Sentora PYUSD", "0x19b3cD7032B8C062E8d44EaCad661a0970DD8c55", 2],
-        ["Sentora RLUSD", "0x71cb2F8038B2C5D65ddc740B2F3268890CD2A89C", 2],
     ],
     Chain.BASE: [
         ["Moonwell Flagship USDC", "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca", 1],
         ["Yearn OG USDC", "0xef417a2512C5a41f69AE4e021648b69a7CdE5D03", 2],
         ["Yearn OG WETH", "0x1D795E29044A62Da42D927c4b179269139A28A6B", 2],
         ["OUSD", "0x581Cc9a73Ec7431723A4a80699B8f801205841F1", 2],
-        # ["GauntletUSDC Prime", "0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61", 1],
-        # ["Gauntlet USDT Prime", "0x585867B44914942578149766B305496374E33682", 1],
-        # ["SteakhousePrime USDC", "0xBEEFE94c8aD530842bfE7d8B397938fFc1cb83b2", 1],
-        # ["Moonwell Flagship ETH", "0xa0E430870c4604CcfC7B38Ca7845B1FF653D0ff1", 2],
-        # ["Moonwell Flagship EURC", "0xf24608E0CCb972b0b0f4A6446a0BBf58c701a026", 2],
-        # ["Gauntlet WETH Core", "0x6b13c060F13Af1fdB319F52315BbbF3fb1D88844", 2],
-        # ["Seamless/Gauntlet WETH", "0x27D8c7273fd3fcC6956a0B370cE5Fd4A7fc65c18", 2],
-        # ["Seamless/Gauntlet USDC", "0x616a4E1db48e22028f6bbf20444Cd3b8e3273738", 2],
-        # ["Seamless/Gauntlet cbBTC", "0x5a47C803488FE2BB0A0EAaf346b420e4dF22F3C7", 2],
     ],
     Chain.KATANA: [
         ["Yearn OG WETH", "0xFaDe0C546f44e33C134c4036207B314AC643dc2E", 1],
@@ -275,6 +259,10 @@ MARKETS_RISK_2 = {
         "0xd8a8e6667f58aa9229e8979bd619742b1660ee856c200a93e407dbccb7222323",  # cbBTC/PYUSD -> lltv 86%, oracle: chainlink cbBTC/USD and Chainlink PYUSD/USD.
         "0x6d2fba32b8649d92432d036c16aa80779034b7469b63abc259b17678857f31c2",  # wstETH/USDC -> lltv 86%, oracle: MorphoChainlinkOracleV2 —  Api3 wstETH/USD + Api3 USDC/USD.
         "0xba3ba077d9c838696b76e29a394ae9f0d1517a372e30fd9a0fc19c516fb4c5a7",  # cbBTC/USDC -> lltv 86%, oracle: MorphoChainlinkOracleV2, Api3 cbBTC/USD + Api3 USDC/USD.
+        "0x15bb2a6af0c909eed19fb1f2ceeead34ecbdcba626de752c6b09389ee14eec32",  # kBTC/RLUSD -> lltv 86%, oracle: Chainlink BTC/USD and Chainlink RLUSD/USD.
+        "0xe51f9aaad25d0e755429cf77076b3c2d37cb1228ed81f8a5482f2102c220eef5",  # kBTC/PYUSD -> lltv 86%, oracle: Chainlink BTC/USD and Chainlink PYUSD/USD.
+        "0xe3df58f9d3011b7481ff36b939fa5f8da642f34ea5792d25d3958dbf1efa26d7",  # USD3/USDC -> lltv 91.5%, oracle: MorphoChainlinkOracleV2, USD3 ERC4626 vault rate (underlying USDC). No price feeds; USDC = $1.
+        "0xf8c5aa31ea6b2a068a9eddb46dd110cae57bf0f12be9583a3f9a818effecba89",  # PT-USD3-17DEC2026/USDC -> lltv 86%, oracle: MorphoChainlinkOracleV2, PendleSparkLinearDiscountOracle PT feed for PT-USD3. No quote feed (USDC = $1). Discount 30% per year.
     ],
     Chain.BASE: [
         "0x6aa81f51dfc955df598e18006deae56ce907ac02b0b5358705f1a28fcea23cc0",  # wstETH/WETH -> lltv 96.5%, oracle: Chainlink wstETH-stETH Exchange Rate
@@ -331,8 +319,6 @@ MARKETS_RISK_3 = {
         "0xdf034d0351a4c0af947e1a37ecd5ccbce60d72eac90de6fcad48c74e2869d14c",  # PT-iUSD-25JUN2026/USDC -> lltv 91.5%, oracle: same stack as PT-siUSD row but Ojo PT Feed (Pendle-compatible) for PT leg; InfiniFi RT + dummy USDC.
         "0xc6ae8e71e11ef511acee3f6cc6ad2af67b862877d459e3789905f537c85db5e3",  # PT-sUSDE-25SEP2025/DAI -> lltv 91.5%, oracle: PendleSparkLinearDiscountOracle with linear discount oracle for sUSDE. No price oracle for DAI, USDe = DAI.
         "0x27b9a0a5bfee98a31eb51e3850250d103a9f8e41673c782defc66aa943af0e65",  # PT-srUSDe-2APR2026/USDC -> lltv 91.5%, oracle: Pendle PT exchange rate(PT to asset) srUSDe. USDC = 1 using dummy oracle.
-        "0x15bb2a6af0c909eed19fb1f2ceeead34ecbdcba626de752c6b09389ee14eec32",  # kBTC/RLUSD -> lltv 86%, oracle: Chainlink BTC/USD and Chainlink RLUSD/USD.
-        "0xe51f9aaad25d0e755429cf77076b3c2d37cb1228ed81f8a5482f2102c220eef5",  # kBTC/PYUSD -> lltv 86%, oracle: Chainlink BTC/USD and Chainlink PYUSD/USD.
     ],
     Chain.BASE: [
         "0x4944a1169bc07b441473b830308ffe5bb535c10a9f824e33988b60738120c48e",  # LBTC/cbBTC -> lltv 91.5%, oracle: Custom moonwell oracle. Base feed is fetched from upgradeable oracle which uses 2 oracles. Primary oracle is redstone oracle, if the price changes more than 2% than it uses fallback oracle chainlink oracle. Chainlink didn't have an exchange rate feed. Redstone was the only provider for the LBTC reserves.
@@ -347,6 +333,7 @@ MARKETS_RISK_3 = {
     Chain.KATANA: [
         "0xd8a93a4cd16f843c385391e208a9a9f2fd75aedfcca05e4810e5fbfcaa6baec6",  # wsrUSD/vbUSDC -> lltv 91.5%, oracle: API3 wsrUSD/rUSD Exchange Rate, rUSD = vbUSDC.
         "0xf7fc5cc82200ddf8f23188ddbd6727eda2c8bc41863e91fb767bbc6e4f71890e",  # siUSD/vbUSDC -> lltv 86%, oracle: MorphoChainlinkOracleV2, Chainlink SIUSD/USD; no quote feed (vbUSDC = USD).
+        "0xea8f588be62079a1ad874bf7c7217166b323e0fe8ea3e59b584430ed1b859ace",  # stcUSD/vbUSDC -> lltv 86%, oracle: MorphoChainlinkOracleV2, Chainlink STCAPUSD/CAPUSD exchange rate, Chainlink CAPUSD/USD and Chainlink USDC/USD.
     ],
     Chain.ARBITRUM: [
         "0x71c2954e00c8f72864600c9d1d1cd70fa15202c4294cd938d80add3be2eced26",  # sUSDai/USDC -> lltv 91.5%, oracle: Chronicle sUSDai/USD and Chainlink USDC/USD.
@@ -401,12 +388,12 @@ ALLOCATION_TIERS = {
     5: 0.01,  # Unknown market max allocation
 }
 
-# Define max risk thresholds by risk level
+# Define max risk thresholds by risk level (each tier is level * 1.15, capped at 5.00)
 MAX_RISK_THRESHOLDS = {
-    1: 1.10,  # Risk tier 1 max total risk
-    2: 2.20,  # Risk tier 2 max total risk
-    3: 3.30,  # Risk tier 3 max total risk
-    4: 4.40,  # Risk tier 4 max total risk
+    1: 1.15,  # Risk tier 1 max total risk
+    2: 2.30,  # Risk tier 2 max total risk
+    3: 3.45,  # Risk tier 3 max total risk
+    4: 4.60,  # Risk tier 4 max total risk
     5: 5.00,  # Risk tier 5 max total risk
 }
 
@@ -1091,21 +1078,17 @@ def main() -> None:
     try:
         response = request_with_retry("post", API_URL, json=json_data)
     except requests.RequestException as e:
-        send_telegram_message(
+        send_error_message(
             f"🚨 Problem with fetching data for Morpho markets: {e.response.status_code} 🚨",
             PROTOCOL,
-            True,
-            True,
         )
         return
 
     data = response.json()
     if "errors" in data:
-        send_telegram_message(
+        send_error_message(
             f"🚨 GraphQL error when fetching Morpho data. Response code: {response.status_code} 🚨",
             PROTOCOL,
-            True,
-            True,
         )
         return
 

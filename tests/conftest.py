@@ -18,10 +18,14 @@ import pytest
 def _isolate_from_live_apis(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Block accidental live API/RPC calls and reset cross-test singletons.
 
-    Strips `ETHERSCAN_TOKEN` and every `PROVIDER_URL_*` so a missing mock
-    short-circuits cheaply via the "no token / no provider" code paths that
-    already exist for production use. Tests that intentionally exercise
-    those code paths opt back in via @patch.dict.
+    Strips `ETHERSCAN_TOKEN`, every `PROVIDER_URL_*`, every `TELEGRAM_*`
+    credential, and emergency webhook credentials so a missing mock short-circuits cheaply via
+    the "no token / no provider / no credentials" code paths that already exist
+    for production use. Forces `LOG_LEVEL=INFO` so a developer's `.env`
+    `LOG_LEVEL=DEBUG` (which skips Telegram sends) can't change tested behavior.
+    Tests that intentionally exercise those code paths opt back in via
+    monkeypatch / @patch.dict. This keeps local runs deterministic and matching
+    CI, where none of these vars are set.
 
     Also clears `ChainManager._instances` so a real client object cached by
     one test can't leak into the next, and points `CACHE_DIR` at a per-test
@@ -29,10 +33,15 @@ def _isolate_from_live_apis(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     repo and never leak entries between tests.
     """
     for key in list(os.environ):
-        if key == "ETHERSCAN_TOKEN" or key.startswith("PROVIDER_URL_"):
+        if key in {"ETHERSCAN_TOKEN", "LIQUIDITY_WEBHOOK_SECRET"} or key.startswith(
+            ("PROVIDER_URL_", "TELEGRAM_", "LIQUIDITY_WEBHOOK_")
+        ):
             monkeypatch.delenv(key, raising=False)
-    # `cache_path` reads this module global at call time, so the redirect takes
-    # effect for caches created at import (they resolve their dir lazily).
+    monkeypatch.setenv("LOG_LEVEL", "INFO")
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path))
+    # `cache_path` reads this module global at call time when the env var is
+    # unset, so keep both path entry points redirected for tests that patch env.
+    monkeypatch.setattr("utils.paths.CACHE_DIR", str(tmp_path))
     monkeypatch.setattr("utils.cache.CACHE_DIR", str(tmp_path))
     try:
         from utils.web3_wrapper import ChainManager

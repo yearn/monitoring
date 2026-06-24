@@ -4,7 +4,7 @@ import os
 
 import requests
 
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 logger = get_logger("bad-debt")
 
@@ -60,8 +60,7 @@ def get_data():
 
 
 def send_telegram_message(message):
-    logger.info("Sending telegram message...")
-    logger.info("%s", message)
+    logger.info("Sending telegram message...\n%s", message)
     bot_token = os.getenv("BAD_DEBT_TELEGRAM_TOKEN")
     chat_id = os.getenv("BAD_DEBT_TELEGRAM_CHAT_ID")
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"

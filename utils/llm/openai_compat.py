@@ -10,7 +10,7 @@ import json
 from typing import Any
 
 from utils.llm.base import LLMError, LLMProvider
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 logger = get_logger("utils.llm.openai_compat")
 

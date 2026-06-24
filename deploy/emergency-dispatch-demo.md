@@ -5,8 +5,8 @@
 ```
 monitoring-scripts-py                    liquidity-monitoring
 +------------------------+              +---------------------------+
-| Protocol monitor       |   GitHub     | emergency_withdraw.yml    |
-| detects issue          | ----------> | receives dispatch event   |
+| Protocol monitor       |   Webhook    | /webhook/emergency        |
+| detects issue          | ----------> | receives signed payload   |
 | (HIGH or CRITICAL)     |   API        |                           |
 +------------------------+              +---------------------------+
                                                     |
@@ -23,8 +23,8 @@ monitoring-scripts-py                    liquidity-monitoring
 
 1. A protocol monitor in `monitoring-scripts-py` detects an issue
 2. It fires `send_alert(Alert(AlertSeverity.HIGH/CRITICAL, message, protocol))`
-3. The alert hook calls `dispatch_emergency_withdrawal()`, which sends a `repository_dispatch` event to `liquidity-monitoring`
-4. The `emergency_withdraw.yml` workflow picks it up and:
+3. The alert hook calls `dispatch_emergency_withdrawal()`, which sends a signed JSON webhook to `liquidity-monitoring`
+4. The webhook handler picks it up and:
    - Looks up the protocol in `emergency_config.json` to find which vaults/markets to act on
    - Zeros the `forced_cap` and `forced_percentage` for those markets in `forced_caps.json`
 
@@ -47,38 +47,56 @@ monitoring-scripts-py                    liquidity-monitoring
 | ethplus | rtoken | Coverage below threshold, StRSR rate drop |
 | origin | pegs | Wrapped OETH redeem value drop, backing ratio drop |
 | usdai | usdai | _(hook registered)_ |
+| 3jane | 3jane | USD3/sUSD3 PPS decrease, junior buffer low, vault shutdown, protocol pause |
 
 ## Safety mechanisms
 
 - **60-minute cooldown** per protocol (prevents duplicate dispatches from repeated alerts)
 - **DEBUG mode** skips dispatch (same as Telegram)
 - **DISPATCHABLE_PROTOCOLS** whitelist (only configured protocols can trigger)
-- **`PAT_DISPATCH`** fine-grained token required (scoped to liquidity-monitoring repo)
+- **`LIQUIDITY_WEBHOOK_SECRET`** required for `X-Hub-Signature-256` HMAC verification
+
+## Webhook configuration
+
+By default, the monitoring dispatcher sends to:
+
+```text
+http://127.0.0.1:8080/webhook/emergency
+```
+
+Set `LIQUIDITY_WEBHOOK_SECRET` to the shared webhook secret. The dispatcher serializes the JSON body once, signs those exact bytes with HMAC-SHA256, and sends:
+
+```text
+X-Hub-Signature-256: sha256=<hmac>
+Content-Type: application/json
+```
+
+Override the endpoint with `LIQUIDITY_WEBHOOK_URL` only when the webhook is not running on the default local address.
 
 ## Manual trigger script
 
-To manually trigger an emergency withdrawal dispatch:
+To manually trigger an emergency withdrawal webhook:
 
 ### CRITICAL (direct commit + immediate reallocation)
 
 ```bash
-gh api repos/tapired/liquidity-monitoring/dispatches \
-  -X POST \
-  -f event_type=emergency_withdrawal \
-  -f 'client_payload[protocol]=usdai' \
-  -f 'client_payload[severity]=CRITICAL'
+body='{"event_type":"emergency_withdrawal","client_payload":{"protocol":"usdai","severity":"CRITICAL","message":"manual trigger"}}'
+sig="$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$LIQUIDITY_WEBHOOK_SECRET" -hex | awk '{print $2}')"
+curl -sS -X POST http://127.0.0.1:8080/webhook/emergency \
+  -H "Content-Type: application/json" \
+  -H "X-Hub-Signature-256: sha256=$sig" \
+  --data-binary "$body"
 ```
 
 ### HIGH (opens PR for review)
 
 ```bash
-gh api repos/tapired/liquidity-monitoring/dispatches \
-  -X POST \
-  -f event_type=emergency_withdrawal \
-  -f 'client_payload[protocol]=usdai' \
-  -f 'client_payload[severity]=HIGH'
+body='{"event_type":"emergency_withdrawal","client_payload":{"protocol":"usdai","severity":"HIGH","message":"manual trigger"}}'
+sig="$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$LIQUIDITY_WEBHOOK_SECRET" -hex | awk '{print $2}')"
+curl -sS -X POST http://127.0.0.1:8080/webhook/emergency \
+  -H "Content-Type: application/json" \
+  -H "X-Hub-Signature-256: sha256=$sig" \
+  --data-binary "$body"
 ```
 
 Replace `usdai` with any protocol from the list above.
-
-A **204 (no output)** response means the dispatch was sent successfully. Check the [Actions tab](https://github.com/tapired/liquidity-monitoring/actions) to see the workflow run.

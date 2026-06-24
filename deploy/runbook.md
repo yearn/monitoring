@@ -9,10 +9,12 @@ All command examples assume you are SSH'd into the VPS as the deploy user (the
 same account the systemd unit runs as), with the repository checked out at
 `/srv/monitoring`.
 
-No Docker, no compose, no Caddy, no reverse proxy. One systemd unit runs
+No Docker or compose. One systemd unit runs
 [supercronic](https://github.com/aptible/supercronic), which executes
 `python -m automation run <profile>` on each cron tick per
 `automation/jobs.yaml`.
+An optional `monitoring-api` unit exposes persisted alert history on localhost;
+public authentication and rate limiting belong at the reverse proxy.
 
 ---
 
@@ -20,6 +22,7 @@ No Docker, no compose, no Caddy, no reverse proxy. One systemd unit runs
 
 ```sh
 systemctl status monitoring
+systemctl status monitoring-api
 ```
 
 See the schedule supercronic is actually running (rendered from `jobs.yaml`):
@@ -39,6 +42,7 @@ record of what ran and when.
 
 ```sh
 journalctl -u monitoring -f --since '15 min ago'
+journalctl -u monitoring-api -f
 ```
 
 supercronic prints a structured line per job (`channel=stdout`, `job.position`,
@@ -77,18 +81,21 @@ Contributors merge to `main` through PRs; nobody normally SSHes in to ship code.
 Two things move `main` onto the box, split on *"does the change need the
 scheduler restarted to take effect?"*
 
-**Auto-sync (no restart, the common case).** The `multisig` profile runs
-`git pull --ff-only` before its tasks every 10 minutes (`sync_before_run: true`
-in `jobs.yaml`). Since supercronic re-spawns every profile fresh against the
-on-disk tree, that one pull keeps the whole checkout current for *all* profiles
-within ~10 minutes — every other profile rides along for free. The pull is
-best-effort: a failure is logged (`journalctl -u monitoring | grep 'pre-run git
-sync'`) and the multisig checks run against the existing checkout anyway, so a
-git hiccup never silences an alert. This covers **scripts, config modules, data,
-and `jobs.yaml` task bodies** — anything read fresh by a subprocess.
+**Auto-sync (no restart, the common case).** The `multisig` profile fetches
+`origin main` and runs `git reset --hard origin/main` before its tasks every 10
+minutes (`sync_before_run: true` in `jobs.yaml`). Since supercronic re-spawns
+every profile fresh against the on-disk tree, that one sync keeps the whole
+checkout current for *all* profiles within ~10 minutes — every other profile
+rides along for free. Tracked local edits are intentionally discarded in favor
+of reviewed `main`, so the VPS does not get stuck on a divergent local branch or
+operator hotfix. The sync is best-effort: a failure is logged (`journalctl -u
+monitoring | grep 'pre-run git sync'`) and the multisig checks run against the
+existing checkout anyway, so a git hiccup never silences an alert. This covers
+**scripts, config modules, data, and `jobs.yaml` task bodies** — anything read
+fresh by a subprocess.
 
 So for the common case — a script tweak, a new task in a profile — **merge the
-PR and the next ~10-min multisig tick pulls it in; no SSH needed.**
+PR and the next ~10-min multisig tick syncs it in; no SSH needed.**
 
 **Manual restart (cadence + deps).** Two kinds of change land on disk via the
 auto-sync but stay inert until a restart, because they're read once at scheduler
@@ -102,7 +109,7 @@ For those, after the PR merges:
 
 ```sh
 cd /srv/monitoring
-git pull --ff-only            # or just let the next multisig tick land it
+git fetch origin main && git reset --hard origin/main  # or let the next multisig tick land it
 uv sync --frozen --extra ai   # only if pyproject.toml / uv.lock changed (--extra ai: openai client for the AI explainer)
 sudo systemctl restart monitoring   # re-renders the crontab and re-points supercronic at the tree
 ```
@@ -190,6 +197,68 @@ skipped, not queued) — the others keep ticking.
 
 ---
 
+## Alerts API
+
+The alerts API is a separate service. It reads the SQLite alert database under
+`/srv/cache` and binds to `127.0.0.1:8923` by default, so stopping it does not
+stop scheduled monitoring. See [`alerts-api.md`](./alerts-api.md) for endpoint
+examples and response shapes.
+
+```sh
+sudo systemctl enable --now monitoring-api
+systemctl status monitoring-api
+journalctl -u monitoring-api -f
+curl http://127.0.0.1:8923/healthz
+curl 'http://127.0.0.1:8923/v1/alerts?limit=10&source=protocol'
+```
+
+Forward public traffic through a reverse proxy to `127.0.0.1:8923`. The proxy
+must require bearer token or basic auth, apply rate limiting, and set request
+and response timeouts. Do not expose `/srv/cache` or the SQLite database file
+directly.
+
+---
+
+## SQLite state and cache migration
+
+Alert history and migrated monitor state live in `/srv/cache/monitoring.db`.
+SQLite may also create `/srv/cache/monitoring.db-wal` and
+`/srv/cache/monitoring.db-shm`; keep all three files local to the VPS and owned
+by the deploy user. `deploy/install.sh` installs the `sqlite3` CLI, creates the
+database schema, and imports existing text cache files into the `monitor_state`
+table.
+
+For the current live host, freeze writes briefly and run the migration once:
+
+```sh
+cd /srv/monitoring
+git pull --ff-only
+uv sync --frozen --extra ai
+sudo systemctl stop monitoring
+sudo REPO_DIR=/srv/monitoring CACHE_DIR=/srv/cache ./deploy/migrate-file-cache-to-db.sh
+sudo systemctl daemon-reload
+sudo systemctl start monitoring
+sudo systemctl enable --now monitoring-api
+```
+
+The migration imports known cache files from `automation/jobs.yaml`, including
+`cache-id.txt`, `cache-id-daily.txt`, and `nonces.txt`. It preserves existing
+SQLite values by default, so rerunning it is safe. Use `--overwrite` only when
+the legacy text files are known to be the source of truth.
+
+Inspect migrated state with:
+
+```sh
+sqlite3 /srv/cache/monitoring.db \
+  'select namespace, key, value from monitor_state order by namespace, key limit 20;'
+```
+
+If rollback is needed, set `CACHE_BACKEND=file` in `/etc/monitoring/.env` and
+restart `monitoring`. That makes `utils.cache` use the legacy text files again.
+Remove the variable and restart to return to SQLite-backed cache state.
+
+---
+
 ## Common failure modes
 
 | Symptom | First thing to check | Likely cause |
@@ -210,12 +279,15 @@ skipped, not queued) — the others keep ticking.
   it via `ReadWritePaths` and sets `CACHE_DIR=/srv/cache`, which `utils.cache`
   resolves every cache file against). A profile only overrides a cache *basename*
   in `automation/jobs.yaml` when it needs an isolated file (e.g. daily).
+- SQLite database: `/srv/cache/monitoring.db` plus WAL/shm sidecars.
 - Env file: `/etc/monitoring/.env` (mode 0640, root:<deploy-user>;
   operator-supplied, not in git).
-- systemd unit: `/etc/systemd/system/monitoring.service`.
+- systemd units: `/etc/systemd/system/monitoring.service` and
+  `/etc/systemd/system/monitoring-api.service`.
 - Rendered crontab: `/tmp/crontab` (per-service `PrivateTmp`; regenerated on
   every start).
-- Code sync: no separate unit — the `multisig` profile's pre-run `git pull
-  --ff-only` (`sync_before_run` in `jobs.yaml`) every 10 min. The unit grants
+- Code sync: no separate unit — the `multisig` profile's pre-run `git fetch
+  origin main` + `git reset --hard origin/main` (`sync_before_run` in
+  `jobs.yaml`) every 10 min. The unit grants
   the repo write access via `ReadWritePaths=/srv/cache /srv/monitoring` so the
-  pull can update `.git/` under `ProtectSystem=strict`.
+  sync can update `.git/` under `ProtectSystem=strict`.

@@ -25,8 +25,8 @@ import requests
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.config import Config
 from utils.formatting import format_usd
-from utils.http import request_with_retry
-from utils.logging import get_logger
+from utils.http_client import request_with_retry
+from utils.logger import get_logger
 
 PROTOCOL = "maple"
 logger = get_logger(PROTOCOL)

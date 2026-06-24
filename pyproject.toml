@@ -8,7 +8,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "aiohappyeyeballs>=2.6.1",
-    "aiohttp==3.13.5",
+    "aiohttp==3.14.1",
     "aiosignal==1.4.0",
     "annotated-types==0.7.0",
     "async-timeout==5.0.1",
@@ -99,7 +99,7 @@ build-backend = "setuptools.build_meta"
 # they don't need a finder entry.
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["protocols*", "utils*", "automation*"]
+include = ["protocols*", "utils*", "automation*", "api*"]
 namespaces = true
 
 [tool.ruff]

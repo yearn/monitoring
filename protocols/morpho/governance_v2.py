@@ -37,8 +37,8 @@ from utils.cache import (
     write_last_value_to_file,
 )
 from utils.chains import Chain
-from utils.http import request_with_retry
-from utils.logging import get_logger
+from utils.http_client import request_with_retry
+from utils.logger import get_logger
 from utils.telegram import send_telegram_message
 
 PROTOCOL = "morpho"
@@ -251,11 +251,11 @@ def _explorer_link(chain: Chain, tx_hash: str) -> str:
 
 
 def _alert_pending_new(snapshot: V2GovernanceSnapshot, pc: PendingConfig) -> None:
-    decoded = decode_submit(pc.data)
+    decoded = decode_submit(pc.data, snapshot.chain)
     send_telegram_message(
         f"⏳ V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
         f"on {snapshot.chain.name}\n"
-        f"📥 Submitted: `{decoded}`\n"
+        f"📥 Submitted: {decoded}\n"
         f"⏰ Executable at: {_format_ts(pc.valid_at)}\n"
         f"🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}",
         PROTOCOL,

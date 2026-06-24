@@ -10,7 +10,7 @@ from eth_utils import function_signature_to_4byte_selector, to_checksum_address
 
 from utils.calldata.decoder import decode_calldata
 from utils.chains import EXPLORER_URLS, Chain
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 logger = get_logger("utils.proxy")
 

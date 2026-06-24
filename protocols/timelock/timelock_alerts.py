@@ -17,10 +17,10 @@ from utils.cache import cache_filename, get_last_value_for_key_from_file, write_
 from utils.calldata.decoder import decode_calldata, format_call_lines
 from utils.chains import EXPLORER_URLS, Chain
 from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
 from utils.safe_tx import unwrap_safe_exec_transaction
-from utils.telegram import MAX_MESSAGE_LENGTH, escape_markdown, send_telegram_message
+from utils.telegram import MAX_MESSAGE_LENGTH, escape_markdown, send_error_message, send_telegram_message
 from utils.web3_wrapper import ChainManager
 
 load_dotenv()
@@ -62,7 +62,8 @@ TIMELOCK_LIST: list[TimelockConfig] = [
     TimelockConfig("0x2efff88747eb5a3ff00d4d8d0f0800e306c0426b", 1, "MAPLE", "Maple GovernorTimelock"),
     TimelockConfig("0xb2a3cf69c97afd4de7882e5fee120e4efc77b706", 1, "STRATA", "Strata 48h Timelock"),
     TimelockConfig("0x4f2682b78f37910704fb1aff29358a1da07e022d", 1, "STRATA", "Strata 24h Timelock"),
-    TimelockConfig("0x1dccd4628d48a50c1a7adea3848bcc869f08f8c2", 1, "3JANE", "3Jane TimelockController"),
+    TimelockConfig("0x1dccd4628d48a50c1a7adea3848bcc869f08f8c2", 1, "3JANE", "3Jane 24h TimelockController"),
+    TimelockConfig("0x3d3c41419ab401cd25055e8f9421d7d96d887885", 1, "3JANE", "3Jane 7d TimelockController"),
     # Chain 8453 - Base
     TimelockConfig("0xf817cb3092179083c48c014688d98b72fb61464f", 8453, "LRT", "superOETH Timelock"),
     # Yearn Timelock (0x88Ba032be87d5EF1fbE87336B7090767F367BF73) - all chains
@@ -365,6 +366,36 @@ def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain
         return None
 
 
+def _truncate_call_lines(call_lines: list[str], budget: int) -> str:
+    """Join ``call_lines`` to fit within ``budget`` chars, dropping whole trailing lines.
+
+    Slicing the joined text mid-line can sever a Markdown entity — e.g. cut an
+    opening backtick in a `signature` before its closing one — which Telegram
+    rejects with a 400 "can't parse entities". A failed send then blocks the
+    caller's dedupe cursor and wedges the monitor into a re-send loop. Dropping
+    whole lines keeps every entity balanced.
+    """
+    marker = "… (truncated)"
+    kept: list[str] = []
+    used = 0
+    for line in call_lines:
+        added = len(line) + (1 if kept else 0)  # +1 for the joining newline
+        if used + added > budget:
+            break
+        kept.append(line)
+        used += added
+
+    if len(kept) == len(call_lines):
+        return "\n".join(kept)
+
+    # Make room for the truncation marker by dropping more whole lines if needed.
+    while kept and used + len(marker) + 1 > budget:
+        dropped = kept.pop()
+        used -= len(dropped) + (1 if kept else 0)
+    kept.append(marker)
+    return "\n".join(kept)
+
+
 def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> str:
     """Build a Telegram alert message for a group of TimelockEvent events (same operationId).
 
@@ -451,7 +482,7 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
     if budget > 0:
         call_text = "\n".join(call_lines)
         if len(call_text) > budget:
-            call_text = call_text[: budget - 3] + "..."
+            call_text = _truncate_call_lines(call_lines, budget)
     else:
         call_text = ""
 
@@ -618,19 +649,15 @@ def main() -> None:
     if response is None:
         msg = "⚠️ Timelock alerts: Envio API is unreachable after 3 retries"
         _logger.error(msg)
-        protocols = {t.protocol for t in (filtered_timelocks or TIMELOCK_LIST)}
-        if "YEARN_TIMELOCK" in protocols:
-            protocols.add(YEARN_TIMELOCK_INTERNAL_PROTOCOL)
-        for protocol in protocols:
-            try:
-                send_telegram_message(msg, protocol)
-            except Exception:
-                _logger.exception("Failed to send Envio error alert for protocol %s", protocol)
+        try:
+            send_error_message(msg, "timelock")
+        except Exception:
+            _logger.exception("Failed to send Envio error alert")
         return
     if "errors" in response:
         msg = f"Timelock alerts: GraphQL errors: {response['errors']}"
         _logger.error(msg)
-        send_telegram_message(msg, protocol, plain_text=True)
+        send_error_message(msg, "timelock")
         return
 
     data = response.get("data", {})

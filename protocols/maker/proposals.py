@@ -3,8 +3,8 @@ from datetime import datetime
 import requests
 
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
-from utils.logging import get_logger
-from utils.telegram import escape_markdown, send_telegram_message
+from utils.logger import get_logger
+from utils.telegram import escape_markdown, send_error_message, send_telegram_message
 
 PROTOCOL = "maker"
 logger = get_logger(PROTOCOL)
@@ -78,11 +78,11 @@ def get_proposals():
     except requests.RequestException as e:
         error_message = f"Failed to fetch Sky executive proposals: {e}"
         logger.error("%s", error_message)
-        send_telegram_message(error_message, PROTOCOL, True, plain_text=True)
+        send_error_message(error_message, PROTOCOL)
     except Exception as e:
         error_message = f"Error processing Sky executive proposals: {e}"
         logger.error("%s", error_message)
-        send_telegram_message(error_message, PROTOCOL, True, plain_text=True)
+        send_error_message(error_message, PROTOCOL)
 
 
 if __name__ == "__main__":

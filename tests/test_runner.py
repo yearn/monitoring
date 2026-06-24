@@ -13,7 +13,7 @@ class TestRunWithAlert(unittest.TestCase):
         def ok() -> None:
             called["n"] += 1
 
-        with patch("utils.runner.send_telegram_message") as mock_send:
+        with patch("utils.runner.send_error_message") as mock_send:
             run_with_alert(ok, "yearn")
         self.assertEqual(called["n"], 1)
         mock_send.assert_not_called()
@@ -22,7 +22,7 @@ class TestRunWithAlert(unittest.TestCase):
         def boom() -> None:
             raise RuntimeError("kaboom")
 
-        with patch("utils.runner.send_telegram_message") as mock_send:
+        with patch("utils.runner.send_error_message") as mock_send:
             # Must NOT raise — the wrapper swallows and alerts
             run_with_alert(boom, "yearn", name="test.script")
 
@@ -32,9 +32,8 @@ class TestRunWithAlert(unittest.TestCase):
         self.assertIn("test.script", message)
         self.assertIn("RuntimeError", message)
         self.assertIn("kaboom", message)
-        # plain_text=True so Telegram doesn't parse Markdown on the exception string
-        self.assertTrue(call_args.kwargs.get("plain_text"))
-        self.assertTrue(call_args.kwargs.get("disable_notification"))
+        # Routed via send_error_message (plain-text + silent handling lives there);
+        # the protocol is forwarded as the label / fallback channel.
         self.assertEqual(call_args.args[1], "yearn")
 
     def test_alert_includes_github_run_url_when_present(self) -> None:
@@ -42,7 +41,7 @@ class TestRunWithAlert(unittest.TestCase):
             raise ValueError("x")
 
         with (
-            patch("utils.runner.send_telegram_message") as mock_send,
+            patch("utils.runner.send_error_message") as mock_send,
             patch("utils.runner.get_github_run_url", return_value="https://example.com/run/1"),
         ):
             run_with_alert(boom, "yearn", name="s")
@@ -54,7 +53,7 @@ class TestRunWithAlert(unittest.TestCase):
         def quit_() -> None:
             raise SystemExit(2)
 
-        with patch("utils.runner.send_telegram_message") as mock_send:
+        with patch("utils.runner.send_error_message") as mock_send:
             with self.assertRaises(SystemExit):
                 run_with_alert(quit_, "yearn")
         mock_send.assert_not_called()
@@ -63,7 +62,7 @@ class TestRunWithAlert(unittest.TestCase):
         def interrupted() -> None:
             raise KeyboardInterrupt()
 
-        with patch("utils.runner.send_telegram_message") as mock_send:
+        with patch("utils.runner.send_error_message") as mock_send:
             with self.assertRaises(KeyboardInterrupt):
                 run_with_alert(interrupted, "yearn")
         mock_send.assert_not_called()
@@ -75,7 +74,7 @@ class TestRunWithAlert(unittest.TestCase):
         def telegram_dies(*args: object, **kwargs: object) -> None:
             raise ConnectionError("telegram unreachable")
 
-        with patch("utils.runner.send_telegram_message", side_effect=telegram_dies):
+        with patch("utils.runner.send_error_message", side_effect=telegram_dies):
             # Must still return cleanly even when alerting itself fails
             run_with_alert(boom, "yearn", name="s")
 
@@ -83,7 +82,7 @@ class TestRunWithAlert(unittest.TestCase):
         def boom() -> None:
             raise RuntimeError("x")
 
-        with patch("utils.runner.send_telegram_message") as mock_send:
+        with patch("utils.runner.send_error_message") as mock_send:
             run_with_alert(boom, "yearn")
 
         message = mock_send.call_args.args[0]

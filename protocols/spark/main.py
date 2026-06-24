@@ -2,7 +2,7 @@ import json
 
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import Chain
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.web3_wrapper import ChainManager
 
 PROTOCOL = "spark"

@@ -1,0 +1,59 @@
+# Drop in /etc/systemd/system/monitoring-api.service then:
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now monitoring-api
+#   sudo systemctl status monitoring-api
+
+[Unit]
+Description=yearn monitoring alerts API
+Documentation=https://github.com/yearn/monitoring
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=__MONITOR_USER__
+Group=__MONITOR_USER__
+WorkingDirectory=__REPO_DIR__
+
+Environment=REPO_ROOT=__REPO_DIR__
+Environment=PATH=__REPO_DIR__/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LOG_LEVEL=INFO
+Environment=PYTHONUNBUFFERED=1
+Environment=CACHE_DIR=__CACHE_DIR__
+Environment=MONITORING_API_HOST=127.0.0.1
+Environment=MONITORING_API_PORT=8923
+
+ExecStartPre=+/bin/bash -c '\
+  install -m 750 -o root -g __MONITOR_USER__ -d __ETC_DIR__; \
+  if [ ! -f __ETC_DIR__/.env ]; then \
+    echo "monitoring-api: __ETC_DIR__/.env missing" >&2; \
+    exit 1; \
+  fi'
+
+EnvironmentFile=__ETC_DIR__/.env
+ExecStart=__REPO_DIR__/.venv/bin/python -m api
+
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__CACHE_DIR__
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=monitoring-api
+
+[Install]
+WantedBy=multi-user.target

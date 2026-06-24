@@ -6,7 +6,7 @@ from decimal import Decimal
 from utils.chains import Chain
 from utils.config import Config
 from utils.erc20_supply_delta_monitor import ERC20SupplyDeltaMonitorConfig, run_erc20_supply_delta_monitor
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 PROTOCOL = "usdai"
 logger = get_logger(f"{PROTOCOL}.large_mints")

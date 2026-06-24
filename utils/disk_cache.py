@@ -34,7 +34,7 @@ import time
 from typing import Any
 
 from utils.cache import cache_path
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 logger = get_logger("utils.disk_cache")
 

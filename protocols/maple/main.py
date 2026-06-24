@@ -19,7 +19,8 @@ from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_path, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import Chain
 from utils.formatting import format_usd
-from utils.logging import get_logger
+from utils.logger import get_logger
+from utils.telegram import send_error_message
 from utils.web3_wrapper import ChainManager
 
 PROTOCOL = "maple"
@@ -336,7 +337,7 @@ def main() -> None:
         )
     except Exception as e:
         logger.error("Error during Maple monitoring: %s", e)
-        send_alert(Alert(AlertSeverity.LOW, "Maple monitoring failed", PROTOCOL))
+        send_error_message("Maple monitoring failed", PROTOCOL)
 
 
 if __name__ == "__main__":

@@ -11,8 +11,8 @@ Usage:
 
 from typing import Callable
 
-from utils.logging import get_logger
-from utils.telegram import get_github_run_url, send_telegram_message
+from utils.logger import get_logger
+from utils.telegram import get_github_run_url, send_error_message
 
 logger = get_logger("utils.runner")
 
@@ -22,12 +22,15 @@ def run_with_alert(entrypoint: Callable[[], None], protocol: str, name: str | No
 
     KeyboardInterrupt and SystemExit are re-raised so explicit exits aren't
     swallowed. All other exceptions trigger a plain-text crash alert routed to
-    `protocol`'s Telegram channel, then this function returns normally so a CI
-    shell loop running multiple scripts continues to the next one.
+    the dedicated errors channel (labelled with `protocol`; falls back to
+    `protocol`'s own channel when no errors destination is configured), then this
+    function returns normally so a CI shell loop running multiple scripts
+    continues to the next one.
 
     Args:
         entrypoint: Zero-arg callable to execute (typically the script's `main`).
-        protocol: Telegram protocol key the crash alert should be routed to.
+        protocol: Telegram protocol key used to label the crash alert and as the
+            fallback channel.
         name: Optional display name for the script. Defaults to entrypoint.__module__.
     """
     try:
@@ -42,11 +45,6 @@ def run_with_alert(entrypoint: Callable[[], None], protocol: str, name: str | No
         if run_url:
             lines.append(f"Run: {run_url}")
         try:
-            send_telegram_message(
-                "\n".join(lines),
-                protocol,
-                disable_notification=True,
-                plain_text=True,
-            )
+            send_error_message("\n".join(lines), protocol, source="crash")
         except Exception:  # noqa: BLE001 - alerting must not itself crash the wrapper
             logger.exception("Failed to send crash alert for %s", script)

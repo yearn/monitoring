@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 from typing import Iterable
 
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.source_context import fetch_source
 
 logger = get_logger("utils.impl_diff")

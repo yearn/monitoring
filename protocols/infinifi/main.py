@@ -8,7 +8,8 @@ from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import Chain
 from utils.config import Config
-from utils.logging import get_logger
+from utils.logger import get_logger
+from utils.telegram import send_error_message
 from utils.web3_wrapper import ChainManager
 
 # Constants
@@ -27,11 +28,13 @@ FARM_RATIO_ACTIVATION_ALERT_THRESHOLD = 0.03
 FARM_RATIO_MIN_TVL_ALERT = 0.01
 SAFE_FARM_IDENTIFIERS = [
     "sentora pyusd",
+    "sentora prime main",
     "sgho",
     "maple",
     "cap",
     "aave horizon",
     "aave usdc",
+    "aave usdg",
     "syrupusdc",
     "autousd",
     "spark susdc",
@@ -150,8 +153,7 @@ def main():
             # target_reserve_ratio = to_float(params.get("reserveRatio"))
             # target_illiquid_ratio = to_float(params.get("illiquidTargetRatio"))
 
-        logger.info("--- Infinifi Stats ---")
-        logger.info("iUSD Supply:     $%s", f"{iusd_supply:,.2f}")
+        logger.info("--- Infinifi Stats ---\niUSD Supply:     $%s", f"{iusd_supply:,.2f}")
 
         if liquid_reserves > 0:
             logger.info("Liquid Reserves: $%s", f"{liquid_reserves:,.2f}")
@@ -168,8 +170,7 @@ def main():
             logger.info("Total Backing:   [Data Not Available]")
 
         if total_backing > 0:
-            logger.info("Liquid Ratio:    %.2f%%", reserve_ratio * 100)
-            logger.info("Illiquid Ratio:  %.2f%%", illiquid_ratio * 100)
+            logger.info("Liquid Ratio:    %.2f%%\nIlliquid Ratio:  %.2f%%", reserve_ratio * 100, illiquid_ratio * 100)
 
         if pending_redemptions > 0:
             logger.info("Pending Redeems: $%s", f"{pending_redemptions:,.2f}")
@@ -383,9 +384,13 @@ def main():
 
             if risky_exposure > 0:
                 min_required = risky_exposure * JUNIOR_RISKY_COVERAGE_MIN
-                logger.info("Junior TVL:      $%s", f"{junior_tvl:,.2f}")
-                logger.info("Risky Exposure:  $%s", f"{risky_exposure:,.2f}")
-                logger.info("Min Required:    $%s (%.0f%%)", f"{min_required:,.2f}", JUNIOR_RISKY_COVERAGE_MIN * 100)
+                logger.info(
+                    "Junior TVL:      $%s\nRisky Exposure:  $%s\nMin Required:    $%s (%.0f%%)",
+                    f"{junior_tvl:,.2f}",
+                    f"{risky_exposure:,.2f}",
+                    f"{min_required:,.2f}",
+                    JUNIOR_RISKY_COVERAGE_MIN * 100,
+                )
 
                 cache_key_junior_risky = f"{PROTOCOL}_junior_below_risky_breach"
                 if junior_tvl < min_required:
@@ -411,7 +416,7 @@ def main():
 
     except Exception as e:
         logger.error("Error: %s", e)
-        send_alert(Alert(AlertSeverity.LOW, f"Infinifi monitoring failed: {e}", PROTOCOL))
+        send_error_message(f"Infinifi monitoring failed: {e}", PROTOCOL)
 
 
 if __name__ == "__main__":

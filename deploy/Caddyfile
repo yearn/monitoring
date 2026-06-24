@@ -1,0 +1,100 @@
+# Caddy reverse proxy for the monitoring alerts API on a Hetzner VPS.
+#
+# Routes:
+#   GET /healthz  -> public (uptime checks); returns {"status":"ok"}
+#   everything else -> requires  Authorization: Bearer <one of ALERTS_API_TOKENS>
+#
+# Caddy provisions and renews TLS automatically once DNS for $ALERTS_API_DOMAIN
+# points at this box and ports 80 + 443 are reachable.
+#
+# Install (Debian/Ubuntu, official Caddy apt repo — https://caddyserver.com/docs/install):
+#   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
+#   sudo systemctl edit caddy        # add the [Service] Environment= block below
+#   sudo systemctl restart caddy
+#
+# Secrets are read from the environment (never hard-code them here). Add via
+# `sudo systemctl edit caddy`:
+#
+#   [Service]
+#   Environment=ALERTS_API_DOMAIN=alerts.example.com
+#   Environment=ALERTS_API_TOKENS=<token1>|<token2>   (pipe-separated; one per consumer)
+#   Environment=ACME_EMAIL=you@example.com
+#
+# Generate each token with `openssl rand -hex 32` (hex => safe inside the regex
+# below, nothing to escape) and join multiple with `|`. Clients then call the
+# API with:  -H "Authorization: Bearer <their-token>"
+#
+# Rate limiting (the commented `rate_limit` blocks) needs the caddy-ratelimit
+# plugin, which is NOT in the stock apt build. Either build it once with
+#   xcaddy build --with github.com/mholt/caddy-ratelimit
+# and uncomment the blocks + the `order` line, or leave them off and rely on the
+# Hetzner Cloud Firewall + fail2ban (Hetzner already absorbs L3/L4 volumetric
+# DDoS for free at its network edge).
+
+{
+	email {$ACME_EMAIL}
+	# Uncomment once the caddy-ratelimit plugin is installed:
+	# order rate_limit before reverse_proxy
+}
+
+{$ALERTS_API_DOMAIN} {
+	encode gzip
+
+	# Don't advertise the upstream server (Python BaseHTTP) or Caddy in
+	# responses — applies to proxied and Caddy-generated (e.g. 401) responses.
+	header -Server
+
+	# GET-only API; reject anything trying to push a body.
+	request_body {
+		max_size 4KB
+	}
+
+	# --- public health check (no auth) ---
+	handle /healthz {
+		# rate_limit {
+		# 	zone health {
+		# 		key    {remote_host}
+		# 		events 30
+		# 		window 1m
+		# 	}
+		# }
+		reverse_proxy 127.0.0.1:8923 {
+			# The stdlib server has no timeouts of its own and uses one
+			# thread per connection — these timeouts shield it from slowloris.
+			transport http {
+				dial_timeout 2s
+				read_timeout 5s
+				write_timeout 5s
+			}
+		}
+	}
+
+	# --- token-gated API (everything else) ---
+	handle {
+		# Accept any token in the pipe-separated ALERTS_API_TOKENS list.
+		@unauthorized {
+			not header_regexp Authorization "^Bearer ({$ALERTS_API_TOKENS})$"
+		}
+		error @unauthorized "unauthorized" 401
+
+		# rate_limit {
+		# 	zone api {
+		# 		key    {remote_host}
+		# 		events 60
+		# 		window 1m
+		# 	}
+		# }
+		reverse_proxy 127.0.0.1:8923 {
+			transport http {
+				dial_timeout 2s
+				read_timeout 5s
+				write_timeout 5s
+			}
+		}
+	}
+
+	log {
+		output file /var/log/caddy/alerts.log
+		format json
+	}
+}

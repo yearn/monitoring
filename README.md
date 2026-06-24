@@ -8,7 +8,6 @@ Monitoring scripts for DeFi protocols to track key metrics and send alerts. Join
 
 - [Aave V3](./protocols/aave/README.md)
 - [APYUSD](./protocols/apyusd/README.md)
-- [Bad Debt](./protocols/bad-debt/)
 - [Cap](./protocols/cap/README.md)
 - [Compound V3](./protocols/compound/README.md)
 - [Ethena](./protocols/ethena/README.md)
@@ -81,6 +80,8 @@ uv run protocols/aave/main.py
 ## Deployment
 
 In production the scripts run on a schedule via supercronic on a VPS, defined in [`automation/jobs.yaml`](./automation/jobs.yaml). See [`deploy/`](./deploy/) — [`install.sh`](./deploy/install.sh) provisions a host and [`runbook.md`](./deploy/runbook.md) covers operations.
+
+The optional read-only alerts API exposes persisted alert history from SQLite. See [`deploy/alerts-api.md`](./deploy/alerts-api.md) for endpoint examples and pagination.
 
 ## Code Style
 

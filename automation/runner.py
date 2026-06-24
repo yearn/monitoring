@@ -38,7 +38,7 @@ def _error_tail(stdout: str | None, stderr: str | None) -> str | None:
     """Extract a short, human-readable error tail from a failed task's output.
 
     Prefers stderr — uncaught tracebacks and the interpreter's own error output land there —
-    and falls back to stdout (where `utils.logging` handlers write). Returns the last few
+    and falls back to stdout (where `utils.logger` handlers write). Returns the last few
     non-empty lines, char-capped, or None when the task produced no output at all (the caller
     then falls back to the bare exit code).
     """
@@ -163,13 +163,13 @@ def run_profile(
 
 
 def _sync_repo(repo_root: Path) -> None:
-    """Fast-forward the checkout to origin before running the profile's tasks.
+    """Force the checkout to origin/main before running the profile's tasks.
 
-    Best-effort: a failed pull is logged but never blocks the run — these are
+    Best-effort: a failed sync is logged but never blocks the run — these are
     read-only checks, so running slightly older code is harmless, and we never
     want a transient git hiccup to silence an alert. See `automation.git_sync`.
     """
-    result = git_sync.pull_ff_only(repo_root)
+    result = git_sync.sync_to_remote_main(repo_root)
     if result.ok:
         logger.info("pre-run git sync: %s", result.output or "already up to date")
     else:
@@ -237,6 +237,13 @@ def _run_task(task: Task, *, profile: Profile, repo_root: Path, dry_run: bool) -
 def _send_failure_digest(result: ProfileResult) -> None:
     message = result.telegram_summary()
     try:
-        send_telegram_message(message, protocol=TELEGRAM_PROTOCOL, plain_text=False)
+        send_telegram_message(
+            message,
+            protocol=TELEGRAM_PROTOCOL,
+            plain_text=False,
+            source="automation_digest",
+            origin_protocol=TELEGRAM_PROTOCOL,
+            channel=TELEGRAM_PROTOCOL,
+        )
     except TelegramError as exc:
         logger.error("failed to send automation digest for %s: %s", result.profile, exc)

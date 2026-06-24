@@ -23,7 +23,7 @@ from web3 import Web3
 
 from utils.abi import load_abi
 from utils.chains import Chain
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.telegram import send_telegram_message_with_fallback
 from utils.web3_wrapper import ChainManager
 
@@ -287,9 +287,7 @@ def print_summary(issues: List[ShadowDebtIssue]) -> None:
     Args:
         issues: List of shadow debt issues.
     """
-    logger.info("=" * 80)
-    logger.info("SHADOW DEBT SUMMARY")
-    logger.info("=" * 80)
+    logger.info("=" * 80 + "\nSHADOW DEBT SUMMARY\n" + "=" * 80)
 
     # Group by chain
     issues_by_chain: Dict[Chain, List[ShadowDebtIssue]] = {}
@@ -299,8 +297,7 @@ def print_summary(issues: List[ShadowDebtIssue]) -> None:
         issues_by_chain[issue.chain].append(issue)
 
     for chain, chain_issues in sorted(issues_by_chain.items(), key=lambda x: x[0].name):
-        logger.info("%s:", chain.name)
-        logger.info("-" * 80)
+        logger.info("%s:\n%s", chain.name, "-" * 80)
 
         for issue in chain_issues:
             shadow_debt_pct = (
@@ -310,14 +307,15 @@ def print_summary(issues: List[ShadowDebtIssue]) -> None:
             # Extract token name from vault symbol (e.g., "yvWETH" -> "WETH", "yvUSDC" -> "USDC")
             token_symbol = issue.vault_symbol.replace("yv", "").replace("yvault-", "")
 
-            logger.info("  Vault: %s (%s)", issue.vault_symbol, issue.vault_address)
             logger.info(
-                "  Shadow Debt: %s %s (%s%% of total vault debt)",
+                "  Vault: %s (%s)\n  Shadow Debt: %s %s (%s%% of total vault debt)\n  Affected Strategies: %d",
+                issue.vault_symbol,
+                issue.vault_address,
                 format_amount(issue.total_shadow_debt, issue.vault_decimals),
                 token_symbol,
                 f"{shadow_debt_pct:.1f}",
+                len(issue.strategies_with_shadow_debt),
             )
-            logger.info("  Affected Strategies: %d", len(issue.strategies_with_shadow_debt))
 
             for strategy in issue.strategies_with_shadow_debt:
                 logger.info(
@@ -329,9 +327,7 @@ def print_summary(issues: List[ShadowDebtIssue]) -> None:
 
             logger.info("")
 
-    logger.info("=" * 80)
-    logger.info("Total: %d vault(s) with shadow debt issues", len(issues))
-    logger.info("=" * 80)
+    logger.info("=" * 80 + "\nTotal: %d vault(s) with shadow debt issues\n" + "=" * 80, len(issues))
 
 
 def build_alert_message(issues: List[ShadowDebtIssue]) -> str:

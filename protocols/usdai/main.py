@@ -7,7 +7,8 @@ from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import Chain
 from utils.config import Config
-from utils.logging import get_logger
+from utils.logger import get_logger
+from utils.telegram import send_error_message
 from utils.web3_wrapper import ChainManager
 
 # Constants
@@ -84,7 +85,7 @@ def get_loan_details(client, owner_addr):
 
     except Exception as e:
         logger.error("Loan scan error: %s", e)
-        send_alert(Alert(AlertSeverity.LOW, f"Loan scan error: {e}", PROTOCOL), plain_text=True)
+        send_error_message(f"Loan scan error: {e}", PROTOCOL)
 
     return loans
 
@@ -112,10 +113,13 @@ def main():
         pyusd_assets_fmt = pyusd_assets_raw / (10**PYUSD_DECIMALS)
         pyusd_assets_18_raw = pyusd_assets_raw * (10 ** max(USDAI_DECIMALS - PYUSD_DECIMALS, 0))
 
-        logger.info("--- USDai Stats ---")
-        logger.info("USDai Supply:    $%s", f"{usdai_supply_fmt:,.2f}")
-        logger.info("USDai Bridged:   $%s", f"{bridged_supply_fmt:,.2f}")
-        logger.info("%s Assets:    $%s", PYUSD_SYMBOL, f"{pyusd_assets_fmt:,.2f}")
+        logger.info(
+            "--- USDai Stats ---\nUSDai Supply:    $%s\nUSDai Bridged:   $%s\n%s Assets:    $%s",
+            f"{usdai_supply_fmt:,.2f}",
+            f"{bridged_supply_fmt:,.2f}",
+            PYUSD_SYMBOL,
+            f"{pyusd_assets_fmt:,.2f}",
+        )
 
         # Invariant:
         # totalSupply + bridgedSupply <= pyUSD.balanceOf(USDai)  (all in 1e18 scale)
@@ -124,8 +128,11 @@ def main():
         invariant_gap_fmt = invariant_gap_raw / (10**USDAI_DECIMALS)
         required_backing_fmt = required_backing_raw / (10**USDAI_DECIMALS)
 
-        logger.info("Required Backing: $%s (supply + bridged)", f"{required_backing_fmt:,.2f}")
-        logger.info("Invariant Gap:    $%s (required - pyUSD assets)", f"{invariant_gap_fmt:,.2f}")
+        logger.info(
+            "Required Backing: $%s (supply + bridged)\nInvariant Gap:    $%s (required - pyUSD assets)",
+            f"{required_backing_fmt:,.2f}",
+            f"{invariant_gap_fmt:,.2f}",
+        )
 
         cache_key_invariant_breach = f"{PROTOCOL}_backing_invariant_breach"
         if invariant_gap_raw >= USDAI_INVARIANT_BREACH_THRESHOLD_RAW:
@@ -212,7 +219,7 @@ def main():
 
     except Exception as e:
         logger.error("Error: %s", e)
-        send_alert(Alert(AlertSeverity.LOW, f"USDai monitoring failed: {e}", PROTOCOL), plain_text=True)
+        send_error_message(f"USDai monitoring failed: {e}", PROTOCOL)
 
 
 if __name__ == "__main__":

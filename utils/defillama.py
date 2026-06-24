@@ -4,7 +4,7 @@ from decimal import Decimal, getcontext
 
 from defillama_sdk import DefiLlama
 
-from utils.logging import get_logger
+from utils.logger import get_logger
 
 getcontext().prec = 18
 

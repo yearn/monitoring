@@ -55,16 +55,14 @@ def test_fluid_proposal_alert_escapes_api_markdown_and_keeps_link():
     mock_write.assert_called_once_with("fluid", 131)
 
 
-def test_fluid_proposal_fetch_error_alert_uses_plain_text():
+def test_fluid_proposal_fetch_error_routes_to_errors_channel():
     with (
         patch("protocols.fluid.proposals.requests.get", side_effect=Exception("bad TYPE_1 payload")),
-        patch("protocols.fluid.proposals.send_telegram_message") as mock_send,
+        patch("protocols.fluid.proposals.send_error_message") as mock_send,
     ):
         get_proposals()
 
     mock_send.assert_called_once_with(
         "Error processing Fluid proposals: bad TYPE_1 payload",
         "fluid",
-        disable_notification=True,
-        plain_text=True,
     )

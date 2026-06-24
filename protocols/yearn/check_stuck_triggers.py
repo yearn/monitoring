@@ -20,7 +20,7 @@ from web3 import Web3
 
 from utils.cache import cache_path
 from utils.chains import Chain
-from utils.logging import get_logger
+from utils.logger import get_logger
 from utils.telegram import send_telegram_message_with_fallback
 from utils.web3_wrapper import ChainManager
 

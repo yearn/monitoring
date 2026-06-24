@@ -4,7 +4,8 @@ from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
 from utils.chains import Chain
-from utils.logging import get_logger
+from utils.logger import get_logger
+from utils.telegram import send_error_message
 from utils.web3_wrapper import ChainManager
 
 PROTOCOL = "ethplus"
@@ -131,7 +132,7 @@ def monitor_rtoken_on_chain(chain: Chain):
         else:
             error_message = f"[{chain.network_name}] Batch Call: Expected 4 responses, got {len(responses)}"
             logger.error("%s", error_message)
-            send_alert(Alert(AlertSeverity.LOW, error_message, PROTOCOL, channel=CHANNEL))
+            send_error_message(error_message, CHANNEL)
             return
 
     # --- RToken Coverage Check ---
@@ -232,7 +233,7 @@ def main():
         except Exception as e:
             error_message = f"Critical error monitoring on {chain.network_name}. Check the logs."
             logger.error("%s\n%s", error_message, e)
-            send_alert(Alert(AlertSeverity.LOW, error_message, PROTOCOL, channel=CHANNEL))
+            send_error_message(error_message, CHANNEL)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,8 @@ import re
 import requests
 from dotenv import load_dotenv
 
-from utils.logging import get_logger
+from utils import store
+from utils.logger import get_logger
 
 load_dotenv()
 
@@ -12,6 +13,13 @@ logger = get_logger("utils.telegram")
 
 # Maximum message length allowed by Telegram API
 MAX_MESSAGE_LENGTH = 4096
+
+# Channel key for operational errors/diagnostics (GraphQL/fetch failures, retries,
+# crashes). Routed to a dedicated chat so transient noise doesn't spam the
+# per-protocol alert groups. Resolves via the same env-var scheme as any other
+# channel: TELEGRAM_TOPIC_ID_ERRORS (topics group) or TELEGRAM_CHAT_ID_ERRORS +
+# optional TELEGRAM_BOT_TOKEN_ERRORS (falls back to the DEFAULT bot).
+ERROR_CHANNEL = "errors"
 
 # Matches `bot<digits>:<token>` in Telegram API URLs. Used to scrub the bot
 # token out of exception messages — `requests.HTTPError.__str__()` includes
@@ -40,6 +48,17 @@ class TelegramError(Exception):
     """Exception raised for errors in Telegram API interactions."""
 
     pass
+
+
+def _is_parse_entities_error(exc: TelegramError) -> bool:
+    """Return True if a send failed because Telegram couldn't parse Markdown entities.
+
+    Telegram returns 400 "can't parse entities" when a message contains an
+    unbalanced formatting token (e.g. a truncated `code` span or [link]). Such a
+    message can never be delivered as-is, so callers should retry it as plain text
+    rather than fail permanently.
+    """
+    return "can't parse entities" in str(exc).lower()
 
 
 def _post_message(
@@ -89,6 +108,12 @@ def send_telegram_message(
     protocol: str,
     disable_notification: bool = False,
     plain_text: bool = False,
+    *,
+    severity: str | None = None,
+    source: str = "protocol",
+    origin_protocol: str | None = None,
+    channel: str | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> None:
     """
     Send a message to a Telegram chat using a bot.
@@ -103,14 +128,29 @@ def send_telegram_message(
     """
     logger.debug("Sending telegram message:\n%s", message)
 
-    if os.getenv("LOG_LEVEL", "INFO").upper() == "DEBUG":
-        logger.debug("Skipping Telegram send (LOG_LEVEL=DEBUG)")
-        return
-
     # Truncate long messages; disable Markdown to avoid broken entities
     if len(message) > MAX_MESSAGE_LENGTH:
         message = message[: MAX_MESSAGE_LENGTH - 3] + "..."
         plain_text = True
+
+    logical_protocol = origin_protocol or protocol
+    delivery_channel = channel or protocol
+
+    if os.getenv("LOG_LEVEL", "INFO").upper() == "DEBUG":
+        # Terminal status recorded in the single insert; no delivery update needed.
+        _record_alert_safe(
+            message=message,
+            protocol=logical_protocol,
+            channel=delivery_channel,
+            severity=severity,
+            source=source,
+            plain_text=plain_text,
+            silent=disable_notification,
+            delivery_status="skipped_debug",
+            metadata=metadata,
+        )
+        logger.debug("Skipping Telegram send (LOG_LEVEL=DEBUG)")
+        return
 
     # Test/staging override: route every message to one chat for comparison runs.
     # Set TELEGRAM_TEST_CHAT_ID to a dummy group id; unset to restore prod routing.
@@ -121,6 +161,17 @@ def send_telegram_message(
     if test_chat_id:
         bot_token = os.getenv("TELEGRAM_BOT_TOKEN_DEFAULT")
         if not bot_token:
+            _record_alert_safe(
+                message=message,
+                protocol=logical_protocol,
+                channel=delivery_channel,
+                severity=severity,
+                source=source,
+                plain_text=plain_text,
+                silent=disable_notification,
+                delivery_status="skipped_missing_credentials",
+                metadata=metadata,
+            )
             logger.warning("TELEGRAM_TEST_CHAT_ID set but TELEGRAM_BOT_TOKEN_DEFAULT missing")
             return
         # Escape the label for Markdown sends — protocol names contain `_`
@@ -130,7 +181,23 @@ def send_telegram_message(
         label = f"[{protocol}] "
         if not plain_text:
             label = escape_markdown(label)
-        _post_message(bot_token, test_chat_id, f"{label}{message}", plain_text, disable_notification)
+        sent_message = f"{label}{message}"
+        alert_id = _record_alert_safe(
+            message=sent_message,
+            protocol=logical_protocol,
+            channel=delivery_channel,
+            severity=severity,
+            source=source,
+            plain_text=plain_text,
+            silent=disable_notification,
+            metadata=metadata,
+        )
+        try:
+            _post_message(bot_token, test_chat_id, sent_message, plain_text, disable_notification)
+        except TelegramError as exc:
+            _update_alert_delivery_safe(alert_id, status="failed", error=str(exc))
+            raise
+        _update_alert_delivery_safe(alert_id, status="delivered", delivered_at=store.utc_now_iso())
         return
 
     # Check if this protocol has a topic ID configured (forum-style group)
@@ -148,10 +215,147 @@ def send_telegram_message(
         chat_id = os.getenv(f"TELEGRAM_CHAT_ID_{protocol.upper()}")
 
     if not bot_token or not chat_id:
+        _record_alert_safe(
+            message=message,
+            protocol=logical_protocol,
+            channel=delivery_channel,
+            severity=severity,
+            source=source,
+            plain_text=plain_text,
+            silent=disable_notification,
+            delivery_status="skipped_missing_credentials",
+            metadata=metadata,
+        )
         logger.warning("Missing Telegram credentials for %s", protocol)
         return
 
-    _post_message(bot_token, chat_id, message, plain_text, disable_notification, topic_id)
+    alert_id = _record_alert_safe(
+        message=message,
+        protocol=logical_protocol,
+        channel=delivery_channel,
+        severity=severity,
+        source=source,
+        plain_text=plain_text,
+        silent=disable_notification,
+        metadata=metadata,
+    )
+    try:
+        _post_message(bot_token, chat_id, message, plain_text, disable_notification, topic_id)
+    except TelegramError as exc:
+        # A malformed-Markdown message (e.g. a truncated `code`/[link] entity)
+        # triggers a 400 "can't parse entities" and can never be delivered as-is.
+        # Callers that gate their dedupe cursor on delivery (e.g. timelock_alerts)
+        # would then re-send the whole batch every run forever. Retry once as plain
+        # text so the alert still lands and the cursor can advance.
+        if not plain_text and _is_parse_entities_error(exc):
+            logger.warning("Markdown parse error from Telegram; retrying as plain text for %s", protocol)
+            try:
+                _post_message(bot_token, chat_id, message, True, disable_notification, topic_id)
+            except TelegramError as retry_exc:
+                _update_alert_delivery_safe(alert_id, status="failed", error=str(retry_exc))
+                raise
+            _update_alert_delivery_safe(alert_id, status="delivered", delivered_at=store.utc_now_iso())
+            return
+        _update_alert_delivery_safe(alert_id, status="failed", error=str(exc))
+        raise
+    _update_alert_delivery_safe(alert_id, status="delivered", delivered_at=store.utc_now_iso())
+
+
+def _record_alert_safe(
+    *,
+    message: str,
+    protocol: str,
+    channel: str,
+    severity: str | None,
+    source: str,
+    plain_text: bool,
+    silent: bool,
+    delivery_status: str = "generated",
+    metadata: dict[str, object] | None = None,
+) -> int | None:
+    """Best-effort alert insert; never raises."""
+    try:
+        return store.record_alert(
+            message=message,
+            protocol=protocol,
+            channel=channel,
+            severity=severity,
+            source=source,
+            plain_text=plain_text,
+            silent=silent,
+            delivery_status=delivery_status,
+            metadata=metadata,
+        )
+    except Exception:
+        logger.debug("Failed to record alert event", exc_info=True)
+        return None
+
+
+def _update_alert_delivery_safe(
+    alert_id: int | None,
+    *,
+    status: str,
+    delivered_at: str | None = None,
+    error: str | None = None,
+) -> None:
+    """Best-effort delivery update; never raises."""
+    if alert_id is None:
+        return
+    try:
+        store.update_alert_delivery(alert_id, status=status, delivered_at=delivered_at, error=error)
+    except Exception:
+        logger.debug("Failed to update alert delivery", exc_info=True)
+
+
+def _error_channel_configured() -> bool:
+    """Return True if a dedicated errors destination (topic or chat id) is set."""
+    return bool(os.getenv("TELEGRAM_TOPIC_ID_ERRORS") or os.getenv("TELEGRAM_CHAT_ID_ERRORS"))
+
+
+def send_error_message(
+    message: str,
+    protocol: str,
+    disable_notification: bool = True,
+    *,
+    source: str = "ops_error",
+) -> None:
+    """Route an operational error/diagnostic to the dedicated errors channel.
+
+    Keeps transient failures (GraphQL/fetch errors, retries, crashes) out of the
+    per-protocol alert groups. The originating ``protocol`` is prefixed as a
+    ``[label]`` so the merged errors feed shows which monitor produced each line.
+
+    Falls back to the protocol's own channel when no errors destination is
+    configured, so error visibility is never silently lost. Always sent as plain
+    text (error strings routinely contain Markdown-breaking characters) and
+    silently by default.
+
+    Args:
+        message: The error/diagnostic text.
+        protocol: Originating protocol/channel, used as the ``[label]`` prefix
+            and as the fallback channel when no errors destination is configured.
+        disable_notification: If True (default), send silently.
+    """
+    if _error_channel_configured():
+        send_telegram_message(
+            f"[{protocol}] {message}",
+            ERROR_CHANNEL,
+            disable_notification,
+            plain_text=True,
+            source=source,
+            origin_protocol=protocol,
+            channel=ERROR_CHANNEL,
+        )
+    else:
+        send_telegram_message(
+            message,
+            protocol,
+            disable_notification,
+            plain_text=True,
+            source=source,
+            origin_protocol=protocol,
+            channel=protocol,
+        )
 
 
 def get_github_run_url() -> str:
