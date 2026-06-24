@@ -4,7 +4,12 @@ import unittest
 import unittest.mock
 from unittest.mock import patch
 
-from protocols.timelock.timelock_alerts import TIMELOCKS, TimelockConfig, build_alert_message
+from protocols.timelock.timelock_alerts import (
+    TIMELOCKS,
+    TimelockConfig,
+    _truncate_call_lines,
+    build_alert_message,
+)
 from utils.telegram import MAX_MESSAGE_LENGTH
 
 
@@ -157,6 +162,46 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         mock_ai.assert_not_called()  # type: ignore[attr-defined]
         self.assertNotIn("AI Summary", msg)
         self.assertIn("TIMELOCK: New Operation Scheduled", msg)
+
+
+class TestTruncateCallLines(unittest.TestCase):
+    """Direct tests for the _truncate_call_lines helper."""
+
+    def test_fits_completely_without_marker(self) -> None:
+        """When all lines fit, no truncation marker is added."""
+        lines = ["line one", "line two"]
+        result = _truncate_call_lines(lines, 100)
+        self.assertEqual(result, "line one\nline two")
+        self.assertNotIn("truncated", result)
+
+    def test_truncates_whole_lines_and_keeps_marker(self) -> None:
+        """When lines don't fit, drop whole trailing lines and add a marker."""
+        lines = ["a" * 50, "b" * 50, "c" * 50]
+        # Full text is 152 chars; keep the first two lines (101 chars) and the
+        # marker (15 chars plus one newline) for a total of 117 chars.
+        result = _truncate_call_lines(lines, 120)
+        self.assertIn("a" * 50, result)
+        self.assertIn("b" * 50, result)
+        self.assertNotIn("c" * 50, result)
+        self.assertIn("... (truncated)", result)
+        self.assertLessEqual(len(result), 120)
+
+    def test_small_budget_returns_empty_string(self) -> None:
+        """When the budget cannot even fit the marker, return an empty string."""
+        lines = ["a very long line that cannot possibly fit", "another line"]
+        result = _truncate_call_lines(lines, 5)
+        self.assertEqual(result, "")
+
+    def test_marker_consistent_length_with_budget(self) -> None:
+        """The returned string must never exceed the requested budget."""
+        lines = [f"line {i}" for i in range(50)]
+        for budget in (0, 1, 10, 50, 100, 1000):
+            result = _truncate_call_lines(lines, budget)
+            self.assertLessEqual(
+                len(result),
+                budget,
+                f"result exceeded budget {budget}",
+            )
 
 
 class TestMapleProposalUnwrap(unittest.TestCase):

@@ -375,7 +375,7 @@ def _truncate_call_lines(call_lines: list[str], budget: int) -> str:
     caller's dedupe cursor and wedges the monitor into a re-send loop. Dropping
     whole lines keeps every entity balanced.
     """
-    marker = "… (truncated)"
+    marker = "... (truncated)"
     kept: list[str] = []
     used = 0
     for line in call_lines:
@@ -389,10 +389,18 @@ def _truncate_call_lines(call_lines: list[str], budget: int) -> str:
         return "\n".join(kept)
 
     # Make room for the truncation marker by dropping more whole lines if needed.
-    while kept and used + len(marker) + 1 > budget:
+    while kept:
+        extra = 1 if kept else 0  # newline only required when joining to existing lines
+        if used + len(marker) + extra <= budget:
+            break
         dropped = kept.pop()
         used -= len(dropped) + (1 if kept else 0)
-    kept.append(marker)
+
+    # Only append the marker when it fits within the budget; otherwise return an
+    # empty call-details section rather than exceeding the caller's allowance.
+    if kept and used + len(marker) + (1 if kept else 0) <= budget:
+        kept.append(marker)
+
     return "\n".join(kept)
 
 
