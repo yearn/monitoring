@@ -50,6 +50,17 @@ class TelegramError(Exception):
     pass
 
 
+def _is_parse_entities_error(exc: TelegramError) -> bool:
+    """Return True if a send failed because Telegram couldn't parse Markdown entities.
+
+    Telegram returns 400 "can't parse entities" when a message contains an
+    unbalanced formatting token (e.g. a truncated `code` span or [link]). Such a
+    message can never be delivered as-is, so callers should retry it as plain text
+    rather than fail permanently.
+    """
+    return "can't parse entities" in str(exc).lower()
+
+
 def _post_message(
     bot_token: str,
     chat_id: str,
@@ -231,6 +242,20 @@ def send_telegram_message(
     try:
         _post_message(bot_token, chat_id, message, plain_text, disable_notification, topic_id)
     except TelegramError as exc:
+        # A malformed-Markdown message (e.g. a truncated `code`/[link] entity)
+        # triggers a 400 "can't parse entities" and can never be delivered as-is.
+        # Callers that gate their dedupe cursor on delivery (e.g. timelock_alerts)
+        # would then re-send the whole batch every run forever. Retry once as plain
+        # text so the alert still lands and the cursor can advance.
+        if not plain_text and _is_parse_entities_error(exc):
+            logger.warning("Markdown parse error from Telegram; retrying as plain text for %s", protocol)
+            try:
+                _post_message(bot_token, chat_id, message, True, disable_notification, topic_id)
+            except TelegramError as retry_exc:
+                _update_alert_delivery_safe(alert_id, status="failed", error=str(retry_exc))
+                raise
+            _update_alert_delivery_safe(alert_id, status="delivered", delivered_at=store.utc_now_iso())
+            return
         _update_alert_delivery_safe(alert_id, status="failed", error=str(exc))
         raise
     _update_alert_delivery_safe(alert_id, status="delivered", delivered_at=store.utc_now_iso())

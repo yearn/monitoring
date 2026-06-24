@@ -71,7 +71,31 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         ]
         msg = build_alert_message(events, TIMELOCK_INFO)
         self.assertLessEqual(len(msg), MAX_MESSAGE_LENGTH)
-        self.assertIn("...", msg)
+        self.assertIn("truncated", msg)
+
+    @patch("protocols.timelock.timelock_alerts._get_ai_explanation", return_value=None)
+    def test_truncation_keeps_markdown_entities_balanced(self, _mock_ai: object) -> None:
+        """Truncating call details must not sever a `signature` mid-entity.
+
+        Regression: slicing the joined text mid-line left an unclosed backtick,
+        which Telegram rejected with 400 "can't parse entities", freezing the
+        dedupe cursor and re-sending every event hourly.
+        """
+        events = [
+            _make_event(
+                index=i,
+                target=f"0x{i:040x}",
+                data="0x" + "ab" * 4,
+                signature="update_max_debt_for_strategy(address,uint256)",
+            )
+            for i in range(60)
+        ]
+        msg = build_alert_message(events, TIMELOCK_INFO)
+
+        self.assertLessEqual(len(msg), MAX_MESSAGE_LENGTH)
+        # Backticks (code spans) and link brackets must come in balanced pairs.
+        self.assertEqual(msg.count("`") % 2, 0, "unbalanced backticks would break Telegram Markdown")
+        self.assertEqual(msg.count("["), msg.count("]"), "unbalanced link brackets")
 
     @patch("protocols.timelock.timelock_alerts.format_explanation_line")
     @patch("protocols.timelock.timelock_alerts._get_ai_explanation")
@@ -100,7 +124,7 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         # Footer (tx link) must be present
         self.assertIn("Tx:", msg)
         # Call details should be truncated
-        self.assertIn("...", msg)
+        self.assertIn("truncated", msg)
 
     @patch("protocols.timelock.timelock_alerts.format_explanation_line")
     @patch("protocols.timelock.timelock_alerts._get_ai_explanation")
