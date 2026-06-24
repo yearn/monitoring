@@ -10,6 +10,7 @@ Etherscan v2 uses a single multichain API key.
 import json
 import os
 import re
+import threading
 from dataclasses import dataclass
 
 from utils.disk_cache import MISS, DiskCache
@@ -32,6 +33,10 @@ MAX_SNIPPET_CHARS = 4000
 # The ABI is stored as the raw JSON string from Etherscan and parsed lazily by callers
 # that need it — keeps the cache small for the common case where only source is read.
 _source_cache: dict[tuple[int, str], tuple[str, str, str] | None] = {}
+_source_cache_hits = 0
+_source_cache_misses = 0
+_source_cache_lock = threading.RLock()
+_source_key_locks: dict[tuple[int, str], threading.Lock] = {}
 
 # On-disk layer keyed by "chain_id-address". Verified source is immutable per address, so
 # positive entries never expire; "unverified" misses get the short negative TTL so a
@@ -46,6 +51,31 @@ _source_disk_cache = DiskCache(
 
 def _disk_key(chain_id: int, address: str) -> str:
     return f"{chain_id}-{address.lower()}"
+
+
+def _lock_for_key(cache_key: tuple[int, str]) -> threading.Lock:
+    with _source_cache_lock:
+        return _source_key_locks.setdefault(cache_key, threading.Lock())
+
+
+def _record_cache_event(source: str, hit: bool, cache_key: tuple[int, str]) -> None:
+    global _source_cache_hits, _source_cache_misses
+    with _source_cache_lock:
+        if hit:
+            _source_cache_hits += 1
+        else:
+            _source_cache_misses += 1
+        hits = _source_cache_hits
+        misses = _source_cache_misses
+    logger.debug(
+        "source cache %s %s for %s:%s (hits=%s misses=%s)",
+        source,
+        "hit" if hit else "miss",
+        cache_key[0],
+        cache_key[1],
+        hits,
+        misses,
+    )
 
 
 _NATSPEC_LINE = r"(?:[ \t]*///.*\n|[ \t]*\*[^/].*\n|[ \t]*/\*\*[\s\S]*?\*/[ \t]*\n)"
@@ -98,52 +128,67 @@ def _fetch_etherscan_contract(chain_id: int, address: str) -> tuple[str, str, st
         return None
 
     cache_key = (chain_id, address.lower())
-    if cache_key in _source_cache:
-        return _source_cache[cache_key]
+    with _source_cache_lock:
+        if cache_key in _source_cache:
+            _record_cache_event("memory", True, cache_key)
+            return _source_cache[cache_key]
 
-    disk_key = _disk_key(chain_id, address)
-    disk_val = _source_disk_cache.get(disk_key)
-    if disk_val is not MISS:
-        if disk_val is None:
-            # Cached negative: a prior run saw this contract unverified.
-            _source_cache[cache_key] = None
+    with _lock_for_key(cache_key):
+        with _source_cache_lock:
+            if cache_key in _source_cache:
+                _record_cache_event("memory", True, cache_key)
+                return _source_cache[cache_key]
+
+        disk_key = _disk_key(chain_id, address)
+        disk_val = _source_disk_cache.get(disk_key)
+        if disk_val is not MISS:
+            _record_cache_event("disk", True, cache_key)
+            if disk_val is None:
+                # Cached negative: a prior run saw this contract unverified.
+                with _source_cache_lock:
+                    _source_cache[cache_key] = None
+                return None
+            if isinstance(disk_val, (list, tuple)) and len(disk_val) == 3:
+                record = (disk_val[0], disk_val[1], disk_val[2])
+                with _source_cache_lock:
+                    _source_cache[cache_key] = record
+                return record
+            # Unexpected shape — fall through to a live fetch.
+        else:
+            _record_cache_event("disk", False, cache_key)
+
+        params = {
+            "chainid": str(chain_id),
+            "module": "contract",
+            "action": "getsourcecode",
+            "address": address,
+            "apikey": api_key,
+        }
+        data = fetch_json(ETHERSCAN_V2_API_URL, params=params)
+        # A clean response is status "1" with a result array; anything else (None on a
+        # request error, or status "0") is treated as transient and not persisted, so an
+        # Etherscan blip can't poison the disk cache as a day-long "unverified".
+        status_ok = data is not None and data.get("status") == "1"
+        results = (data or {}).get("result") or [] if status_ok else []
+        entry = results[0] if results else {}
+        raw_source = entry.get("SourceCode") or ""
+
+        if not raw_source:
+            with _source_cache_lock:
+                _source_cache[cache_key] = None
+            if status_ok:
+                _source_disk_cache.set_negative(disk_key)
             return None
-        if isinstance(disk_val, (list, tuple)) and len(disk_val) == 3:
-            record = (disk_val[0], disk_val[1], disk_val[2])
-            _source_cache[cache_key] = record
-            return record
-        # Unexpected shape — fall through to a live fetch.
 
-    params = {
-        "chainid": str(chain_id),
-        "module": "contract",
-        "action": "getsourcecode",
-        "address": address,
-        "apikey": api_key,
-    }
-    data = fetch_json(ETHERSCAN_V2_API_URL, params=params)
-    # A clean response is status "1" with a result array; anything else (None on a
-    # request error, or status "0") is treated as transient and not persisted, so an
-    # Etherscan blip can't poison the disk cache as a day-long "unverified".
-    status_ok = data is not None and data.get("status") == "1"
-    results = (data or {}).get("result") or [] if status_ok else []
-    entry = results[0] if results else {}
-    raw_source = entry.get("SourceCode") or ""
-
-    if not raw_source:
-        _source_cache[cache_key] = None
-        if status_ok:
-            _source_disk_cache.set_negative(disk_key)
-        return None
-
-    result = (
-        entry.get("ContractName") or "",
-        _concat_sources(raw_source),
-        entry.get("ABI") or "",
-    )
-    _source_cache[cache_key] = result
-    _source_disk_cache.set_positive(disk_key, list(result))
-    return result
+        result = (
+            entry.get("ContractName") or "",
+            _concat_sources(raw_source),
+            entry.get("ABI") or "",
+        )
+        with _source_cache_lock:
+            _source_cache[cache_key] = result
+        _source_disk_cache.set_positive(disk_key, list(result))
+        return result
 
 
 def fetch_source(chain_id: int, address: str) -> tuple[str, str] | None:
@@ -544,4 +589,9 @@ def format_source_context(ctx: SourceContext) -> str:
 
 def reset_cache() -> None:
     """Reset the in-memory source cache. Useful for testing."""
-    _source_cache.clear()
+    global _source_cache_hits, _source_cache_misses
+    with _source_cache_lock:
+        _source_cache.clear()
+        _source_key_locks.clear()
+        _source_cache_hits = 0
+        _source_cache_misses = 0

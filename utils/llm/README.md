@@ -68,6 +68,23 @@ If the function isn't found in the target's source (e.g., the target is an `ERC1
 
 Requires `ETHERSCAN_TOKEN`. Failures degrade gracefully — no `--- Contract Source Context ---` section is added.
 
+#### Disk-Backed Source And Label Cache
+
+Verified source/ABI lookups and Swiss Knife labels are cached under `CACHE_DIR` via `utils/disk_cache.py`:
+
+- `source-cache/`: Etherscan verified contract name, source, and ABI JSON.
+- `label-cache/`: Swiss Knife address labels.
+
+Positive entries do not expire because verified source and curated labels are effectively stable for a given address. Negative entries use a short TTL so a newly verified contract or newly labeled address is picked up later. Tunables:
+
+- `CACHE_DIR`: parent directory for cache namespaces. Empty/default means the repo working directory; systemd should set a persistent cache path.
+- `CACHE_NEGATIVE_TTL_SECONDS`: TTL for negative entries, default `86400`.
+- `SOURCE_CACHE_MAX_ENTRIES`: source-cache entry cap, default `5000`.
+- `SOURCE_CACHE_MAX_BYTES`: source-cache size cap, default `268435456`.
+- `LABEL_CACHE_MAX_ENTRIES`: label-cache entry cap, default `50000`.
+
+Writes are atomic (`mkstemp` + `os.replace`) and same-process duplicate lookups are single-flighted per key, so a Safe batch with repeated targets does not fan out duplicate Etherscan/Swiss Knife calls. Debug logs include memory/disk hit/miss counters, which are useful after deploy for confirming the VPS cache is warm.
+
 ### 3. On-chain Before-State (`utils/on_chain_state.py`)
 
 For setter-style calls, reads the *current* on-chain value of state variables the function will write so the LLM can quote concrete before→after deltas instead of guessing scale.

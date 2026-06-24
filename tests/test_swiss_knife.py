@@ -1,6 +1,8 @@
 """Tests for utils/swiss_knife.py."""
 
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from utils.swiss_knife import fetch_swiss_knife_labels, pick_display_name, reset_cache
@@ -43,6 +45,21 @@ class TestFetchSwissKnifeLabels(unittest.TestCase):
         fetch_swiss_knife_labels(addr, 1)
         fetch_swiss_knife_labels(addr, 1)
         fetch_swiss_knife_labels(addr, 1)
+        self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]
+
+    @patch("utils.swiss_knife.fetch_json")
+    def test_concurrent_same_address_lookup_single_flights(self, mock_fetch: object) -> None:
+        def slow_response(*args: object, **kwargs: object) -> list[str]:
+            time.sleep(0.02)
+            return ["Curve.fi: 3pool"]
+
+        mock_fetch.side_effect = slow_response  # type: ignore[attr-defined]
+        addr = "0x" + "d0" * 20
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(lambda _: fetch_swiss_knife_labels(addr, 1), range(8)))
+
+        self.assertTrue(all(result == ["Curve.fi: 3pool"] for result in results))
         self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]
 
     @patch("utils.swiss_knife.fetch_json")

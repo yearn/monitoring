@@ -1,7 +1,9 @@
 """Tests for utils/source_context.py."""
 
 import json
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from utils.source_context import (
@@ -189,6 +191,24 @@ class TestGetSourceContext(unittest.TestCase):
         get_source_context(1, "0xabc", "setMaxSlippage")
         get_source_context(1, "0xabc", "setMaxSlippage")
         # Two calls — Etherscan should be hit only once
+        self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_concurrent_same_address_lookup_single_flights(self, mock_fetch: object) -> None:
+        def slow_response(*args: object, **kwargs: object) -> dict:
+            time.sleep(0.02)
+            return {
+                "status": "1",
+                "result": [{"SourceCode": INFINIFI_FARM_SOURCE, "ContractName": "Farm"}],
+            }
+
+        mock_fetch.side_effect = slow_response  # type: ignore[attr-defined]
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(lambda _: get_source_context(1, "0xabc", "setMaxSlippage"), range(8)))
+
+        self.assertTrue(all(result is not None for result in results))
         self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})

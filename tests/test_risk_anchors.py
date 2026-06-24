@@ -4,7 +4,7 @@ import unittest
 
 from eth_utils import function_signature_to_4byte_selector
 
-from utils.risk_anchors import _ANCHORS, RiskAnchor, format_anchors_block, lookup
+from utils.risk_anchors import _ANCHORS, _ANCHORS_BY_SIGNATURE, RiskAnchor, format_anchors_block, lookup
 
 
 class TestLookup(unittest.TestCase):
@@ -65,6 +65,13 @@ class TestAnchorRegistryIntegrity(unittest.TestCase):
         for selector, anchor in _ANCHORS.items():
             self.assertIn(anchor.level, self._VALID_LEVELS, f"{selector} has invalid level {anchor.level}")
             self.assertTrue(anchor.rationale, f"{selector} missing rationale")
+
+    def test_selectors_are_derived_from_signature_table(self) -> None:
+        expected = {
+            "0x" + function_signature_to_4byte_selector(signature).hex(): anchor
+            for signature, anchor in _ANCHORS_BY_SIGNATURE.items()
+        }
+        self.assertEqual(_ANCHORS, expected)
 
     def test_selectors_match_signatures(self) -> None:
         # Recompute the selector for each anchored signature to catch typos.
