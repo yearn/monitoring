@@ -19,6 +19,7 @@ alerting.
 from __future__ import annotations
 
 import os
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from dune_client.client import DuneClient
@@ -28,6 +29,7 @@ from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.config import Config
 from utils.logger import get_logger
+from utils.telegram import escape_markdown
 
 logger = get_logger("stables.dune_large_transfers")
 PROTOCOL = "stables"
@@ -64,6 +66,22 @@ def _tx_link(blockchain: str, tx_hash: str) -> str:
     return f"{prefix}{tx_hash}"
 
 
+def _format_number(value: Any, decimal_places: int = 2) -> str:
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return "unknown"
+    if not number.is_finite():
+        return "unknown"
+    return f"{number:,.{decimal_places}f}"
+
+
+def _short_tx_hash(tx_hash: str) -> str:
+    if len(tx_hash) <= 20:
+        return tx_hash
+    return f"{tx_hash[:10]}…{tx_hash[-8:]}"
+
+
 def _row_key(row: dict[str, Any]) -> str:
     tx_hash = _as_str(row.get("tx_hash")).lower()
     contract = _as_str(row.get("contract_address")).lower()
@@ -80,25 +98,58 @@ def _route_for_row(row: dict[str, Any]) -> tuple[str, str] | None:
     return TOKEN_ROUTE.get((chain, addr))
 
 
-def _build_row_line(row: dict[str, Any]) -> str:
+def _build_row_line(row: dict[str, Any], position: int = 1) -> str:
     chain = _as_str(row.get("blockchain"))
-    symbol = _as_str(row.get("symbol")) or "unknown"
-    amount = row.get("amount")
-    amount_usd = row.get("amount_usd")
+    chain_name = escape_markdown(chain.replace("_", " ").title() or "Unknown")
+    symbol = escape_markdown(_as_str(row.get("symbol")) or "unknown")
+    amount = _format_number(row.get("amount"))
+    amount_usd = _format_number(row.get("amount_usd"))
     tx_hash = _as_str(row.get("tx_hash"))
     link = _tx_link(chain, tx_hash)
-    return f"- {symbol} on {chain}: amount={amount}, amount_usd={amount_usd}, tx={link}"
+    tx_label = escape_markdown(_short_tx_hash(tx_hash) or "unknown")
+    tx_line = f"🔗 Transaction: [{tx_label}]({link})" if link != tx_hash else f"🔗 Transaction: {tx_label}"
+    return (
+        f"*Transfer {position}*\n"
+        f"🌐 Network: {chain_name}\n"
+        f"💰 Amount: {amount} {symbol}\n"
+        f"💵 Value: ${amount_usd}\n"
+        f"{tx_line}"
+    )
 
 
 def _build_protocol_lines(protocol_rows: list[dict[str, Any]], query_id: int) -> list[str]:
     included_rows = protocol_rows[:MAX_ROWS_PER_PROTOCOL_ALERT]
-    lines = [_build_row_line(row) for row in included_rows]
+    lines = [_build_row_line(row, position) for position, row in enumerate(included_rows, start=1)]
 
     omitted_count = len(protocol_rows) - len(included_rows)
     if omitted_count > 0:
-        lines.append(f"- +{omitted_count} more not shown -- see Dune query {query_id} directly")
+        lines.append(f"…and {omitted_count} more. See Dune query {query_id} for the full result.")
 
     return lines
+
+
+def _build_alert_message(
+    protocol: str,
+    protocol_rows: list[dict[str, Any]],
+    query_id: int,
+    total_rows: int,
+) -> str:
+    route = _route_for_row(protocol_rows[0])
+    symbol = route[0] if route else (_as_str(protocol_rows[0].get("symbol")) or "unknown")
+    symbol = escape_markdown(symbol)
+    protocol_name = escape_markdown(protocol.replace("_", " ").title())
+    transfer_word = "transfer" if len(protocol_rows) == 1 else "transfers"
+    match_summary = str(len(protocol_rows))
+    if total_rows != len(protocol_rows):
+        match_summary = f"{len(protocol_rows)} for {protocol_name} ({total_rows} total)"
+
+    lines = _build_protocol_lines(protocol_rows, query_id)
+    return (
+        f"*Large {symbol} {transfer_word} detected*\n\n"
+        f"🏦 Protocol: {protocol_name}\n"
+        f"📦 New matches: {match_summary}\n"
+        f"📊 Dune query: {query_id}\n\n" + "\n\n".join(lines)
+    )
 
 
 def _group_rows_by_protocol(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -190,18 +241,8 @@ def main() -> None:
     grouped = _group_rows_by_protocol(new_alert_rows)
     total_rows = len(new_alert_rows)
     for protocol, protocol_rows in grouped.items():
-        route = _route_for_row(protocol_rows[0])
-        if route is None:
-            continue
-        first_symbol, _ = route
-        lines = _build_protocol_lines(protocol_rows, query_id)
-        message = (
-            f"*Dune Large Transfer Alert ({first_symbol}/{protocol})*\n\n"
-            f"Query ID: {query_id}\n"
-            f"Matched rows: {total_rows}\n"
-            f"Included in this alert: {min(len(protocol_rows), MAX_ROWS_PER_PROTOCOL_ALERT)}\n\n" + "\n".join(lines)
-        )
-        send_alert(Alert(AlertSeverity.HIGH, message, protocol), plain_text=True)
+        message = _build_alert_message(protocol, protocol_rows, query_id, total_rows)
+        send_alert(Alert(AlertSeverity.HIGH, message, protocol))
 
     write_last_value_to_file(cache_filename, CACHE_KEY_LAST_TX, _row_key(alert_rows[0]))
 

@@ -1,5 +1,7 @@
 """Tests for the Dune-backed large transfer monitor."""
 
+from unittest.mock import Mock
+
 from protocols.stables import dune_large_transfers as monitor
 
 
@@ -79,4 +81,53 @@ def test_build_protocol_lines_appends_truncation_notice():
     lines = monitor._build_protocol_lines(rows, query_id=1234567)
 
     assert len(lines) == monitor.MAX_ROWS_PER_PROTOCOL_ALERT + 1
-    assert lines[-1] == "- +2 more not shown -- see Dune query 1234567 directly"
+    assert lines[-1] == "…and 2 more. See Dune query 1234567 for the full result."
+
+
+def test_build_alert_message_is_readable_and_formats_large_values():
+    tx_hash = "0xbcd224d842f47167ec6339c47ac473ba751b73afbce36ed82142d8603c0c1bfd"
+    row = _row(
+        contract_address="0x48f9e38f3070ad8945dfeae3fa70987722e3d89c",
+        symbol="iUSD",
+        amount="5139554.464867114",
+        amount_usd="5139554.464867114",
+        tx_hash=tx_hash,
+    )
+
+    message = monitor._build_alert_message("infinifi", [row], query_id=7558262, total_rows=1)
+
+    assert message == (
+        "*Large iUSD transfer detected*\n\n"
+        "🏦 Protocol: Infinifi\n"
+        "📦 New matches: 1\n"
+        "📊 Dune query: 7558262\n\n"
+        "*Transfer 1*\n"
+        "🌐 Network: Ethereum\n"
+        "💰 Amount: 5,139,554.46 iUSD\n"
+        "💵 Value: $5,139,554.46\n"
+        f"🔗 Transaction: [0xbcd224d8…3c0c1bfd](https://etherscan.io/tx/{tx_hash})"
+    )
+
+
+def test_main_sends_pretty_alert_with_markdown_enabled(monkeypatch):
+    row = _row()
+    result = Mock()
+    result.result.rows = [row]
+    dune = Mock()
+    dune.run_query.return_value = result
+
+    monkeypatch.setenv("DUNE_API_KEY", "test-key")
+    monkeypatch.setattr(monitor, "DuneClient", Mock(return_value=dune))
+    monkeypatch.setattr(monitor.Config, "get_env_int", Mock(return_value=7558262))
+    monkeypatch.setattr(monitor.Config, "get_env_float", Mock(return_value=5_000_000))
+    monkeypatch.setattr(monitor, "get_last_value_for_key_from_file", Mock(return_value=""))
+    send_alert = Mock()
+    monkeypatch.setattr(monitor, "send_alert", send_alert)
+    monkeypatch.setattr(monitor, "write_last_value_to_file", Mock())
+
+    monitor.main()
+
+    send_alert.assert_called_once()
+    alert = send_alert.call_args.args[0]
+    assert alert.message.startswith("*Large cUSD transfer detected*")
+    assert send_alert.call_args.kwargs == {}
