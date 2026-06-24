@@ -50,6 +50,10 @@ selector-cache.txt
 *.cache
 .uv/
 
+# File-backed disk caches (utils/disk_cache.py)
+source-cache/
+label-cache/
+
 # SQLite state (alerts + migrated monitor state); resolved under CACHE_DIR
 monitoring.db
 monitoring.db-wal

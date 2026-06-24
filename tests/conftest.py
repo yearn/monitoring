@@ -9,12 +9,13 @@ on which env vars the developer happens to have set.
 """
 
 import os
+from pathlib import Path
 
 import pytest
 
 
 @pytest.fixture(autouse=True)
-def _isolate_from_live_apis(monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolate_from_live_apis(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Block accidental live API/RPC calls and reset cross-test singletons.
 
     Strips `ETHERSCAN_TOKEN`, every `PROVIDER_URL_*`, every `TELEGRAM_*`
@@ -27,7 +28,9 @@ def _isolate_from_live_apis(monkeypatch: pytest.MonkeyPatch) -> None:
     CI, where none of these vars are set.
 
     Also clears `ChainManager._instances` so a real client object cached by
-    one test can't leak into the next.
+    one test can't leak into the next, and points `CACHE_DIR` at a per-test
+    temp dir so the file-backed disk caches (utils.disk_cache) never litter the
+    repo and never leak entries between tests.
     """
     for key in list(os.environ):
         if key in {"ETHERSCAN_TOKEN", "LIQUIDITY_WEBHOOK_SECRET"} or key.startswith(
@@ -35,6 +38,11 @@ def _isolate_from_live_apis(monkeypatch: pytest.MonkeyPatch) -> None:
         ):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("LOG_LEVEL", "INFO")
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path))
+    # `cache_path` reads this module global at call time when the env var is
+    # unset, so keep both path entry points redirected for tests that patch env.
+    monkeypatch.setattr("utils.paths.CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr("utils.cache.CACHE_DIR", str(tmp_path))
     try:
         from utils.web3_wrapper import ChainManager
 

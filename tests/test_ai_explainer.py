@@ -937,6 +937,38 @@ class TestRiskAnchorsSection(unittest.TestCase):
     @patch("utils.llm.ai_explainer.decode_calldata")
     @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
     @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    def test_safe_enable_module_anchor_is_critical(
+        self,
+        mock_label: MagicMock,
+        mock_meta: MagicMock,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_source: MagicMock,
+    ) -> None:
+        mock_decode.return_value = DecodedCall(
+            function_name="enableModule",
+            signature="enableModule(address)",
+            params=[("address", "0x" + "11" * 20)],
+        )
+        provider = MagicMock()
+        provider.supports_structured_output = False
+        provider.complete.return_value = "TLDR: enables a Safe module. CRITICAL."
+        provider.model_name = "test"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target="0x" + "ff" * 20, calldata="0x610b5925" + "00" * 32, chain_id=1)
+        prompt = provider.complete.call_args[0][0]
+        self.assertIn("--- Risk Anchors ---", prompt)
+        self.assertIn("enableModule(address) → typically CRITICAL", prompt)
+        self.assertIn("NO owner signatures", prompt)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
     def test_no_anchor_section_for_unknown_selector(
         self,
         mock_label: MagicMock,

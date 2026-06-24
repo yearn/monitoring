@@ -2,7 +2,9 @@
 
 import unittest
 
-from utils.risk_anchors import RiskAnchor, format_anchors_block, lookup
+from eth_utils import function_signature_to_4byte_selector
+
+from utils.risk_anchors import _ANCHORS, _ANCHORS_BY_SIGNATURE, RiskAnchor, format_anchors_block, lookup
 
 
 class TestLookup(unittest.TestCase):
@@ -47,6 +49,53 @@ class TestFormatAnchorsBlock(unittest.TestCase):
         )
         self.assertIn("pause()", block)
         self.assertIn("transferOwnership(address)", block)
+
+
+class TestAnchorRegistryIntegrity(unittest.TestCase):
+    """Guards over the whole _ANCHORS table."""
+
+    _VALID_LEVELS = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+
+    def test_all_keys_wellformed(self) -> None:
+        for selector in _ANCHORS:
+            self.assertTrue(selector.startswith("0x") and len(selector) == 10, f"bad selector {selector}")
+            self.assertEqual(selector, selector.lower(), f"selector not lowercase: {selector}")
+
+    def test_all_levels_valid(self) -> None:
+        for selector, anchor in _ANCHORS.items():
+            self.assertIn(anchor.level, self._VALID_LEVELS, f"{selector} has invalid level {anchor.level}")
+            self.assertTrue(anchor.rationale, f"{selector} missing rationale")
+
+    def test_selectors_are_derived_from_signature_table(self) -> None:
+        expected = {
+            "0x" + function_signature_to_4byte_selector(signature).hex(): anchor
+            for signature, anchor in _ANCHORS_BY_SIGNATURE.items()
+        }
+        self.assertEqual(_ANCHORS, expected)
+
+    def test_selectors_match_signatures(self) -> None:
+        # Recompute the selector for each anchored signature to catch typos.
+        expected = {
+            "acceptOwnership()": "0x79ba5097",
+            "mint(address,uint256)": "0x40c10f19",
+            "addOwnerWithThreshold(address,uint256)": "0x0d582f13",
+            "removeOwner(address,address,uint256)": "0xf8dc5dd9",
+            "swapOwner(address,address,address)": "0xe318b52b",
+            "changeThreshold(uint256)": "0x694e80c3",
+            "enableModule(address)": "0x610b5925",
+            "disableModule(address,address)": "0xe009cfde",
+            "setGuard(address)": "0xe19a9dd9",
+            "setFallbackHandler(address)": "0xf08a0323",
+        }
+        for sig, selector in expected.items():
+            self.assertEqual("0x" + function_signature_to_4byte_selector(sig).hex(), selector, sig)
+            self.assertIn(selector, _ANCHORS, f"{sig} ({selector}) not registered")
+
+    def test_safe_module_is_critical(self) -> None:
+        # enableModule can move funds with no owner signatures — highest band.
+        anchor = lookup("0x610b5925")
+        assert anchor is not None
+        self.assertEqual(anchor.level, "CRITICAL")
 
 
 if __name__ == "__main__":

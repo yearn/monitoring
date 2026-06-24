@@ -19,6 +19,13 @@ logger = get_logger("utils.address_resolver")
 Backend = Callable[[int, str], str]
 
 
+def _known_address_backend(chain_id: int, address: str) -> str:
+    """Curated registry of multisigs / EOAs / burn addresses. No IO."""
+    from utils.known_addresses import lookup
+
+    return lookup(chain_id, address)
+
+
 def _safe_utility_backend(chain_id: int, address: str) -> str:
     """Canonical Safe utilities (MultiSendCallOnly, SignMessageLib, …). No IO."""
     from protocols.safe.multisend import safe_utility_label
@@ -66,6 +73,7 @@ def _etherscan_backend(chain_id: int, address: str) -> str:
 # actually swaps what the chain calls. Also lets callers `register_backend` a
 # new function attached to this module and have it resolve correctly.
 _BACKEND_NAMES: list[str] = [
+    "_known_address_backend",
     "_safe_utility_backend",
     "_swiss_knife_backend",
     "_etherscan_backend",

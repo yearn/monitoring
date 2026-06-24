@@ -1,7 +1,9 @@
 """Tests for utils/source_context.py."""
 
 import json
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from utils.source_context import (
@@ -190,6 +192,67 @@ class TestGetSourceContext(unittest.TestCase):
         get_source_context(1, "0xabc", "setMaxSlippage")
         # Two calls — Etherscan should be hit only once
         self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_concurrent_same_address_lookup_single_flights(self, mock_fetch: object) -> None:
+        def slow_response(*args: object, **kwargs: object) -> dict:
+            time.sleep(0.02)
+            return {
+                "status": "1",
+                "result": [{"SourceCode": INFINIFI_FARM_SOURCE, "ContractName": "Farm"}],
+            }
+
+        mock_fetch.side_effect = slow_response  # type: ignore[attr-defined]
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(lambda _: get_source_context(1, "0xabc", "setMaxSlippage"), range(8)))
+
+        self.assertTrue(all(result is not None for result in results))
+        self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_verified_source_persists_across_process_restart(self, mock_fetch: object) -> None:
+        # A persistent disk cache should serve the same address after the in-memory
+        # layer is dropped (reset_cache simulates a fresh cron process).
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "status": "1",
+            "result": [{"SourceCode": INFINIFI_FARM_SOURCE, "ContractName": "Farm"}],
+        }
+        self.assertIsNotNone(get_source_context(1, "0xabc", "setMaxSlippage"))
+        reset_cache()  # clears in-memory only; disk cache survives
+        ctx = get_source_context(1, "0xabc", "setMaxSlippage")
+        self.assertIsNotNone(ctx)
+        self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]  # served from disk
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_unverified_negative_persists_across_process_restart(self, mock_fetch: object) -> None:
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "status": "1",
+            "result": [{"SourceCode": "", "ContractName": ""}],
+        }
+        self.assertIsNone(get_source_context(1, "0xabc", "setMaxSlippage"))
+        reset_cache()
+        self.assertIsNone(get_source_context(1, "0xabc", "setMaxSlippage"))
+        self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]  # negative cached on disk
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_transient_error_is_not_persisted(self, mock_fetch: object) -> None:
+        # A request failure (fetch_json -> None) must not be cached as "unverified".
+        mock_fetch.return_value = None  # type: ignore[attr-defined]
+        self.assertIsNone(get_source_context(1, "0xabc", "setMaxSlippage"))
+        reset_cache()
+        # Etherscan recovers: a later run should re-fetch and succeed, proving the
+        # blip was never persisted.
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "status": "1",
+            "result": [{"SourceCode": INFINIFI_FARM_SOURCE, "ContractName": "Farm"}],
+        }
+        self.assertIsNotNone(get_source_context(1, "0xabc", "setMaxSlippage"))
+        self.assertEqual(mock_fetch.call_count, 2)  # type: ignore[attr-defined]
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.proxy.get_current_implementation")
