@@ -366,6 +366,36 @@ def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain
         return None
 
 
+def _truncate_call_lines(call_lines: list[str], budget: int) -> str:
+    """Join ``call_lines`` to fit within ``budget`` chars, dropping whole trailing lines.
+
+    Slicing the joined text mid-line can sever a Markdown entity — e.g. cut an
+    opening backtick in a `signature` before its closing one — which Telegram
+    rejects with a 400 "can't parse entities". A failed send then blocks the
+    caller's dedupe cursor and wedges the monitor into a re-send loop. Dropping
+    whole lines keeps every entity balanced.
+    """
+    marker = "… (truncated)"
+    kept: list[str] = []
+    used = 0
+    for line in call_lines:
+        added = len(line) + (1 if kept else 0)  # +1 for the joining newline
+        if used + added > budget:
+            break
+        kept.append(line)
+        used += added
+
+    if len(kept) == len(call_lines):
+        return "\n".join(kept)
+
+    # Make room for the truncation marker by dropping more whole lines if needed.
+    while kept and used + len(marker) + 1 > budget:
+        dropped = kept.pop()
+        used -= len(dropped) + (1 if kept else 0)
+    kept.append(marker)
+    return "\n".join(kept)
+
+
 def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> str:
     """Build a Telegram alert message for a group of TimelockEvent events (same operationId).
 
@@ -452,7 +482,7 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
     if budget > 0:
         call_text = "\n".join(call_lines)
         if len(call_text) > budget:
-            call_text = call_text[: budget - 3] + "..."
+            call_text = _truncate_call_lines(call_lines, budget)
     else:
         call_text = ""
 
