@@ -6,6 +6,7 @@ per-test temp dir, so every DiskCache here writes under an isolated location.
 
 import os
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from utils.disk_cache import MISS, DiskCache
@@ -108,6 +109,23 @@ class TestDiskCacheResilience(unittest.TestCase):
         with open(cache._path("k"), "w") as f:
             f.write("{not json")
         self.assertIs(cache.get("k"), MISS)
+
+    def test_concurrent_same_key_writes_use_independent_temp_files(self) -> None:
+        cache = DiskCache(namespace="concurrent")
+
+        def write_value(i: int) -> None:
+            cache.set_positive("shared", {"writer": i, "payload": "x" * 10000})
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(write_value, range(40)))
+
+        value = cache.get("shared")
+        self.assertIsInstance(value, dict)
+        self.assertIn(value["writer"], range(40))
+        self.assertEqual(value["payload"], "x" * 10000)
+
+        leftovers = [name for name in os.listdir(cache._dir()) if name.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
 
 
 if __name__ == "__main__":

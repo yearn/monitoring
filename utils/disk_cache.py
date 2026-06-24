@@ -29,6 +29,7 @@ negative entry's lifetime.
 
 import json
 import os
+import tempfile
 import time
 from typing import Any
 
@@ -132,10 +133,16 @@ class DiskCache:
         """
         directory = self._dir()
         path = self._path(key)
-        tmp = f"{path}.{os.getpid()}.tmp"
+        tmp = ""
         try:
             os.makedirs(directory, exist_ok=True)
-            with open(tmp, "w") as f:
+            fd, tmp = tempfile.mkstemp(
+                prefix=f".{os.path.basename(path)}.",
+                suffix=".tmp",
+                dir=directory,
+                text=True,
+            )
+            with os.fdopen(fd, "w") as f:
                 json.dump({"v": value, "t": time.time(), "ttl": ttl}, f)
             os.replace(tmp, path)
         except OSError as e:
