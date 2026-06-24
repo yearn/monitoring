@@ -146,12 +146,14 @@ def fetch_borrow_metrics_from_gauntlet(
 
     charts = charts["charts"]
     total_risk_level = 0.0
-    logger.info("Market: %s", market_key)
-    logger.info("Assigned Risk Level: %s", vault_risk_level)
-    logger.info("Total supply: %s", format_usd(total_supply))
-    logger.info("Total borrow: %s", format_usd(total_borrow))
-    logger.debug("--------------------------------")
-    logger.debug("Asset | Supply | Allocation")
+    logger.info(
+        "Market: %s\nAssigned Risk Level: %s\nTotal supply: %s\nTotal borrow: %s",
+        market_key,
+        vault_risk_level,
+        format_usd(total_supply),
+        format_usd(total_borrow),
+    )
+    logger.debug("--------------------------------\nAsset | Supply | Allocation")
 
     for chart in charts:
         if chart["key"] == "market_health_timeseries_asset_supply":
@@ -200,8 +202,9 @@ def fetch_borrow_metrics_from_gauntlet(
             f"💸 Total borrow: {format_usd(total_borrow)}\n"
         )
 
-    logger.info("--------------------------------")
-    logger.info("Total risk level: %s", f"{total_risk_level:.1%}")
-    logger.info("================================")
+    logger.info(
+        "--------------------------------\nTotal risk level: %s\n================================",
+        f"{total_risk_level:.1%}",
+    )
 
     return alerts

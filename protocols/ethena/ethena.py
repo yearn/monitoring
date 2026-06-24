@@ -53,8 +53,7 @@ def fetch_json(url: str) -> dict | None:
     try:
         resp = requests.get(url, timeout=REQUEST_TIMEOUT)
         if resp.status_code != 200:
-            logger.error("HTTP %s for %s", resp.status_code, url)
-            logger.error("%s", resp.text)
+            logger.error("HTTP %s for %s\n%s", resp.status_code, url, resp.text)
             return None
         return resp.json()
     except Exception as e:
@@ -442,9 +441,13 @@ def chaos_labs_check():
     # Calculate and report backing metrics for transparency
     backing_ratio = attestation.backing_assets_usd_value / attestation.total_supply
     reserve_buffer = attestation.backing_assets_and_reserve_fund_usd_value - attestation.total_supply
-    logger.info("Attestation from Chaos Labs: %s", attestation.timestamp)
-    logger.info("Backing Ratio: %s (%s%%)", f"{backing_ratio:.4f}", f"{backing_ratio * 100:,.2f}")
-    logger.info("Reserve Buffer: $%s", f"{reserve_buffer:,.2f}")
+    logger.info(
+        "Attestation from Chaos Labs: %s\nBacking Ratio: %s (%s%%)\nReserve Buffer: $%s",
+        attestation.timestamp,
+        f"{backing_ratio:.4f}",
+        f"{backing_ratio * 100:,.2f}",
+        f"{reserve_buffer:,.2f}",
+    )
 
 
 if __name__ == "__main__":

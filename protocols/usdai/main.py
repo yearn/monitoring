@@ -113,10 +113,13 @@ def main():
         pyusd_assets_fmt = pyusd_assets_raw / (10**PYUSD_DECIMALS)
         pyusd_assets_18_raw = pyusd_assets_raw * (10 ** max(USDAI_DECIMALS - PYUSD_DECIMALS, 0))
 
-        logger.info("--- USDai Stats ---")
-        logger.info("USDai Supply:    $%s", f"{usdai_supply_fmt:,.2f}")
-        logger.info("USDai Bridged:   $%s", f"{bridged_supply_fmt:,.2f}")
-        logger.info("%s Assets:    $%s", PYUSD_SYMBOL, f"{pyusd_assets_fmt:,.2f}")
+        logger.info(
+            "--- USDai Stats ---\nUSDai Supply:    $%s\nUSDai Bridged:   $%s\n%s Assets:    $%s",
+            f"{usdai_supply_fmt:,.2f}",
+            f"{bridged_supply_fmt:,.2f}",
+            PYUSD_SYMBOL,
+            f"{pyusd_assets_fmt:,.2f}",
+        )
 
         # Invariant:
         # totalSupply + bridgedSupply <= pyUSD.balanceOf(USDai)  (all in 1e18 scale)
@@ -125,8 +128,11 @@ def main():
         invariant_gap_fmt = invariant_gap_raw / (10**USDAI_DECIMALS)
         required_backing_fmt = required_backing_raw / (10**USDAI_DECIMALS)
 
-        logger.info("Required Backing: $%s (supply + bridged)", f"{required_backing_fmt:,.2f}")
-        logger.info("Invariant Gap:    $%s (required - pyUSD assets)", f"{invariant_gap_fmt:,.2f}")
+        logger.info(
+            "Required Backing: $%s (supply + bridged)\nInvariant Gap:    $%s (required - pyUSD assets)",
+            f"{required_backing_fmt:,.2f}",
+            f"{invariant_gap_fmt:,.2f}",
+        )
 
         cache_key_invariant_breach = f"{PROTOCOL}_backing_invariant_breach"
         if invariant_gap_raw >= USDAI_INVARIANT_BREACH_THRESHOLD_RAW:
