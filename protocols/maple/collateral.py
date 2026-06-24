@@ -50,11 +50,11 @@ ASSET_RISK_SCORES: dict[str, int] = {
     "LBTC": 2,
     "HYPE": 2,
     "jitoSOL": 3,
-    "LP_USR": 3,
+    "LP_USR": 5,
     "OrcaLP_PYUSDC": 3,
-    "PT_USR": 3,
+    "PT_USR": 5,
     "PT_sUSDE": 3,
-    "USR": 3,
+    "USR": 5,
     "tETH": 3,
 }
 
@@ -64,7 +64,7 @@ COLLATERALIZATION_RATIO_THRESHOLD = 1.35  # 135%
 # Alert if unrealized losses exceed this % of pool total assets
 UNREALIZED_LOSSES_THRESHOLD = 0.005  # 0.5%
 
-# Alert if Proof-of-Reserves total collateral diverges from syrupGlobals by more than this
+# Alert if syrupGlobals reports more collateral than Proof-of-Reserves by more than this
 PROOF_OF_RESERVES_DIVERGENCE_THRESHOLD = 0.001  # 0.1%
 
 # syrupGlobals provides the official combined collateralization ratio across all Syrup pools.
@@ -415,7 +415,7 @@ def check_proof_of_reserves() -> None:
 
     The Network Firm attestation exposes only an aggregate totalCollateralValue.
     We compare it to the on-chain/GraphQL syrupGlobals collateralValue and alert
-    if the divergence exceeds the configured threshold.
+    only if syrupGlobals reports materially more collateral than the PoR attestation.
     """
     try:
         por_total = fetch_proof_of_reserves()
@@ -429,22 +429,24 @@ def check_proof_of_reserves() -> None:
         logger.warning("Cannot compare proof of reserves: syrupGlobals collateralValue is zero")
         return
 
-    divergence = abs(por_total - syrup_collateral) / syrup_collateral
+    collateral_shortfall = syrup_collateral - por_total
+    divergence = collateral_shortfall / syrup_collateral
 
     logger.info(
-        "Proof of reserves: PoR=%s, syrupGlobals=%s, divergence=%.2f%%",
+        "Proof of reserves: PoR=%s, syrupGlobals=%s, syrupGlobals-over-PoR=%.2f%%",
         format_usd(por_total),
         format_usd(syrup_collateral),
         divergence * 100,
     )
 
-    if divergence > PROOF_OF_RESERVES_DIVERGENCE_THRESHOLD:
+    if collateral_shortfall > 0 and divergence > PROOF_OF_RESERVES_DIVERGENCE_THRESHOLD:
         message = (
             f"*Maple Proof of Reserves Divergence Alert*\n"
             f"📊 PoR total collateral: {format_usd(por_total)}\n"
             f"📊 syrupGlobals collateral: {format_usd(syrup_collateral)}\n"
-            f"📈 Divergence: {divergence:.2%} (threshold: {PROOF_OF_RESERVES_DIVERGENCE_THRESHOLD:.1%})\n"
-            f"⚠️ Third-party attestation differs significantly from on-chain disclosure\n"
+            f"📈 syrupGlobals exceeds PoR by: {divergence:.2%} "
+            f"(threshold: {PROOF_OF_RESERVES_DIVERGENCE_THRESHOLD:.1%})\n"
+            f"⚠️ On-chain disclosure reports materially more collateral than the third-party attestation\n"
             f"🔗 [Proof of Reserves Dashboard](https://app.maple.finance/earn/details)"
         )
         send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
