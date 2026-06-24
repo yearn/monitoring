@@ -27,6 +27,7 @@ from utils.config import Config
 from utils.formatting import format_usd
 from utils.http_client import request_with_retry
 from utils.logger import get_logger
+from utils.telegram import send_error_message
 
 PROTOCOL = "maple"
 logger = get_logger(PROTOCOL)
@@ -41,24 +42,30 @@ ASSET_RISK_SCORES: dict[str, int] = {
     "BTC": 1,
     "ETH": 1,
     "cbBTC": 1,
+    "sUSDS": 1,
+    "weETH": 2,
+    "SOL": 2,
     "XRP": 2,
     "USTB": 2,
     "LBTC": 2,
     "HYPE": 2,
     "jitoSOL": 3,
+    "LP_USR": 5,
+    "OrcaLP_PYUSDC": 3,
+    "PT_USR": 5,
+    "PT_sUSDE": 3,
+    "USR": 5,
+    "tETH": 3,
 }
-
-# Default risk score for unknown assets
-DEFAULT_RISK_SCORE = 5
-
-# Alert if weighted risk score exceeds this threshold
-RISK_SCORE_THRESHOLD = 1.5
 
 # Alert if collateralization ratio drops below this threshold
 COLLATERALIZATION_RATIO_THRESHOLD = 1.35  # 135%
 
 # Alert if unrealized losses exceed this % of pool total assets
 UNREALIZED_LOSSES_THRESHOLD = 0.005  # 0.5%
+
+# Alert if syrupGlobals reports more collateral than Proof-of-Reserves by more than this
+PROOF_OF_RESERVES_DIVERGENCE_THRESHOLD = 0.001  # 0.1%
 
 # syrupGlobals provides the official combined collateralization ratio across all Syrup pools.
 # collateralRatio = collateralValue / loansValue (only overcollateralized loans, excludes DeFi strategies).
@@ -69,6 +76,17 @@ SYRUP_GLOBALS_QUERY = """
     collateralRatio
     collateralValue
     loansValue
+  }
+}
+"""
+
+# Proof of Reserves is Maple's third-party attestation (by The Network Firm).
+# The GraphQL endpoint exposes only an aggregate totalCollateralValue, so we use
+# it to sanity-check the syrupGlobals collateral figure.
+PROOF_OF_RESERVES_QUERY = """
+{
+  proofOfReserves {
+    totalCollateralValue
   }
 }
 """
@@ -88,12 +106,21 @@ COLLATERAL_QUERY = """
     principalOut
     unrealizedLosses
     accountedInterest
+  }
+}
+""" % (SYRUP_USDC_POOL_ID, SYRUP_USDT_POOL_ID)
+
+# collateralDisclosure lists the assets backing each pool. Unlike poolCollaterals,
+# it does not provide USD values, but its resolver does not fail on unregistered
+# native assets, so we use it to detect new/unknown collateral types.
+COLLATERAL_DISCLOSURE_QUERY = """
+{
+  poolV2S(where: {id_in: ["%s", "%s"]}) {
+    id
+    name
     poolMeta {
-      poolCollaterals {
+      collateralDisclosure {
         asset
-        assetAmount
-        assetDecimals
-        assetValueUsd
       }
     }
   }
@@ -135,6 +162,12 @@ def _is_retryable_graphql_error(errors: Any) -> bool:
 
         message = str(error.get("message", "")).lower()
         code = (error.get("extensions") or {}).get("code")
+
+        # Data errors such as an unknown native-asset symbol are not transient;
+        # retrying will not fix them.
+        if "native asset" in message and "not found" in message:
+            return False
+
         if code == "INTERNAL_SERVER_ERROR" or "database unavailable" in message or "store error" in message:
             return True
 
@@ -180,31 +213,28 @@ def _post_maple_graphql(query: str, query_name: str) -> dict:
 
 def _alert_maple_graphql_skip(check_name: str, error: Exception) -> None:
     logger.warning("Skipping Maple %s check: %s", check_name, error)
-    send_alert(
-        Alert(
-            AlertSeverity.MEDIUM,
-            f"Maple GraphQL unavailable; skipping {check_name} check for this run.\nError: {error}",
-            PROTOCOL,
-        ),
-        silent=True,
-        plain_text=True,
+    send_error_message(
+        f"Maple GraphQL unavailable; skipping {check_name} check for this run. Error: {error}",
+        PROTOCOL,
     )
 
 
-def fetch_collateral_data() -> tuple[list[dict], list[dict]]:
-    """Fetch collateral and pool data for both syrupUSDC and syrupUSDT from Maple GraphQL API.
+def fetch_pools_data() -> list[dict]:
+    """Fetch per-pool data for syrupUSDC and syrupUSDT from Maple GraphQL API.
 
-    Collateral is merged across both pools (same asset from different pools is combined).
+    The valued `poolCollaterals` resolver is currently broken for unregistered
+    native assets (e.g. PT_sUSDE), so this query no longer requests it.
+    Per-asset collateral values are unavailable until Maple fixes the resolver.
 
     Returns:
-        Tuple of (combined_collaterals, pools_data) where pools_data contains per-pool
-        totalAssets, principalOut, unrealizedLosses, accountedInterest fields.
+        pools_data: per-pool totalAssets, principalOut, unrealizedLosses,
+        accountedInterest fields.
 
     Raises:
         ValueError: If the API response is malformed or pools not found.
         requests.RequestException: If the API request fails.
     """
-    data = _post_maple_graphql(COLLATERAL_QUERY, "collateral")
+    data = _post_maple_graphql(COLLATERAL_QUERY, "pools")
 
     # Log subgraph sync status
     meta = data.get("data", {}).get("_meta", {})
@@ -225,10 +255,7 @@ def fetch_collateral_data() -> tuple[list[dict], list[dict]]:
             len(pools),
         )
 
-    # Merge collateral across both pools — same asset from different pools gets combined
-    collateral_by_asset: dict[str, dict] = {}
     pools_data = []
-
     for pool in pools:
         pool_name = pool.get("name", pool["id"])
         pools_data.append(
@@ -241,19 +268,33 @@ def fetch_collateral_data() -> tuple[list[dict], list[dict]]:
             }
         )
 
-        for collateral in pool.get("poolMeta", {}).get("poolCollaterals", []):
-            asset = collateral.get("asset")
-            if not asset:
-                logger.warning("Skipping collateral with missing asset: %s", collateral)
-                continue
-            usd_value = float(collateral.get("assetValueUsd") or "0")
-            if asset in collateral_by_asset:
-                existing = collateral_by_asset[asset]
-                existing["assetValueUsd"] = str(float(existing.get("assetValueUsd") or "0") + usd_value)
-            else:
-                collateral_by_asset[asset] = {**collateral}
+    return pools_data
 
-    return list(collateral_by_asset.values()), pools_data
+
+def fetch_collateral_disclosure() -> set[str]:
+    """Fetch the list of disclosed collateral assets for both Syrup pools.
+
+    Returns:
+        Set of unique asset symbols disclosed across syrupUSDC and syrupUSDT.
+
+    Raises:
+        ValueError: If the API response is malformed or pools not found.
+        requests.RequestException: If the API request fails.
+    """
+    data = _post_maple_graphql(COLLATERAL_DISCLOSURE_QUERY, "collateralDisclosure")
+
+    pools = data.get("data", {}).get("poolV2S", [])
+    if not pools:
+        raise ValueError("No Syrup pools found in Maple API response")
+
+    assets: set[str] = set()
+    for pool in pools:
+        for disclosure in pool.get("poolMeta", {}).get("collateralDisclosure", []):
+            asset = disclosure.get("asset")
+            if asset:
+                assets.add(asset)
+
+    return assets
 
 
 def fetch_syrup_globals() -> dict:
@@ -291,49 +332,28 @@ def fetch_syrup_globals() -> dict:
     }
 
 
-def calculate_risk_score(collaterals: list[dict]) -> tuple[float, list[dict]]:
-    """Calculate weighted average risk score from collateral data.
-
-    Args:
-        collaterals: List of collateral dicts from the Maple API.
+def fetch_proof_of_reserves() -> float:
+    """Fetch the aggregate collateral value from Maple's Proof of Reserves attestation.
 
     Returns:
-        Tuple of (weighted_risk_score, active_collaterals) where active_collaterals
-        contains only collaterals with non-zero USD value, enriched with risk info.
+        Total collateral value in USD.
+
+    Raises:
+        ValueError: If the API response is malformed.
+        requests.RequestException: If the API request fails.
     """
-    active_collaterals = []
-    total_usd_value = 0.0
-    weighted_risk_sum = 0.0
+    data = _post_maple_graphql(PROOF_OF_RESERVES_QUERY, "proofOfReserves")
 
-    for collateral in collaterals:
-        usd_value = float(collateral.get("assetValueUsd") or "0")
-        if usd_value <= 0:
-            continue
+    por_snapshots = data.get("data", {}).get("proofOfReserves")
+    if not por_snapshots or not isinstance(por_snapshots, list):
+        raise ValueError("proofOfReserves not found in Maple API response")
 
-        asset = collateral.get("asset")
-        if not asset:
-            continue
-        risk_score = ASSET_RISK_SCORES.get(asset, DEFAULT_RISK_SCORE)
+    latest_snapshot = por_snapshots[0]
+    total_collateral_value = latest_snapshot.get("totalCollateralValue")
+    if total_collateral_value is None:
+        raise ValueError("proofOfReserves missing totalCollateralValue")
 
-        # assetValueUsd is in 6 decimal, convert to dollars
-        usd_value_dollars = usd_value / 1e6
-
-        active_collaterals.append(
-            {
-                "asset": asset,
-                "usd_value": usd_value_dollars,
-                "risk_score": risk_score,
-            }
-        )
-
-        total_usd_value += usd_value_dollars
-        weighted_risk_sum += risk_score * usd_value_dollars
-
-    if total_usd_value == 0:
-        return 0.0, active_collaterals
-
-    weighted_risk = weighted_risk_sum / total_usd_value
-    return weighted_risk, active_collaterals
+    return float(total_collateral_value)
 
 
 def check_collateralization_ratio() -> None:
@@ -390,12 +410,83 @@ def check_unrealized_losses(pools_data: list[dict]) -> None:
             send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
 
+def check_proof_of_reserves() -> None:
+    """Cross-check Proof-of-Reserves collateral value against syrupGlobals.
+
+    The Network Firm attestation exposes only an aggregate totalCollateralValue.
+    We compare it to the on-chain/GraphQL syrupGlobals collateralValue and alert
+    only if syrupGlobals reports materially more collateral than the PoR attestation.
+    """
+    try:
+        por_total = fetch_proof_of_reserves()
+        syrup_globals = fetch_syrup_globals()
+    except (requests.RequestException, ValueError) as e:
+        _alert_maple_graphql_skip("proof of reserves", e)
+        return
+
+    syrup_collateral = syrup_globals["collateralValue"]
+    if syrup_collateral <= 0:
+        logger.warning("Cannot compare proof of reserves: syrupGlobals collateralValue is zero")
+        return
+
+    collateral_shortfall = syrup_collateral - por_total
+    divergence = collateral_shortfall / syrup_collateral
+
+    logger.info(
+        "Proof of reserves: PoR=%s, syrupGlobals=%s, syrupGlobals-over-PoR=%.2f%%",
+        format_usd(por_total),
+        format_usd(syrup_collateral),
+        divergence * 100,
+    )
+
+    if collateral_shortfall > 0 and divergence > PROOF_OF_RESERVES_DIVERGENCE_THRESHOLD:
+        message = (
+            f"*Maple Proof of Reserves Divergence Alert*\n"
+            f"📊 PoR total collateral: {format_usd(por_total)}\n"
+            f"📊 syrupGlobals collateral: {format_usd(syrup_collateral)}\n"
+            f"📈 syrupGlobals exceeds PoR by: {divergence:.2%} "
+            f"(threshold: {PROOF_OF_RESERVES_DIVERGENCE_THRESHOLD:.1%})\n"
+            f"⚠️ On-chain disclosure reports materially more collateral than the third-party attestation\n"
+            f"🔗 [Proof of Reserves Dashboard](https://app.maple.finance/earn/details)"
+        )
+        send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
+
+
+def check_unknown_collateral_assets() -> None:
+    """Alert on collateral assets disclosed by Maple that are not in the risk map.
+
+    Uses `collateralDisclosure`, which returns asset symbols without USD values.
+    This lets us detect new collateral types even when `poolCollaterals` is broken.
+    """
+    try:
+        disclosed_assets = fetch_collateral_disclosure()
+    except (requests.RequestException, ValueError) as e:
+        _alert_maple_graphql_skip("collateral disclosure", e)
+        return
+
+    unknown_assets = sorted(asset for asset in disclosed_assets if asset not in ASSET_RISK_SCORES)
+    if not unknown_assets:
+        return
+
+    logger.info("Unknown collateral assets disclosed by Maple: %s", ", ".join(unknown_assets))
+    unknown_lines = [f"• {asset}" for asset in unknown_assets]
+    message = (
+        "*Maple Syrup Unknown Collateral Asset*\n"
+        "New collateral assets detected that are not in the risk mapping:\n"
+        + "\n".join(unknown_lines)
+        + "\n\nPlease update the risk scores in `maple/collateral.py`"
+    )
+    send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
+
+
 def check_collateral_risk() -> None:
     """Check loan collateral risk and alert if weighted risk score exceeds threshold."""
+    pools_data: list[dict] = []
+
     try:
-        collaterals, pools_data = fetch_collateral_data()
+        pools_data = fetch_pools_data()
     except (requests.RequestException, ValueError) as e:
-        _alert_maple_graphql_skip("collateral risk", e)
+        _alert_maple_graphql_skip("pools data", e)
         return
 
     # Log per-pool subgraph data
@@ -415,61 +506,12 @@ def check_collateral_risk() -> None:
     except (requests.RequestException, ValueError) as e:
         _alert_maple_graphql_skip("collateralization ratio", e)
 
+    # Cross-check Proof-of-Reserves aggregate against syrupGlobals
+    check_proof_of_reserves()
+
     # Check unrealized losses vs pool size
     check_unrealized_losses(pools_data)
 
-    risk_score, active_collaterals = calculate_risk_score(collaterals)
-
-    if not active_collaterals:
-        logger.warning("No active collateral found across Syrup pools")
-        return
-
-    total_usd = sum(c["usd_value"] for c in active_collaterals)
-
-    # Log collateral breakdown
-    breakdown_lines = []
-    for c in sorted(active_collaterals, key=lambda x: x["usd_value"], reverse=True):
-        pct = c["usd_value"] / total_usd * 100 if total_usd > 0 else 0
-        risk_label = {1: "Low", 2: "Medium", 3: "High"}.get(c["risk_score"], "Unknown")
-        breakdown_lines.append(
-            f"  {c['asset']}: {format_usd(c['usd_value'])} ({pct:.1f}%) — risk: {c['risk_score']} ({risk_label})"
-        )
-
-    logger.info(
-        "Collateral risk score: %.2f (threshold: %.2f) | Total: %s\n%s",
-        risk_score,
-        RISK_SCORE_THRESHOLD,
-        format_usd(total_usd),
-        "\n".join(breakdown_lines),
-    )
-
-    if risk_score > RISK_SCORE_THRESHOLD:
-        collateral_lines = []
-        for c in sorted(active_collaterals, key=lambda x: x["usd_value"], reverse=True):
-            pct = c["usd_value"] / total_usd * 100 if total_usd > 0 else 0
-            risk_label = {1: "Low", 2: "Medium", 3: "High"}.get(c["risk_score"], "Unknown")
-            collateral_lines.append(
-                f"• {c['asset']}: {format_usd(c['usd_value'])} ({pct:.1f}%) — Risk {c['risk_score']} ({risk_label})"
-            )
-
-        message = (
-            f"🚨 *Maple Syrup Collateral Risk Alert*\n"
-            f"📊 Weighted risk score: {risk_score:.2f} (threshold: {RISK_SCORE_THRESHOLD:.1f})\n"
-            f"💰 Total collateral: {format_usd(total_usd)}\n\n"
-            f"*Collateral Breakdown:*\n" + "\n".join(collateral_lines) + "\n\n"
-            "⚠️ High-risk collateral concentration detected\n"
-            "🔗 [Pool Details](https://app.maple.finance/earn/details)"
-        )
-        send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
-
-    # Also alert on unknown assets (not in our risk mapping)
-    unknown_assets = [c for c in active_collaterals if c["asset"] not in ASSET_RISK_SCORES]
-    if unknown_assets:
-        unknown_lines = [f"• {c['asset']}: {format_usd(c['usd_value'])}" for c in unknown_assets]
-        message = (
-            "⚠️ *Maple Syrup Unknown Collateral Asset*\n"
-            "New collateral assets detected that are not in the risk mapping:\n"
-            + "\n".join(unknown_lines)
-            + "\n\nPlease update the risk scores in `maple/collateral.py`"
-        )
-        send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
+    # Detect new/unknown collateral assets (poolCollaterals values are currently
+    # unavailable because Maple's resolver fails on unregistered native assets).
+    check_unknown_collateral_assets()

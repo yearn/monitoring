@@ -9,8 +9,9 @@
 - **Strategy AUM:** Logs `assetsUnderManagement()` on Aave and Sky strategies (visibility). Same figures define “liquid funds” for the withdrawal-queue ratio below.
 - **Withdrawal Queue vs TVL:** Pending withdrawal exit value (`totalShares` → `convertToExitAssets`) vs pool TVL. Alerts when pending **>** **1%** of TVL (LOW). Aave + Sky AUM logged for context.
 - **Pool Liquidity:** USDC `balanceOf` the pool vs pending withdrawal exit value (`totalShares` → `convertToExitAssets`). Alerts when pending withdrawals **>** pool cash, i.e. the delegate cannot satisfy the queue from idle cash (MEDIUM). Queue depth is fetched only when alerting and included as context.
-- **Loan Collateral Risk:** GraphQL collateral merged across both pools; USD-weighted risk from `ASSET_RISK_SCORES` in [`maple/collateral.py`](./collateral.py). Alerts when weighted average is **>** **1.5** (MEDIUM), or when a collateral symbol is missing from the map (MEDIUM; unknowns use default score 5 for weighting).
-- **Collateralization Ratio:** [`syrupGlobals`](https://docs.maple.finance/integrate/technical-resources/collateral-and-yield-disclosure) combined ratio (OC loans only; strategies excluded). Alerts when `collateralRatio` **<** **140%** (MEDIUM).
+- **Unknown Collateral Asset:** `collateralDisclosure { asset }` is used to detect collateral symbols not present in `ASSET_RISK_SCORES`. Alerts when a newly disclosed asset appears (MEDIUM).
+- **Collateralization Ratio:** [`syrupGlobals`](https://docs.maple.finance/integrate/technical-resources/collateral-and-yield-disclosure) combined ratio (OC loans only; strategies excluded). Alerts when `collateralRatio` **<** **135%** (MEDIUM).
+- **Proof of Reserves Divergence:** Maple's third-party PoR attestation (`proofOfReserves.totalCollateralValue`) is cross-checked against `syrupGlobals.collateralValue`. Alerts when `syrupGlobals.collateralValue` is more than **0.1%** above PoR (MEDIUM); no alert when PoR is above `syrupGlobals`.
 - **Pool Delegate Cover:** USDC `balanceOf` on PoolDelegateCover vs cached prior. Alerts if balance hits **$0** after a non-zero cached value, or on any decrease vs that cached prior (MEDIUM).
 - **Stablecoin Peg (DeFiLlama):** `syrupUSDC` and `syrupUSDT` prices monitored via [`stables/main.py`](../stables/main.py) (runs every 10 min). Depeg alert below **$0.97** (CRITICAL); fetch failure alerts LOW.
 
@@ -38,9 +39,9 @@ Severities match `AlertSeverity` in code (`utils.alert`): **CRITICAL** / **HIGH*
 | Unrealized losses vs pool | ≥0.5% of `totalAssets` per pool (subgraph; syrupUSDC + syrupUSDT) | HIGH |
 | Withdrawal queue vs TVL | Pending withdrawal exit value **>** 1% of pool TVL (`totalAssets`) | LOW |
 | Pending withdrawals vs cash | Pending withdrawal exit value **>** pool cash | MEDIUM |
-| Collateral risk score | Weighted average **>** 1.5 (USD-weighted over collateral) | MEDIUM |
-| Unknown collateral asset | Collateral asset not in `ASSET_RISK_SCORES` | MEDIUM |
-| Collateralization ratio | `syrupGlobals.collateralRatio` **<** 140% (combined Syrup pools; OC loans only) | MEDIUM |
+| Unknown collateral asset | Collateral asset from `collateralDisclosure` not in `ASSET_RISK_SCORES` | MEDIUM |
+| Collateralization ratio | `syrupGlobals.collateralRatio` **<** 135% (combined Syrup pools; OC loans only) | MEDIUM |
+| Proof of Reserves divergence | `syrupGlobals.collateralValue` exceeds `proofOfReserves.totalCollateralValue` by >0.1% | MEDIUM |
 | Delegate cover | USDC balance → $0 from cached non-zero, or any decrease vs cached prior | MEDIUM |
 | Stablecoin peg (DeFiLlama) | `syrupUSDC` / `syrupUSDT` price **<** $0.97 — see [`stables/main.py`](../stables/main.py) | CRITICAL |
 | DeFiLlama price fetch | Request fails — see [`stables/main.py`](../stables/main.py) | LOW |
