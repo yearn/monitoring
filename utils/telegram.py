@@ -1,5 +1,7 @@
 import os
 import re
+from collections.abc import Iterable, Sequence
+from html import escape as html_escape
 
 import requests
 from dotenv import load_dotenv
@@ -13,6 +15,11 @@ logger = get_logger("utils.telegram")
 
 # Maximum message length allowed by Telegram API
 MAX_MESSAGE_LENGTH = 4096
+
+# Telegram Bot API 10.1 rich messages allow substantially larger structured
+# messages than sendMessage. Keep this explicit so rich-message callers can
+# fail over before handing Telegram malformed/truncated HTML.
+MAX_RICH_MESSAGE_LENGTH = 32768
 
 # Channel key for operational errors/diagnostics (GraphQL/fetch failures, retries,
 # crashes). Routed to a dedicated chat so transient noise doesn't spam the
@@ -44,10 +51,96 @@ def escape_markdown(text: str) -> str:
     return text
 
 
+def escape_rich_html(text: object) -> str:
+    """Escape text for Telegram rich-message HTML."""
+    return html_escape(str(text), quote=True)
+
+
+def format_rich_table(
+    headers: Sequence[object],
+    rows: Iterable[Sequence[object]],
+    caption: object | None = None,
+    alignments: Sequence[str] | None = None,
+    bordered: bool = True,
+    striped: bool = True,
+) -> str:
+    """Render a simple Telegram rich-message HTML table.
+
+    The returned string is meant for ``send_telegram_rich_message``. Cell
+    content is escaped as plain text; callers that need inline rich formatting
+    should build the table HTML themselves.
+    """
+    column_count = len(headers)
+    if column_count == 0:
+        raise ValueError("Telegram rich tables need at least one column")
+    if column_count > 20:
+        raise ValueError("Telegram rich tables support at most 20 columns")
+
+    alignments = alignments or ()
+    if len(alignments) > column_count:
+        raise ValueError("Table alignments cannot exceed the number of columns")
+
+    normalized_alignments: list[str | None] = []
+    for alignment in alignments:
+        if alignment not in {"left", "center", "right"}:
+            raise ValueError("Table alignment must be one of: left, center, right")
+        normalized_alignments.append(alignment)
+    normalized_alignments.extend([None] * (column_count - len(normalized_alignments)))
+
+    table_rows = [tuple(row) for row in rows]
+    for row in table_rows:
+        if len(row) != column_count:
+            raise ValueError("All Telegram rich table rows must have the same number of columns as headers")
+
+    attrs = []
+    if bordered:
+        attrs.append("bordered")
+    if striped:
+        attrs.append("striped")
+    table_tag = "<table" + (f" {' '.join(attrs)}" if attrs else "") + ">"
+
+    html_parts = [table_tag]
+    if caption is not None:
+        html_parts.append(f"<caption>{escape_rich_html(caption)}</caption>")
+
+    def _cell(tag: str, value: object, alignment: str | None) -> str:
+        align_attr = f' align="{alignment}"' if alignment else ""
+        return f"<{tag}{align_attr}>{escape_rich_html(value)}</{tag}>"
+
+    html_parts.append("<tr>")
+    html_parts.extend(_cell("th", value, normalized_alignments[index]) for index, value in enumerate(headers))
+    html_parts.append("</tr>")
+
+    for row in table_rows:
+        html_parts.append("<tr>")
+        html_parts.extend(_cell("td", value, normalized_alignments[index]) for index, value in enumerate(row))
+        html_parts.append("</tr>")
+
+    html_parts.append("</table>")
+    return "".join(html_parts)
+
+
 class TelegramError(Exception):
     """Exception raised for errors in Telegram API interactions."""
 
     pass
+
+
+def _telegram_destination(protocol: str) -> tuple[str | None, str | None, str | None]:
+    """Resolve protocol routing to bot token, chat id, and optional topic id."""
+    topic_id = os.getenv(f"TELEGRAM_TOPIC_ID_{protocol.upper()}")
+
+    if topic_id:
+        return (
+            os.getenv("TELEGRAM_BOT_TOKEN_DEFAULT"),
+            os.getenv("TELEGRAM_CHAT_ID_TOPICS"),
+            topic_id,
+        )
+
+    bot_token = os.getenv(f"TELEGRAM_BOT_TOKEN_{protocol.upper()}")
+    if not bot_token:
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN_DEFAULT")
+    return bot_token, os.getenv(f"TELEGRAM_CHAT_ID_{protocol.upper()}"), None
 
 
 def _post_message(
@@ -89,6 +182,42 @@ def _post_message(
     if response.status_code != 200:
         raise TelegramError(
             _redact_bot_token(f"Failed to send telegram message: {response.status_code} - {response.text}")
+        )
+
+
+def _post_rich_message(
+    bot_token: str,
+    chat_id: str,
+    rich_message: dict[str, object],
+    disable_notification: bool,
+    topic_id: str | None = None,
+) -> None:
+    """Send a rich message to Telegram, raising TelegramError on failure."""
+    url = f"https://api.telegram.org/bot{bot_token}/sendRichMessage"
+    payload: dict[str, object] = {
+        "chat_id": chat_id,
+        "rich_message": rich_message,
+        "disable_notification": disable_notification,
+    }
+    if topic_id:
+        payload["message_thread_id"] = int(topic_id)
+
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        body = ""
+        err_response = getattr(e, "response", None)
+        if err_response is not None:
+            try:
+                body = f" body={err_response.text}"
+            except Exception:
+                pass
+        raise TelegramError(_redact_bot_token(f"Failed to send telegram rich message: {e}{body}"))
+
+    if response.status_code != 200:
+        raise TelegramError(
+            _redact_bot_token(f"Failed to send telegram rich message: {response.status_code} - {response.text}")
         )
 
 
@@ -189,19 +318,7 @@ def send_telegram_message(
         _update_alert_delivery_safe(alert_id, status="delivered", delivered_at=store.utc_now_iso())
         return
 
-    # Check if this protocol has a topic ID configured (forum-style group)
-    topic_id = os.getenv(f"TELEGRAM_TOPIC_ID_{protocol.upper()}")
-
-    if topic_id:
-        # Topics always use the default bot and the shared topics chat
-        bot_token = os.getenv("TELEGRAM_BOT_TOKEN_DEFAULT")
-        chat_id = os.getenv("TELEGRAM_CHAT_ID_TOPICS")
-    else:
-        # Legacy per-protocol chat routing
-        bot_token = os.getenv(f"TELEGRAM_BOT_TOKEN_{protocol.upper()}")
-        if not bot_token:
-            bot_token = os.getenv("TELEGRAM_BOT_TOKEN_DEFAULT")
-        chat_id = os.getenv(f"TELEGRAM_CHAT_ID_{protocol.upper()}")
+    bot_token, chat_id, topic_id = _telegram_destination(protocol)
 
     if not bot_token or not chat_id:
         _record_alert_safe(
@@ -280,6 +397,58 @@ def _update_alert_delivery_safe(
         store.update_alert_delivery(alert_id, status=status, delivered_at=delivered_at, error=error)
     except Exception:
         logger.debug("Failed to update alert delivery", exc_info=True)
+
+
+def send_telegram_rich_message(
+    html: str,
+    protocol: str,
+    disable_notification: bool = False,
+    fallback_message: str | None = None,
+    skip_entity_detection: bool = True,
+) -> None:
+    """Send Telegram Bot API 10.1 rich-message HTML.
+
+    Use this for structured content like tables. If the Bot API rejects the rich
+    payload and ``fallback_message`` is provided, the fallback is sent as plain
+    text through the existing ``sendMessage`` path.
+    """
+    logger.debug("Sending telegram rich message:\n%s", html)
+
+    if os.getenv("LOG_LEVEL", "INFO").upper() == "DEBUG":
+        logger.debug("Skipping Telegram rich send (LOG_LEVEL=DEBUG)")
+        return
+
+    if len(html) > MAX_RICH_MESSAGE_LENGTH:
+        if fallback_message is not None:
+            send_telegram_message(fallback_message, protocol, disable_notification, plain_text=True)
+            return
+        raise TelegramError(f"Telegram rich message exceeds {MAX_RICH_MESSAGE_LENGTH} characters")
+
+    rich_message: dict[str, object] = {"html": html, "skip_entity_detection": skip_entity_detection}
+
+    test_chat_id = os.getenv("TELEGRAM_TEST_CHAT_ID")
+    if test_chat_id:
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN_DEFAULT")
+        if not bot_token:
+            logger.warning("TELEGRAM_TEST_CHAT_ID set but TELEGRAM_BOT_TOKEN_DEFAULT missing")
+            return
+        labelled_html = f"<p>[{escape_rich_html(protocol)}]</p>{html}"
+        rich_message = {"html": labelled_html, "skip_entity_detection": skip_entity_detection}
+        _post_rich_message(bot_token, test_chat_id, rich_message, disable_notification)
+        return
+
+    bot_token, chat_id, topic_id = _telegram_destination(protocol)
+    if not bot_token or not chat_id:
+        logger.warning("Missing Telegram credentials for %s", protocol)
+        return
+
+    try:
+        _post_rich_message(bot_token, chat_id, rich_message, disable_notification, topic_id)
+    except TelegramError:
+        if fallback_message is None:
+            raise
+        logger.exception("Failed to send Telegram rich message for %s; sending fallback", protocol)
+        send_telegram_message(fallback_message, protocol, disable_notification, plain_text=True)
 
 
 def _error_channel_configured() -> bool:
