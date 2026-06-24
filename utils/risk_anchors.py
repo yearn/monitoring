@@ -39,20 +39,28 @@ _ANCHORS_BY_SIGNATURE: dict[str, RiskAnchor] = {
     # Access control — depends on which role/who, but the operation itself is high-trust
     "grantRole(bytes32,address)": RiskAnchor("MEDIUM", "grantRole(): elevate to HIGH if role is owner/admin/upgrader"),
     "revokeRole(bytes32,address)": RiskAnchor("MEDIUM", "revokeRole(): elevate to HIGH if removing an emergency role"),
-    "renounceRole(bytes32,address)": RiskAnchor("LOW", "renounceRole() permanently drops a privilege; usually defensive"),
+    "renounceRole(bytes32,address)": RiskAnchor(
+        "LOW", "renounceRole() permanently drops a privilege; usually defensive"
+    ),
     # Ownership — irreversible authority change
     "transferOwnership(address)": RiskAnchor("HIGH", "transferOwnership(): hands over full admin control"),
     "renounceOwnership()": RiskAnchor("HIGH", "renounceOwnership(): irrevocably abandons admin"),
     "acceptOwnership()": RiskAnchor("HIGH", "acceptOwnership(): completes an Ownable2Step handover"),
     # Token supply
-    "mint(address,uint256)": RiskAnchor("MEDIUM", "mint(address,uint256): new supply — elevate to HIGH if large or unbacked"),
+    "mint(address,uint256)": RiskAnchor(
+        "MEDIUM", "mint(address,uint256): new supply — elevate to HIGH if large or unbacked"
+    ),
     # Proxy upgrades — replaces all code; impl-diff section should drive the verdict
     "upgradeTo(address)": RiskAnchor("HIGH", "upgradeTo(): replaces all implementation code"),
     "upgradeToAndCall(address,bytes)": RiskAnchor("HIGH", "upgradeToAndCall(): replaces code AND runs initializer"),
-    "upgradeAndCall(address,address,bytes)": RiskAnchor("HIGH", "upgradeAndCall() via ProxyAdmin: same as above, routed via admin"),
+    "upgradeAndCall(address,address,bytes)": RiskAnchor(
+        "HIGH", "upgradeAndCall() via ProxyAdmin: same as above, routed via admin"
+    ),
     # Admin parameter changes
     "setDelay(uint256)": RiskAnchor("MEDIUM", "setDelay(): timelock window change — direction & magnitude matter"),
-    "setPendingAdmin(address)": RiskAnchor("MEDIUM", "setPendingAdmin(): new admin candidate — confirm + accept needed"),
+    "setPendingAdmin(address)": RiskAnchor(
+        "MEDIUM", "setPendingAdmin(): new admin candidate — confirm + accept needed"
+    ),
     "acceptAdmin()": RiskAnchor("HIGH", "acceptAdmin(): completes an admin handover"),
     # Diamond / facet operations
     "diamondCut((address,uint8,bytes4[])[],address,bytes)": RiskAnchor(
