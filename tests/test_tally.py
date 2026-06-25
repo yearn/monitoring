@@ -2,10 +2,13 @@ import os
 import socket
 import time
 
+import pytest
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
+_REQUIRES_TALLY_KEY = pytest.mark.skipif(not os.getenv("TALLY_API_KEY"), reason="TALLY_API_KEY not set in environment")
 
 
 def _check_dns_resolution() -> bool:
@@ -99,6 +102,7 @@ def _check_with_different_timeouts() -> bool:
     return False
 
 
+@_REQUIRES_TALLY_KEY
 def test_with_different_timeouts():
     """Test API with progressively longer timeouts."""
     assert _check_with_different_timeouts()
@@ -122,6 +126,7 @@ def _check_alternative_endpoints() -> bool:
     return True
 
 
+@_REQUIRES_TALLY_KEY
 def test_alternative_endpoints():
     """Test if there are alternative endpoints or if the main one is down."""
     assert _check_alternative_endpoints()
