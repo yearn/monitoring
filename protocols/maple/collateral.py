@@ -47,6 +47,7 @@ ASSET_RISK_SCORES: dict[str, int] = {
     "SOL": 2,
     "XRP": 2,
     "USTB": 2,
+    "USDG": 2,
     "LBTC": 2,
     "HYPE": 2,
     "jitoSOL": 3,
