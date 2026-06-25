@@ -1,10 +1,13 @@
 from utils.abi import load_abi
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import Chain
-from utils.telegram import send_error_message, send_telegram_message
+from utils.logger import get_logger
+from utils.telegram import send_error_message
 from utils.web3_wrapper import ChainManager
 
+logger = get_logger("lido.steth")
 PROTOCOL = "lido"
-PEG_THRESHOLD = 0.05  # 5% threshold
+PEG_THRESHOLD = 0.001  # 0.1% threshold
 
 # Load ABIs
 ABI_CURVE_POOL = load_abi("common-abi/CurvePool.json")
@@ -35,6 +38,9 @@ def check_peg(validator_rate, curve_rate):
         return False
     difference = abs(validator_rate - curve_rate)
     percentage_diff = difference / validator_rate
+    logger.debug(
+        "Rate validator: %s, rate curve: %s, PEG difference: %s%%", validator_rate, curve_rate, percentage_diff
+    )
     return percentage_diff >= PEG_THRESHOLD
 
 
@@ -69,7 +75,7 @@ def main():
                     human_readable_amount = amount / 1e18
                     human_readable_result = curve_rate / 1e18
                     message += f"📊 Swap result for amount {human_readable_amount:.5f}: {human_readable_result:.5f}"
-                    send_telegram_message(message, PROTOCOL)
+                    send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
             except Exception as e:
                 error_message = f"Error processing curve pool rate for amount {amount / 1e18:.2f}: {e}"
                 send_error_message(error_message, PROTOCOL)

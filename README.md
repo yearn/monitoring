@@ -23,7 +23,6 @@ Monitoring scripts for DeFi protocols to track key metrics and send alerts. Join
 - [RTokens - ETH+](./protocols/rtoken/README.md)
 - [Spark](./protocols/spark/README.md)
 - [Strata](./protocols/strata/README.md)
-- [Stargate](./protocols/stargate/README.md) — _monitoring disabled_
 - [USDAI](./protocols/usdai/README.md)
 - [USTB - Superstate](./protocols/ustb/README.md)
 - [Yearn](./protocols/yearn/README.md)

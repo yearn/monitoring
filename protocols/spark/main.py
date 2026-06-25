@@ -66,7 +66,7 @@ def print_stuff(chain_name, token_name, ur):
     logger.info("Chain: %s, Token: %s, UR: %s", chain_name, token_name, ur)
     if ur > THRESHOLD_UR:
         message = f"**BEEP BOP**\n💎 Market asset: {token_name}\n📊 Utilization rate: {ur:.2%}\n🌐 Chain: {chain_name}"
-        send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
+        send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
 
 
 # Function to process assets for a specific network
