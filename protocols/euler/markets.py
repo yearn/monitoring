@@ -1,10 +1,11 @@
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.formatting import format_usd
 from utils.gauntlet import (
     fetch_borrow_metrics_from_gauntlet,
     get_markets_for_protocol,
     get_timestamp_before,
 )
-from utils.telegram import send_telegram_message
+from utils.telegram import send_error_message
 
 PROTOCOL = "euler"
 
@@ -72,7 +73,7 @@ def fetch_metric_from_gauntlet(max_retries=3):
 
     if alerts:
         message = "\n\n".join(alerts)
-        send_telegram_message(message, PROTOCOL)
+        send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
     return True
 
@@ -82,14 +83,14 @@ def analyze_euler_market_allocation(market_key, vault_risk_level):
     alerts = fetch_borrow_metrics_from_gauntlet(PROTOCOL, market_key, vault_risk_level, DEBT_SUPPLY_RATIO)
     if alerts:
         message = "\n\n".join(alerts)
-        send_telegram_message(message, PROTOCOL)
+        send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
 
 def main():
     successfull = fetch_metric_from_gauntlet()
     if not successfull:
         # if both data sources are not working, send an alert
-        send_telegram_message("🚨 Euler metrics cannot be fetched", PROTOCOL)
+        send_error_message("Euler metrics cannot be fetched", PROTOCOL)
 
     # Implement checks for vault allocations with their respective risk levels
     for vault in EULER_VAULTS_KEYS:

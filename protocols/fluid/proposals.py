@@ -2,9 +2,10 @@ from datetime import datetime
 
 import requests
 
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
 from utils.logger import get_logger
-from utils.telegram import escape_markdown, send_error_message, send_telegram_message
+from utils.telegram import escape_markdown, send_error_message
 
 PROTOCOL = "fluid"
 logger = get_logger(PROTOCOL)
@@ -123,17 +124,17 @@ def get_proposals():
             message += "\n"
 
         if new_proposals_found:
-            send_telegram_message(message, PROTOCOL)
+            send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
             write_last_queued_id_to_file(PROTOCOL, newest_reported_proposal_id)
         else:
             logger.info("No new proposals to report")
 
     except requests.RequestException as e:
-        error_message = f"Failed to fetch Fluid proposals: {e}"
+        error_message = f"Failed to fetch Fluid proposals: {escape_markdown(str(e))}"
         logger.error("%s", error_message)
         send_error_message(error_message, PROTOCOL)
     except Exception as e:
-        error_message = f"Error processing Fluid proposals: {e}"
+        error_message = f"Error processing Fluid proposals: {escape_markdown(str(e))}"
         logger.error("%s", error_message)
         send_error_message(error_message, PROTOCOL)
 

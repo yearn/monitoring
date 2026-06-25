@@ -25,7 +25,7 @@ def print_stuff(chain_name: str, token_name: str, ur: float) -> None:
     logger.debug(f"Chain: {chain_name}, Token: {token_name}, UR: {ur}")
     if ur > THRESHOLD_UR:
         message = f"**BEEP BOP**\n💎 Market asset: {token_name}\n📊 Utilization rate: {ur:.2%}\n🌐 Chain: {chain_name}"
-        send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
+        send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
 
 
 def process_assets(chain: Chain) -> None:

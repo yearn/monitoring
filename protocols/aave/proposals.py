@@ -2,10 +2,11 @@ from datetime import datetime
 
 import requests
 
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
 from utils.http_client import request_with_retry
 from utils.logger import get_logger
-from utils.telegram import send_error_message, send_telegram_message
+from utils.telegram import send_error_message
 
 PROTOCOL = "aave"
 logger = get_logger(PROTOCOL)
@@ -186,7 +187,7 @@ def handle_governance_proposals() -> None:
         return
 
     message = "🖋️ Queued Aave Governance Proposals 🖋️\n" + message
-    send_telegram_message(message, PROTOCOL)
+    send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
     write_last_queued_id_to_file(PROTOCOL, newest_reported_id)
 
 

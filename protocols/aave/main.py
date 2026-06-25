@@ -9,6 +9,7 @@ from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import Chain
 from utils.logger import get_logger
+from utils.telegram import send_error_message
 from utils.web3_wrapper import ChainManager
 
 PROTOCOL = "aave"
@@ -54,7 +55,7 @@ THRESHOLD_UR = 0.99
 def print_stuff(chain_name: str, token_name: str, ur: float) -> None:
     if ur > THRESHOLD_UR:
         message = f"**BEEP BOP**\n💎 Market asset: {token_name}\n📊 Utilization rate: {ur:.2%}\n🌐 Chain: {chain_name}"
-        send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
+        send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
 
 
 def process_assets(chain: Chain) -> None:
@@ -96,6 +97,7 @@ def main() -> None:
             process_assets(chain)
         except Exception as e:
             logger.error("Error processing %s: %s", chain.name, e)
+            send_error_message(f"Error processing Aave assets on {chain.name}: {e}", PROTOCOL)
 
 
 if __name__ == "__main__":

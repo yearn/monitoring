@@ -3,9 +3,10 @@ import os
 import requests
 from dotenv import load_dotenv
 
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
 from utils.logger import get_logger
-from utils.telegram import escape_markdown, send_telegram_message
+from utils.telegram import escape_markdown, send_error_message
 
 load_dotenv()
 
@@ -136,17 +137,17 @@ def get_proposals():
             #     if summary:
             #         message += f"📝 Description: {summary}\n\n"
 
-        send_telegram_message(message, PROTOCOL)
+        send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
         # write the last reported id (highest ID since we sorted ascending)
         write_last_queued_id_to_file(PROTOCOL, newest_reported_proposal_id)
 
     except requests.RequestException as e:
         message = f"Failed to fetch compound proposals: {e}"
-        send_telegram_message(message, PROTOCOL, disable_notification=True, plain_text=True)
+        send_error_message(message, PROTOCOL)
     except Exception as e:
         message = f"Error processing compound proposals: {e}"
         logger.error("%s", message)
-        send_telegram_message(message, PROTOCOL, disable_notification=True, plain_text=True)
+        send_error_message(message, PROTOCOL)
 
 
 if __name__ == "__main__":

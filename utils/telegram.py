@@ -338,7 +338,7 @@ def send_error_message(
     """
     if _error_channel_configured():
         send_telegram_message(
-            f"[{protocol}] {message}",
+            f"[{protocol}] {escape_markdown(message)}",
             ERROR_CHANNEL,
             disable_notification,
             plain_text=True,
@@ -348,7 +348,7 @@ def send_error_message(
         )
     else:
         send_telegram_message(
-            message,
+            escape_markdown(message),
             protocol,
             disable_notification,
             plain_text=True,

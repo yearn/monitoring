@@ -12,10 +12,11 @@ from decimal import Decimal, getcontext
 from dotenv import load_dotenv
 
 from utils.abi import load_abi
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import EXPLORER_URLS, Chain
 from utils.defillama import fetch_prices
-from utils.telegram import send_error_message, send_telegram_message
+from utils.telegram import send_error_message
 from utils.web3_wrapper import ChainManager
 
 load_dotenv()
@@ -405,7 +406,7 @@ def send_large_flow_alert(
         message_lines.append(f"👤 From: [{from_address}]({from_url})" if from_url else f"👤 From: {from_address}")
 
     message = "\n".join(message_lines)
-    send_telegram_message(message, PROTOCOL)
+    send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
     return tx_hash
 
 

@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 from protocols.fluid.proposals import get_proposals
+from utils.alert import AlertSeverity
 
 
 class _Response:
@@ -42,15 +43,16 @@ def test_fluid_proposal_alert_escapes_api_markdown_and_keeps_link():
         patch("protocols.fluid.proposals.requests.get", return_value=_Response(payload)),
         patch("protocols.fluid.proposals.get_last_queued_id_from_file", return_value=130),
         patch("protocols.fluid.proposals.write_last_queued_id_to_file") as mock_write,
-        patch("protocols.fluid.proposals.send_telegram_message") as mock_send,
+        patch("protocols.fluid.proposals.send_alert") as mock_send,
     ):
         get_proposals()
 
     mock_send.assert_called_once()
-    message, protocol = mock_send.call_args.args
-    assert protocol == "fluid"
-    assert "[Proposal 131](https://fluid.io/gov/proposals/131)" in message
-    assert "TYPE\\_1 vaults..." in message
+    alert = mock_send.call_args.args[0]
+    assert alert.protocol == "fluid"
+    assert alert.severity == AlertSeverity.LOW
+    assert "[Proposal 131](https://fluid.io/gov/proposals/131)" in alert.message
+    assert "TYPE\\_1 vaults..." in alert.message
     assert mock_send.call_args.kwargs == {}
     mock_write.assert_called_once_with("fluid", 131)
 

@@ -12,9 +12,9 @@ import requests
 from dotenv import load_dotenv
 from web3 import Web3
 
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import Chain
 from utils.logger import get_logger
-from utils.telegram import send_telegram_message_with_fallback
 from utils.web3_wrapper import ChainManager
 
 load_dotenv()
@@ -153,12 +153,7 @@ def main() -> None:
         return
 
     message = build_alert_message(all_errors, total_checked)
-    fallback = (
-        f"👹 *yDaemon Endorsed Check*\n"
-        f"Found {total_errors} unendorsed vaults across {len(all_errors)} chains.\n"
-        f"Too many to list here."
-    )
-    send_telegram_message_with_fallback(message, PROTOCOL, fallback, max_length=2000)
+    send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
 
 
 if __name__ == "__main__":

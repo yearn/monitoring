@@ -11,9 +11,9 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 from web3 import Web3
 
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import EXPLORER_URLS, Chain
 from utils.logger import get_logger
-from utils.telegram import send_telegram_message
 from utils.web3_wrapper import ChainManager
 
 load_dotenv()
@@ -109,7 +109,7 @@ def main() -> None:
         return
 
     message = build_alert_message(violations)
-    send_telegram_message(message, ALERT_PROTOCOL, disable_notification=True)
+    send_alert(Alert(AlertSeverity.HIGH, message, ALERT_PROTOCOL))
 
 
 if __name__ == "__main__":

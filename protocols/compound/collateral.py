@@ -16,6 +16,7 @@ Sends Telegram alerts when thresholds are exceeded.
 from dataclasses import dataclass
 
 from utils.abi import load_abi
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.assets import (
     ALLOCATION_TIERS,
     MAX_RISK_THRESHOLDS,
@@ -25,7 +26,6 @@ from utils.assets import (
 from utils.chains import Chain
 from utils.formatting import format_usd
 from utils.logger import get_logger
-from utils.telegram import send_telegram_message
 from utils.web3_wrapper import ChainManager, Web3Client
 
 PROTOCOL = "comp"
@@ -315,4 +315,4 @@ def check_collateral_risk(chain: Chain) -> None:
         alerts = _analyze_market(market)
         if alerts:
             message = "\n\n".join(alerts)
-            send_telegram_message(message, PROTOCOL)
+            send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))

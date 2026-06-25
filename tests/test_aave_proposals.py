@@ -6,6 +6,7 @@ from protocols.aave.proposals import (
     handle_governance_proposals,
     has_pending_payload,
 )
+from utils.alert import AlertSeverity
 
 
 def _proposal(proposal_id: int, title: str = "Test Proposal", state: str = "queued") -> dict:
@@ -58,17 +59,18 @@ def test_aave_handler_alerts_governance_executed_proposals_with_pending_payloads
         patch("protocols.aave.proposals.get_last_queued_id_from_file", return_value=487),
         patch("protocols.aave.proposals.fetch_queued_proposals", return_value=proposals),
         patch("protocols.aave.proposals.fetch_payload_states", side_effect=[fully_executed, still_pending]),
-        patch("protocols.aave.proposals.send_telegram_message") as mock_send,
+        patch("protocols.aave.proposals.send_alert") as mock_send,
         patch("protocols.aave.proposals.write_last_queued_id_to_file") as mock_write,
     ):
         handle_governance_proposals()
 
     mock_send.assert_called_once()
-    message, protocol = mock_send.call_args.args
-    assert protocol == "aave"
-    assert "Passed Proposal" in message
-    assert "Already Executed Proposal" not in message
-    assert "2026-05-26 10:30:35 UTC" in message
+    alert = mock_send.call_args.args[0]
+    assert alert.protocol == "aave"
+    assert alert.severity == AlertSeverity.LOW
+    assert "Passed Proposal" in alert.message
+    assert "Already Executed Proposal" not in alert.message
+    assert "2026-05-26 10:30:35 UTC" in alert.message
     mock_write.assert_called_once_with("aave", 489)
 
 

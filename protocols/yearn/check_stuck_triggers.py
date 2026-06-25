@@ -18,10 +18,10 @@ import requests
 from dotenv import load_dotenv
 from web3 import Web3
 
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_path
 from utils.chains import Chain
 from utils.logger import get_logger
-from utils.telegram import send_telegram_message_with_fallback
 from utils.web3_wrapper import ChainManager
 
 load_dotenv()
@@ -537,12 +537,7 @@ def main() -> None:
     # Build and send alert
     message = build_alert_message(stuck_triggers)
 
-    fallback = (
-        f"⚠️ *TKS Trigger Alert*\n"
-        f"Found {len(stuck_triggers)} trigger(s) crossing alert thresholds.\n"
-        f"Too many to list here."
-    )
-    send_telegram_message_with_fallback(message, PROTOCOL, fallback)
+    send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
     logger.info("Alert sent successfully")
 
 
