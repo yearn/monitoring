@@ -30,6 +30,7 @@ from web3 import Web3
 
 from protocols.morpho._shared import API_URL, SUPPORTED_CHAINS, VAULTS_V2_BY_CHAIN, get_vault_url
 from protocols.morpho.v2_decoders import decode_submit, submit_data_key
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import (
     get_last_value_for_key_from_file,
     morpho_filename,
@@ -39,7 +40,6 @@ from utils.cache import (
 from utils.chains import Chain
 from utils.http_client import request_with_retry
 from utils.logger import get_logger
-from utils.telegram import send_telegram_message
 
 PROTOCOL = "morpho"
 logger = get_logger("morpho.governance_v2")
@@ -271,13 +271,16 @@ def _pending_function_key(snapshot: V2GovernanceSnapshot, data_hash: str) -> str
 
 
 def _alert_pending_new(snapshot: V2GovernanceSnapshot, pc: PendingConfig, operation_label: str) -> None:
-    send_telegram_message(
-        f"⏳ V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
-        f"on {snapshot.chain.name}\n"
-        f"📥 Submitted: {operation_label}\n"
-        f"⏰ Executable at: {_format_ts(pc.valid_at)}\n"
-        f"🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}",
-        PROTOCOL,
+    send_alert(
+        Alert(
+            AlertSeverity.MEDIUM,
+            f"⏳ V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
+            f"on {snapshot.chain.name}\n"
+            f"📥 Submitted: {operation_label}\n"
+            f"⏰ Executable at: {_format_ts(pc.valid_at)}\n"
+            f"🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}",
+            PROTOCOL,
+        )
     )
 
 
@@ -297,22 +300,28 @@ def _alert_pending_resolved(
     verb = "executed" if last_valid_at <= now else "revoked"
     icon = "✅" if verb == "executed" else "🛑"
     operation = f"`{function_name}()`" if function_name else f"`{data_hash[:10]}…`"
-    send_telegram_message(
-        f"{icon} V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
-        f"on {snapshot.chain.name}\n"
-        f"Pending operation {operation} was {verb} "
-        f"(was due {_format_ts(last_valid_at)}).",
-        PROTOCOL,
+    send_alert(
+        Alert(
+            AlertSeverity.LOW,
+            f"{icon} V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
+            f"on {snapshot.chain.name}\n"
+            f"Pending operation {operation} was {verb} "
+            f"(was due {_format_ts(last_valid_at)}).",
+            PROTOCOL,
+        )
     )
 
 
 def _alert_role_change(snapshot: V2GovernanceSnapshot, role: str, before: str, after: str) -> None:
     icon = "👑" if role == "owner" else "🎩"
-    send_telegram_message(
-        f"🚨 V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
-        f"on {snapshot.chain.name}\n"
-        f"{icon} {role.capitalize()} changed: `{before}` → `{after}`",
-        PROTOCOL,
+    send_alert(
+        Alert(
+            AlertSeverity.HIGH,
+            f"🚨 V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
+            f"on {snapshot.chain.name}\n"
+            f"{icon} {role.capitalize()} changed: `{before}` → `{after}`",
+            PROTOCOL,
+        )
     )
 
 
@@ -328,10 +337,13 @@ def _alert_set_diff(
         lines.append(f"  + `{addr}`")
     for addr in sorted(removed):
         lines.append(f"  − `{addr}`")
-    send_telegram_message(
-        f"{icon} V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
-        f"{set_name} changed on {snapshot.chain.name}\n" + "\n".join(lines),
-        PROTOCOL,
+    send_alert(
+        Alert(
+            AlertSeverity.LOW,
+            f"{icon} V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
+            f"{set_name} changed on {snapshot.chain.name}\n" + "\n".join(lines),
+            PROTOCOL,
+        )
     )
 
 

@@ -65,6 +65,6 @@ def test_fluid_proposal_fetch_error_routes_to_errors_channel():
         get_proposals()
 
     mock_send.assert_called_once_with(
-        "Error processing Fluid proposals: bad TYPE_1 payload",
+        "Error processing Fluid proposals: bad TYPE\\_1 payload",
         "fluid",
     )

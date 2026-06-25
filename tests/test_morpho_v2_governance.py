@@ -53,7 +53,7 @@ class TestMorphoV2GovernancePendingLabels(unittest.TestCase):
         with (
             patch("protocols.morpho.governance_v2.get_last_value_for_key_from_file", side_effect=read_value),
             patch("protocols.morpho.governance_v2.write_last_value_to_file", side_effect=write_value),
-            patch("protocols.morpho.governance_v2.send_telegram_message") as send,
+            patch("protocols.morpho.governance_v2.send_alert") as send,
         ):
             governance_v2._diff_pending(_snapshot([pc]))
             send.reset_mock()
@@ -63,21 +63,21 @@ class TestMorphoV2GovernancePendingLabels(unittest.TestCase):
         function_key = governance_v2.morpho_key(VAULT.lower(), data_hash, governance_v2.PENDING_FUNCTION_TYPE)
         self.assertEqual(state[function_key], "addAdapter")
 
-        message = send.call_args.args[0]
-        self.assertIn("Pending operation `addAdapter()` was executed", message)
-        self.assertNotIn(Web3.to_checksum_address(A1), message)
-        self.assertNotIn(f"`{data_hash[:10]}…`", message)
-        self.assertIn("was executed", message)
+        alert = send.call_args.args[0]
+        self.assertIn("Pending operation `addAdapter()` was executed", alert.message)
+        self.assertNotIn(Web3.to_checksum_address(A1), alert.message)
+        self.assertNotIn(f"`{data_hash[:10]}…`", alert.message)
+        self.assertIn("was executed", alert.message)
 
     def test_resolved_pending_alert_without_cached_function_keeps_hash_only_message(self):
         data_hash = "3d6d72861e" + "0" * 54
 
-        with patch("protocols.morpho.governance_v2.send_telegram_message") as send:
+        with patch("protocols.morpho.governance_v2.send_alert") as send:
             governance_v2._alert_pending_resolved(_snapshot([]), data_hash, 1, "")
 
-        message = send.call_args.args[0]
-        self.assertIn(f"Pending operation `{data_hash[:10]}…` was executed", message)
-        self.assertNotIn(f"(`{data_hash[:10]}…`)", message)
+        alert = send.call_args.args[0]
+        self.assertIn(f"Pending operation `{data_hash[:10]}…` was executed", alert.message)
+        self.assertNotIn(f"(`{data_hash[:10]}…`)", alert.message)
 
 
 if __name__ == "__main__":

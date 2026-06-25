@@ -3,6 +3,7 @@ from datetime import datetime
 from web3 import Web3
 
 from utils.abi import load_abi
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import (
     get_last_executed_morpho_from_file,
     write_last_executed_morpho_to_file,
@@ -11,7 +12,6 @@ from utils.chains import Chain
 from utils.formatting import format_token_amount, format_with_suffix
 from utils.http_client import request_with_retry
 from utils.logger import get_logger
-from utils.telegram import send_telegram_message
 from utils.web3_wrapper import ChainManager
 
 PROTOCOL = "morpho"
@@ -275,7 +275,7 @@ def check_markets_pending_cap(name, morpho_contract, chain, w3):
                         f"For vault [{name}]({vault_url}) for market: [{market_name}]({market_url}) on {chain.name}. "
                         f"Queued for {time}"
                     )
-                send_telegram_message(message, PROTOCOL)
+                send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
                 write_last_executed_morpho_to_file(vault_address, market, PENDING_CAP_TYPE, pending_cap_timestamp)
             else:
                 logger.info(
@@ -291,9 +291,12 @@ def check_markets_pending_cap(name, morpho_contract, chain, w3):
             if removable_at > get_last_executed_morpho_from_file(vault_address, market, REMOVABLE_AT_TYPE):
                 time = datetime.fromtimestamp(removable_at).strftime("%Y-%m-%d %H:%M:%S")
                 market_name, _ = fetch_market_info(market, chain)
-                send_telegram_message(
-                    f"Vault [{name}]({vault_url}) queued to remove market: [{market_name}]({market_url}) at {time}",
-                    PROTOCOL,
+                send_alert(
+                    Alert(
+                        AlertSeverity.MEDIUM,
+                        f"Vault [{name}]({vault_url}) queued to remove market: [{market_name}]({market_url}) at {time}",
+                        PROTOCOL,
+                    )
                 )
                 write_last_executed_morpho_to_file(vault_address, market, REMOVABLE_AT_TYPE, removable_at)
             else:
@@ -309,9 +312,12 @@ def check_pending_role_change(name, morpho_contract, role_type, timestamp, chain
     market_id = ""  # use empty string for all markets because the value is used per vault
     if timestamp > get_last_executed_morpho_from_file(morpho_contract.address, market_id, role_type):
         vault_url = get_vault_url_by_name(name, chain)
-        send_telegram_message(
-            f"{role_type.capitalize()} is changing for vault [{name}]({vault_url})",
-            PROTOCOL,
+        send_alert(
+            Alert(
+                AlertSeverity.HIGH,
+                f"{role_type.capitalize()} is changing for vault [{name}]({vault_url})",
+                PROTOCOL,
+            )
         )
         write_last_executed_morpho_to_file(morpho_contract.address, market_id, role_type, timestamp)
 

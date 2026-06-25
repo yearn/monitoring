@@ -11,10 +11,11 @@ from typing import Any, Dict, List
 
 import requests
 
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import Chain
 from utils.http_client import request_with_retry
 from utils.logger import get_logger
-from utils.telegram import send_error_message, send_telegram_message
+from utils.telegram import send_error_message
 
 # Configuration constants
 API_URL = "https://api.morpho.org/graphql"
@@ -479,7 +480,7 @@ def bad_debt_alert(
                 f"💸 Bad debt: ${bad_debt:,.2f} ({(bad_debt / borrowed_tvl):.2%} of borrowed)\n"
             )
 
-            send_telegram_message(message, PROTOCOL)
+            send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
 
 def check_allocation_and_risk(vault_data):
@@ -560,7 +561,7 @@ def check_allocation_and_risk(vault_data):
             f"🔺 High allocation in [{vault_name}]({vault_url}) (risk {risk_level}) on {chain.name}\n"
             f"{violations_text}\n"
         )
-        send_telegram_message(message, PROTOCOL)
+        send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
     # print total risk level and vault name
     logger.info("Total risk level: %s, vault: %s on %s", f"{total_risk_level:.2f}", vault_name, chain.name)
@@ -572,7 +573,7 @@ def check_allocation_and_risk(vault_data):
             f"🔢 Risk level: {total_risk_level:.2f} (max: {MAX_RISK_THRESHOLDS[risk_level]:.2f})\n"
             f"🔢 Total assets: ${total_assets:,.2f}\n"
         )
-        send_telegram_message(message, PROTOCOL)
+        send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
 
 
 def is_yv_collateral_vault(vault_address: str, chain: Chain) -> bool:
@@ -948,7 +949,7 @@ def check_yv_collateral_market_liquidity(
             f"📊 Required with buffer: ${required_liquidity:,.2f} ({coverage:.2f}x coverage)\n"
             f"💹 Markets:\n{market_lines}\n"
         )
-        send_telegram_message(message, PROTOCOL)
+        send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
 
 def check_individual_liquidity_for_chain(chain: Chain, chain_vaults: List[Dict[str, Any]]) -> None:
@@ -1003,7 +1004,7 @@ def check_low_liquidity(vault_data):
             f"💰 Liquidity: ${liquidity:,.2f} ({liquidity_ratio:.1%} of ${total_assets:,.2f})\n"
             f"📊 Min threshold: {LIQUIDITY_THRESHOLD:.1%}\n"
         )
-        send_telegram_message(message, PROTOCOL)
+        send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
 
 
 def main() -> None:
@@ -1094,7 +1095,10 @@ def main() -> None:
 
     vaults_data = data.get("data", {}).get("vaults", {}).get("items", [])
     if len(vaults_data) == 0:
-        send_telegram_message("🚨 No vaults data found 🚨", PROTOCOL)
+        send_error_message(
+            "🚨 No vaults data found for Morpho markets 🚨",
+            PROTOCOL,
+        )
         return
 
     # Check combined liquidity for all vaults (handles YV collateral grouping)

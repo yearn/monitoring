@@ -43,6 +43,7 @@ from protocols.morpho.markets import (
     get_market_allocation_threshold,
 )
 from utils.abi import load_abi
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import (
     get_last_value_for_key_from_file,
     morpho_filename,
@@ -52,7 +53,6 @@ from utils.cache import (
 from utils.chains import Chain
 from utils.http_client import request_with_retry
 from utils.logger import get_logger
-from utils.telegram import send_telegram_message
 from utils.web3_wrapper import ChainManager, Web3Client
 
 PROTOCOL = "morpho"
@@ -341,28 +341,37 @@ def score_market_allocations(
 
     vault_url = get_vault_url(vault.address, vault.chain)
     if allocation_violations:
-        send_telegram_message(
-            f"🔺 V2 high allocation in [{vault.name}]({vault_url}) (risk {vault.risk_level}) "
-            f"on {vault.chain.name}\n" + "\n".join(allocation_violations),
-            PROTOCOL,
+        send_alert(
+            Alert(
+                AlertSeverity.HIGH,
+                f"🔺 V2 high allocation in [{vault.name}]({vault_url}) (risk {vault.risk_level}) "
+                f"on {vault.chain.name}\n" + "\n".join(allocation_violations),
+                PROTOCOL,
+            )
         )
 
     if bad_debt_alerts:
-        send_telegram_message(
-            f"🚨 V2 bad debt in [{vault.name}]({vault_url}) on {vault.chain.name}\n" + "\n".join(bad_debt_alerts),
-            PROTOCOL,
+        send_alert(
+            Alert(
+                AlertSeverity.HIGH,
+                f"🚨 V2 bad debt in [{vault.name}]({vault_url}) on {vault.chain.name}\n" + "\n".join(bad_debt_alerts),
+                PROTOCOL,
+            )
         )
 
     total_risk_score = round(total_risk_score, 2)
     logger.info("V2 vault %s on %s — total risk score %.2f", vault.name, vault.chain.name, total_risk_score)
     max_risk = MAX_RISK_THRESHOLDS[vault.risk_level]
     if total_risk_score > max_risk:
-        send_telegram_message(
-            f"⚠️ V2 high risk in [{vault.name}]({vault_url}) (risk {vault.risk_level}) "
-            f"on {vault.chain.name}\n"
-            f"🔢 Risk level: {total_risk_score:.2f} (max: {max_risk:.2f})\n"
-            f"🔢 Total assets: ${vault_total_assets_usd:,.2f}",
-            PROTOCOL,
+        send_alert(
+            Alert(
+                AlertSeverity.HIGH,
+                f"⚠️ V2 high risk in [{vault.name}]({vault_url}) (risk {vault.risk_level}) "
+                f"on {vault.chain.name}\n"
+                f"🔢 Risk level: {total_risk_score:.2f} (max: {max_risk:.2f})\n"
+                f"🔢 Total assets: ${vault_total_assets_usd:,.2f}",
+                PROTOCOL,
+            )
         )
 
 
@@ -419,11 +428,14 @@ def analyze_vault_adapter(vault: V2Vault, adapter: AdapterInfo) -> None:
         return
 
     vault_url = get_vault_url(vault.address, vault.chain)
-    send_telegram_message(
-        f"ℹ️ V2 [{vault.name}]({vault_url}) on {vault.chain.name} wraps unmonitored v1 vault "
-        f"`{adapter.wrapped_v1_vault}` — consider adding it to "
-        f"morpho/markets.py:VAULTS_BY_CHAIN.",
-        PROTOCOL,
+    send_alert(
+        Alert(
+            AlertSeverity.LOW,
+            f"ℹ️ V2 [{vault.name}]({vault_url}) on {vault.chain.name} wraps unmonitored v1 vault "
+            f"`{adapter.wrapped_v1_vault}` — consider adding it to "
+            f"morpho/markets.py:VAULTS_BY_CHAIN.",
+            PROTOCOL,
+        )
     )
     write_last_value_to_file(morpho_filename, cache_key, 1)
 
