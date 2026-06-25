@@ -151,6 +151,7 @@ Both scripts share `MORPHO_FILENAME` (default `cache-id.txt`). New key types add
 | Key suffix | Segment | Value | Meaning |
 | --- | --- | --- | --- |
 | `v2_pending` | `keccak(data)` | `validAt` ts, `-1`, or `0` | Pending timelock operation: pending / executed / revoked |
+| `v2_pending_function` | `keccak(data)` | function name | Human-readable operation name used when a pending operation later executes or is revoked |
 | `v2_pending_index` | `pending_keys` | comma-joined `keccak(data)` | Reverse index used to detect operations that disappeared from `pendingConfigs` |
 | `v2_role` | `owner` / `curator` | lowercase address | Last-known instant-role address |
 | `v2_set` | `sentinels` / `allocators` / `adapters` | comma-joined lowercase addresses | Last-known role set |
