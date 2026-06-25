@@ -29,7 +29,7 @@ from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.config import Config
 from utils.logger import get_logger
-from utils.telegram import escape_markdown
+from utils.telegram import escape_markdown, send_error_message
 
 logger = get_logger("stables.dune_large_transfers")
 PROTOCOL = "stables"
@@ -209,12 +209,9 @@ def main() -> None:
         rows = list(result.result.rows) if result and result.result and result.result.rows else []
     except Exception as exc:
         logger.error("Failed to fetch Dune large-transfer query result: %s", exc)
-        send_alert(
-            Alert(
-                AlertSeverity.MEDIUM,
-                f"Dune large-transfer monitor failed while querying Dune: {exc}",
-                PROTOCOL,
-            ),
+        send_error_message(
+            f"Dune large-transfer monitor failed while querying Dune: {exc}",
+            PROTOCOL,
             plain_text=True,
         )
         return
@@ -242,7 +239,7 @@ def main() -> None:
     total_rows = len(new_alert_rows)
     for protocol, protocol_rows in grouped.items():
         message = _build_alert_message(protocol, protocol_rows, query_id, total_rows)
-        send_alert(Alert(AlertSeverity.HIGH, message, protocol))
+        send_alert(Alert(AlertSeverity.INFO, message, protocol))
 
     write_last_value_to_file(cache_filename, CACHE_KEY_LAST_TX, _row_key(alert_rows[0]))
 
