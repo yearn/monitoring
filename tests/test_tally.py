@@ -8,8 +8,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def test_dns_resolution():
-    """Test if we can resolve the Tally API hostname"""
+def _check_dns_resolution() -> bool:
+    """Check if we can resolve the Tally API hostname."""
     try:
         ip = socket.gethostbyname("api.tally.xyz")
         print(f"DNS resolution successful: api.tally.xyz -> {ip}")
@@ -19,8 +19,13 @@ def test_dns_resolution():
         return False
 
 
-def test_basic_connectivity():
-    """Test basic HTTP connectivity without API key"""
+def test_dns_resolution():
+    """Test if we can resolve the Tally API hostname."""
+    assert _check_dns_resolution()
+
+
+def _check_basic_connectivity() -> bool:
+    """Check basic HTTP connectivity without API key."""
     try:
         print("Testing basic connectivity to api.tally.xyz...")
         response = requests.get("https://api.tally.xyz", timeout=10)
@@ -38,8 +43,13 @@ def test_basic_connectivity():
         return False
 
 
-def test_with_different_timeouts():
-    """Test API with progressively longer timeouts"""
+def test_basic_connectivity():
+    """Test basic HTTP connectivity without API key."""
+    assert _check_basic_connectivity()
+
+
+def _check_with_different_timeouts() -> bool:
+    """Check API with progressively longer timeouts."""
     api_key = os.getenv("TALLY_API_KEY")
     if not api_key:
         print("TALLY_API_KEY not found in environment")
@@ -89,8 +99,13 @@ def test_with_different_timeouts():
     return False
 
 
-def test_alternative_endpoints():
-    """Test if there are alternative endpoints or if the main one is down"""
+def test_with_different_timeouts():
+    """Test API with progressively longer timeouts."""
+    assert _check_with_different_timeouts()
+
+
+def _check_alternative_endpoints() -> bool:
+    """Check if there are alternative endpoints or if the main one is down."""
     api_key = os.getenv("TALLY_API_KEY")
     if not api_key:
         print("TALLY_API_KEY not found")
@@ -103,6 +118,13 @@ def test_alternative_endpoints():
         print(f"Tally website status: {response.status_code}")
     except Exception as e:
         print(f"Tally website unreachable: {e}")
+
+    return True
+
+
+def test_alternative_endpoints():
+    """Test if there are alternative endpoints or if the main one is down."""
+    assert _check_alternative_endpoints()
 
 
 def test_network_with_curl():
@@ -124,25 +146,25 @@ def main():
 
     # Step 1: DNS resolution
     print("1. Testing DNS resolution...")
-    if not test_dns_resolution():
+    if not _check_dns_resolution():
         print("❌ DNS resolution failed - check your internet connection")
         return
 
     # Step 2: Basic connectivity
     print("\n2. Testing basic connectivity...")
-    if not test_basic_connectivity():
+    if not _check_basic_connectivity():
         print("❌ Basic connectivity failed - possible firewall/proxy issues")
         return
 
     # Step 3: API endpoint with different timeouts
     print("\n3. Testing API endpoint with different timeouts...")
-    if test_with_different_timeouts():
+    if _check_with_different_timeouts():
         print("✅ API connection successful!")
         return
 
     # Step 4: Check alternatives
     print("\n4. Testing alternative endpoints...")
-    test_alternative_endpoints()
+    _check_alternative_endpoints()
 
     # Step 5: Manual test command
     print("\n5. Manual test option:")

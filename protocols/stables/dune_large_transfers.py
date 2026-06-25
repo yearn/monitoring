@@ -239,7 +239,7 @@ def main() -> None:
     total_rows = len(new_alert_rows)
     for protocol, protocol_rows in grouped.items():
         message = _build_alert_message(protocol, protocol_rows, query_id, total_rows)
-        send_alert(Alert(AlertSeverity.INFO, message, protocol))
+        send_alert(Alert(AlertSeverity.LOW, message, protocol))
 
     write_last_value_to_file(cache_filename, CACHE_KEY_LAST_TX, _row_key(alert_rows[0]))
 
