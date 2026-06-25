@@ -15,7 +15,7 @@ Setup for:
   - yearn-V3-Stargate-USDT
   - yearn-V3-Stargate-USDC.E
 
-[Python script code](https://github.com/tapired/monitoring-scripts-py/blob/main/stargate/main.py)
+[Python script code](https://github.com/yearn/monitoring/blob/main/stargate/main.py)
 
 This bot is suspended because Stargate strategies are not active or have minimal amounts.
 
