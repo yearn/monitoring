@@ -94,8 +94,8 @@ build-backend = "setuptools.build_meta"
 
 # Protocol monitors live under `protocols/`; shared code under `utils/` and `automation/`.
 # Namespace discovery keeps the editable-install finder in sync as protocols come and go.
-# Dirs whose names aren't valid Python identifiers (e.g. `3jane`, `lrt-pegs`, `bad-debt`,
-# `common-abi`) are never imported — they're reached via cwd-relative script/ABI paths — so
+# Dirs whose names aren't valid Python identifiers (e.g. `3jane`, `lrt-pegs`,`common-abi`)
+# are never imported — they're reached via cwd-relative script/ABI paths — so
 # they don't need a finder entry.
 [tool.setuptools.packages.find]
 where = ["."]
