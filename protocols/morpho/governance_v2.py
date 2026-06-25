@@ -47,6 +47,7 @@ logger = get_logger("morpho.governance_v2")
 # Cache value-type tags used with utils.cache.morpho_key.
 PENDING_TYPE = "v2_pending"
 PENDING_INDEX_TYPE = "v2_pending_index"
+PENDING_FUNCTION_TYPE = "v2_pending_function"
 ROLE_TYPE = "v2_role"
 SET_TYPE = "v2_set"
 
@@ -250,12 +251,30 @@ def _explorer_link(chain: Chain, tx_hash: str) -> str:
     return f"[{tx_hash[:10]}…]({base}/tx/{tx_hash})"
 
 
-def _alert_pending_new(snapshot: V2GovernanceSnapshot, pc: PendingConfig) -> None:
+def _operation_label(snapshot: V2GovernanceSnapshot, pc: PendingConfig) -> str:
     decoded = decode_submit(pc.data, snapshot.chain)
+    if decoded:
+        return decoded
+    return pc.function_name or f"`{pc.data_hash[:10]}…`"
+
+
+def _operation_function_name(pc: PendingConfig, operation_label: str) -> str:
+    if pc.function_name:
+        return pc.function_name.split("(", 1)[0]
+    if "(" in operation_label:
+        return operation_label.split("(", 1)[0]
+    return "" if operation_label.startswith("<") else operation_label
+
+
+def _pending_function_key(snapshot: V2GovernanceSnapshot, data_hash: str) -> str:
+    return morpho_key(snapshot.address.lower(), data_hash, PENDING_FUNCTION_TYPE)
+
+
+def _alert_pending_new(snapshot: V2GovernanceSnapshot, pc: PendingConfig, operation_label: str) -> None:
     send_telegram_message(
         f"⏳ V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
         f"on {snapshot.chain.name}\n"
-        f"📥 Submitted: {decoded}\n"
+        f"📥 Submitted: {operation_label}\n"
         f"⏰ Executable at: {_format_ts(pc.valid_at)}\n"
         f"🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}",
         PROTOCOL,
@@ -266,6 +285,7 @@ def _alert_pending_resolved(
     snapshot: V2GovernanceSnapshot,
     data_hash: str,
     last_valid_at: int,
+    function_name: str,
 ) -> None:
     """Alert that a previously-pending operation no longer appears in pendingConfigs.
 
@@ -276,10 +296,11 @@ def _alert_pending_resolved(
     now = int(datetime.now().timestamp())
     verb = "executed" if last_valid_at <= now else "revoked"
     icon = "✅" if verb == "executed" else "🛑"
+    operation = f"`{function_name}()`" if function_name else f"`{data_hash[:10]}…`"
     send_telegram_message(
         f"{icon} V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
         f"on {snapshot.chain.name}\n"
-        f"Pending operation `{data_hash[:10]}…` was {verb} "
+        f"Pending operation {operation} was {verb} "
         f"(was due {_format_ts(last_valid_at)}).",
         PROTOCOL,
     )
@@ -325,12 +346,14 @@ def _diff_pending(snapshot: V2GovernanceSnapshot) -> None:
     current_keys: set[str] = set()
     for pc in snapshot.pending_configs:
         current_keys.add(pc.data_hash)
+        operation_label = _operation_label(snapshot, pc)
+        _write(_pending_function_key(snapshot, pc.data_hash), _operation_function_name(pc, operation_label))
         cache_key = morpho_key(addr, pc.data_hash, PENDING_TYPE)
         last = _read_int(cache_key)
         # Already alerted at this validAt, or marked executed.
         if last == pc.valid_at or last == EXECUTED:
             continue
-        _alert_pending_new(snapshot, pc)
+        _alert_pending_new(snapshot, pc, operation_label)
         _write(cache_key, pc.valid_at)
 
     # Detect resolved entries: anything in last-run's index that isn't in the
@@ -345,7 +368,7 @@ def _diff_pending(snapshot: V2GovernanceSnapshot) -> None:
         if last <= 0:
             # Already marked executed/revoked.
             continue
-        _alert_pending_resolved(snapshot, data_hash, last)
+        _alert_pending_resolved(snapshot, data_hash, last, _read_str(_pending_function_key(snapshot, data_hash)))
         _write(cache_key, EXECUTED if last <= int(datetime.now().timestamp()) else REVOKED)
 
     _write(index_key, ",".join(sorted(current_keys)))
