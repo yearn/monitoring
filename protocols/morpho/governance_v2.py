@@ -265,7 +265,7 @@ def _explorer_link(chain: Chain, tx_hash: str) -> str:
     base = chain.explorer_url
     if not base or not tx_hash:
         return tx_hash
-    return f"[{tx_hash[:10]}…]({base}/tx/{tx_hash})"
+    return f"[{tx_hash}…]({base}/tx/{tx_hash})"
 
 
 def _operation_label(snapshot: V2GovernanceSnapshot, pc: PendingConfig) -> str:
