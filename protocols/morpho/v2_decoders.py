@@ -186,7 +186,9 @@ def _format_args(sig: str, args: tuple[Any, ...], chain: Chain | None = None) ->
     """Render a decoded argument tuple per signature."""
     name = _function_name(sig)
 
-    if name in ("addAdapter", "removeAdapter"):
+    if name == "removeAdapter":
+        return ""
+    if name == "addAdapter":
         return f"adapter {_format_address(args[0])}"
     if name == "setIsAllocator":
         addr, flag = args
