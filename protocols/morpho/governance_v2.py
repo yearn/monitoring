@@ -244,11 +244,28 @@ def _format_ts(ts: int) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _format_countdown(ts: int) -> str:
+    """Human-friendly time remaining until ``ts``, e.g. ``(3 days)``."""
+    seconds = ts - int(datetime.now().timestamp())
+    if seconds <= 0:
+        return "(now)"
+    days = seconds / 86400
+    if days >= 1:
+        n = round(days)
+        return f"({n} day{'s' if n != 1 else ''})"
+    hours = seconds / 3600
+    if hours >= 1:
+        n = round(hours)
+        return f"({n} hour{'s' if n != 1 else ''})"
+    n = max(round(seconds / 60), 1)
+    return f"({n} minute{'s' if n != 1 else ''})"
+
+
 def _explorer_link(chain: Chain, tx_hash: str) -> str:
     base = chain.explorer_url
     if not base or not tx_hash:
         return tx_hash
-    return f"[{tx_hash[:10]}…]({base}/tx/{tx_hash})"
+    return f"[{tx_hash}…]({base}/tx/{tx_hash})"
 
 
 def _operation_label(snapshot: V2GovernanceSnapshot, pc: PendingConfig) -> str:
@@ -277,7 +294,7 @@ def _alert_pending_new(snapshot: V2GovernanceSnapshot, pc: PendingConfig, operat
             f"⏳ V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
             f"on {snapshot.chain.name}\n"
             f"📥 Submitted: {operation_label}\n"
-            f"⏰ Executable at: {_format_ts(pc.valid_at)}\n"
+            f"⏰ Executable at: {_format_ts(pc.valid_at)} {_format_countdown(pc.valid_at)}\n"
             f"🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}",
             PROTOCOL,
         )

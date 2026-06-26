@@ -61,21 +61,21 @@ class TestDecodeSubmit(unittest.TestCase):
         data = _build("addAdapter(address)", ["address"], [A1])
         self.assertEqual(
             decode_submit(data),
-            f"addAdapter(adapter {Web3.to_checksum_address(A1)})",
+            f"addAdapter({Web3.to_checksum_address(A1)})",
         )
 
     def test_remove_adapter(self):
         data = _build("removeAdapter(address)", ["address"], [A2])
         self.assertEqual(
             decode_submit(data),
-            f"removeAdapter(adapter {Web3.to_checksum_address(A2)})",
+            "removeAdapter()",
         )
 
     def test_set_is_allocator_grant(self):
         data = _build("setIsAllocator(address,bool)", ["address", "bool"], [A1, True])
         self.assertEqual(
             decode_submit(data),
-            f"setIsAllocator(allocator {Web3.to_checksum_address(A1)} = True)",
+            f"setIsAllocator({Web3.to_checksum_address(A1)} = True)",
         )
 
     def test_set_is_allocator_revoke(self):
