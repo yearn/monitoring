@@ -65,8 +65,12 @@ COLLATERALIZATION_RATIO_THRESHOLD = 1.35  # 135%
 # Alert if unrealized losses exceed this % of pool total assets
 UNREALIZED_LOSSES_THRESHOLD = 0.005  # 0.5%
 
-# Alert if syrupGlobals reports more collateral than Proof-of-Reserves by more than this
-PROOF_OF_RESERVES_DIVERGENCE_THRESHOLD = 0.001  # 0.1%
+# Alert if syrupGlobals reports more collateral than Proof-of-Reserves by more than this.
+# Raised from 0.1% to 10% to tolerate the structural timing mismatch between the
+# near-real-time on-chain syrupGlobals value and the lagging periodic PoR attestation
+# (The Network Firm). The per-run divergence is logged unconditionally below so we can
+# track the actual discrepancy over time and tighten this once the cadence is understood.
+PROOF_OF_RESERVES_DIVERGENCE_THRESHOLD = 0.10  # 10%
 
 # syrupGlobals provides the official combined collateralization ratio across all Syrup pools.
 # collateralRatio = collateralValue / loansValue (only overcollateralized loans, excludes DeFi strategies).
@@ -434,10 +438,12 @@ def check_proof_of_reserves() -> None:
     divergence = collateral_shortfall / syrup_collateral
 
     logger.info(
-        "Proof of reserves: PoR=%s, syrupGlobals=%s, syrupGlobals-over-PoR=%.2f%%",
+        "Proof of reserves discrepancy: PoR=%s, syrupGlobals=%s, gap=%s, syrupGlobals-over-PoR=%.2f%% (threshold=%.1f%%)",
         format_usd(por_total),
         format_usd(syrup_collateral),
+        format_usd(collateral_shortfall),
         divergence * 100,
+        PROOF_OF_RESERVES_DIVERGENCE_THRESHOLD * 100,
     )
 
     if collateral_shortfall > 0 and divergence > PROOF_OF_RESERVES_DIVERGENCE_THRESHOLD:
@@ -507,7 +513,7 @@ def check_collateral_risk() -> None:
     except (requests.RequestException, ValueError) as e:
         _alert_maple_graphql_skip("collateralization ratio", e)
 
-    # Cross-check Proof-of-Reserves aggregate against syrupGlobals
+    # Cross-check Proof-of-Reserves aggregate against syrupGlobals.
     check_proof_of_reserves()
 
     # Check unrealized losses vs pool size
