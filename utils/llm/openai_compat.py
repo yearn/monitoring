@@ -9,7 +9,7 @@ Works with any provider that implements the OpenAI chat completions API:
 import json
 from typing import Any
 
-from utils.llm.base import LLMError, LLMProvider
+from utils.llm.base import LLMError, LLMProvider, wrap_llm_errors
 from utils.logger import get_logger
 
 logger = get_logger("utils.llm.openai_compat")
@@ -45,7 +45,7 @@ class OpenAICompatProvider(LLMProvider):
 
     def complete(self, prompt: str, system_prompt: str = "") -> str:
         """Generate a completion using the OpenAI chat completions API."""
-        try:
+        with wrap_llm_errors("LLM API call failed"):
             response = self._client.chat.completions.create(
                 model=self._model,
                 messages=self._build_messages(prompt, system_prompt),
@@ -54,10 +54,6 @@ class OpenAICompatProvider(LLMProvider):
             if not content:
                 raise LLMError("Empty response from LLM")
             return content.strip()
-        except LLMError:
-            raise
-        except Exception as e:
-            raise LLMError(f"LLM API call failed: {e}") from e
 
     @property
     def supports_structured_output(self) -> bool:
@@ -66,7 +62,7 @@ class OpenAICompatProvider(LLMProvider):
 
     def complete_structured(self, prompt: str, schema: dict[str, Any], system_prompt: str = "") -> dict[str, Any]:
         """Request a JSON-schema-constrained response and return it parsed."""
-        try:
+        with wrap_llm_errors("Structured LLM call failed"):
             response = self._client.chat.completions.create(  # type: ignore[call-overload]
                 model=self._model,
                 messages=self._build_messages(prompt, system_prompt),
@@ -78,14 +74,11 @@ class OpenAICompatProvider(LLMProvider):
             content = response.choices[0].message.content
             if not content:
                 raise LLMError("Empty response from LLM")
-            parsed: dict[str, Any] = json.loads(content)
+            try:
+                parsed: dict[str, Any] = json.loads(content)
+            except json.JSONDecodeError as e:
+                raise LLMError(f"Structured response was not valid JSON: {e}") from e
             return parsed
-        except LLMError:
-            raise
-        except json.JSONDecodeError as e:
-            raise LLMError(f"Structured response was not valid JSON: {e}") from e
-        except Exception as e:
-            raise LLMError(f"Structured LLM call failed: {e}") from e
 
     def _build_messages(self, prompt: str, system_prompt: str) -> list[dict[str, str]]:
         """Assemble chat messages, prepending the system prompt when present."""

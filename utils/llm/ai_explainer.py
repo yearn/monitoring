@@ -5,10 +5,12 @@ them to an LLM to produce human-readable explanations for governance
 transactions (timelocks and Safe multisigs).
 """
 
+import re
 from dataclasses import dataclass
 from decimal import Decimal
+from functools import lru_cache
 
-from eth_utils import to_checksum_address
+from eth_utils import function_signature_to_4byte_selector, to_checksum_address
 
 from utils.calldata.decoder import DecodedCall, decode_calldata, is_selector_resolvable_offline
 from utils.erc20_metadata import fetch_erc20_metadata
@@ -114,6 +116,11 @@ The summary need not repeat the risk tag; the risk_tag field carries it."""
 SYSTEM_INSTRUCTIONS_SUMMARY_JSON = SYSTEM_PROMPT + JSON_SUMMARY_NOTE
 
 _RISK_TAGS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+
+# Matches a trailing risk tag with surrounding space/punctuation. Only whitespace
+# (not a period) may precede the tag, so the preceding sentence's period is
+# preserved: "…vault. LOW." → "…vault."
+_TRAILING_RISK_TAG_RE = re.compile(r"\s*\b(?:" + "|".join(_RISK_TAGS) + r")\b[\s.]*$", re.IGNORECASE)
 DETAIL_REPORT_TITLE = "AI Transaction Analysis"
 
 # JSON Schema for stage 1 (summary + risk_tag only). risk_tag is enum-constrained so
@@ -180,6 +187,11 @@ PASS
 Otherwise output the revised TLDR on one line:
 TLDR: <revised>"""
 
+# Max self-critique rounds (see `_refine_summary`). Critique converges in 1-2
+# rounds; past ~3 the model tends to make cosmetic edits or strip hedges, so the
+# cap is about quality, not cost. Bump it if you want to spend more calls.
+MAX_REFINE_ROUNDS = 3
+
 
 @dataclass(frozen=True)
 class Explanation:
@@ -195,9 +207,8 @@ def _collect_state_reads(
 ) -> list[tuple[str, list[StateRead]]]:
     """Best-effort: read current on-chain values for state vars each call will write.
 
-    Returns a list of (target, reads) tuples in the same order as the input. Empty
-    reads are still returned (so callers can show per-call ordering); the formatter
-    skips them.
+    Returns a list of (target, reads) tuples in input order, one per unique
+    (target, function) pair. Pairs that yielded no reads are omitted.
     """
     out: list[tuple[str, list[StateRead]]] = []
     seen: set[tuple[str, str]] = set()
@@ -579,8 +590,6 @@ def _collect_risk_anchors(decoded_calls: list[DecodedCall]) -> str:
             continue
         # The decoder normalizes signatures to the 4byte-selector text form, so
         # we re-compute the selector locally rather than carrying it through.
-        from eth_utils import function_signature_to_4byte_selector
-
         try:
             sel = "0x" + function_signature_to_4byte_selector(call.signature).hex()
         except Exception:  # noqa: BLE001 - bad signatures are skipped
@@ -892,17 +901,21 @@ def _build_prompt(
     return "\n".join(parts)
 
 
+@lru_cache(maxsize=None)
+def _marker_pattern(keyword: str) -> "re.Pattern[str]":
+    """Compile (and cache) the section-marker regex for ``keyword``.
+
+    Handles variations: 'KEYWORD:', '## KEYWORD', '**KEYWORD**', '**KEYWORD:**', etc.
+    """
+    return re.compile(rf"(?:^|\n)\s*(?:#{{1,4}}\s+)?(?:\*{{2}})?{keyword}(?:\*{{2}})?[:\s]*", re.IGNORECASE)
+
+
 def _find_marker(text: str, keyword: str) -> tuple[int, int]:
     """Find a section marker like 'TLDR:' or '### DETAIL' and return (start_of_marker, start_of_content).
 
-    Handles variations: 'KEYWORD:', '## KEYWORD', '**KEYWORD**', '**KEYWORD:**', etc.
     Returns (-1, -1) if not found.
     """
-    import re
-
-    heading = r"#{1,4}"  # fmt: skip
-    pattern = rf"(?:^|\n)\s*(?:{heading}\s+)?(?:\*{{2}})?{keyword}(?:\*{{2}})?[:\s]*"
-    match = re.search(pattern, text, re.IGNORECASE)
+    match = _marker_pattern(keyword).search(text)
     if match:
         return match.start(), match.end()
     return -1, -1
@@ -943,12 +956,7 @@ def _parse_explanation(raw: str) -> Explanation:
 
 def _strip_trailing_risk_tag(text: str) -> str:
     """Remove a trailing risk tag (with surrounding space/punctuation) from text."""
-    import re
-
-    # Only whitespace (not a period) may precede the tag, so the preceding
-    # sentence's period is preserved: "…vault. LOW." → "…vault."
-    pattern = r"\s*\b(?:" + "|".join(_RISK_TAGS) + r")\b[\s.]*$"
-    return re.sub(pattern, "", text, flags=re.IGNORECASE).rstrip()
+    return _TRAILING_RISK_TAG_RE.sub("", text).rstrip()
 
 
 def _explanation_from_json(data: dict) -> Explanation:
@@ -990,31 +998,53 @@ def _generate_summary(provider: LLMProvider, prompt: str) -> Explanation:
     return _parse_explanation(raw)
 
 
-def _refine_summary(original_prompt: str, draft: Explanation, provider: LLMProvider) -> Explanation:
-    """Self-critique the summary then revise. Returns the draft unchanged on PASS or any error.
+def _refine_summary(
+    original_prompt: str,
+    draft: Explanation,
+    provider: LLMProvider,
+    max_rounds: int = MAX_REFINE_ROUNDS,
+) -> Explanation:
+    """Iteratively self-critique the summary and revise until PASS or ``max_rounds``.
 
-    Runs before detail expansion: the summary is authoritative, so it's the artifact
-    we refine. Only the summary text is rewritten; detail is produced afterward.
+    Each round critiques the *current* draft against the checklist: the critic
+    either returns ``PASS`` (we stop and keep the draft) or a revised ``TLDR:``
+    that becomes the next round's draft. Runs before detail expansion — the
+    summary is authoritative, so it's the artifact we refine; only the summary
+    text is rewritten. Critique converges fast and over-editing degrades quality,
+    so rounds are capped rather than looped until the model "feels done".
+
+    Never raises: any LLM error or empty/invalid response keeps the best draft so far.
     """
-    refine_prompt = f"{original_prompt}\n\n--- Your Previous Draft ---\nTLDR: {draft.summary}\n\n{SUMMARY_REFINE_TASK}"
+    for round_num in range(1, max_rounds + 1):
+        refine_prompt = (
+            f"{original_prompt}\n\n--- Your Previous Draft ---\nTLDR: {draft.summary}\n\n{SUMMARY_REFINE_TASK}"
+        )
+        try:
+            raw = provider.complete(refine_prompt, system_prompt=SYSTEM_INSTRUCTIONS)
+        except LLMError as e:
+            logger.warning("Summary refine round %d failed (%s); keeping draft", round_num, e)
+            return draft
 
-    try:
-        raw = provider.complete(refine_prompt, system_prompt=SYSTEM_INSTRUCTIONS)
-    except LLMError as e:
-        logger.warning("Summary refine failed (%s); keeping draft", e)
-        return draft
+        if not raw or not raw.strip() or raw.strip().upper().startswith("PASS"):
+            logger.info("Summary refine: PASS at round %d/%d", round_num, max_rounds)
+            return draft
 
-    if not raw or not raw.strip() or raw.strip().upper().startswith("PASS"):
-        logger.info("Summary refine: PASS (no changes)")
-        return draft
+        revised = _parse_explanation(raw)
+        if not revised.summary:
+            logger.warning("Summary refine round %d returned empty summary; keeping draft", round_num)
+            return draft
 
-    revised = _parse_explanation(raw)
-    if not revised.summary:
-        logger.warning("Summary refine returned empty summary; keeping draft")
-        return draft
+        logger.info(
+            "Summary refine round %d/%d revised TLDR (%d→%d chars)",
+            round_num,
+            max_rounds,
+            len(draft.summary),
+            len(revised.summary),
+        )
+        draft = Explanation(summary=revised.summary, detail="")
 
-    logger.info("Summary refine produced a revision (TLDR %d→%d chars)", len(draft.summary), len(revised.summary))
-    return Explanation(summary=revised.summary, detail="")
+    logger.info("Summary refine reached max rounds (%d) without PASS; using last revision", max_rounds)
+    return draft
 
 
 def _expand_detail(provider: LLMProvider, prompt: str, summary: str) -> str:
@@ -1072,7 +1102,7 @@ def explain_transaction(
     from_address: str = "0x0000000000000000000000000000000000000000",
     skip_simulation: bool = False,
     context_note: str = "",
-    refine: bool = False,
+    refine: bool = True,
     description: str = "",
 ) -> Explanation | None:
     """Generate an AI explanation for a governance transaction.
@@ -1094,8 +1124,9 @@ def explain_transaction(
         context_note: Optional preamble injected into the prompt to give the LLM
             context that isn't in the calldata (e.g. "this is delegated from
             a Safe; msg.sender of inner calls is the Safe itself").
-        refine: If True, runs a second LLM call that critiques the draft against
-            a checklist and revises only if it finds concrete issues. ~2× cost.
+        refine: If True (default), runs up to MAX_REFINE_ROUNDS self-critique
+            passes that revise the summary only when they find concrete issues,
+            stopping early once the critic returns PASS. Adds 1-3 LLM calls.
         description: Optional proposer-supplied description of intent. When set,
             the LLM compares stated intent against the decoded actions and flags
             any divergence.
@@ -1180,7 +1211,7 @@ def explain_batch_transaction(
     from_address: str = "0x0000000000000000000000000000000000000000",
     skip_simulation: bool = False,
     context_note: str = "",
-    refine: bool = False,
+    refine: bool = True,
     description: str = "",
 ) -> Explanation | None:
     """Generate an AI explanation for a batch/multicall governance transaction.
@@ -1196,8 +1227,9 @@ def explain_batch_transaction(
             dependent flows (approve+transferFrom, swapOwner+swapOwner, etc).
         context_note: Optional preamble describing the execution context (e.g.
             DELEGATECALL semantics) that the LLM can't infer from calldata alone.
-        refine: If True, runs a second LLM call that critiques the draft against
-            a checklist and revises only if it finds concrete issues. ~2× cost.
+        refine: If True (default), runs up to MAX_REFINE_ROUNDS self-critique
+            passes that revise the summary only when they find concrete issues,
+            stopping early once the critic returns PASS. Adds 1-3 LLM calls.
         description: Optional proposer-supplied description of intent. When set,
             the LLM compares stated intent against the decoded actions and flags
             any divergence.
