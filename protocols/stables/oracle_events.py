@@ -92,8 +92,20 @@ class OracleRound:
     answer: int
     updated_at: int  # on-chain updatedAt (unix seconds)
     block_timestamp: int  # indexer block time (unix seconds) — used for the cursor
+    block_number: int  # canonical event order (with log_index); see event_order
+    log_index: int
     tx_hash: str
     chain_id: int
+
+    @property
+    def event_order(self) -> tuple[int, int]:
+        """Canonical on-chain ordering key — the actual emission order of the event.
+
+        Never order the stream by ``round_id``: that is the very field whose
+        monotonicity we validate, so using it as a sort key would hide a backwards
+        round when two events land in the same block.
+        """
+        return (self.block_number, self.log_index)
 
 
 # GraphQL field names for the AnswerUpdated entity (indexer #31). Centralised so a
@@ -103,6 +115,8 @@ _F_ROUND_ID = "roundId"
 _F_ANSWER = "current"
 _F_UPDATED_AT = "updatedAt"
 _F_BLOCK_TS = "blockTimestamp"
+_F_BLOCK_NUM = "blockNumber"
+_F_LOG_INDEX = "logIndex"
 _F_TX = "transactionHash"
 _F_CHAIN = "chainId"
 
@@ -115,6 +129,8 @@ def parse_round(row: dict) -> OracleRound:
         answer=int(row[_F_ANSWER]),
         updated_at=int(row[_F_UPDATED_AT]),
         block_timestamp=int(row[_F_BLOCK_TS]),
+        block_number=int(row[_F_BLOCK_NUM]),
+        log_index=int(row[_F_LOG_INDEX]),
         tx_hash=str(row.get(_F_TX, "")),
         chain_id=int(row.get(_F_CHAIN, 1)),
     )
@@ -135,7 +151,10 @@ def detect_anomalies(
     (jump / gap diffing); alerts only fire for the rounds whose ``block_timestamp``
     is strictly greater than ``since_ts`` so reruns never re-alert the same round.
     """
-    ordered = sorted(rounds, key=lambda r: (r.block_timestamp, r.round_id))
+    # Sort by the true emission order (blockNumber, logIndex), NOT round_id — see
+    # OracleRound.event_order. Using round_id would mask a backwards round whenever
+    # two updates share a block_timestamp.
+    ordered = sorted(rounds, key=lambda r: r.event_order)
     alerts: list[Alert] = []
 
     for prev, cur in zip(ordered, ordered[1:]):
@@ -268,6 +287,7 @@ def load_answer_updated(aggregators: list[str], since_ts: int, limit: int) -> di
         updatedAt
         blockNumber
         blockTimestamp
+        logIndex
         transactionHash
         chainId
       }

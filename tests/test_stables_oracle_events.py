@@ -16,13 +16,24 @@ AGG = "0xaggregator"
 HB = FEED.heartbeat  # 86_400
 
 
-def _round(round_id: int, answer: int, updated_at: int, *, block_ts: int | None = None) -> OracleRound:
+def _round(
+    round_id: int,
+    answer: int,
+    updated_at: int,
+    *,
+    block_ts: int | None = None,
+    block_number: int | None = None,
+    log_index: int = 0,
+) -> OracleRound:
+    bt = block_ts if block_ts is not None else updated_at
     return OracleRound(
         aggregator=AGG,
         round_id=round_id,
         answer=answer,
         updated_at=updated_at,
-        block_timestamp=block_ts if block_ts is not None else updated_at,
+        block_timestamp=bt,
+        block_number=block_number if block_number is not None else bt,
+        log_index=log_index,
         tx_hash="0xtx",
         chain_id=1,
     )
@@ -78,6 +89,18 @@ class TestSequence(unittest.TestCase):
         self.assertTrue(any(a.severity == AlertSeverity.CRITICAL for a in alerts))
         self.assertTrue(any("sequence anomaly" in a.message for a in alerts))
 
+    def test_backwards_round_in_same_block_is_detected(self):
+        # 102 then 101 in the SAME block_timestamp; only logIndex distinguishes order.
+        # Sorting by round_id (the old bug) would reorder these into 101->102 and hide
+        # the regression. Sorting by (blockNumber, logIndex) preserves the real stream.
+        rounds = [
+            _round(102, 100_000_000, 1_000, block_number=500, log_index=0),
+            _round(101, 100_000_000, 1_000, block_number=500, log_index=1),
+        ]
+        alerts = _detect(rounds)
+        self.assertTrue(any(a.severity == AlertSeverity.CRITICAL for a in alerts))
+        self.assertTrue(any("sequence anomaly" in a.message for a in alerts))
+
 
 class TestDedup(unittest.TestCase):
     def test_rounds_at_or_before_cursor_not_realerted(self):
@@ -126,6 +149,8 @@ class TestParseRound(unittest.TestCase):
             "current": "99980000",
             "updatedAt": "1700000000",
             "blockTimestamp": "1700000005",
+            "blockNumber": "21000000",
+            "logIndex": "7",
             "transactionHash": "0xdead",
             "chainId": 1,
         }
@@ -135,6 +160,7 @@ class TestParseRound(unittest.TestCase):
         self.assertEqual(rnd.answer, 99_980_000)
         self.assertEqual(rnd.updated_at, 1_700_000_000)
         self.assertEqual(rnd.block_timestamp, 1_700_000_005)
+        self.assertEqual(rnd.event_order, (21_000_000, 7))
 
 
 if __name__ == "__main__":
