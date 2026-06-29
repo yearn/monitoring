@@ -6,30 +6,19 @@ Ethena is a synthetic dollar protocol built on Ethereum that provides a crypto-n
 
 ## Monitoring
 
-The script [`ethena/ethena.py`](ethena.py) runs daily via GitHub Actions to sanity-check that **USDe remains fully backed** and that the public data feeds are fresh and internally consistent. Telegram messages are sent if some values are out of the expected range.
+The script [`ethena/ethena.py`](ethena.py) runs daily via our VPS automation to sanity-check that **USDe remains fully backed** and that the public data feeds are fresh and internally consistent. Telegram messages are sent if some values are out of the expected range.
 
-### Data Sources - Chaos Labs
+### Data Source - Ethena Transparency API
 
-1. **Attestation**
-   `GET https://api.chaoslabs.xyz/v1/attestation/ethena`
+The primary backing check uses Ethena's own transparency API (`app.ethena.fi`). This API was previously blocked for GitHub Actions IPs, so a Chaos Labs / Oracle Security Proof-of-Reserve endpoint was used instead. That endpoint has since been decommissioned (returns HTTP 503), and Chainlink's USDe Proof of Reserves (Ethena's [PoR launch](https://ethena.fi/blog/usde-proof-of-reserves-launch) with Chainlink, Chaos Labs, LlamaRisk and Harris & Trotter) is not published as a public on-chain feed we can query. Since monitoring now runs on our VPS, Ethena's transparency API is reachable and is used directly.
 
-2. **Attestation Freshness**
-   If attestation is older than 1 day, skip the check.
-
-3. **Attestation Consistency**
-   - Check if USDe is fully backed
-   - Check if only approved assets are used
-   - Check if delta neutral strategy is maintained
-   - Check if signature is valid
-
-4. **Attestation Metrics**
-   - Backing Ratio: `backingAssetsUsdValue / totalSupply`
-   - Reserve Buffer: `backingAssetsAndReserveFundUsdValue - totalSupply`
-   - Last Update: `timestamp`
+1. **Supply**: `GET /api/solvency/token-supply?symbol=USDe`
+2. **Collateral**: `GET /api/positions/current/collateral?latest=true`
+3. **Backing Ratio**: `totalBackingAssetsInUsd / supply` — alert CRITICAL if `< 1`. USDe targets ~1:1 collateral backing with a separate reserve fund as the buffer, so the collateral-only ratio sits just above 1.0 in normal operation.
 
 ### Data Sources - LlamaRisk
 
-> NOTE: LlamaRisk data is not reliable, so we use Chaos Labs data instead.
+> NOTE: LlamaRisk data is not reliable, so it is currently disabled (`llama_risk_check`).
 
 #### Off-Chain
 
@@ -41,7 +30,7 @@ Data used is provided by Ethena on [transparency page](https://app.ethena.fi/das
 2. **LlamaRisk Dashboard**
    `GET https://api.llamarisk.com/protocols/ethena/overview/all/?format=json`
 
-> NOTE: Ethena data is not available when running on Github Actions, so we use LlamaRisk data only.
+> NOTE: This LlamaRisk cross-check section is currently disabled (`llama_risk_check`). The note that Ethena data was unavailable applied to the old GitHub Actions setup; on our VPS the Ethena transparency API is reachable and is the primary source (see above).
 
 #### On-Chain
 
