@@ -25,7 +25,7 @@ from decimal import Decimal
 
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
-from utils.chainlink import FeedReading, read_feeds, round_issues
+from utils.chainlink import FeedReading, RoundData, is_round_healthy, read_feeds, round_issues
 from utils.chains import Chain
 from utils.config import Config
 from utils.defillama import fetch_prices
@@ -103,7 +103,7 @@ def check_staleness(obs: OracleObservation, buffer: int = STALENESS_BUFFER) -> A
             f"Age: {age}s — heartbeat {feed.heartbeat}s + buffer {buffer}s\n"
             f"updatedAt: {updated_at}\n"
             f"Feed: `{feed.address}`",
-            PROTOCOL,
+            obs.asset.protocol,
             channel=obs.asset.channel,
         )
     return None
@@ -134,7 +134,7 @@ def check_round_health(obs: OracleObservation) -> Alert | None:
         f"*{obs.asset.name} oracle round unhealthy* ({feed.description})\n"
         + "\n".join(f"- {issue}" for issue in issues)
         + f"\nFeed: `{feed.address}`",
-        PROTOCOL,
+        obs.asset.protocol,
         channel=obs.asset.channel,
     )
 
@@ -152,7 +152,7 @@ def check_peg_deviation(obs: OracleObservation) -> Alert | None:
         f"Oracle: ${obs.oracle_price_usd:.6f}\n"
         f"Peg: ${obs.peg_price_usd:.6f}\n"
         f"Deviation: {dev:+.2%} (tolerance {obs.asset.depeg_pct:.2%})",
-        PROTOCOL,
+        obs.asset.protocol,
         channel=obs.asset.channel,
     )
 
@@ -170,7 +170,7 @@ def check_market_divergence(obs: OracleObservation, threshold: Decimal = DIVERGE
         f"Oracle: ${obs.oracle_price_usd:.6f}\n"
         f"Market (DeFiLlama): ${obs.market_price_usd:.6f}\n"
         f"Divergence: {dev:+.2%} (threshold {threshold:.2%})",
-        PROTOCOL,
+        obs.asset.protocol,
         channel=obs.asset.channel,
     )
 
@@ -189,6 +189,22 @@ def evaluate_chainlink_asset(
         check_market_divergence(obs, divergence_threshold),
     ]
     return [alert for alert in candidates if alert is not None]
+
+
+def next_cached_round(prev_round_id: int | None, round_data: RoundData) -> int:
+    """High-water-mark ``roundId`` to persist so a regression never poisons the cache.
+
+    The cached ``roundId`` is the baseline the next run compares against for
+    monotonicity. Writing a lower or malfunctioning round would make the
+    regression the new baseline, so it is flagged only once and a feed stuck at
+    (or crawling below) the regressed round looks "monotonic" forever. Only a
+    healthy, non-decreasing round advances the mark.
+    """
+    if not is_round_healthy(round_data):
+        return prev_round_id or 0
+    if prev_round_id is None:
+        return round_data.round_id
+    return max(prev_round_id, round_data.round_id)
 
 
 def check_rate_oracle(
@@ -217,7 +233,7 @@ def check_rate_oracle(
                 f"*{asset.name} fundamental oracle DECREASED* (monotonic/capped)\n"
                 f"Previous: {prev_rate}\nCurrent: {current_rate}\nDelta: {delta:+.4%}\n"
                 f"Oracle: `{oracle.address}`",
-                PROTOCOL,
+                asset.protocol,
                 channel=asset.channel,
             )
         )
@@ -227,7 +243,7 @@ def check_rate_oracle(
                 AlertSeverity.HIGH,
                 f"*{asset.name} fundamental oracle delta* {delta:+.4%} (threshold {threshold:.2%})\n"
                 f"Previous: {prev_rate}\nCurrent: {current_rate}\nOracle: `{oracle.address}`",
-                PROTOCOL,
+                asset.protocol,
                 channel=asset.channel,
             )
         )
@@ -301,7 +317,9 @@ def _monitor_chainlink_assets(client: Web3Client) -> None:
         for alert in alerts:
             send_alert(alert)
 
-        write_last_value_to_file(CACHE_FILE, _round_cache_key(feed.address), reading.round_data.round_id)
+        write_last_value_to_file(
+            CACHE_FILE, _round_cache_key(feed.address), next_cached_round(prev_round_id, reading.round_data)
+        )
 
 
 def _monitor_rate_oracles(client: Web3Client) -> None:

@@ -9,9 +9,11 @@ from protocols.stables.oracles import (
     check_round_health,
     check_staleness,
     evaluate_chainlink_asset,
+    next_cached_round,
 )
 from utils.alert import AlertSeverity
 from utils.chainlink import FeedReading, RoundData
+from utils.dispatch import DISPATCHABLE_PROTOCOLS
 from utils.pegged_assets import PeggedAsset, PegTarget, RateOracle, get_asset
 
 NOW = 2_000_000
@@ -71,7 +73,9 @@ class TestStaleness(unittest.TestCase):
         alert = check_staleness(stale, buffer=600)
         self.assertIsNotNone(alert)
         self.assertEqual(alert.severity, AlertSeverity.HIGH)
-        self.assertEqual(alert.channel, "pegs")
+        # cbBTC has no dispatchable owner: protocol is "pegs", channel override empty.
+        self.assertEqual(alert.protocol, "pegs")
+        self.assertEqual(alert.channel, "")
 
     def test_zero_updated_at_is_stale(self):
         obs = _cbbtc_obs(reading=_reading(get_asset("cbBTC").chainlink_feed.address, 60_100 * 10**8, updated_at=0))
@@ -150,7 +154,7 @@ class TestRateOracle(unittest.TestCase):
         return PeggedAsset(
             name="fakeRate",
             defillama_key="ethereum:0x0000000000000000000000000000000000000001",
-            channel="pegs",
+            protocol="pegs",
             peg=PegTarget.USD,
             depeg_pct=Decimal("0.02"),
             rate_oracle=RateOracle(address="0xRate", monotonic=monotonic),
@@ -174,6 +178,45 @@ class TestRateOracle(unittest.TestCase):
             check_rate_oracle(self._asset(), current_rate=101 * 10**16, prev_rate=10**18, threshold=Decimal("0.05")),
             [],
         )
+
+
+class TestDispatchRouting(unittest.TestCase):
+    """Alerts must carry the asset's logical protocol so emergency dispatch can fire."""
+
+    def test_owned_asset_uses_dispatchable_protocol(self):
+        usde = get_asset("USDe")  # owner "ethena", peg USD, 3% tolerance
+        obs = OracleObservation(
+            asset=usde,
+            reading=_reading(usde.chainlink_feed.address, 90 * 10**6),  # $0.90 -> off peg
+            peg_price_usd=Decimal("1"),
+            quote_price_usd=Decimal("1"),
+            now=NOW,
+            market_price_usd=Decimal("0.90"),
+        )
+        alert = check_peg_deviation(obs)
+        self.assertIsNotNone(alert)
+        # protocol (not channel) carries the owner; dispatch keys off alert.protocol.
+        self.assertEqual(alert.protocol, "ethena")
+        self.assertIn(alert.protocol, DISPATCHABLE_PROTOCOLS)
+
+
+class TestNextCachedRound(unittest.TestCase):
+    def _rd(self, round_id: int, answer: int = 60_100 * 10**8, updated_at: int = NOW - 100) -> RoundData:
+        return RoundData(round_id, answer, updated_at, updated_at, round_id)
+
+    def test_first_run_caches_current(self):
+        self.assertEqual(next_cached_round(None, self._rd(100)), 100)
+
+    def test_advances_on_increase(self):
+        self.assertEqual(next_cached_round(100, self._rd(101)), 101)
+
+    def test_keeps_high_water_mark_on_regression(self):
+        # Backwards round must NOT lower the cached baseline (no poisoning).
+        self.assertEqual(next_cached_round(100, self._rd(99)), 100)
+
+    def test_broken_round_does_not_poison_even_if_higher(self):
+        # answer == 0 -> unhealthy; keep last-good rather than caching a broken round.
+        self.assertEqual(next_cached_round(100, self._rd(200, answer=0)), 100)
 
 
 if __name__ == "__main__":
