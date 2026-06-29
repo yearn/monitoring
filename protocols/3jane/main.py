@@ -9,6 +9,7 @@ Monitors:
 - PPS (Price Per Share) for USD3 and sUSD3 — alerts on any decrease
 - TVL (Total Value Locked) via totalAssets() — alerts on >15% change
 - Junior tranche buffer — alerts when sUSD3 coverage drops below threshold
+- USD3 OC — alerts when senior-tranche overcollateralization drops below thresholds
 - Insurance fund — alerts on waUSDC outflows of at least $50k
 - Withdraw liquidity — alerts when USD3 availableWithdrawLimit falls below $4M
 - Vault shutdown status — alerts once if either vault enters emergency shutdown
@@ -70,6 +71,8 @@ CFG_KEY_IS_PAUSED = Web3.keccak(text="IS_PAUSED")
 # --- Thresholds ---
 TVL_CHANGE_THRESHOLD = 0.15  # 15% TVL change alert
 JUNIOR_BUFFER_THRESHOLD = 0.15  # Alert when sUSD3 backing < 15% of deployed credit
+USD3_OC_HIGH_THRESHOLD = 1.11  # Alert when USD3 OC drops below the 111% target
+USD3_OC_CRITICAL_THRESHOLD = 1.06  # Alert when USD3 OC drops below 106%
 INSURANCE_FUND_OUTFLOW_THRESHOLD = 50_000  # USDC
 WITHDRAW_LIMIT_THRESHOLD = 4_000_000  # USDC, alert when USD3 availableWithdrawLimit falls below
 
@@ -230,6 +233,62 @@ def check_junior_buffer(susd3_backing: float, deployed_credit: float) -> None:
             f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
         )
         send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
+
+
+def check_usd3_oc(susd3_backing: float, deployed_credit: float) -> None:
+    """Check senior-tranche overcollateralization from sUSD3 subordination.
+
+    USD3 OC is deployed credit divided by senior at-risk credit after sUSD3
+    absorbs first losses: deployed / (deployed - sUSD3). Alert thresholds use
+    the direct OC ratio, so 111% means OC is below 1.11x.
+
+    Args:
+        susd3_backing: USD3 held by sUSD3, valued in USDC.
+        deployed_credit: Borrowed waUSDC in the credit market, converted to USDC.
+    """
+    if deployed_credit <= 0:
+        return
+
+    senior_at_risk = deployed_credit - susd3_backing
+    if senior_at_risk <= 0:
+        logger.info(
+            "USD3 OC: fully covered by sUSD3 backing (sUSD3: %s / deployed credit: %s)",
+            format_usd(susd3_backing),
+            format_usd(deployed_credit),
+        )
+        return
+
+    oc_ratio = deployed_credit / senior_at_risk
+    oc_excess = oc_ratio - 1
+    logger.info(
+        "USD3 OC: %.2f%% (%.4fx; %.2f%% excess; deployed: %s / senior at-risk: %s)",
+        oc_ratio * 100,
+        oc_ratio,
+        oc_excess * 100,
+        format_usd(deployed_credit),
+        format_usd(senior_at_risk),
+    )
+
+    if oc_ratio < USD3_OC_CRITICAL_THRESHOLD:
+        severity = AlertSeverity.CRITICAL
+        title = "3Jane USD3 OC Critical"
+        threshold = USD3_OC_CRITICAL_THRESHOLD
+    elif oc_ratio < USD3_OC_HIGH_THRESHOLD:
+        severity = AlertSeverity.HIGH
+        title = "3Jane USD3 OC Low"
+        threshold = USD3_OC_HIGH_THRESHOLD
+    else:
+        return
+
+    message = (
+        f"🚨 *{title}*\n"
+        f"📊 USD3 OC: {oc_ratio:.2%} ({oc_ratio:.4f}x; {oc_excess:.2%} excess)\n"
+        f"💰 Deployed: {format_usd(deployed_credit)} | Senior at-risk: {format_usd(senior_at_risk)}\n"
+        f"🛡️ sUSD3 subordination: {format_usd(susd3_backing)}\n"
+        f"⚠️ Threshold: {threshold:.0%} OC\n"
+        f"🔗 [USD3](https://etherscan.io/address/{USD3_ADDRESS})"
+    )
+    send_alert(Alert(severity, message, PROTOCOL))
 
 
 def check_insurance_fund(
@@ -545,6 +604,7 @@ def main() -> None:
         check_pps(usd3_pps, susd3_pps)
         check_tvl(usd3_tvl, susd3_tvl)
         check_junior_buffer(susd3_backing, deployed_credit)
+        check_usd3_oc(susd3_backing, deployed_credit)
         check_insurance_fund(
             previous_insurance_shares,
             insurance_fund_shares,
