@@ -41,11 +41,17 @@ class PegTarget(Enum):
 
 @dataclass(frozen=True)
 class ChainlinkFeed:
-    """A Chainlink aggregator backing an asset's price (consumed by L2)."""
+    """A Chainlink aggregator backing an asset's price (consumed by L2).
+
+    ``quote`` is the unit the feed is denominated in (e.g. a ``LBTC/BTC`` feed
+    quotes in ``BTC``, a ``cbBTC/USD`` feed in ``USD``); L2 multiplies the raw
+    answer by the quote's live price to compare oracle and market on a USD basis.
+    """
 
     address: str
     heartbeat: int  # max expected seconds between updates (Chainlink mainnet default)
     description: str = ""
+    quote: PegTarget = PegTarget.USD
 
 
 @dataclass(frozen=True)
@@ -233,7 +239,9 @@ PEGGED_ASSETS: list[PeggedAsset] = [
         peg=PegTarget.BTC,
         depeg_pct=Decimal("0.03"),
         # LBTC/BTC market-rate feed (8 decimals); price ~1 BTC per LBTC.
-        chainlink_feed=ChainlinkFeed("0x5c29868C58b6e15e2b962943278969Ab6a7D3212", _STABLE_HEARTBEAT, "LBTC/BTC"),
+        chainlink_feed=ChainlinkFeed(
+            "0x5c29868C58b6e15e2b962943278969Ab6a7D3212", _STABLE_HEARTBEAT, "LBTC/BTC", quote=PegTarget.BTC
+        ),
     ),
 ]
 
