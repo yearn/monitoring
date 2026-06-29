@@ -7,6 +7,7 @@
 - **PPS (Price Per Share):** `convertToAssets(1e6)` on USD3 and sUSD3 vs cached prior run. Alerts on any decrease — indicates loan markdowns or defaults (critical since loans are unsecured).
 - **TVL (Total Value Locked):** `totalAssets()` on both vaults vs cached prior run. Alerts when absolute change is **≥15%**.
 - **Junior Buffer Ratio:** USD3 held by sUSD3, valued in USDC, as a percentage of deployed credit (`getMarketLiquidity().totalBorrowAssets` converted from waUSDC to USDC). Alerts below **15%** — thin first-loss coverage puts the senior tranche at risk. This matches the 3Jane backing UI's `sUSD3 / Deployed` loss-buffer metric.
+- **USD3 OC:** Deployed credit divided by senior at-risk credit after sUSD3 absorbs first loss: `Deployed / (Deployed - sUSD3)`. Alerts below the **111%** target as HIGH and below **106%** as CRITICAL. This excludes indirect enhancement from underlying credit-line assets and warehouse equity slices.
 - **Insurance Fund:** Tracks the fund's raw waUSDC share balance and alerts when an outflow is worth **≥$50k USDC**. Caching shares instead of asset value prevents waUSDC yield from masking withdrawals.
 - **Withdraw Liquidity:** `availableWithdrawLimit()` on the USD3 vault. Alerts when it falls below **$4M** — low withdraw liquidity means senior-tranche withdrawals may queue or stall.
 - **Vault Shutdown:** `isShutdown()` on both vaults. Alert-once when either vault enters emergency shutdown.
@@ -31,6 +32,8 @@
 | sUSD3 PPS decrease | Any decrease vs cached prior | HIGH |
 | TVL change | ≥15% absolute change vs prior run | LOW |
 | Junior buffer ratio | sUSD3 backing < 15% of deployed credit | HIGH |
+| USD3 OC low | OC < 111% | HIGH |
+| USD3 OC critical | OC < 106% | CRITICAL |
 | Insurance fund outflow | ≥$50k USDC since prior run | MEDIUM |
 | Withdraw liquidity low | `availableWithdrawLimit()` < $4M | MEDIUM |
 | Vault shutdown | `isShutdown()` transitions to true (alert-once) | CRITICAL |

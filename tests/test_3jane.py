@@ -2,6 +2,8 @@ import importlib.util
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 from utils import paths, store
 
 
@@ -15,7 +17,7 @@ def load_3jane_module() -> ModuleType:
     return module
 
 
-def test_junior_buffer_uses_backing_over_deployed_credit(monkeypatch) -> None:
+def test_junior_buffer_uses_backing_over_deployed_credit(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
     monkeypatch.setattr(module, "send_alert", alerts.append)
@@ -25,7 +27,7 @@ def test_junior_buffer_uses_backing_over_deployed_credit(monkeypatch) -> None:
     assert alerts == []
 
 
-def test_junior_buffer_alert_describes_deployed_credit(monkeypatch) -> None:
+def test_junior_buffer_alert_describes_deployed_credit(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
     monkeypatch.setattr(module, "send_alert", alerts.append)
@@ -38,7 +40,44 @@ def test_junior_buffer_alert_describes_deployed_credit(monkeypatch) -> None:
     assert "sUSD3 backing: $5.00M | Deployed: $40.00M" in alerts[0].message
 
 
-def test_insurance_fund_alerts_on_large_share_outflow(monkeypatch) -> None:
+def test_usd3_oc_does_not_alert_above_high_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_usd3_oc(11_000_000, 100_000_000)
+
+    assert alerts == []
+
+
+def test_usd3_oc_alerts_high_below_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_usd3_oc(9_000_000, 100_000_000)
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == module.AlertSeverity.HIGH
+    assert "USD3 OC: 109.89% (1.0989x; 9.89% excess)" in alerts[0].message
+    assert "Senior at-risk: $91.00M" in alerts[0].message
+    assert "Threshold: 111% OC" in alerts[0].message
+
+
+def test_usd3_oc_alerts_critical_below_critical_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_usd3_oc(5_000_000, 100_000_000)
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == module.AlertSeverity.CRITICAL
+    assert "USD3 OC: 105.26% (1.0526x; 5.26% excess)" in alerts[0].message
+    assert "Threshold: 106% OC" in alerts[0].message
+
+
+def test_insurance_fund_alerts_on_large_share_outflow(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
     cached: list[tuple[str, int | float]] = []
@@ -53,7 +92,7 @@ def test_insurance_fund_alerts_on_large_share_outflow(monkeypatch) -> None:
     assert cached == [(module.CACHE_KEY_INSURANCE_FUND_SHARES, 850_000_000_000)]
 
 
-def test_insurance_fund_ignores_yield_and_small_outflows(monkeypatch) -> None:
+def test_insurance_fund_ignores_yield_and_small_outflows(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
     monkeypatch.setattr(module, "set_cache_value", lambda _key, _value: None)
@@ -65,7 +104,7 @@ def test_insurance_fund_ignores_yield_and_small_outflows(monkeypatch) -> None:
     assert alerts == []
 
 
-def test_withdraw_limit_alerts_below_threshold(monkeypatch) -> None:
+def test_withdraw_limit_alerts_below_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
     monkeypatch.setattr(module, "send_alert", alerts.append)
@@ -78,7 +117,7 @@ def test_withdraw_limit_alerts_below_threshold(monkeypatch) -> None:
     assert "threshold $4.00M" in alerts[0].message
 
 
-def test_withdraw_limit_no_alert_at_or_above_threshold(monkeypatch) -> None:
+def test_withdraw_limit_no_alert_at_or_above_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
     monkeypatch.setattr(module, "send_alert", alerts.append)
@@ -89,7 +128,7 @@ def test_withdraw_limit_no_alert_at_or_above_threshold(monkeypatch) -> None:
     assert alerts == []
 
 
-def test_insurance_shares_round_trip_exactly_through_sqlite(monkeypatch, tmp_path) -> None:
+def test_insurance_shares_round_trip_exactly_through_sqlite(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     module = load_3jane_module()
     monkeypatch.setattr(paths, "CACHE_DIR", str(tmp_path))
     monkeypatch.setattr(store, "_initialized", False)

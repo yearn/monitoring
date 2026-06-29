@@ -9,6 +9,7 @@ on which env vars the developer happens to have set.
 """
 
 import os
+import warnings
 from pathlib import Path
 
 import pytest
@@ -44,7 +45,16 @@ def _isolate_from_live_apis(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     monkeypatch.setattr("utils.paths.CACHE_DIR", str(tmp_path))
     monkeypatch.setattr("utils.cache.CACHE_DIR", str(tmp_path))
     try:
-        from utils.web3_wrapper import ChainManager
+        # web3 7.16 imports websockets.legacy; keep this upstream import warning
+        # from hiding warnings produced by tests in this repository.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="websockets.legacy is deprecated.*",
+                category=DeprecationWarning,
+                module="websockets.legacy",
+            )
+            from utils.web3_wrapper import ChainManager
 
         ChainManager._instances.clear()
     except Exception:  # noqa: BLE001 - test setup is best-effort
