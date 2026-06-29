@@ -46,6 +46,36 @@ ADDRESSES_BY_CHAIN = {
             "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E",
             "crvUSD",
         ),
+        (
+            "0x32a6268f9Ba3642Dda7892aDd74f1D34469A4259",
+            "0xdC035D45d973E3EC169d2276DDab16f1e407384F",
+            "USDS",
+        ),
+        (
+            "0xBdfa7b7893081B35Fb54027489e2Bc7A38275129",
+            "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
+            "weETH",
+        ),
+        (
+            "0x5c647cE0Ae10658ec44FA4E11A51c96e94efd1Dd",
+            "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+            "cbBTC",
+        ),
+        (
+            "0x5Ee5bf7ae06D1Be5997A1A72006FE6C607eC6DE8",
+            "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
+            "WBTC",
+        ),
+        (
+            "0x10Ac93971cdb1F5c778144084242374473c350Da",
+            "0x18084fbA666a33d37592fA2633fD49a74DD93a88",
+            "tBTC",
+        ),
+        (
+            "0x65906988ADEe75306021C417a1A3458040239602",
+            "0x8236a87084f8B84306f72007F36F2618A5634494",
+            "LBTC",
+        ),
     ],
 }
 
@@ -53,6 +83,7 @@ THRESHOLD_UR = 0.99
 
 
 def print_stuff(chain_name: str, token_name: str, ur: float) -> None:
+    logger.debug(f"Chain: {chain_name}, Token: {token_name}, UR: {ur}")
     if ur > THRESHOLD_UR:
         message = f"**BEEP BOP**\n💎 Market asset: {token_name}\n📊 Utilization rate: {ur:.2%}\n🌐 Chain: {chain_name}"
         send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
