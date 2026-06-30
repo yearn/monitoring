@@ -82,6 +82,21 @@ def _short_tx_hash(tx_hash: str) -> str:
     return f"{tx_hash[:10]}…{tx_hash[-8:]}"
 
 
+def _tx_group_key(row: dict[str, Any]) -> str:
+    tx_hash = _as_str(row.get("tx_hash")).lower()
+    chain = _as_str(row.get("blockchain")).lower()
+    if tx_hash:
+        return f"{chain}|{tx_hash}"
+    return _row_key(row)
+
+
+def _group_rows_by_tx(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(_tx_group_key(row), []).append(row)
+    return list(grouped.values())
+
+
 def _row_key(row: dict[str, Any]) -> str:
     tx_hash = _as_str(row.get("tx_hash")).lower()
     contract = _as_str(row.get("contract_address")).lower()
@@ -98,7 +113,7 @@ def _route_for_row(row: dict[str, Any]) -> tuple[str, str] | None:
     return TOKEN_ROUTE.get((chain, addr))
 
 
-def _build_row_line(row: dict[str, Any], position: int = 1) -> str:
+def _build_row_line(row: dict[str, Any], position: int = 1, matched_transfers_in_tx: int = 1) -> str:
     chain = _as_str(row.get("blockchain"))
     chain_name = escape_markdown(chain.replace("_", " ").title() or "Unknown")
     symbol = escape_markdown(_as_str(row.get("symbol")) or "unknown")
@@ -108,24 +123,42 @@ def _build_row_line(row: dict[str, Any], position: int = 1) -> str:
     link = _tx_link(chain, tx_hash)
     tx_label = escape_markdown(_short_tx_hash(tx_hash) or "unknown")
     tx_line = f"🔗 Transaction: [{tx_label}]({link})" if link != tx_hash else f"🔗 Transaction: {tx_label}"
-    return (
-        f"*Transfer {position}*\n"
-        f"🌐 Network: {chain_name}\n"
-        f"💰 Amount: {amount} {symbol}\n"
-        f"💵 Value: ${amount_usd}\n"
-        f"{tx_line}"
-    )
+    lines = [
+        f"*Transaction {position}*",
+        f"🌐 Network: {chain_name}",
+        f"💰 Amount: {amount} {symbol}",
+        f"💵 Value: ${amount_usd}",
+    ]
+    if matched_transfers_in_tx > 1:
+        lines.append(f"🧾 Matched transfers in tx: {matched_transfers_in_tx}")
+    lines.append(tx_line)
+    return "\n".join(lines)
 
 
 def _build_protocol_lines(protocol_rows: list[dict[str, Any]], query_id: int) -> list[str]:
-    included_rows = protocol_rows[:MAX_ROWS_PER_PROTOCOL_ALERT]
-    lines = [_build_row_line(row, position) for position, row in enumerate(included_rows, start=1)]
+    tx_groups = _group_rows_by_tx(protocol_rows)
+    included_groups = tx_groups[:MAX_ROWS_PER_PROTOCOL_ALERT]
+    lines = [
+        _build_row_line(tx_rows[0], position, len(tx_rows)) for position, tx_rows in enumerate(included_groups, start=1)
+    ]
 
-    omitted_count = len(protocol_rows) - len(included_rows)
+    omitted_count = len(tx_groups) - len(included_groups)
     if omitted_count > 0:
-        lines.append(f"…and {omitted_count} more. See Dune query {query_id} for the full result.")
+        lines.append(f"…and {omitted_count} more transactions. See Dune query {query_id} for the full result.")
 
     return lines
+
+
+def _build_match_summary(protocol_rows: list[dict[str, Any]], total_rows: int, protocol_name: str) -> str:
+    tx_count = len(_group_rows_by_tx(protocol_rows))
+    row_count = len(protocol_rows)
+    transfer_word = "transfer" if row_count == 1 else "transfers"
+    match_summary = str(tx_count)
+    if row_count != tx_count:
+        match_summary = f"{match_summary} ({row_count} matched {transfer_word})"
+    if total_rows != row_count:
+        match_summary = f"{match_summary} for {protocol_name} ({total_rows} total matched transfers)"
+    return match_summary
 
 
 def _build_alert_message(
@@ -138,16 +171,15 @@ def _build_alert_message(
     symbol = route[0] if route else (_as_str(protocol_rows[0].get("symbol")) or "unknown")
     symbol = escape_markdown(symbol)
     protocol_name = escape_markdown(protocol.replace("_", " ").title())
-    transfer_word = "transfer" if len(protocol_rows) == 1 else "transfers"
-    match_summary = str(len(protocol_rows))
-    if total_rows != len(protocol_rows):
-        match_summary = f"{len(protocol_rows)} for {protocol_name} ({total_rows} total)"
+    tx_count = len(_group_rows_by_tx(protocol_rows))
+    transfer_word = "transfer" if tx_count == 1 else "transfers"
+    match_summary = _build_match_summary(protocol_rows, total_rows, protocol_name)
 
     lines = _build_protocol_lines(protocol_rows, query_id)
     return (
         f"*Large {symbol} {transfer_word} detected*\n\n"
         f"🏦 Protocol: {protocol_name}\n"
-        f"📦 New matches: {match_summary}\n"
+        f"📦 New transactions: {match_summary}\n"
         f"📊 Dune query: {query_id}\n\n" + "\n\n".join(lines)
     )
 

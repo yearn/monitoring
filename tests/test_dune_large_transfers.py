@@ -81,7 +81,21 @@ def test_build_protocol_lines_appends_truncation_notice():
     lines = monitor._build_protocol_lines(rows, query_id=1234567)
 
     assert len(lines) == monitor.MAX_ROWS_PER_PROTOCOL_ALERT + 1
-    assert lines[-1] == "…and 2 more. See Dune query 1234567 for the full result."
+    assert lines[-1] == "…and 2 more transactions. See Dune query 1234567 for the full result."
+
+
+def test_build_protocol_lines_shows_one_entry_per_transaction():
+    rows = [
+        _row(tx_hash="0xSAME", log_index=1, amount="5139554.464867114", amount_usd="5139554.464867114"),
+        _row(tx_hash="0xSAME", log_index=2, amount="5139554.464867114", amount_usd="5139554.464867114"),
+    ]
+
+    lines = monitor._build_protocol_lines(rows, query_id=1234567)
+
+    assert len(lines) == 1
+    assert lines[0].startswith("*Transaction 1*")
+    assert "🧾 Matched transfers in tx: 2" in lines[0]
+    assert "*Transaction 2*" not in lines[0]
 
 
 def test_build_alert_message_is_readable_and_formats_large_values():
@@ -99,14 +113,42 @@ def test_build_alert_message_is_readable_and_formats_large_values():
     assert message == (
         "*Large iUSD transfer detected*\n\n"
         "🏦 Protocol: Infinifi\n"
-        "📦 New matches: 1\n"
+        "📦 New transactions: 1\n"
         "📊 Dune query: 7558262\n\n"
-        "*Transfer 1*\n"
+        "*Transaction 1*\n"
         "🌐 Network: Ethereum\n"
         "💰 Amount: 5,139,554.46 iUSD\n"
         "💵 Value: $5,139,554.46\n"
         f"🔗 Transaction: [0xbcd224d8…3c0c1bfd](https://etherscan.io/tx/{tx_hash})"
     )
+
+
+def test_build_alert_message_counts_duplicate_rows_inside_same_tx_once():
+    tx_hash = "0xbcd224d842f47167ec6339c47ac473ba751b73afbce36ed82142d8603c0c1bfd"
+    rows = [
+        _row(
+            contract_address="0x48f9e38f3070ad8945dfeae3fa70987722e3d89c",
+            symbol="iUSD",
+            amount="5139554.464867114",
+            amount_usd="5139554.464867114",
+            tx_hash=tx_hash,
+            log_index=1,
+        ),
+        _row(
+            contract_address="0x48f9e38f3070ad8945dfeae3fa70987722e3d89c",
+            symbol="iUSD",
+            amount="5139554.464867114",
+            amount_usd="5139554.464867114",
+            tx_hash=tx_hash,
+            log_index=2,
+        ),
+    ]
+
+    message = monitor._build_alert_message("infinifi", rows, query_id=7558262, total_rows=2)
+
+    assert "📦 New transactions: 1 (2 matched transfers)" in message
+    assert message.count("*Transaction ") == 1
+    assert "🧾 Matched transfers in tx: 2" in message
 
 
 def test_main_sends_pretty_alert_with_markdown_enabled(monkeypatch):
