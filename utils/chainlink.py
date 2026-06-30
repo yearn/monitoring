@@ -81,8 +81,8 @@ def scale_price(answer: int, decimals: int) -> Decimal:
     Raises:
         ValueError: If ``decimals`` is negative.
     """
-    if decimals < 0:
-        raise ValueError(f"decimals must be non-negative, got {decimals}")
+    if decimals < 1:
+        raise ValueError(f"decimals must be positive, got {decimals}")
     return Decimal(answer) / (Decimal(10) ** decimals)
 
 

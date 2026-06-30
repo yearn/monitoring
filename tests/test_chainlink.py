@@ -25,8 +25,9 @@ class TestScalePrice(unittest.TestCase):
     def test_scales_fractional(self):
         self.assertEqual(scale_price(99_960_043, 8), Decimal("0.99960043"))
 
-    def test_zero_decimals_is_identity(self):
-        self.assertEqual(scale_price(42, 0), Decimal("42"))
+    def test_zero_decimals_raises(self):
+        with self.assertRaises(ValueError):
+            scale_price(1, 0)
 
     def test_negative_decimals_raises(self):
         with self.assertRaises(ValueError):
