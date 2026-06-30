@@ -150,6 +150,11 @@ def detect_anomalies(
     ``rounds`` may include up to one round at/just before ``since_ts`` for context
     (jump / gap diffing); alerts only fire for the rounds whose ``block_timestamp``
     is strictly greater than ``since_ts`` so reruns never re-alert the same round.
+
+    The sequence and missed-heartbeat checks rely on a meaningful ``roundId`` /
+    ``updatedAt``; for feeds flagged ``reports_round_metadata=False`` (constant or
+    zero round/time values) they are skipped and only the answer-based jump check
+    runs — mirroring L2's gating in ``oracles.py``.
     """
     # Sort by the true emission order (blockNumber, logIndex), NOT round_id — see
     # OracleRound.event_order. Using round_id would mask a backwards round whenever
@@ -161,8 +166,9 @@ def detect_anomalies(
         if cur.block_timestamp <= since_ts:
             continue  # already processed in a prior run
 
-        # Sequence anomaly: roundId must strictly increase.
-        if cur.round_id <= prev.round_id:
+        # Sequence anomaly: roundId must strictly increase. Skipped for feeds that
+        # don't report a meaningful roundId (constant/zero) to avoid false positives.
+        if feed.reports_round_metadata and cur.round_id <= prev.round_id:
             alerts.append(
                 _alert(
                     asset,
@@ -190,9 +196,10 @@ def detect_anomalies(
                     )
                 )
 
-        # Missed-heartbeat gap between consecutive updates.
+        # Missed-heartbeat gap between consecutive updates. Relies on a meaningful
+        # updatedAt, so skipped when the feed doesn't report reliable round metadata.
         gap = cur.updated_at - prev.updated_at
-        if gap > feed.heartbeat + heartbeat_buffer:
+        if feed.reports_round_metadata and gap > feed.heartbeat + heartbeat_buffer:
             alerts.append(
                 _alert(
                     asset,
@@ -401,6 +408,14 @@ def main() -> None:
 
     rows = response.get("data", {}).get("AnswerUpdated", [])
     _logger.info("Fetched %d AnswerUpdated rows", len(rows))
+    if len(rows) >= args.limit:
+        # Rows are ordered ascending, so the newest rounds are the ones dropped; the
+        # cursor still advances to the last fetched round, so they land next run.
+        _logger.warning(
+            "AnswerUpdated hit the query limit (%d) — newest rounds deferred to the next run; "
+            "raise --limit / PEG_EVENT_QUERY_LIMIT if this recurs",
+            args.limit,
+        )
     process_rounds(aggregator_map, rows, use_cache)
 
 

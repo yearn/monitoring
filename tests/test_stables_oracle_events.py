@@ -1,4 +1,5 @@
 import unittest
+from decimal import Decimal
 
 from protocols.stables.oracle_events import (
     OracleRound,
@@ -8,7 +9,7 @@ from protocols.stables.oracle_events import (
 )
 from utils.alert import AlertSeverity
 from utils.dispatch import DISPATCHABLE_PROTOCOLS
-from utils.pegged_assets import get_asset
+from utils.pegged_assets import ChainlinkFeed, PeggedAsset, PegTarget, get_asset
 
 USDE = get_asset("USDe")  # protocol "ethena" (dispatchable), USD/USD feed, 24h heartbeat
 FEED = USDE.chainlink_feed
@@ -100,6 +101,40 @@ class TestSequence(unittest.TestCase):
         alerts = _detect(rounds)
         self.assertTrue(any(a.severity == AlertSeverity.CRITICAL for a in alerts))
         self.assertTrue(any("sequence anomaly" in a.message for a in alerts))
+
+
+class TestRoundMetadataGate(unittest.TestCase):
+    """Feeds flagged reports_round_metadata=False skip sequence + gap, keep jump."""
+
+    def _flat_asset(self) -> PeggedAsset:
+        return PeggedAsset(
+            name="fakeFlat",
+            defillama_key="ethereum:0x0000000000000000000000000000000000000002",
+            protocol="pegs",
+            peg=PegTarget.USD,
+            depeg_pct=Decimal("0.02"),
+            chainlink_feed=ChainlinkFeed("0xfeed", HB, "FLAT/USD", reports_round_metadata=False),
+        )
+
+    def _detect_flat(self, rounds):
+        asset = self._flat_asset()
+        return detect_anomalies(asset, asset.chainlink_feed, rounds, since_ts=0)
+
+    def test_sequence_and_gap_skipped_when_metadata_unreliable(self):
+        # Non-increasing roundId AND a heartbeat-busting gap; both would normally fire,
+        # but the feed is flagged unreliable so neither does (answer barely moves).
+        rounds = [
+            _round(101, 100_000_000, 1_000),
+            _round(101, 100_000_001, 1_000 + HB + 50_000),
+        ]
+        self.assertEqual(self._detect_flat(rounds), [])
+
+    def test_jump_still_fires_when_metadata_unreliable(self):
+        # The answer-based jump check is independent of round metadata.
+        rounds = [_round(100, 100_000_000, 1_000), _round(101, 130_000_000, 1_500)]  # +30%
+        alerts = self._detect_flat(rounds)
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("jump", alerts[0].message)
 
 
 class TestDedup(unittest.TestCase):
