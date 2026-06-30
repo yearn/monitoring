@@ -11,8 +11,7 @@ constant ``1``; ``BTC`` is the live BTC/USD price from DeFiLlama), so a single
 entry covers both dollar- and bitcoin-denominated assets. ``depeg_pct`` is a
 *deviation* tolerance (fractional distance from the peg), not an absolute floor.
 
-Addresses and Chainlink feeds were verified on Ethereum mainnet; entries that
-could not be verified use :data:`PLACEHOLDER_ADDRESS` and are marked ``TODO``.
+Addresses and Chainlink feeds were verified on Ethereum mainnet.
 """
 
 from dataclasses import dataclass
@@ -23,9 +22,6 @@ from utils.defillama import fetch_prices
 
 # DeFiLlama key for the live BTC/USD reference price (BTC peg target).
 BTC_USD_DEFILLAMA_KEY = "coingecko:bitcoin"
-
-# Sentinel for assets/feeds whose address has not yet been verified on-chain.
-PLACEHOLDER_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
 class PegTarget(Enum):
@@ -208,14 +204,6 @@ PEGGED_ASSETS: list[PeggedAsset] = [
         channel="infinifi",
         peg=PegTarget.USD,
         depeg_pct=Decimal("0.03"),
-    ),
-    PeggedAsset(
-        # TODO: siUSD token address not yet verified on-chain — placeholder.
-        name="siUSD",
-        defillama_key=f"ethereum:{PLACEHOLDER_ADDRESS}",
-        channel="pegs",
-        peg=PegTarget.USD,
-        depeg_pct=Decimal("0.05"),
     ),
     # --- BTC-pegged -----------------------------------------------------------
     PeggedAsset(

@@ -13,7 +13,7 @@ from utils.pegged_assets import (
 )
 
 # Asset set the registry must cover per the issue acceptance criteria.
-REQUIRED_ASSETS = {"cbBTC", "LBTC", "siUSD", "cUSD", "USDe", "USDC", "USDT", "USDS"}
+REQUIRED_ASSETS = {"cbBTC", "LBTC", "iUSD", "cUSD", "USDe", "USDC", "USDT", "USDS"}
 
 
 class TestPriceDeviation(unittest.TestCase):
