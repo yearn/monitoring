@@ -93,9 +93,9 @@ def test_build_protocol_lines_shows_one_entry_per_transaction():
     lines = monitor._build_protocol_lines(rows, query_id=1234567)
 
     assert len(lines) == 1
-    assert lines[0].startswith("*Transaction 1*")
+    assert lines[0].startswith("🌐 Network: Ethereum")
     assert "🧾 Matched transfers in tx: 2" in lines[0]
-    assert "*Transaction 2*" not in lines[0]
+    assert "*Transaction " not in lines[0]
 
 
 def test_build_alert_message_is_readable_and_formats_large_values():
@@ -111,11 +111,7 @@ def test_build_alert_message_is_readable_and_formats_large_values():
     message = monitor._build_alert_message("infinifi", [row], query_id=7558262, total_rows=1)
 
     assert message == (
-        "*Large iUSD transfer detected*\n\n"
-        "🏦 Protocol: Infinifi\n"
-        "📦 New transactions: 1\n"
-        "📊 Dune query: 7558262\n\n"
-        "*Transaction 1*\n"
+        "*Large iUSD transfer detected*\n"
         "🌐 Network: Ethereum\n"
         "💰 Amount: 5,139,554.46 iUSD\n"
         "💵 Value: $5,139,554.46\n"
@@ -146,9 +142,39 @@ def test_build_alert_message_counts_duplicate_rows_inside_same_tx_once():
 
     message = monitor._build_alert_message("infinifi", rows, query_id=7558262, total_rows=2)
 
-    assert "📦 New transactions: 1 (2 matched transfers)" in message
-    assert message.count("*Transaction ") == 1
+    assert "📦 New transactions" not in message
+    assert "🏦 Protocol" not in message
+    assert "📊 Dune query" not in message
+    assert "*Transaction " not in message
     assert "🧾 Matched transfers in tx: 2" in message
+
+
+def test_build_alert_message_separates_multiple_transactions_without_repeated_headings():
+    first_tx_hash = "0xbcd224d842f47167ec6339c47ac473ba751b73afbce36ed82142d8603c0c1bfd"
+    second_tx_hash = "0xaaaaaaaa42f47167ec6339c47ac473ba751b73afbce36ed82142d8603c0c1bfd"
+    rows = [
+        _row(
+            contract_address="0x48f9e38f3070ad8945dfeae3fa70987722e3d89c",
+            symbol="iUSD",
+            amount="5139554.464867114",
+            amount_usd="5139554.464867114",
+            tx_hash=first_tx_hash,
+        ),
+        _row(
+            contract_address="0x48f9e38f3070ad8945dfeae3fa70987722e3d89c",
+            symbol="iUSD",
+            amount="7000000",
+            amount_usd="7000000",
+            tx_hash=second_tx_hash,
+        ),
+    ]
+
+    message = monitor._build_alert_message("infinifi", rows, query_id=7558262, total_rows=2)
+
+    assert message.startswith("*Large iUSD transfers detected*\n")
+    assert message.count("🌐 Network: Ethereum") == 2
+    assert message.count("\n—————\n") == 1
+    assert "*Transaction " not in message
 
 
 def test_main_sends_pretty_alert_with_markdown_enabled(monkeypatch):
