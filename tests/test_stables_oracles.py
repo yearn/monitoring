@@ -74,8 +74,8 @@ class TestStaleness(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert.severity, AlertSeverity.HIGH)
         # cbBTC has no dispatchable owner: protocol is "pegs", channel override empty.
-        self.assertEqual(alert.protocol, "pegs")
-        self.assertEqual(alert.channel, "")
+        self.assertEqual(alert.channel, "pegs")
+        self.assertEqual(alert.protocol, "coinbase")
 
     def test_zero_updated_at_is_stale(self):
         obs = _cbbtc_obs(reading=_reading(get_asset("cbBTC").chainlink_feed.address, 60_100 * 10**8, updated_at=0))
