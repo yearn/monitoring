@@ -14,7 +14,7 @@ from protocols.stables.oracles import (
 from utils.alert import AlertSeverity
 from utils.chainlink import FeedReading, RoundData
 from utils.dispatch import DISPATCHABLE_PROTOCOLS
-from utils.pegged_assets import PeggedAsset, PegTarget, RateOracle, get_asset
+from utils.pegged_assets import ChainlinkFeed, PeggedAsset, PegTarget, RateOracle, get_asset
 
 NOW = 2_000_000
 HEARTBEAT = 86_400  # matches registry _STABLE_HEARTBEAT
@@ -74,8 +74,8 @@ class TestStaleness(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert.severity, AlertSeverity.HIGH)
         # cbBTC has no dispatchable owner: protocol is "pegs", channel override empty.
-        self.assertEqual(alert.protocol, "pegs")
-        self.assertEqual(alert.channel, "")
+        self.assertEqual(alert.channel, "pegs")
+        self.assertEqual(alert.protocol, "coinbase")
 
     def test_zero_updated_at_is_stale(self):
         obs = _cbbtc_obs(reading=_reading(get_asset("cbBTC").chainlink_feed.address, 60_100 * 10**8, updated_at=0))
@@ -111,11 +111,16 @@ class TestPegDeviation(unittest.TestCase):
         self.assertIsNone(check_peg_deviation(_cbbtc_obs()))
 
     def test_off_peg_fires(self):
-        # oracle $63,000 vs $60,000 peg = +5% > cbBTC 2% tolerance
-        obs = _cbbtc_obs(reading=_reading(get_asset("cbBTC").chainlink_feed.address, 63_000 * 10**8))
+        # cbBTC is downside_only; oracle $58,200 vs $60,000 peg = -3% < -2% tolerance
+        obs = _cbbtc_obs(reading=_reading(get_asset("cbBTC").chainlink_feed.address, 58_200 * 10**8))
         alert = check_peg_deviation(obs)
         self.assertIsNotNone(alert)
         self.assertEqual(alert.severity, AlertSeverity.HIGH)
+
+    def test_upside_does_not_fire_for_downside_only(self):
+        # cbBTC can legitimately trade above BTC; +5% upside must NOT alert.
+        obs = _cbbtc_obs(reading=_reading(get_asset("cbBTC").chainlink_feed.address, 63_000 * 10**8))
+        self.assertIsNone(check_peg_deviation(obs))
 
 
 class TestMarketDivergence(unittest.TestCase):
@@ -198,6 +203,47 @@ class TestDispatchRouting(unittest.TestCase):
         # protocol (not channel) carries the owner; dispatch keys off alert.protocol.
         self.assertEqual(alert.protocol, "ethena")
         self.assertIn(alert.protocol, DISPATCHABLE_PROTOCOLS)
+
+
+class TestRoundMetadataGate(unittest.TestCase):
+    """Feeds that don't report reliable round metadata skip staleness + round checks."""
+
+    def _flat_obs(self) -> OracleObservation:
+        # Feed flagged reports_round_metadata=False, with a reading that would
+        # otherwise trip both staleness (updatedAt=0) and round-health (round_id=0).
+        asset = PeggedAsset(
+            name="fakeFlat",
+            defillama_key="ethereum:0x0000000000000000000000000000000000000002",
+            protocol="pegs",
+            peg=PegTarget.USD,
+            depeg_pct=Decimal("0.02"),
+            chainlink_feed=ChainlinkFeed("0xFeed", HEARTBEAT, "FLAT/USD", reports_round_metadata=False),
+        )
+        return OracleObservation(
+            asset=asset,
+            reading=_reading("0xFeed", 10**8, round_id=0, updated_at=0, answered_in_round=0),
+            peg_price_usd=Decimal("1"),
+            quote_price_usd=Decimal("1"),
+            now=NOW,
+            market_price_usd=Decimal("1"),
+        )
+
+    def test_unreliable_feed_skips_staleness_and_round(self):
+        # On-peg, aligned price -> only peg/divergence run, and both pass -> no alerts.
+        self.assertEqual(evaluate_chainlink_asset(self._flat_obs()), [])
+
+    def test_unreliable_feed_still_flags_peg_deviation(self):
+        # Off-peg must still fire even when round metadata is untrusted.
+        obs = OracleObservation(
+            asset=self._flat_obs().asset,
+            reading=_reading("0xFeed", 90 * 10**6, round_id=0, updated_at=0),  # $0.90
+            peg_price_usd=Decimal("1"),
+            quote_price_usd=Decimal("1"),
+            now=NOW,
+            market_price_usd=Decimal("0.90"),
+        )
+        alerts = evaluate_chainlink_asset(obs)
+        self.assertTrue(any("off peg" in a.message for a in alerts))
 
 
 class TestNextCachedRound(unittest.TestCase):

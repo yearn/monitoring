@@ -11,11 +11,13 @@ shared :data:`PeggedAsset` registry, for every Chainlink-backed asset it checks:
 * **oracle ↔ market divergence** — Chainlink vs DeFiLlama, the actual
   liquidation-risk signal (markets liquidate on the oracle, not market price).
 
+Staleness and round-sanity run only for feeds that report reliable round metadata
+(``ChainlinkFeed.reports_round_metadata``); feeds that return constant or zero
+``roundId`` / ``updatedAt`` are skipped for those two checks to avoid false positives.
+
 For **rate / fundamental oracles** (vault-rate, capped Redstone feeds) it checks
 monotonicity + delta-vs-cached (the ``protocols/apyusd/main.py`` approach); any
-fundamental-oracle depeg is ``CRITICAL`` (per #196). Fundamental oracles already
-covered by a Tenderly alert are listed in :data:`TENDERLY_COVERED` and skipped
-here to avoid duplicate alerting.
+fundamental-oracle depeg is ``CRITICAL`` (per #196).
 
 Runs hourly via ``automation/jobs.yaml``.
 """
@@ -25,7 +27,7 @@ from decimal import Decimal
 
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
-from utils.chainlink import FeedReading, RoundData, is_round_healthy, read_feeds, round_issues
+from utils.chainlink import FeedReading, RoundData, read_feeds
 from utils.chains import Chain
 from utils.config import Config
 from utils.defillama import fetch_prices
@@ -52,21 +54,6 @@ def _rate_cache_key(address: str) -> str:
     return f"peg_oracle_rate_{address.lower()}"
 
 
-# Fundamental oracles already covered by an existing Tenderly alert — NOT polled
-# here to avoid duplicate alerting. See protocols/lrt-pegs/README.md.
-#
-# Gap analysis (per #196 step 6): the registry currently exposes no *uncovered*
-# fundamental oracle. Adding active polling for a new one needs the oracle
-# contract address, its read function + precision, and whether it is monotonic
-# (capped) — wire it as a ``rate_oracle`` on the relevant ``PeggedAsset``.
-TENDERLY_COVERED: dict[str, str] = {
-    # LBTC Redstone fundamental oracle, upper-capped at 1 (healthy == 1).
-    "LBTC Redstone (0xb415eAA355D8440ac7eCB602D3fb67ccC1f0bc81)": (
-        "https://dashboard.tenderly.co/yearn/sam/alerts/rules/eca272ef-979a-47b3-a7f0-2e67172889bb"
-    ),
-}
-
-
 # ---------------------------------------------------------------------------
 # Observation + pure per-check helpers (unit tested without a chain)
 # ---------------------------------------------------------------------------
@@ -88,6 +75,32 @@ class OracleObservation:
     def oracle_price_usd(self) -> Decimal:
         """Chainlink answer expressed in USD (answer × quote price)."""
         return self.reading.price * self.quote_price_usd
+
+
+def _round_issues(round_data: RoundData) -> list[str]:
+    """Collect Chainlink round sanity-check failures.
+
+    Checks the invariants a consumer is expected to enforce: a positive answer, an
+    initialised round, and an ``answeredInRound`` not behind ``roundId`` (a stale
+    answer carried over from an earlier round). Only meaningful for feeds that
+    report real round metadata (see ``ChainlinkFeed.reports_round_metadata``).
+
+    Returns:
+        Human-readable problem descriptions; empty when healthy.
+    """
+    issues: list[str] = []
+    if round_data.answer <= 0:
+        issues.append(f"non-positive answer ({round_data.answer})")
+    if round_data.updated_at <= 0:
+        issues.append("round not complete (updatedAt is 0)")
+    if round_data.answered_in_round < round_data.round_id:
+        issues.append(f"stale round (answeredInRound {round_data.answered_in_round} < roundId {round_data.round_id})")
+    return issues
+
+
+def _is_round_healthy(round_data: RoundData) -> bool:
+    """Return ``True`` if the round passes all checks in :func:`_round_issues`."""
+    return not _round_issues(round_data)
 
 
 def check_staleness(obs: OracleObservation, buffer: int = STALENESS_BUFFER) -> Alert | None:
@@ -118,7 +131,7 @@ def check_round_health(obs: OracleObservation) -> Alert | None:
     feed = obs.asset.chainlink_feed
     assert feed is not None
     round_data = obs.reading.round_data
-    issues = round_issues(round_data)
+    issues = _round_issues(round_data)
 
     if obs.prev_round_id is not None and round_data.round_id < obs.prev_round_id:
         issues.append(f"roundId went backwards ({obs.prev_round_id} -> {round_data.round_id})")
@@ -181,13 +194,21 @@ def evaluate_chainlink_asset(
     buffer: int = STALENESS_BUFFER,
     divergence_threshold: Decimal = DIVERGENCE_THRESHOLD,
 ) -> list[Alert]:
-    """Run all Chainlink-asset checks, returning the alerts that fired."""
-    candidates = [
-        check_staleness(obs, buffer),
-        check_round_health(obs),
-        check_peg_deviation(obs),
-        check_market_divergence(obs, divergence_threshold),
-    ]
+    """Run all Chainlink-asset checks, returning the alerts that fired.
+
+    Staleness and round-health rely on the feed reporting real ``roundId`` /
+    ``updatedAt``; feeds flagged ``reports_round_metadata=False`` (constant or zero
+    round/time values) skip those two checks to avoid false positives. Peg-deviation
+    and oracle↔market divergence always run.
+    """
+    feed = obs.asset.chainlink_feed
+    assert feed is not None
+    candidates: list[Alert | None] = []
+    if feed.reports_round_metadata:
+        candidates.append(check_staleness(obs, buffer))
+        candidates.append(check_round_health(obs))
+    candidates.append(check_peg_deviation(obs))
+    candidates.append(check_market_divergence(obs, divergence_threshold))
     return [alert for alert in candidates if alert is not None]
 
 
@@ -200,7 +221,7 @@ def next_cached_round(prev_round_id: int | None, round_data: RoundData) -> int:
     (or crawling below) the regressed round looks "monotonic" forever. Only a
     healthy, non-decreasing round advances the mark.
     """
-    if not is_round_healthy(round_data):
+    if not _is_round_healthy(round_data):
         return prev_round_id or 0
     if prev_round_id is None:
         return round_data.round_id
@@ -350,7 +371,7 @@ def main() -> None:
     client = ChainManager.get_client(Chain.MAINNET)
     _monitor_chainlink_assets(client)
     _monitor_rate_oracles(client)
-    logger.info("L2 oracle health check complete (%d Tenderly-covered oracle(s) skipped)", len(TENDERLY_COVERED))
+    logger.info("L2 oracle health check complete")
 
 
 if __name__ == "__main__":
