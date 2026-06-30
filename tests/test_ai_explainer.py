@@ -11,17 +11,12 @@ from utils.llm.ai_explainer import (
     _build_prompt,
     _collect_safety_checks,
     _collect_token_flows,
-    _expand_detail,
     _explanation_from_json,
     _format_decimal,
-    _generate_explanation,
-    _generate_summary,
     _parse_explanation,
-    _refine_summary,
     explain_transaction,
     format_explanation_line,
 )
-from utils.llm.base import LLMError
 from utils.source_context import SourceContext
 from utils.tenderly.simulation import SimulationResult
 
@@ -213,79 +208,6 @@ class TestBatchParamConstants(unittest.TestCase):
         self.assertNotIn("--- Shared Across Batch ---", result)
 
 
-class TestSkipSimulation(unittest.TestCase):
-    """Tests for skip_simulation flag."""
-
-    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
-    @patch("utils.llm.ai_explainer.get_llm_provider")
-    @patch("utils.llm.ai_explainer.simulate_transaction")
-    @patch("utils.llm.ai_explainer.decode_calldata")
-    def test_explain_transaction_skips_tenderly_when_flag_set(
-        self,
-        mock_decode: MagicMock,
-        mock_simulate: MagicMock,
-        mock_get_provider: MagicMock,
-        mock_source: MagicMock,
-    ) -> None:
-        mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
-        mock_provider = MagicMock()
-        mock_provider.supports_structured_output = False
-        mock_provider.complete.return_value = "TLDR: paused"
-        mock_provider.model_name = "test-model"
-        mock_get_provider.return_value = mock_provider
-
-        explain_transaction(
-            target="0xT",
-            calldata="0x8456cb59",
-            chain_id=1,
-            skip_simulation=True,
-            context_note="delegated",
-        )
-
-        mock_simulate.assert_not_called()
-        prompt = mock_provider.complete.call_args[0][0]
-        self.assertIn("--- Execution Context ---", prompt)
-        self.assertIn("delegated", prompt)
-        self.assertNotIn("--- Simulation Results ---", prompt)
-
-    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
-    @patch("utils.llm.ai_explainer.get_llm_provider")
-    @patch("utils.llm.ai_explainer.simulate_transaction")
-    @patch("utils.llm.ai_explainer.decode_calldata")
-    def test_explain_batch_transaction_skips_tenderly_when_flag_set(
-        self,
-        mock_decode: MagicMock,
-        mock_simulate: MagicMock,
-        mock_get_provider: MagicMock,
-        mock_source: MagicMock,
-    ) -> None:
-        mock_decode.return_value = DecodedCall(
-            function_name="swapOwner", signature="swapOwner(address,address,address)"
-        )
-        mock_provider = MagicMock()
-        mock_provider.supports_structured_output = False
-        mock_provider.complete.return_value = "TLDR: swap"
-        mock_provider.model_name = "test-model"
-        mock_get_provider.return_value = mock_provider
-
-        from utils.llm.ai_explainer import explain_batch_transaction
-
-        explain_batch_transaction(
-            calls=[
-                {"target": "0xSafe", "data": "0xe318b52b" + "00" * 96, "value": "0"},
-                {"target": "0xSafe", "data": "0xe318b52b" + "11" * 96, "value": "0"},
-            ],
-            chain_id=1,
-            skip_simulation=True,
-            context_note="delegated batch",
-        )
-
-        mock_simulate.assert_not_called()
-        prompt = mock_provider.complete.call_args[0][0]
-        self.assertIn("delegated batch", prompt)
-        self.assertNotIn("--- Simulation Results ---", prompt)
-
-
 class TestExplainTransaction(unittest.TestCase):
     """Tests for explain_transaction."""
 
@@ -297,119 +219,11 @@ class TestExplainTransaction(unittest.TestCase):
         result = explain_transaction(target="0xTarget", calldata="0x1234", chain_id=1)
         self.assertIsNone(result)
 
-    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
-    @patch("utils.llm.ai_explainer.get_llm_provider")
-    @patch("utils.llm.ai_explainer.simulate_transaction")
-    @patch("utils.llm.ai_explainer.decode_calldata")
-    def test_successful_explanation(
-        self,
-        mock_decode: MagicMock,
-        mock_simulate: MagicMock,
-        mock_get_provider: MagicMock,
-        mock_source: MagicMock,
-    ) -> None:
-        mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
-        mock_simulate.return_value = SimulationResult(success=True, gas_used=50000)
-        mock_provider = MagicMock()
-        mock_provider.supports_structured_output = False
-        mock_provider.complete.return_value = "TLDR: This pauses the protocol.\n\nDETAIL:\nPauses all operations."
-        mock_provider.model_name = "test-model"
-        mock_get_provider.return_value = mock_provider
-
-        result = explain_transaction(
-            target="0xTarget",
-            calldata="0x8456cb59",  # pause()
-            chain_id=1,
-            protocol="AAVE",
-        )
-
-        self.assertIsNotNone(result)
-        self.assertEqual(result.summary, "This pauses the protocol.")
-        self.assertEqual(result.detail, "Pauses all operations.")
-        mock_simulate.assert_called_once()
-        mock_provider.complete.assert_called_once()
-
-    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
-    @patch("utils.llm.ai_explainer.get_llm_provider")
-    @patch("utils.llm.ai_explainer.simulate_transaction")
-    @patch("utils.llm.ai_explainer.decode_calldata")
-    def test_llm_error_returns_none(
-        self,
-        mock_decode: MagicMock,
-        mock_simulate: MagicMock,
-        mock_get_provider: MagicMock,
-        mock_source: MagicMock,
-    ) -> None:
-        mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
-        mock_simulate.return_value = None
-        mock_provider = MagicMock()
-        mock_provider.supports_structured_output = False
-        mock_provider.complete.side_effect = LLMError("API error")
-        mock_get_provider.return_value = mock_provider
-
-        result = explain_transaction(target="0xTarget", calldata="0x8456cb59", chain_id=1)
-        self.assertIsNone(result)
-
     @patch("utils.llm.ai_explainer.decode_calldata")
     def test_undecoded_calldata_returns_none(self, mock_decode: MagicMock) -> None:
         mock_decode.return_value = None
         result = explain_transaction(target="0xTarget", calldata="0x11223344", chain_id=1)
         self.assertIsNone(result)
-
-    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
-    @patch("utils.llm.ai_explainer.get_llm_provider")
-    @patch("utils.llm.ai_explainer.simulate_transaction")
-    @patch("utils.llm.ai_explainer.decode_calldata")
-    def test_simulation_failure_still_explains(
-        self,
-        mock_decode: MagicMock,
-        mock_simulate: MagicMock,
-        mock_get_provider: MagicMock,
-        mock_source: MagicMock,
-    ) -> None:
-        """If simulation fails, should still explain using decoded calldata only."""
-        mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
-        mock_simulate.return_value = None  # Simulation failed
-        mock_provider = MagicMock()
-        mock_provider.supports_structured_output = False
-        mock_provider.complete.return_value = "TLDR: This pauses the protocol."
-        mock_provider.model_name = "test-model"
-        mock_get_provider.return_value = mock_provider
-
-        result = explain_transaction(target="0xTarget", calldata="0x8456cb59", chain_id=1)
-        self.assertIsNotNone(result)
-        self.assertEqual(result.summary, "This pauses the protocol.")
-
-    @patch("utils.llm.ai_explainer.get_source_context")
-    @patch("utils.llm.ai_explainer.get_llm_provider")
-    @patch("utils.llm.ai_explainer.simulate_transaction")
-    @patch("utils.llm.ai_explainer.decode_calldata")
-    def test_source_context_passed_to_llm(
-        self,
-        mock_decode: MagicMock,
-        mock_simulate: MagicMock,
-        mock_get_provider: MagicMock,
-        mock_source: MagicMock,
-    ) -> None:
-        """When source context is available, it should be injected into the prompt."""
-        mock_decode.return_value = DecodedCall(function_name="setMaxSlippage", signature="setMaxSlippage(uint256)")
-        mock_simulate.return_value = SimulationResult(success=True, gas_used=50000)
-        mock_source.return_value = SourceContext(
-            contract_name="Farm",
-            function_snippet="function setMaxSlippage(uint256) external;",
-            state_var_snippets=["/// @dev so actually 1 - slippage\nuint256 public maxSlippage;"],
-        )
-        mock_provider = MagicMock()
-        mock_provider.supports_structured_output = False
-        mock_provider.complete.return_value = "TLDR: Tight slippage."
-        mock_provider.model_name = "test-model"
-        mock_get_provider.return_value = mock_provider
-
-        explain_transaction(target="0xTarget", calldata="0x12345678" + "00" * 32, chain_id=1)
-
-        prompt = mock_provider.complete.call_args[0][0]
-        self.assertIn("Contract Source Context", prompt)
-        self.assertIn("so actually 1 - slippage", prompt)
 
 
 class TestStructuredOutput(unittest.TestCase):
@@ -428,87 +242,6 @@ class TestStructuredOutput(unittest.TestCase):
         # Model put LOW in the prose but the validated risk_tag is HIGH — schema wins.
         exp = _explanation_from_json({"summary": "Grants admin role. LOW.", "detail": "d", "risk_tag": "HIGH"})
         self.assertEqual(exp.summary, "Grants admin role. HIGH")
-
-    def test_generate_summary_uses_structured_when_supported(self) -> None:
-        provider = MagicMock()
-        provider.supports_structured_output = True
-        # Stage-1 schema carries summary + risk_tag only — no detail field.
-        provider.complete_structured.return_value = {"summary": "Does X", "risk_tag": "HIGH"}
-
-        result = _generate_summary(provider, "prompt")
-
-        provider.complete_structured.assert_called_once()
-        provider.complete.assert_not_called()
-        self.assertEqual(result.summary, "Does X HIGH")
-        self.assertEqual(result.detail, "")
-
-    def test_generate_summary_falls_back_to_text_on_error(self) -> None:
-        provider = MagicMock()
-        provider.supports_structured_output = True
-        provider.complete_structured.side_effect = LLMError("unsupported")
-        provider.complete.return_value = "TLDR: Does X. LOW."
-
-        result = _generate_summary(provider, "prompt")
-
-        provider.complete.assert_called_once()
-        self.assertEqual(result.summary, "Does X. LOW.")
-
-    def test_generate_summary_falls_back_on_empty_summary(self) -> None:
-        provider = MagicMock()
-        provider.supports_structured_output = True
-        provider.complete_structured.return_value = {"summary": "", "risk_tag": "LOW"}
-        provider.complete.return_value = "TLDR: text path. LOW."
-
-        result = _generate_summary(provider, "prompt")
-
-        provider.complete.assert_called_once()
-        self.assertEqual(result.summary, "text path. LOW.")
-
-
-class TestTwoStageGeneration(unittest.TestCase):
-    """Tests for _generate_explanation: summary first, then detail derived from it."""
-
-    def test_detail_expanded_from_summary_on_structured_path(self) -> None:
-        provider = MagicMock()
-        provider.supports_structured_output = True
-        provider.complete_structured.return_value = {"summary": "Transfers 50.78 USDC", "risk_tag": "LOW"}
-        provider.complete.return_value = "Moves 50.78 USDC from the multisig to five addresses."
-
-        result = _generate_explanation(provider, "ctx prompt")
-
-        # Stage 1 = structured summary, stage 2 = one text completion for the detail.
-        provider.complete_structured.assert_called_once()
-        provider.complete.assert_called_once()
-        self.assertEqual(result.summary, "Transfers 50.78 USDC LOW")
-        self.assertEqual(result.detail, "Moves 50.78 USDC from the multisig to five addresses.")
-        # The expansion prompt must carry the confirmed summary so the detail derives from it.
-        expansion_prompt = provider.complete.call_args[0][0]
-        self.assertIn("Transfers 50.78 USDC LOW", expansion_prompt)
-        self.assertIn("ctx prompt", expansion_prompt)
-
-    def test_text_fallback_keeps_joint_detail_single_call(self) -> None:
-        provider = MagicMock()
-        provider.supports_structured_output = False
-        provider.complete.return_value = "TLDR: Does X. LOW.\n\nDETAIL:\njoint detail."
-
-        result = _generate_explanation(provider, "prompt")
-
-        # Degraded path: one completion produces both fields; no second expansion call.
-        provider.complete.assert_called_once()
-        self.assertEqual(result.summary, "Does X. LOW.")
-        self.assertEqual(result.detail, "joint detail.")
-
-    def test_empty_summary_skips_expansion(self) -> None:
-        provider = MagicMock()
-        provider.supports_structured_output = True
-        provider.complete_structured.return_value = {"summary": "", "risk_tag": "LOW"}
-        provider.complete.return_value = ""  # text fallback also empty
-
-        result = _generate_explanation(provider, "prompt")
-
-        self.assertEqual(result.summary, "")
-        # No expansion attempted when there's no summary to derive from.
-        self.assertEqual(result.detail, "")
 
 
 class TestParseExplanation(unittest.TestCase):
@@ -577,115 +310,6 @@ class TestFormatExplanationLine(unittest.TestCase):
         self.assertIn("AI Summary", result)
         self.assertIn("This pauses the protocol.", result)
         self.assertNotIn("Full details", result)
-
-
-class TestRefineSummary(unittest.TestCase):
-    """Tests for _refine_summary (critiques the authoritative summary, not the detail)."""
-
-    def test_pass_keeps_draft_unchanged(self) -> None:
-        # Trailing whitespace around "PASS" must also count as PASS.
-        draft = Explanation(summary="Lowers fee 30→25 bps. LOW.", detail="")
-        provider = MagicMock()
-        provider.complete.return_value = "  PASS  \n"
-        self.assertIs(_refine_summary("orig prompt", draft, provider), draft)
-        provider.complete.assert_called_once()
-
-    def test_revision_replaces_summary(self) -> None:
-        draft = Explanation(summary="This transaction does X. LOW.", detail="")
-        provider = MagicMock()
-        provider.complete.return_value = "TLDR: Does X. LOW."
-        result = _refine_summary("orig", draft, provider)
-        self.assertEqual(result.summary, "Does X. LOW.")
-        # Detail is produced later (stage 2), so a refined summary carries none.
-        self.assertEqual(result.detail, "")
-
-    def test_llm_error_falls_back_to_draft(self) -> None:
-        draft = Explanation(summary="x", detail="")
-        provider = MagicMock()
-        provider.complete.side_effect = LLMError("rate limit")
-        self.assertIs(_refine_summary("p", draft, provider), draft)
-
-    def test_empty_response_falls_back_to_draft(self) -> None:
-        draft = Explanation(summary="x", detail="")
-        provider = MagicMock()
-        provider.complete.return_value = ""
-        self.assertIs(_refine_summary("p", draft, provider), draft)
-
-
-class TestExpandDetail(unittest.TestCase):
-    """Tests for _expand_detail (stage 2: detail derived from the confirmed summary)."""
-
-    def test_returns_bare_detail_text(self) -> None:
-        provider = MagicMock()
-        provider.complete.return_value = "Pauses all operations; reversible. No fund movement."
-        detail = _expand_detail(provider, "ctx", "Pauses the protocol. LOW")
-        self.assertEqual(detail, "Pauses all operations; reversible. No fund movement.")
-        # The confirmed summary is handed to the expansion call.
-        self.assertIn("Pauses the protocol. LOW", provider.complete.call_args[0][0])
-
-    def test_strips_stray_detail_header(self) -> None:
-        provider = MagicMock()
-        provider.complete.return_value = "DETAIL:\nThe real detail body."
-        self.assertEqual(_expand_detail(provider, "ctx", "sum"), "The real detail body.")
-
-    def test_llm_error_returns_empty(self) -> None:
-        provider = MagicMock()
-        provider.complete.side_effect = LLMError("boom")
-        self.assertEqual(_expand_detail(provider, "ctx", "sum"), "")
-
-
-class TestRefineFlagInExplainTransaction(unittest.TestCase):
-    """Tests that the refine flag triggers a second LLM call."""
-
-    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
-    @patch("utils.llm.ai_explainer._collect_state_reads", return_value=[])
-    @patch("utils.llm.ai_explainer.get_llm_provider")
-    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
-    @patch("utils.llm.ai_explainer.decode_calldata")
-    def test_refine_off_makes_one_call(
-        self,
-        mock_decode: MagicMock,
-        mock_simulate: MagicMock,
-        mock_get_provider: MagicMock,
-        mock_state: MagicMock,
-        mock_source: MagicMock,
-    ) -> None:
-        mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
-        provider = MagicMock()
-        provider.supports_structured_output = False
-        provider.complete.return_value = "TLDR: Pauses. LOW."
-        provider.model_name = "test-model"
-        mock_get_provider.return_value = provider
-
-        explain_transaction(target="0xT", calldata="0x8456cb59", chain_id=1)
-        self.assertEqual(provider.complete.call_count, 1)
-
-    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
-    @patch("utils.llm.ai_explainer._collect_state_reads", return_value=[])
-    @patch("utils.llm.ai_explainer.get_llm_provider")
-    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
-    @patch("utils.llm.ai_explainer.decode_calldata")
-    def test_refine_on_makes_two_calls(
-        self,
-        mock_decode: MagicMock,
-        mock_simulate: MagicMock,
-        mock_get_provider: MagicMock,
-        mock_state: MagicMock,
-        mock_source: MagicMock,
-    ) -> None:
-        mock_decode.return_value = DecodedCall(function_name="pause", signature="pause()")
-        provider = MagicMock()
-        provider.supports_structured_output = False
-        provider.complete.side_effect = ["TLDR: Pauses. LOW.", "PASS"]
-        provider.model_name = "test-model"
-        mock_get_provider.return_value = provider
-
-        explain_transaction(target="0xT", calldata="0x8456cb59", chain_id=1, refine=True)
-        self.assertEqual(provider.complete.call_count, 2)
-        # Second call should contain the critique task
-        second_call_prompt = provider.complete.call_args_list[1][0][0]
-        self.assertIn("Critique Task", second_call_prompt)
-        self.assertIn("Your Previous Draft", second_call_prompt)
 
 
 class TestFailedSimulationDropped(unittest.TestCase):

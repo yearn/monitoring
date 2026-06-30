@@ -1,7 +1,33 @@
 """Abstract base class for LLM providers."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
+
+
+class LLMError(Exception):
+    """Exception raised for LLM API errors."""
+
+
+@contextmanager
+def wrap_llm_errors(label: str) -> Iterator[None]:
+    """Translate any non-``LLMError`` raised inside the block into an ``LLMError``.
+
+    Existing ``LLMError``s (and their messages) pass through untouched; anything
+    else becomes ``LLMError(f"{label}: {e}")``. Providers wrap their API calls
+    with this so the "re-raise LLMError, wrap everything else" contract lives in
+    one place instead of being copy-pasted into every method.
+
+    Args:
+        label: Human-readable prefix describing the failed call.
+    """
+    try:
+        yield
+    except LLMError:
+        raise
+    except Exception as e:
+        raise LLMError(f"{label}: {e}") from e
 
 
 class LLMProvider(ABC):
@@ -57,7 +83,3 @@ class LLMProvider(ABC):
     @abstractmethod
     def model_name(self) -> str:
         """Return the model identifier being used."""
-
-
-class LLMError(Exception):
-    """Exception raised for LLM API errors."""

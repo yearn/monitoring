@@ -6,7 +6,7 @@ the OpenAI chat completions API.
 
 from typing import Any
 
-from utils.llm.base import LLMError, LLMProvider
+from utils.llm.base import LLMError, LLMProvider, wrap_llm_errors
 from utils.logger import get_logger
 
 logger = get_logger("utils.llm.anthropic_provider")
@@ -50,16 +50,12 @@ class AnthropicProvider(LLMProvider):
             "messages": [{"role": "user", "content": prompt}],
         }
         self._add_system(kwargs, system_prompt)
-        try:
+        with wrap_llm_errors("Anthropic API call failed"):
             response = self._client.messages.create(**kwargs)
             block = response.content[0]
             if block.type != "text":
                 raise LLMError(f"Unexpected response block type: {block.type}")
             return block.text.strip()
-        except LLMError:
-            raise
-        except Exception as e:
-            raise LLMError(f"Anthropic API call failed: {e}") from e
 
     @property
     def supports_structured_output(self) -> bool:
@@ -78,16 +74,12 @@ class AnthropicProvider(LLMProvider):
             "tool_choice": {"type": "tool", "name": _STRUCTURED_TOOL},
         }
         self._add_system(kwargs, system_prompt)
-        try:
+        with wrap_llm_errors("Anthropic structured call failed"):
             response = self._client.messages.create(**kwargs)
             for block in response.content:
                 if block.type == "tool_use":
                     return dict(block.input)
             raise LLMError("Anthropic response contained no tool_use block")
-        except LLMError:
-            raise
-        except Exception as e:
-            raise LLMError(f"Anthropic structured call failed: {e}") from e
 
     def _add_system(self, kwargs: dict[str, Any], system_prompt: str) -> None:
         """Attach a cacheable system block to ``kwargs`` when a prompt is given."""
