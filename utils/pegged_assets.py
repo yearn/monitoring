@@ -247,7 +247,7 @@ PEGGED_ASSETS: list[PeggedAsset] = [
         peg=PegTarget.BTC,
         depeg_pct=Decimal("0.02"),
         chainlink_feed=ChainlinkFeed(
-            "0xfdFD9C85aD200c506Cf9e21F1FD8dD01932FBB23", _STABLE_HEARTBEAT, "WBTC/BTC", quote=PegTarget.BTC
+            "0xfdFD9C85aD200c506Cf9e21F1FD8dd01932FBB23", _STABLE_HEARTBEAT, "WBTC/BTC", quote=PegTarget.BTC
         ),
         downside_only=True,  # only a drop below BTC is a risk
     ),
