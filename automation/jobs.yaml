@@ -38,6 +38,7 @@ profiles:
       - { name: "usdai-large-mints",      script: protocols/usdai/large_mints.py }
       - { name: "stables-dune-large-transfers", script: protocols/stables/dune_large_transfers.py }
       - { name: "stables-oracles",         script: protocols/stables/oracles.py }
+      - { name: "stables-oracle-events",   script: protocols/stables/oracle_events.py }
       - { name: "yearn-alert-large-flows", script: protocols/yearn/alert_large_flows.py }
       # Cache: tks-trigger-cache.json under $CACHE_DIR (check_stuck_triggers.DEFAULT_CACHE_FILE).
       - { name: "yearn-check-stuck-triggers", script: protocols/yearn/check_stuck_triggers.py, enabled: false }
