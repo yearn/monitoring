@@ -47,12 +47,20 @@ class ChainlinkFeed:
             absolute price; a ``BTC`` feed reports the asset-to-BTC ratio (~1.0).
             Lets consumers scale correctly — BTC-quoted feeds compare straight to
             ``1.0`` with no BTC/USD lookup, USD-quoted feeds need live BTC/USD.
+            L2 multiplies a USD-quoted answer by the live quote price to compare
+            oracle and market on a common USD basis.
+        reports_round_metadata: Whether the feed reports reliable ``roundId`` /
+            ``updatedAt``. Set ``False`` for feeds that return constant or zero
+            round/timestamp values (some non-standard aggregators do); L2 then
+            skips the staleness and round-health checks for that feed to avoid
+            false positives. Verify on-chain before trusting these for a new feed.
     """
 
     address: str
     heartbeat: int
     description: str = ""
     quote: PegTarget = PegTarget.USD
+    reports_round_metadata: bool = True
 
 
 @dataclass(frozen=True)
@@ -80,11 +88,12 @@ class PeggedAsset:
 
     name: str
     defillama_key: str  # "chain:address"
-    channel: str  # Telegram routing channel
+    protocol: str  # logical owner — used as Alert.protocol so emergency dispatch can key off it
     peg: PegTarget
     depeg_pct: Decimal  # deviation tolerance from the peg (e.g. Decimal("0.02") = 2%)
     chainlink_feed: ChainlinkFeed | None = None
     rate_oracle: RateOracle | None = None
+    channel: str = ""  # Telegram channel override; empty falls back to ``protocol`` routing
     # When True, only a drop *below* the peg counts as a depeg; upside is ignored.
     # Use for assets that can legitimately trade above peg (e.g. BTC wrappers).
     downside_only: bool = False
@@ -183,6 +192,7 @@ PEGGED_ASSETS: list[PeggedAsset] = [
     PeggedAsset(
         name="USDC",
         defillama_key="ethereum:0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        protocol="circle",
         channel="pegs",
         peg=PegTarget.USD,
         depeg_pct=Decimal("0.02"),
@@ -191,6 +201,7 @@ PEGGED_ASSETS: list[PeggedAsset] = [
     PeggedAsset(
         name="USDT",
         defillama_key="ethereum:0xdAC17F958D2ee523a2206206994597C13D831ec7",
+        protocol="tether",
         channel="pegs",
         peg=PegTarget.USD,
         depeg_pct=Decimal("0.02"),
@@ -199,7 +210,7 @@ PEGGED_ASSETS: list[PeggedAsset] = [
     PeggedAsset(
         name="USDS",
         defillama_key="ethereum:0xdC035D45d973E3EC169d2276DDab16f1e407384F",
-        channel="pegs",
+        protocol="maker",
         peg=PegTarget.USD,
         depeg_pct=Decimal("0.02"),
         chainlink_feed=ChainlinkFeed("0xfF30586cD0F29eD462364C7e81375FC0C71219b1", _STABLE_HEARTBEAT, "USDS/USD"),
@@ -208,7 +219,7 @@ PEGGED_ASSETS: list[PeggedAsset] = [
     PeggedAsset(
         name="USDe",
         defillama_key="ethereum:0x4c9EDD5852cd905f086C759E8383e09bff1E68B3",
-        channel="ethena",
+        protocol="ethena",
         peg=PegTarget.USD,
         depeg_pct=Decimal("0.03"),
         chainlink_feed=ChainlinkFeed("0xa569d910839Ae8865Da8F8e70FfFb0cBA869F961", _STABLE_HEARTBEAT, "USDe/USD"),
@@ -216,14 +227,14 @@ PEGGED_ASSETS: list[PeggedAsset] = [
     PeggedAsset(
         name="cUSD",
         defillama_key="ethereum:0xcccc62962d17b8914c62d74ffb843d73b2a3cccc",
-        channel="cap",
+        protocol="cap",
         peg=PegTarget.USD,
         depeg_pct=Decimal("0.05"),  # cap cUSD price is more volatile
     ),
     PeggedAsset(
         name="iUSD",
         defillama_key="ethereum:0x48f9e38f3070AD8945DFEae3FA70987722E3D89c",
-        channel="infinifi",
+        protocol="infinifi",
         peg=PegTarget.USD,
         depeg_pct=Decimal("0.03"),
     ),
@@ -231,6 +242,7 @@ PEGGED_ASSETS: list[PeggedAsset] = [
     PeggedAsset(
         name="WBTC",
         defillama_key="ethereum:0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
+        protocol="wbtc",
         channel="pegs",
         peg=PegTarget.BTC,
         depeg_pct=Decimal("0.02"),
@@ -242,6 +254,7 @@ PEGGED_ASSETS: list[PeggedAsset] = [
     PeggedAsset(
         name="cbBTC",
         defillama_key="ethereum:0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+        protocol="coinbase",
         channel="pegs",
         peg=PegTarget.BTC,
         depeg_pct=Decimal("0.02"),
@@ -251,6 +264,7 @@ PEGGED_ASSETS: list[PeggedAsset] = [
     PeggedAsset(
         name="LBTC",
         defillama_key="ethereum:0x8236a87084f8B84306f72007F36F2618A5634494",
+        protocol="lombard",
         channel="pegs",
         peg=PegTarget.BTC,
         depeg_pct=Decimal("0.03"),
