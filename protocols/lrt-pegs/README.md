@@ -10,8 +10,8 @@ Curve pools that are checked are:
 
 - ETH+/WETH
 - weETH-WETH
-- frxETH-WETH
 - OETH/ETH
+- stETH/ETH (Lido) — canonical wstETH-vs-ETH depeg gauge; wstETH deterministically wraps stETH
 
 ### Uniswap V3 pools - DISABLED ⚠️
 

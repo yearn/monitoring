@@ -48,7 +48,7 @@ CACHE_KEY_CHAINLINK_NAV = "ustb_chainlink_nav"
 # ABIs
 # ---------------------------------------------------------------------------
 ABI_ORACLE = load_abi("protocols/ustb/abi/SuperstateOracle.json")
-ABI_CHAINLINK = load_abi("protocols/ustb/abi/ChainlinkAggregator.json")
+ABI_CHAINLINK = load_abi("common-abi/ChainlinkAggregator.json")
 ABI_ERC20 = load_abi("common-abi/ERC20.json")
 
 USTB_DECIMALS = 6
