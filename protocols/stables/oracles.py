@@ -17,9 +17,7 @@ Staleness and round-sanity run only for feeds that report reliable round metadat
 
 For **rate / fundamental oracles** (vault-rate, capped Redstone feeds) it checks
 monotonicity + delta-vs-cached (the ``protocols/apyusd/main.py`` approach); any
-fundamental-oracle depeg is ``CRITICAL`` (per #196). Fundamental oracles already
-covered by a Tenderly alert are listed in :data:`TENDERLY_COVERED` and skipped
-here to avoid duplicate alerting.
+fundamental-oracle depeg is ``CRITICAL`` (per #196).
 
 Runs hourly via ``automation/jobs.yaml``.
 """
@@ -54,21 +52,6 @@ def _round_cache_key(address: str) -> str:
 
 def _rate_cache_key(address: str) -> str:
     return f"peg_oracle_rate_{address.lower()}"
-
-
-# Fundamental oracles already covered by an existing Tenderly alert — NOT polled
-# here to avoid duplicate alerting. See protocols/lrt-pegs/README.md.
-#
-# Gap analysis (per #196 step 6): the registry currently exposes no *uncovered*
-# fundamental oracle. Adding active polling for a new one needs the oracle
-# contract address, its read function + precision, and whether it is monotonic
-# (capped) — wire it as a ``rate_oracle`` on the relevant ``PeggedAsset``.
-TENDERLY_COVERED: dict[str, str] = {
-    # LBTC Redstone fundamental oracle, upper-capped at 1 (healthy == 1).
-    "LBTC Redstone (0xb415eAA355D8440ac7eCB602D3fb67ccC1f0bc81)": (
-        "https://dashboard.tenderly.co/yearn/sam/alerts/rules/eca272ef-979a-47b3-a7f0-2e67172889bb"
-    ),
-}
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +371,7 @@ def main() -> None:
     client = ChainManager.get_client(Chain.MAINNET)
     _monitor_chainlink_assets(client)
     _monitor_rate_oracles(client)
-    logger.info("L2 oracle health check complete (%d Tenderly-covered oracle(s) skipped)", len(TENDERLY_COVERED))
+    logger.info("L2 oracle health check complete")
 
 
 if __name__ == "__main__":
