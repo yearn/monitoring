@@ -3,7 +3,7 @@
 This registry is consumed by every layer of peg/oracle monitoring:
 
 * L1 — market depeg (DeFiLlama price vs ``peg`` target, deviation > ``depeg_pct``)
-* L2 — oracle health (``chainlink_feed`` staleness / round sanity, ``rate_oracle`` drift)
+* L2 — oracle health (``chainlink_feed`` price cross-check, ``rate_oracle`` drift)
 * L3 — event consumers
 
 Peg deviation is expressed relative to a :class:`PegTarget` (``USD`` is the
@@ -11,8 +11,7 @@ constant ``1``; ``BTC`` is the live BTC/USD price from DeFiLlama), so a single
 entry covers both dollar- and bitcoin-denominated assets. ``depeg_pct`` is a
 *deviation* tolerance (fractional distance from the peg), not an absolute floor.
 
-Addresses and Chainlink feeds were verified on Ethereum mainnet; entries that
-could not be verified use :data:`PLACEHOLDER_ADDRESS` and are marked ``TODO``.
+Addresses and Chainlink feeds were verified on Ethereum mainnet.
 """
 
 from dataclasses import dataclass
@@ -23,9 +22,6 @@ from utils.defillama import fetch_prices
 
 # DeFiLlama key for the live BTC/USD reference price (BTC peg target).
 BTC_USD_DEFILLAMA_KEY = "coingecko:bitcoin"
-
-# Sentinel for assets/feeds whose address has not yet been verified on-chain.
-PLACEHOLDER_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
 class PegTarget(Enum):
@@ -43,13 +39,18 @@ class PegTarget(Enum):
 class ChainlinkFeed:
     """A Chainlink aggregator backing an asset's price (consumed by L2).
 
-    ``quote`` is the unit the feed is denominated in (e.g. a ``LBTC/BTC`` feed
-    quotes in ``BTC``, a ``cbBTC/USD`` feed in ``USD``); L2 multiplies the raw
-    answer by the quote's live price to compare oracle and market on a USD basis.
+    Args:
+        address: Aggregator contract address.
+        heartbeat: Max expected seconds between updates (Chainlink mainnet default).
+        description: Human-readable feed pair, e.g. ``"WBTC/BTC"``.
+        quote: Denomination of the feed's ``answer``. A ``USD`` feed reports an
+            absolute price; a ``BTC`` feed reports the asset-to-BTC ratio (~1.0).
+            Lets consumers scale correctly — BTC-quoted feeds compare straight to
+            ``1.0`` with no BTC/USD lookup, USD-quoted feeds need live BTC/USD.
     """
 
     address: str
-    heartbeat: int  # max expected seconds between updates (Chainlink mainnet default)
+    heartbeat: int
     description: str = ""
     quote: PegTarget = PegTarget.USD
 
@@ -84,7 +85,9 @@ class PeggedAsset:
     depeg_pct: Decimal  # deviation tolerance from the peg (e.g. Decimal("0.02") = 2%)
     chainlink_feed: ChainlinkFeed | None = None
     rate_oracle: RateOracle | None = None
-    channel: str = ""  # Telegram channel override; empty falls back to ``protocol`` routing
+    # When True, only a drop *below* the peg counts as a depeg; upside is ignored.
+    # Use for assets that can legitimately trade above peg (e.g. BTC wrappers).
+    downside_only: bool = False
 
     @property
     def address(self) -> str:
@@ -96,8 +99,16 @@ class PeggedAsset:
         return price_deviation(price, peg_price)
 
     def is_depegged(self, price: Decimal, peg_price: Decimal) -> bool:
-        """Return ``True`` if ``price`` deviates from ``peg_price`` beyond ``depeg_pct``."""
-        return abs(self.deviation(price, peg_price)) >= self.depeg_pct
+        """Return ``True`` if ``price`` has depegged from ``peg_price`` beyond ``depeg_pct``.
+
+        For ``downside_only`` assets only a drop below the peg triggers (deviation
+        ``<= -depeg_pct``); for all others the check is symmetric (``abs`` deviation
+        ``>= depeg_pct``), so an upside move flags too.
+        """
+        deviation = self.deviation(price, peg_price)
+        if self.downside_only:
+            return deviation <= -self.depeg_pct
+        return abs(deviation) >= self.depeg_pct
 
 
 # ---------------------------------------------------------------------------
@@ -216,15 +227,18 @@ PEGGED_ASSETS: list[PeggedAsset] = [
         peg=PegTarget.USD,
         depeg_pct=Decimal("0.03"),
     ),
-    PeggedAsset(
-        # TODO: siUSD token address not yet verified on-chain — placeholder.
-        name="siUSD",
-        defillama_key=f"ethereum:{PLACEHOLDER_ADDRESS}",
-        protocol="pegs",
-        peg=PegTarget.USD,
-        depeg_pct=Decimal("0.05"),
-    ),
     # --- BTC-pegged -----------------------------------------------------------
+    PeggedAsset(
+        name="WBTC",
+        defillama_key="ethereum:0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
+        channel="pegs",
+        peg=PegTarget.BTC,
+        depeg_pct=Decimal("0.02"),
+        chainlink_feed=ChainlinkFeed(
+            "0xfdFD9C85aD200c506Cf9e21F1FD8dD01932FBB23", _STABLE_HEARTBEAT, "WBTC/BTC", quote=PegTarget.BTC
+        ),
+        downside_only=True,  # only a drop below BTC is a risk
+    ),
     PeggedAsset(
         name="cbBTC",
         defillama_key="ethereum:0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
@@ -232,6 +246,7 @@ PEGGED_ASSETS: list[PeggedAsset] = [
         peg=PegTarget.BTC,
         depeg_pct=Decimal("0.02"),
         chainlink_feed=ChainlinkFeed("0x2665701293fCbEB223D11A08D826563EDcCE423A", _STABLE_HEARTBEAT, "cbBTC/USD"),
+        downside_only=True,  # only a drop below BTC is a risk
     ),
     PeggedAsset(
         name="LBTC",
@@ -239,10 +254,11 @@ PEGGED_ASSETS: list[PeggedAsset] = [
         protocol="pegs",
         peg=PegTarget.BTC,
         depeg_pct=Decimal("0.03"),
-        # LBTC/BTC market-rate feed (8 decimals); price ~1 BTC per LBTC.
+        # LBTC/BTC market-rate feed (8 decimals); can sit slightly above 1 BTC.
         chainlink_feed=ChainlinkFeed(
             "0x5c29868C58b6e15e2b962943278969Ab6a7D3212", _STABLE_HEARTBEAT, "LBTC/BTC", quote=PegTarget.BTC
         ),
+        downside_only=True,  # LBTC can trade above peg; only a drop below BTC matters
     ),
 ]
 

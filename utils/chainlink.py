@@ -1,9 +1,8 @@
 """Chainlink aggregator helpers shared across peg / oracle monitors.
 
 Generalises the inline ``latestRoundData`` handling from ``protocols/ustb/main.py``:
-a batched feed reader plus pure helpers for staleness, round sanity checks and
-price scaling. Pure helpers take primitive values so they are trivially unit
-testable without a chain connection.
+a batched feed reader plus a pure price-scaling helper that takes primitive
+values so it is trivially unit testable without a chain connection.
 """
 
 from dataclasses import dataclass
@@ -82,57 +81,9 @@ def scale_price(answer: int, decimals: int) -> Decimal:
     Raises:
         ValueError: If ``decimals`` is negative.
     """
-    if decimals < 0:
-        raise ValueError(f"decimals must be non-negative, got {decimals}")
+    if decimals < 1:
+        raise ValueError(f"decimals must be positive, got {decimals}")
     return Decimal(answer) / (Decimal(10) ** decimals)
-
-
-def is_stale(updated_at: int, heartbeat: int, now: int, buffer: int = 0) -> bool:
-    """Return ``True`` if a feed has not updated within its heartbeat window.
-
-    Args:
-        updated_at: ``updatedAt`` timestamp from the latest round (unix seconds).
-        heartbeat: Expected maximum interval between updates (seconds).
-        now: Current unix timestamp (seconds).
-        buffer: Extra grace period added to the heartbeat before flagging
-            staleness (seconds). Defaults to ``0``.
-
-    Returns:
-        ``True`` when ``now - updated_at`` exceeds ``heartbeat + buffer``, or when
-        ``updated_at`` is non-positive (uninitialised / invalid round).
-    """
-    if updated_at <= 0:
-        return True
-    return (now - updated_at) > (heartbeat + buffer)
-
-
-def round_issues(round_data: RoundData) -> list[str]:
-    """Collect Chainlink round sanity-check failures.
-
-    Checks the standard freshness/consistency invariants Chainlink consumers are
-    expected to enforce: a positive answer, an initialised round, and an
-    ``answeredInRound`` that is not behind the current ``roundId`` (a stale answer
-    carried over from an earlier round).
-
-    Args:
-        round_data: The decoded round data to validate.
-
-    Returns:
-        A list of human-readable problem descriptions; empty when healthy.
-    """
-    issues: list[str] = []
-    if round_data.answer <= 0:
-        issues.append(f"non-positive answer ({round_data.answer})")
-    if round_data.updated_at <= 0:
-        issues.append("round not complete (updatedAt is 0)")
-    if round_data.answered_in_round < round_data.round_id:
-        issues.append(f"stale round (answeredInRound {round_data.answered_in_round} < roundId {round_data.round_id})")
-    return issues
-
-
-def is_round_healthy(round_data: RoundData) -> bool:
-    """Return ``True`` if the round passes all sanity checks in :func:`round_issues`."""
-    return not round_issues(round_data)
 
 
 # ---------------------------------------------------------------------------
