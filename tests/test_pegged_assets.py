@@ -13,7 +13,7 @@ from utils.pegged_assets import (
 )
 
 # Asset set the registry must cover per the issue acceptance criteria.
-REQUIRED_ASSETS = {"cbBTC", "LBTC", "siUSD", "cUSD", "USDe", "USDC", "USDT", "USDS"}
+REQUIRED_ASSETS = {"WBTC", "cbBTC", "LBTC", "iUSD", "cUSD", "USDe", "USDC", "USDT", "USDS"}
 
 
 class TestPriceDeviation(unittest.TestCase):
@@ -52,6 +52,19 @@ class TestIsDepegged(unittest.TestCase):
         cbbtc = get_asset("cbBTC")  # depeg_pct = 0.02, peg = BTC
         self.assertFalse(cbbtc.is_depegged(Decimal("60500"), Decimal("60000")))
         self.assertTrue(cbbtc.is_depegged(Decimal("58000"), Decimal("60000")))
+
+    def test_downside_only_ignores_upside(self):
+        lbtc = get_asset("LBTC")  # depeg_pct = 0.03, downside_only
+        # +5% above peg (LBTC legitimately trades above 1 BTC) -> not a depeg.
+        self.assertFalse(lbtc.is_depegged(Decimal("63000"), Decimal("60000")))
+        # -5% below peg -> depeg.
+        self.assertTrue(lbtc.is_depegged(Decimal("57000"), Decimal("60000")))
+        # exactly at the downside threshold -> depeg.
+        self.assertTrue(lbtc.is_depegged(Decimal("58200"), Decimal("60000")))
+
+    def test_symmetric_asset_flags_upside(self):
+        usdc = get_asset("USDC")  # depeg_pct = 0.02, symmetric
+        self.assertTrue(usdc.is_depegged(Decimal("1.05"), Decimal("1")))
 
 
 class TestResolvePegPrices(unittest.TestCase):
@@ -95,6 +108,20 @@ class TestRegistry(unittest.TestCase):
     def test_every_asset_has_positive_depeg_tolerance(self):
         for asset in PEGGED_ASSETS:
             self.assertGreater(asset.depeg_pct, Decimal("0"), asset.name)
+
+    def test_btc_wrappers_are_downside_only(self):
+        for name in ("WBTC", "cbBTC", "LBTC"):
+            self.assertTrue(get_asset(name).downside_only, name)
+
+    def test_usd_stables_are_symmetric(self):
+        self.assertFalse(get_asset("USDC").downside_only)
+
+    def test_chainlink_feed_quote_denomination(self):
+        # BTC-denominated feeds (answer ~1.0) vs USD-denominated feeds (absolute price).
+        self.assertEqual(get_asset("WBTC").chainlink_feed.quote, PegTarget.BTC)
+        self.assertEqual(get_asset("LBTC").chainlink_feed.quote, PegTarget.BTC)
+        self.assertEqual(get_asset("cbBTC").chainlink_feed.quote, PegTarget.USD)
+        self.assertEqual(get_asset("USDC").chainlink_feed.quote, PegTarget.USD)
 
 
 if __name__ == "__main__":
