@@ -54,6 +54,18 @@ class ChainlinkFeed:
             round/timestamp values (some non-standard aggregators do); L2 then
             skips the staleness and round-health checks for that feed to avoid
             false positives. Verify on-chain before trusting these for a new feed.
+        deviation_threshold: The feed's on-chain deviation parameter — the price
+            move that triggers a new answer (see data.chain.link). Between updates
+            the oracle legitimately lags the live market by up to this band, so L2's
+            oracle↔market divergence alert only fires beyond ``deviation_threshold``
+            + a buffer. Must be ``>=`` the feed's real band or the divergence check
+            false-positives on normal update lag. Defaults to 1%.
+        divergence_buffer: Extra slack over ``deviation_threshold`` for the L2
+            oracle↔market divergence alert. ``None`` uses the global default
+            (``oracles.DIVERGENCE_BUFFER``, 0.25%), which suits stable/ratio answers
+            (USDC ≈ $1, WBTC/BTC ≈ 1.0). Set a wider value for feeds whose answer is
+            volatile (e.g. cbBTC/USD tracks the full BTC price), where the market can
+            overshoot the band before the oracle re-pushes.
     """
 
     address: str
@@ -61,6 +73,8 @@ class ChainlinkFeed:
     description: str = ""
     quote: PegTarget = PegTarget.USD
     reports_round_metadata: bool = True
+    deviation_threshold: Decimal = Decimal("0.01")
+    divergence_buffer: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -196,7 +210,12 @@ PEGGED_ASSETS: list[PeggedAsset] = [
         channel="pegs",
         peg=PegTarget.USD,
         depeg_pct=Decimal("0.02"),
-        chainlink_feed=ChainlinkFeed("0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6", _STABLE_HEARTBEAT, "USDC/USD"),
+        chainlink_feed=ChainlinkFeed(
+            "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6",
+            _STABLE_HEARTBEAT,
+            "USDC/USD",
+            deviation_threshold=Decimal("0.0025"),  # 0.25% band (data.chain.link)
+        ),
     ),
     PeggedAsset(
         name="USDT",
@@ -205,7 +224,12 @@ PEGGED_ASSETS: list[PeggedAsset] = [
         channel="pegs",
         peg=PegTarget.USD,
         depeg_pct=Decimal("0.02"),
-        chainlink_feed=ChainlinkFeed("0x3E7d1eAB13ad0104d2750B8863b489D65364e32D", _STABLE_HEARTBEAT, "USDT/USD"),
+        chainlink_feed=ChainlinkFeed(
+            "0x3E7d1eAB13ad0104d2750B8863b489D65364e32D",
+            _STABLE_HEARTBEAT,
+            "USDT/USD",
+            deviation_threshold=Decimal("0.0025"),  # 0.25% band (data.chain.link)
+        ),
     ),
     PeggedAsset(
         name="USDS",
@@ -213,7 +237,12 @@ PEGGED_ASSETS: list[PeggedAsset] = [
         protocol="maker",
         peg=PegTarget.USD,
         depeg_pct=Decimal("0.02"),
-        chainlink_feed=ChainlinkFeed("0xfF30586cD0F29eD462364C7e81375FC0C71219b1", _STABLE_HEARTBEAT, "USDS/USD"),
+        chainlink_feed=ChainlinkFeed(
+            "0xfF30586cD0F29eD462364C7e81375FC0C71219b1",
+            _STABLE_HEARTBEAT,
+            "USDS/USD",
+            deviation_threshold=Decimal("0.003"),  # 0.3% band (data.chain.link)
+        ),
     ),
     # --- USD-pegged protocol stables ------------------------------------------
     PeggedAsset(
@@ -222,7 +251,12 @@ PEGGED_ASSETS: list[PeggedAsset] = [
         protocol="ethena",
         peg=PegTarget.USD,
         depeg_pct=Decimal("0.03"),
-        chainlink_feed=ChainlinkFeed("0xa569d910839Ae8865Da8F8e70FfFb0cBA869F961", _STABLE_HEARTBEAT, "USDe/USD"),
+        chainlink_feed=ChainlinkFeed(
+            "0xa569d910839Ae8865Da8F8e70FfFb0cBA869F961",
+            _STABLE_HEARTBEAT,
+            "USDe/USD",
+            deviation_threshold=Decimal("0.005"),  # 0.5% band (data.chain.link)
+        ),
     ),
     PeggedAsset(
         name="cUSD",
@@ -247,7 +281,11 @@ PEGGED_ASSETS: list[PeggedAsset] = [
         peg=PegTarget.BTC,
         depeg_pct=Decimal("0.02"),
         chainlink_feed=ChainlinkFeed(
-            "0xfdFD9C85aD200c506Cf9e21F1FD8dd01932FBB23", _STABLE_HEARTBEAT, "WBTC/BTC", quote=PegTarget.BTC
+            "0xfdFD9C85aD200c506Cf9e21F1FD8dd01932FBB23",
+            _STABLE_HEARTBEAT,
+            "WBTC/BTC",
+            quote=PegTarget.BTC,
+            deviation_threshold=Decimal("0.005"),  # 0.5% band (data.chain.link)
         ),
         downside_only=True,  # only a drop below BTC is a risk
     ),
@@ -258,7 +296,13 @@ PEGGED_ASSETS: list[PeggedAsset] = [
         channel="pegs",
         peg=PegTarget.BTC,
         depeg_pct=Decimal("0.02"),
-        chainlink_feed=ChainlinkFeed("0x2665701293fCbEB223D11A08D826563EDcCE423A", _STABLE_HEARTBEAT, "cbBTC/USD"),
+        chainlink_feed=ChainlinkFeed(
+            "0x2665701293fCbEB223D11A08D826563EDcCE423A",
+            _STABLE_HEARTBEAT,
+            "cbBTC/USD",
+            deviation_threshold=Decimal("0.02"),  # 2% band (data.chain.link) — lags market up to 2%
+            divergence_buffer=Decimal("0.005"),  # volatile USD answer; allow overshoot on fast BTC moves
+        ),
         downside_only=True,  # only a drop below BTC is a risk
     ),
     PeggedAsset(
@@ -270,7 +314,11 @@ PEGGED_ASSETS: list[PeggedAsset] = [
         depeg_pct=Decimal("0.03"),
         # LBTC/BTC market-rate feed (8 decimals); can sit slightly above 1 BTC.
         chainlink_feed=ChainlinkFeed(
-            "0x5c29868C58b6e15e2b962943278969Ab6a7D3212", _STABLE_HEARTBEAT, "LBTC/BTC", quote=PegTarget.BTC
+            "0x5c29868C58b6e15e2b962943278969Ab6a7D3212",
+            _STABLE_HEARTBEAT,
+            "LBTC/BTC",
+            quote=PegTarget.BTC,
+            deviation_threshold=Decimal("0.005"),  # 0.5% band (data.chain.link)
         ),
         downside_only=True,  # LBTC can trade above peg; only a drop below BTC matters
     ),

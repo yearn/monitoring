@@ -40,7 +40,11 @@ logger = get_logger("stables-oracles")
 
 # Tunables (env-overridable).
 STALENESS_BUFFER = Config.get_env_int("PEG_ORACLE_STALENESS_BUFFER", 600)  # 10 min grace on heartbeat
-DIVERGENCE_THRESHOLD = Decimal(str(Config.get_env_float("PEG_ORACLE_DIVERGENCE_THRESHOLD", 0.01)))  # 1%
+# Default slack over a feed's on-chain deviation band before flagging an oracle↔market
+# gap (a feed legitimately lags the market by up to its band). Tight by default — right
+# for stable/ratio answers; feeds with a volatile answer (e.g. cbBTC/USD) widen it via
+# ChainlinkFeed.divergence_buffer. Env-tunable as a global override for all feeds.
+DIVERGENCE_BUFFER = Decimal(str(Config.get_env_float("PEG_ORACLE_DIVERGENCE_BUFFER", 0.0025)))  # 0.25%
 RATE_DELTA_THRESHOLD = Decimal(str(Config.get_env_float("PEG_ORACLE_RATE_DELTA_THRESHOLD", 0.05)))  # 5%
 
 CACHE_FILE = cache_filename
@@ -170,10 +174,23 @@ def check_peg_deviation(obs: OracleObservation) -> Alert | None:
     )
 
 
-def check_market_divergence(obs: OracleObservation, threshold: Decimal = DIVERGENCE_THRESHOLD) -> Alert | None:
-    """Alert (HIGH) if the oracle and DeFiLlama market price diverge beyond ``threshold``."""
+def check_market_divergence(obs: OracleObservation, buffer: Decimal | None = None) -> Alert | None:
+    """Alert (HIGH) if oracle and DeFiLlama market diverge beyond the feed's band + buffer.
+
+    A Chainlink feed only re-pushes when the price moves past its on-chain deviation
+    threshold, so the oracle legitimately lags the live market by up to that band. The
+    buffer is per-feed (``ChainlinkFeed.divergence_buffer``, else ``DIVERGENCE_BUFFER``)
+    — tight for stable/ratio answers, wider for volatile ones like cbBTC/USD. Only
+    divergence beyond ``deviation_threshold + buffer`` signals a stuck oracle or a
+    genuine gap; a real depeg is caught independently by ``check_peg_deviation``.
+    """
+    feed = obs.asset.chainlink_feed
+    assert feed is not None
     if obs.market_price_usd is None or obs.market_price_usd <= 0:
         return None
+    if buffer is None:
+        buffer = feed.divergence_buffer if feed.divergence_buffer is not None else DIVERGENCE_BUFFER
+    threshold = feed.deviation_threshold + buffer
     dev = price_deviation(obs.oracle_price_usd, obs.market_price_usd)
     if abs(dev) < threshold:
         return None
@@ -182,7 +199,8 @@ def check_market_divergence(obs: OracleObservation, threshold: Decimal = DIVERGE
         f"*{obs.asset.name} oracle ↔ market divergence*\n"
         f"Oracle: ${obs.oracle_price_usd:.6f}\n"
         f"Market (DeFiLlama): ${obs.market_price_usd:.6f}\n"
-        f"Divergence: {dev:+.2%} (threshold {threshold:.2%})",
+        f"Divergence: {dev:+.2%} "
+        f"(threshold {threshold:.2%} = {feed.deviation_threshold:.2%} feed band + {buffer:.2%} buffer)",
         obs.asset.protocol,
         channel=obs.asset.channel,
     )
@@ -192,7 +210,6 @@ def evaluate_chainlink_asset(
     obs: OracleObservation,
     *,
     buffer: int = STALENESS_BUFFER,
-    divergence_threshold: Decimal = DIVERGENCE_THRESHOLD,
 ) -> list[Alert]:
     """Run all Chainlink-asset checks, returning the alerts that fired.
 
@@ -208,7 +225,7 @@ def evaluate_chainlink_asset(
         candidates.append(check_staleness(obs, buffer))
         candidates.append(check_round_health(obs))
     candidates.append(check_peg_deviation(obs))
-    candidates.append(check_market_divergence(obs, divergence_threshold))
+    candidates.append(check_market_divergence(obs))
     return [alert for alert in candidates if alert is not None]
 
 
