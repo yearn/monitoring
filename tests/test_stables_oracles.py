@@ -125,12 +125,46 @@ class TestPegDeviation(unittest.TestCase):
 
 class TestMarketDivergence(unittest.TestCase):
     def test_aligned_ok(self):
-        self.assertIsNone(check_market_divergence(_cbbtc_obs(), threshold=Decimal("0.01")))
+        self.assertIsNone(check_market_divergence(_cbbtc_obs()))
+
+    def test_within_feed_band_is_quiet(self):
+        # The production false positive: cbBTC feed band is 2%, so the oracle lagging
+        # the live market by ~1.14% is normal update lag, NOT an anomaly.
+        obs = _cbbtc_obs(
+            reading=_reading(get_asset("cbBTC").chainlink_feed.address, 59_211 * 10**8),
+            market_price_usd=Decimal("58544"),
+        )
+        self.assertIsNone(check_market_divergence(obs))  # ~1.14% < 2% band + 0.5% buffer
+
+    def test_volatile_feed_uses_wider_buffer(self):
+        # cbBTC overrides the buffer to 0.5%; band 2% -> trigger 2.5%.
+        addr = get_asset("cbBTC").chainlink_feed.address
+        quiet = _cbbtc_obs(reading=_reading(addr, 61_320 * 10**8), market_price_usd=Decimal("60000"))
+        self.assertIsNone(check_market_divergence(quiet))  # 2.2% < 2.5%
+        fires = _cbbtc_obs(reading=_reading(addr, 61_560 * 10**8), market_price_usd=Decimal("60000"))
+        self.assertIsNotNone(check_market_divergence(fires))  # 2.6% > 2.5%
+
+    def test_stable_feed_uses_tight_default_buffer(self):
+        # USDC: 0.25% band + 0.25% default buffer -> 0.5% trigger (no per-feed override).
+        usdc = get_asset("USDC")
+
+        def usdc_obs(oracle_usd: str, market_usd: str) -> OracleObservation:
+            return OracleObservation(
+                asset=usdc,
+                reading=_reading(usdc.chainlink_feed.address, int(Decimal(oracle_usd) * 10**8)),
+                peg_price_usd=Decimal("1"),
+                quote_price_usd=Decimal("1"),
+                now=NOW,
+                market_price_usd=Decimal(market_usd),
+            )
+
+        self.assertIsNone(check_market_divergence(usdc_obs("1.004", "1")))  # 0.4% < 0.5%
+        self.assertIsNotNone(check_market_divergence(usdc_obs("1.006", "1")))  # 0.6% > 0.5%
 
     def test_forced_divergence_fires(self):
-        # oracle $60,100 vs market $50,000 ~ +20%
+        # oracle $60,100 vs market $50,000 ~ +20% >> 2% band + buffer
         obs = _cbbtc_obs(market_price_usd=Decimal("50000"))
-        alert = check_market_divergence(obs, threshold=Decimal("0.01"))
+        alert = check_market_divergence(obs)
         self.assertIsNotNone(alert)
         self.assertEqual(alert.severity, AlertSeverity.HIGH)
 
