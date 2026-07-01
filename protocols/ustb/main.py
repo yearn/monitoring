@@ -15,6 +15,7 @@ Run hourly via GitHub Actions.
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_path, get_last_value_for_key_from_file, write_last_value_to_file
+from utils.chainlink import FeedReading, read_feeds, scale_price
 from utils.chains import Chain
 from utils.formatting import format_usd
 from utils.logger import get_logger
@@ -48,10 +49,9 @@ CACHE_KEY_CHAINLINK_NAV = "ustb_chainlink_nav"
 # ABIs
 # ---------------------------------------------------------------------------
 ABI_ORACLE = load_abi("protocols/ustb/abi/SuperstateOracle.json")
-ABI_CHAINLINK = load_abi("common-abi/ChainlinkAggregator.json")
 ABI_ERC20 = load_abi("common-abi/ERC20.json")
 
-USTB_DECIMALS = 6
+USTB_DECIMALS: int = 6
 
 
 def main() -> None:
@@ -59,30 +59,25 @@ def main() -> None:
     client = ChainManager.get_client(Chain.MAINNET)
 
     oracle = client.eth.contract(address=CONTINUOUS_ORACLE, abi=ABI_ORACLE)
-    chainlink = client.eth.contract(address=CHAINLINK_ORACLE, abi=ABI_CHAINLINK)
     ustb = client.eth.contract(address=USTB_TOKEN, abi=ABI_ERC20)
+    chainlink_reading = read_feeds(client, [CHAINLINK_ORACLE])[CHAINLINK_ORACLE]
 
     # --- Batch 1: all independent reads ------------------------------------------------
     with client.batch_requests() as batch:
         batch.add(oracle.functions.latestRoundData())
         batch.add(oracle.functions.decimals())
-        batch.add(chainlink.functions.latestRoundData())
-        batch.add(chainlink.functions.decimals())
         batch.add(ustb.functions.totalSupply())
         responses = client.execute_batch(batch)
 
     oracle_round_data = responses[0]
     oracle_decimals = int(responses[1])
-    chainlink_round_data = responses[2]
-    chainlink_decimals = int(responses[3])
-    total_supply_raw = int(responses[4])
+    total_supply_raw = int(responses[2])
 
     oracle_round_id = int(oracle_round_data[0])
     oracle_answer = int(oracle_round_data[1])
-    chainlink_answer = int(chainlink_round_data[1])
 
-    oracle_price = oracle_answer / (10**oracle_decimals)
-    chainlink_price = chainlink_answer / (10**chainlink_decimals)
+    oracle_price = float(scale_price(oracle_answer, oracle_decimals))
+    chainlink_price = float(chainlink_reading.price)
 
     # --- Batch 2: checkpoint data (needs roundId from batch 1) -------------------------
     with client.batch_requests() as batch:
@@ -97,7 +92,7 @@ def main() -> None:
     effective_at = int(latest_checkpoint[1])
 
     _check_nav_monotonicity(oracle_round_id, checkpoint_responses, oracle_decimals)
-    _check_chainlink_monotonicity(chainlink_answer, chainlink_decimals)
+    _check_chainlink_monotonicity(chainlink_reading)
     _check_oracle_divergence(oracle_price, chainlink_price)
     _check_supply_change(total_supply_raw, oracle_price)
     _check_oracle_staleness(current_timestamp, effective_at)
@@ -175,7 +170,7 @@ def _check_oracle_divergence(oracle_price: float, chainlink_price: float) -> Non
         )
 
 
-def _check_chainlink_monotonicity(chainlink_answer: int, chainlink_decimals: int) -> None:
+def _check_chainlink_monotonicity(reading: FeedReading) -> None:
     """Alert if the Chainlink NAV feed decreases versus the last observed value."""
     previous_answer = get_last_value_for_key_from_file(CACHE_FILE, CACHE_KEY_CHAINLINK_NAV)
     try:
@@ -183,16 +178,16 @@ def _check_chainlink_monotonicity(chainlink_answer: int, chainlink_decimals: int
     except (TypeError, ValueError):
         previous_answer_int = 0
 
+    chainlink_answer = reading.round_data.answer
     if previous_answer_int > 0 and chainlink_answer < previous_answer_int:
-        previous_price = previous_answer_int / (10**chainlink_decimals)
-        current_price = chainlink_answer / (10**chainlink_decimals)
+        previous_price = scale_price(previous_answer_int, reading.decimals)
         decrease_pct = (previous_answer_int - chainlink_answer) / previous_answer_int * 100
         send_alert(
             Alert(
                 AlertSeverity.CRITICAL,
                 f"USTB Chainlink NAV DECREASED\n"
                 f"Previous: ${previous_price:.6f}\n"
-                f"Current: ${current_price:.6f}\n"
+                f"Current: ${reading.price:.6f}\n"
                 f"Decrease: {decrease_pct:.4f}%",
                 PROTOCOL,
             )
