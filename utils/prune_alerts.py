@@ -8,7 +8,7 @@ logger = get_logger("utils.prune_alerts")
 
 
 def main() -> None:
-    days = int(os.getenv("ALERTS_RETENTION_DAYS", "30"))
+    days = int(os.getenv("ALERTS_RETENTION_DAYS", "90"))
     deleted = prune_alerts(days)
     logger.info("Pruned %d alert rows older than %d days", deleted, days)
     checkpoint_wal()
