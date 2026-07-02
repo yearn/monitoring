@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 
 from automation.config import JobsConfig, load_jobs_config
 from utils.logger import get_logger
+from utils.monitoring_config import load_monitoring_config, monitoring_to_json
 from utils.store import AlertEvent, get_alert, normalize_timestamp, query_alerts
 
 logger = get_logger("api.server")
@@ -159,6 +160,9 @@ class AlertsHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/v1/protocols":
                 write_json(self, 200, protocols_to_json(load_jobs_config()))
+                return
+            if parsed.path == "/v1/monitoring":
+                write_json(self, 200, monitoring_to_json(load_monitoring_config()))
                 return
             if parsed.path == "/v1/alerts":
                 alert_query = parse_alert_query(parsed.query)

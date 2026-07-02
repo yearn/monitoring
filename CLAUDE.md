@@ -37,6 +37,13 @@
 - **Logging**: Use structured logging instead of print statements
 - **Testing**: Write unit tests for utility functions and integration tests for protocols
 
+## Monitoring Metadata
+
+- `monitoring.yaml` at the repo root is the source of truth for the protocol cards on https://curation.yearn.fi/monitoring/.
+- When adding, removing, or changing a monitor, update `monitoring.yaml` and the protocol `README.md`.
+- The alerts API exposes this metadata at `GET /v1/monitoring` (see `api/server.py`).
+- `tests/test_monitoring_config.py` validates that every enabled protocol task in `automation/jobs.yaml` has a `monitoring.yaml` entry and that every task referenced there is scheduled.
+
 ## Best Practices
 - Create custom exception types for domain-specific errors
 - Extract repeated patterns into utility functions. Try to keep utility functions small and focused on a single task and store in utils folder.

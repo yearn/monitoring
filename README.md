@@ -80,7 +80,7 @@ uv run protocols/aave/main.py
 
 In production the scripts run on a schedule via supercronic on a VPS, defined in [`automation/jobs.yaml`](./automation/jobs.yaml). See [`deploy/`](./deploy/) — [`install.sh`](./deploy/install.sh) provisions a host and [`runbook.md`](./deploy/runbook.md) covers operations.
 
-The optional read-only alerts API exposes persisted alert history from SQLite. See [`deploy/alerts-api.md`](./deploy/alerts-api.md) for endpoint examples and pagination.
+The optional read-only alerts API exposes persisted alert history from SQLite and monitoring card metadata. See [`deploy/alerts-api.md`](./deploy/alerts-api.md) for endpoint examples and pagination, or `GET /v1/monitoring` for the protocol card data used by the curation website.
 
 ## Code Style
 
