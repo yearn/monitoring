@@ -149,9 +149,10 @@ write_last_value_to_file(cache_filename, "MY_KEY", new_value)
 
 1. Create `protocols/protocol-name/main.py` following the pattern above, with a `main()` function and an `if __name__ == "__main__":` block that wraps it via `run_with_alert(main, PROTOCOL)` (see [Script Entrypoint](#script-entrypoint)). Reference ABIs by their repo-root-relative path, e.g. `load_abi("protocols/protocol-name/abi/Foo.json")`
 2. Add a `protocols/protocol-name/README.md` describing what it monitors
-3. No `pyproject.toml` change is needed — packages under `protocols/` are discovered automatically (see `[tool.setuptools.packages.find]`)
-4. Add the corresponding `TELEGRAM_BOT_TOKEN_*` and `TELEGRAM_CHAT_ID_*` entries to `.env.example`
-5. Register the script in `automation/jobs.yaml` under the right profile if it should run on a schedule
+3. Add or update the protocol entry in `monitoring.yaml` so the curation website card stays in sync
+4. No `pyproject.toml` change is needed — packages under `protocols/` are discovered automatically (see `[tool.setuptools.packages.find]`)
+5. Add the corresponding `TELEGRAM_BOT_TOKEN_*` and `TELEGRAM_CHAT_ID_*` entries to `.env.example`
+6. Register the script in `automation/jobs.yaml` under the right profile if it should run on a schedule
 
 ## Tests
 

@@ -130,6 +130,41 @@ Example response:
 }
 ```
 
+### `GET /v1/monitoring`
+
+Returns the structured protocol card metadata from `monitoring.yaml`, used by
+the curation website to render what each protocol monitors.
+
+```sh
+curl http://127.0.0.1:8923/v1/monitoring
+```
+
+Example response:
+
+```json
+{
+  "version": "1.0",
+  "data": [
+    {
+      "slug": "3jane",
+      "display_name": "3Jane",
+      "description": "USD3/sUSD3 credit market monitoring on Mainnet",
+      "cadence": "Hourly",
+      "monitor_count": 11,
+      "disabled": false,
+      "tasks": ["protocols/3jane/main.py"],
+      "monitors": [
+        {
+          "name": "Price Per Share",
+          "description": "USD3 PPS decrease (any drop vs cached prior, CRITICAL) and sUSD3 PPS decrease (HIGH)"
+        }
+      ]
+    }
+  ],
+  "count": 1
+}
+```
+
 ## Delivery Status
 
 An alert row means a monitor generated an alert. Telegram delivery is tracked

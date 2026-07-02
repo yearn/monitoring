@@ -1,0 +1,446 @@
+# Monitoring card metadata for https://curation.yearn.fi/monitoring/
+#
+# This file is the source of truth for what each protocol card displays.
+# It is rebuilt from the actual repo code and READMEs, not from the website.
+# When you add, remove, or change a monitor, update this file and the
+# protocol README so the website stays in sync.
+#
+# Consumed by:
+#   - the alerts API at GET /v1/monitoring
+#   - the curation website (directly or via the API)
+#
+# Keep in sync with:
+#   - automation/jobs.yaml (scheduled tasks)
+#   - protocols/<name>/README.md (protocol-specific docs)
+
+version: "1.0"
+
+protocols:
+  3jane:
+    display_name: "3Jane"
+    description: "USD3/sUSD3 credit market monitoring on Mainnet"
+    cadence: "Hourly"
+    tasks:
+      - protocols/3jane/main.py
+    monitors:
+      - name: "Price Per Share"
+        description: "USD3 PPS decrease (any drop vs cached prior, CRITICAL) and sUSD3 PPS decrease (HIGH)"
+      - name: "TVL"
+        description: "Absolute TVL change >=15% for USD3 or sUSD3"
+      - name: "Junior Buffer Ratio"
+        description: "sUSD3 backing <15% of deployed credit"
+      - name: "USD3 Overcollateralization"
+        description: "OC <111% (HIGH) or <106% (CRITICAL)"
+      - name: "Insurance Fund Outflow"
+        description: "waUSDC outflow >=$50k since prior run"
+      - name: "Withdraw Liquidity"
+        description: "USD3 availableWithdrawLimit < $4M"
+      - name: "Vault Shutdown"
+        description: "Alert-once when isShutdown() transitions to true"
+      - name: "Debt Cap"
+        description: "Any change to ProtocolConfig.getDebtCap()"
+      - name: "Nominal sUSD3 Backing Floor"
+        description: "Any floor change; alert-once when floor > sUSD3 backing"
+      - name: "Protocol Pause"
+        description: "Alert-once when ProtocolConfig IS_PAUSED flips true"
+      - name: "Timelock"
+        description: "CallScheduled events from 24h and 7-day TimelockControllers via Envio"
+
+  aave:
+    display_name: "Aave V3"
+    description: "Aave V3 market and governance monitoring"
+    cadence: "Hourly"
+    tasks:
+      - protocols/aave/main.py
+      - protocols/aave/proposals.py
+    monitors:
+      - name: "Market Utilization"
+        description: "Utilization rate >99% on Mainnet"
+      - name: "Governance Proposals"
+        description: "Queued proposals via Aave governance cache API"
+      - name: "Timelock"
+        description: "Aave Governance V3 events via Envio timelock monitor"
+      - name: "Safe Multisigs"
+        description: "Protocol Guardian and Governance Guardian Safe queues"
+
+  apyusd:
+    display_name: "APYUSD"
+    description: "apxUSD rate oracle monitoring on Mainnet"
+    cadence: "Hourly"
+    tasks:
+      - protocols/apyusd/main.py
+    monitors:
+      - name: "Rate Oracle"
+        description: "apxUSD rate change >=10% vs cached prior value"
+
+  cap:
+    display_name: "CAP"
+    description: "CAP cUSD liquidity and governance monitoring on Mainnet"
+    cadence: "Daily"
+    tasks:
+      - protocols/cap/liquidity.py
+    monitors:
+      - name: "Withdrawable Liquidity"
+        description: "Total withdrawable liquidity across cUSD assets < $15M"
+      - name: "Large cUSD Mints"
+        description: "totalSupply delta >5% vs cached prior"
+      - name: "Timelock"
+        description: "CAP TimelockController events via Envio"
+      - name: "Safe Multisig"
+        description: "Cap Money Multisig queue"
+
+  compound:
+    display_name: "Compound V3"
+    description: "Compound V3 market, collateral, and governance monitoring"
+    cadence: "Hourly / Daily"
+    tasks:
+      - protocols/compound/main.py
+      - protocols/compound/proposals.py
+    monitors:
+      - name: "Market Utilization"
+        description: "Utilization >99% on Mainnet"
+      - name: "On-Chain Collateral Risk"
+        description: "Per-asset allocation ratios vs risk-adjusted thresholds; weighted total risk level"
+      - name: "Borrow/Supply Ratio"
+        description: "Borrow/supply ratio >95%"
+      - name: "Bad Debt"
+        description: "Negative reserves (getReserves() < 0)"
+      - name: "Unknown Collateral"
+        description: "Collateral assets not mapped in SUPPLY_ASSETS_DICT"
+      - name: "Governance Proposals"
+        description: "Queued proposals via Tally API"
+      - name: "Timelock"
+        description: "Compound Timelock events via Envio"
+
+  ethena:
+    display_name: "Ethena"
+    description: "USDe backing and supply monitoring"
+    cadence: "Daily"
+    tasks:
+      - protocols/ethena/ethena.py
+    monitors:
+      - name: "USDe Backing Ratio"
+        description: "Collateral / supply < 1.0 via Ethena transparency API (CRITICAL)"
+      - name: "Data Freshness"
+        description: "Collateral, chain, or reserve data older than 12 hours"
+
+  euler:
+    display_name: "Euler"
+    description: "Euler market risk and governance monitoring"
+    cadence: "Hourly"
+    disabled: true
+    tasks:
+      - protocols/euler/markets.py
+    monitors:
+      - name: "Debt/Supply Ratio"
+        description: "Gauntlet dashboard debt/supply ratio >60%"
+      - name: "Value at Risk"
+        description: "VaR >1% of borrow amount"
+      - name: "Liquidation at Risk"
+        description: "LaR >5% of borrow amount"
+      - name: "Vault Risk Levels"
+        description: "Computed risk vs maximum threshold"
+      - name: "Vault Allocation Ratios"
+        description: "Risk-adjusted allocation thresholds"
+      - name: "Safe Multisig"
+        description: "4/7 multisig transaction queue"
+
+  fluid:
+    display_name: "Fluid"
+    description: "Fluid governance and timelock monitoring"
+    cadence: "Hourly"
+    tasks:
+      - protocols/fluid/proposals.py
+    monitors:
+      - name: "Governance Proposals"
+        description: "Queued proposals via Fluid API"
+      - name: "Timelock"
+        description: "InstaTimelock events via Envio"
+
+  infinifi:
+    display_name: "Infinifi"
+    description: "Infinifi iUSD reserves, backing, and farm monitoring"
+    cadence: "Hourly"
+    tasks:
+      - protocols/infinifi/main.py
+    monitors:
+      - name: "Liquid Reserves"
+        description: "Liquid reserves < $8M"
+      - name: "Backing Per iUSD"
+        description: "totalTVL / iUSD supply < 0.999"
+      - name: "Redemption Pressure"
+        description: "Pending redemptions / liquid reserves >80%"
+      - name: "Large iUSD Mints"
+        description: "totalSupply delta >5% vs cached prior"
+      - name: "Farm Allocation Shift"
+        description: "Farm allocation ratio change >30% vs prior run (farms <1% of TVL excluded)"
+      - name: "Farm Activation"
+        description: "Farm previously at 0 ratio moves above 3% of TVL"
+      - name: "Junior TVL Coverage"
+        description: "Junior TVL <50% of risky farm exposure"
+      - name: "Timelock"
+        description: "Longtimelock and Shorttimelock events via Envio"
+
+  lido:
+    display_name: "Lido"
+    description: "Lido stETH peg and governance monitoring"
+    cadence: "Hourly"
+    tasks:
+      - protocols/lido/steth/main.py
+    monitors:
+      - name: "stETH/ETH Exchange Rate"
+        description: "Curve stETH/ETH pool rate deviates >0.1% from Lido validator rate"
+      - name: "Timelock"
+        description: "Lido Timelock StartVote events via Envio"
+      - name: "Safe Multisigs"
+        description: "Emergency Brakes and GateSeal Committee Safe queues"
+
+  lrt-pegs:
+    display_name: "LRT Pegs"
+    description: "Liquid restaking token peg and governance monitoring"
+    cadence: "Hourly"
+    tasks:
+      - protocols/lrt-pegs/curve/main.py
+      - protocols/lrt-pegs/fluid/main.py
+      - protocols/lrt-pegs/origin_protocol.py
+    monitors:
+      - name: "Curve Pool Balance Ratios"
+        description: "ETH+/WETH, OETH/ETH, weETH-WETH, stETH/ETH pool ratios >90%"
+      - name: "Fluid Pool Balance Ratio"
+        description: "weETH/ETH Fluid pool ratio >90% or balance <1 token"
+      - name: "Origin Protocol"
+        description: "Wrapped OETH redeem value decrease and vault backing ratio <1 on Mainnet and Base"
+      - name: "Timelock"
+        description: "Lombard, EtherFi, KelpDAO, and superOETH timelock events via Envio"
+      - name: "Safe Multisig"
+        description: "LBTC boring vault, Origin admin, and tBTC bridge owner Safe queues"
+
+  maker:
+    display_name: "Maker DAO"
+    description: "Maker/Sky governance and PSM monitoring"
+    cadence: "Hourly"
+    tasks:
+      - protocols/maker/proposals.py
+    monitors:
+      - name: "Executive Proposals"
+        description: "New scheduled (not cast) executive proposals from Sky governance portal API"
+      - name: "DSPause / Timelock"
+        description: "Tenderly alert on plot() in DSPause (16-hour execution delay)"
+      - name: "PSM USDC Balance"
+        description: "Tenderly alert when PSM USDC balance < 2B"
+
+  maple:
+    display_name: "Maple Finance"
+    description: "Maple syrupUSDC pool monitoring"
+    cadence: "Hourly"
+    tasks:
+      - protocols/maple/main.py
+    monitors:
+      - name: "Price Per Share"
+        description: "Any PPS decrease"
+      - name: "TVL"
+        description: "Absolute TVL change >=15%"
+      - name: "Unrealized Losses"
+        description: "Any non-zero on-chain unrealized losses; >=0.5% of pool assets via subgraph"
+      - name: "Withdrawal Queue"
+        description: "Pending exit value >1% of TVL"
+      - name: "Pool Liquidity"
+        description: "Pending withdrawals exceed pool cash"
+      - name: "Collateralization Ratio"
+        description: "syrupGlobals collateralRatio <135%"
+      - name: "Proof of Reserves Divergence"
+        description: "syrupGlobals collateralValue exceeds PoR attestation by >10%"
+      - name: "Unknown Collateral"
+        description: "Collateral assets not in risk mapping"
+      - name: "Pool Delegate Cover"
+        description: "Cover balance drops to $0 or decreases vs cached prior"
+      - name: "Timelock"
+        description: "Maple GovernorTimelock events via Envio"
+      - name: "Safe Multisig"
+        description: "Maple DAO Multisig queue"
+
+  morpho:
+    display_name: "Morpho"
+    description: "Morpho market, vault, and governance monitoring"
+    cadence: "Hourly / Daily"
+    tasks:
+      - protocols/morpho/markets.py
+      - protocols/morpho/markets_v2.py
+      - protocols/morpho/governance.py
+      - protocols/morpho/governance_v2.py
+    monitors:
+      - name: "Bad Debt Ratio"
+        description: "Bad debt >0.5% of borrowed TVL in v1 and v2 vault markets"
+      - name: "Market Allocation Ratios"
+        description: "Per-market allocation vs risk-adjusted thresholds"
+      - name: "Vault Risk Levels"
+        description: "Weighted total risk score vs vault threshold"
+      - name: "Low Liquidity"
+        description: "Vault liquidity <1% of assets; YV-collateral unwind liquidity vs collateral at risk"
+      - name: "V1 Governance"
+        description: "Pending supply caps, market removals, timelock changes, guardian changes"
+      - name: "V2 Governance"
+        description: "Pending timelocked operations, owner/curator changes, sentinel/allocator/adapter changes"
+      - name: "V2 Unmonitored Vault Wrappers"
+        description: "V2 vault wrapping a v1 vault not in markets.py:VAULTS_BY_CHAIN"
+      - name: "Safe Multisig"
+        description: "Morpho eUSDe predeposit vault owner Safe queue"
+
+  pendle:
+    display_name: "Pendle"
+    description: "Pendle PT ratio and governance monitoring"
+    cadence: "Hourly"
+    disabled: true
+    tasks:
+      - protocols/pendle/main.py
+    monitors:
+      - name: "PT to Asset Ratio"
+        description: "Active vault market PT ratio <0.95"
+      - name: "Safe Multisig"
+        description: "2/4 governance multisig queues on Mainnet and Arbitrum"
+
+  rtoken:
+    display_name: "RToken (ETH+)"
+    description: "ETH+ RToken collateral and redemption monitoring"
+    cadence: "Hourly"
+    tasks:
+      - protocols/rtoken/monitor_rtoken.py
+    monitors:
+      - name: "Collateral Coverage"
+        description: "basketsNeeded / totalSupply < 105% on Mainnet; <103% on Base (bsdETH disabled)"
+      - name: "StRSR Exchange Rate"
+        description: "StRSR exchange rate falls below initial cached value"
+      - name: "Redemption Available"
+        description: "redemptionAvailable < 1000 ETH on Mainnet; <600 ETH on Base"
+      - name: "Timelock"
+        description: "ETH+ Timelock events via Envio"
+
+  safe:
+    display_name: "Safe Multisigs"
+    description: "Cross-protocol Safe multisig transaction monitoring"
+    cadence: "Every 10 minutes"
+    tasks:
+      - protocols/safe/main.py
+    monitors:
+      - name: "Queued Transactions"
+        description: "Pending transactions across all monitored protocol Safe multisigs"
+      - name: "Unexpected Proposers"
+        description: "Yearn multisig txs proposed by addresses outside known bot/EOA set"
+
+  silo:
+    display_name: "Silo"
+    description: "Silo bad debt and governance monitoring"
+    cadence: "Hourly"
+    disabled: true
+    tasks: []
+    monitors:
+      - name: "Bad Debt"
+        description: "Positions with riskFactor > 1"
+      - name: "Timelock"
+        description: "Contract monitoring (2-day minimum delay)"
+      - name: "Safe Multisig"
+        description: "3/6 multisig monitoring on Mainnet, Optimism, and Arbitrum"
+
+  stables:
+    display_name: "Stablecoins"
+    description: "Cross-protocol stablecoin peg, oracle, and large-transfer monitoring"
+    cadence: "Hourly / Every 10 minutes"
+    tasks:
+      - protocols/stables/main.py
+      - protocols/stables/dune_large_transfers.py
+      - protocols/stables/oracles.py
+    monitors:
+      - name: "Stablecoin Prices"
+        description: "Depeg alerts via DeFiLlama (USDe/sUSDe/iUSD/syrupUSDC/syrupUSDT/USTB thresholds)"
+      - name: "Large Transfers"
+        description: "Dune-backed large transfers >=$5M for cUSD and iUSD"
+      - name: "Oracle Health"
+        description: "Chainlink staleness, round health, peg deviation, oracle-market divergence; rate-oracle monotonicity/delta"
+
+  strata:
+    display_name: "Strata"
+    description: "Strata srUSDe/jrUSDe tranche monitoring"
+    cadence: "Daily"
+    tasks:
+      - protocols/strata/main.py
+    monitors:
+      - name: "srUSDe Exchange Rate"
+        description: "srUSDe convertToAssets decrease vs cached prior"
+      - name: "Senior Coverage Ratio"
+        description: "Senior coverage <105%"
+      - name: "Junior Tranche Drain"
+        description: "jrUSDe totalAssets drop >=15%"
+      - name: "Strategy Balance"
+        description: "sUSDe strategy balance / total deposits drops >=20%"
+      - name: "TVL"
+        description: "Total deposits change >=15%"
+      - name: "sUSDe Dependency"
+        description: "sUSDe vault rate monotonicity and cooldown duration changes"
+      - name: "Timelock"
+        description: "48h and 24h timelock events via Envio"
+      - name: "Safe Multisig"
+        description: "Strata Admin Multisig queue"
+
+  timelock:
+    display_name: "Timelock Alerts"
+    description: "Cross-protocol timelock event monitoring"
+    cadence: "Hourly"
+    tasks:
+      - protocols/timelock/timelock_alerts.py
+    monitors:
+      - name: "Timelock Events"
+        description: "CallScheduled/ProposalQueued/QueueTransaction/StartVote/ProposalScheduled events across monitored timelocks via Envio"
+
+  ustb:
+    display_name: "Superstate USTB"
+    description: "Superstate USTB fund and oracle monitoring"
+    cadence: "Hourly"
+    tasks:
+      - protocols/ustb/main.py
+    monitors:
+      - name: "NAV/Share Monotonicity"
+        description: "Continuous oracle checkpoint NAV decrease"
+      - name: "Oracle Divergence"
+        description: "Continuous Oracle vs Chainlink differ by >0.5%"
+      - name: "Supply Changes"
+        description: "Total supply change >10% vs prior run"
+      - name: "Oracle Staleness"
+        description: "Latest checkpoint effectiveAt >4 days old"
+      - name: "Stablecoin Price"
+        description: "USTB price < $10.50 via stables monitor"
+
+  usdai:
+    display_name: "USDAI"
+    description: "USDAI collateral, mint ratio, and loan monitoring on Arbitrum"
+    cadence: "Hourly"
+    tasks:
+      - protocols/usdai/main.py
+      - protocols/usdai/large_mints.py
+    monitors:
+      - name: "Backing Invariant"
+        description: "totalSupply + bridgedSupply - PYUSD balance >= 100 USDai"
+      - name: "Loan Activity"
+        description: "Total verified principal change >1% vs prior run"
+      - name: "Legacy Loan Expiry"
+        description: "Hardcoded NVIDIA H200s legacy loan past 2028-07-27"
+      - name: "Large Mints"
+        description: "totalSupply delta >5% via large_mints.py"
+      - name: "Safe Multisigs"
+        description: "USDai and sUSDai Admin Safe queues"
+
+  yearn:
+    display_name: "Yearn"
+    description: "Yearn vault flow and timelock monitoring"
+    cadence: "Hourly / Daily"
+    tasks:
+      - protocols/yearn/alert_large_flows.py
+      - protocols/yearn/check_timelock_delay.py
+    monitors:
+      - name: "Large Flows"
+        description: "Deposit/withdrawal flows >=$1M USD (or 10% of vault totalSupply fallback for unpriced tokens)"
+      - name: "Timelock Delay"
+        description: "Yearn TimelockController getMinDelay() < 7 days across Mainnet, Base, Arbitrum, Polygon, Optimism, Katana"
+      - name: "Timelock Events"
+        description: "Yearn TimelockController events via Envio"
+      - name: "Safe Multisigs"
+        description: "Yearn multisig queues (yChad, Strategist, SAM, Curation) and unexpected-proposer escalation"
