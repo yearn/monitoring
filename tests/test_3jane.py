@@ -147,10 +147,13 @@ def test_insurance_shares_round_trip_exactly_through_sqlite(monkeypatch: pytest.
     assert module.get_cache_int(module.CACHE_KEY_INSURANCE_FUND_SHARES) == 868_288_861_448
 
 
-def test_parse_envio_borrower_default_watch_rows_dedupes_and_requires_alert_bucket() -> None:
+def test_parse_envio_borrower_default_watch_rows_computes_bucket_and_dedupes() -> None:
     module = load_3jane_module()
     market_id = "0x" + "12" * 32
     borrower = "0x00000000000000000000000000000000000000a1"
+    cycle_end = 1_700_000_000
+    default_at = cycle_end + 30 * module.SECONDS_PER_DAY
+    now = default_at - 6 * module.SECONDS_PER_DAY
 
     parsed = module.parse_envio_borrower_default_watch_rows(
         [
@@ -160,35 +163,27 @@ def test_parse_envio_borrower_default_watch_rows_dedupes_and_requires_alert_buck
                 "credit": str(2_000_000 * module.ONE_SHARE),
                 "amountDue": str(250_000 * module.ONE_SHARE),
                 "cycleId": "4",
-                "cycleEnd": "1700000000",
+                "cycleEnd": str(cycle_end),
                 "endingBalance": str(1_000_000 * module.ONE_SHARE),
-                "defaultAt": str(1_700_000_000 + 30 * module.SECONDS_PER_DAY),
-                "secondsToDefault": str(6 * module.SECONDS_PER_DAY),
-                "secondsSinceDefault": "0",
-                "repaymentStatus": "Delinquent",
-                "defaultBucket": "7d",
+                "gracePeriod": str(7 * module.SECONDS_PER_DAY),
+                "delinquencyPeriod": str(23 * module.SECONDS_PER_DAY),
+                "defaultStarted": False,
                 "settled": False,
             },
             {
                 "marketId": market_id.upper(),
                 "borrower": borrower,
                 "amountDue": str(250_000 * module.ONE_SHARE),
-                "defaultBucket": "7d",
+                "cycleEnd": str(cycle_end),
                 "settled": "false",
             },
-            {"marketId": market_id, "borrower": borrower, "amountDue": "1", "defaultBucket": "7d", "settled": True},
+            {"marketId": market_id, "borrower": borrower, "amountDue": "1", "settled": True},
             {"marketId": market_id, "borrower": borrower, "amountDue": "1", "settled": False},
-            {"marketId": market_id, "borrower": borrower, "amountDue": "0", "defaultBucket": "7d"},
-            {
-                "marketId": market_id,
-                "borrower": borrower,
-                "amountDue": "1",
-                "repaymentStatus": "GracePeriod",
-                "defaultBucket": "7d",
-            },
-            {"marketId": "bad", "borrower": borrower, "amountDue": "1", "defaultBucket": "7d"},
-            {"marketId": market_id, "borrower": "not-an-address", "amountDue": "1", "defaultBucket": "7d"},
-        ]
+            {"marketId": market_id, "borrower": borrower, "amountDue": "0", "cycleEnd": str(cycle_end)},
+            {"marketId": "bad", "borrower": borrower, "amountDue": "1", "cycleEnd": str(cycle_end)},
+            {"marketId": market_id, "borrower": "not-an-address", "amountDue": "1", "cycleEnd": str(cycle_end)},
+        ],
+        now,
     )
 
     assert parsed == [
@@ -196,12 +191,13 @@ def test_parse_envio_borrower_default_watch_rows_dedupes_and_requires_alert_buck
             market_id=market_id,
             borrower=module.Web3.to_checksum_address(borrower),
             cycle_id=4,
-            cycle_end=1_700_000_000,
+            cycle_end=cycle_end,
             amount_due_raw=250_000 * module.ONE_SHARE,
             ending_balance_raw=1_000_000 * module.ONE_SHARE,
             credit_raw=2_000_000 * module.ONE_SHARE,
+            default_started=False,
             repayment_status="Delinquent",
-            default_at=1_700_000_000 + 30 * module.SECONDS_PER_DAY,
+            default_at=default_at,
             seconds_to_default=6 * module.SECONDS_PER_DAY,
             seconds_since_default=0,
             default_bucket="7d",
@@ -225,6 +221,7 @@ def test_borrower_default_watch_snapshot_without_envio_bucket_does_not_alert(
             amount_due_raw=250_000 * module.ONE_SHARE,
             ending_balance_raw=1_000_000 * module.ONE_SHARE,
             credit_raw=2_000_000 * module.ONE_SHARE,
+            default_started=False,
             repayment_status="GracePeriod",
             default_at=1_700_000_000 + 30 * module.SECONDS_PER_DAY,
             seconds_to_default=23 * module.SECONDS_PER_DAY,
@@ -259,6 +256,7 @@ def test_borrower_default_watch_alert_is_medium_and_deduped(monkeypatch: pytest.
         amount_due_raw=250_000 * module.ONE_SHARE,
         ending_balance_raw=1_000_000 * module.ONE_SHARE,
         credit_raw=2_000_000 * module.ONE_SHARE,
+        default_started=False,
         repayment_status="Delinquent",
         default_at=1_700_000_000 + 30 * module.SECONDS_PER_DAY,
         seconds_to_default=6 * module.SECONDS_PER_DAY,
@@ -301,6 +299,7 @@ def test_borrower_default_watch_alert_shows_time_since_default(monkeypatch: pyte
         amount_due_raw=100_000 * module.ONE_SHARE,
         ending_balance_raw=900_000 * module.ONE_SHARE,
         credit_raw=2_000_000 * module.ONE_SHARE,
+        default_started=True,
         repayment_status="Default",
         default_at=1_700_000_000 + 30 * module.SECONDS_PER_DAY,
         seconds_to_default=-2 * module.SECONDS_PER_DAY,
@@ -315,3 +314,53 @@ def test_borrower_default_watch_alert_shows_time_since_default(monkeypatch: pyte
     assert "Status: Default (default)" in alerts[0].message
     assert "Defaulted at:" in alerts[0].message
     assert "2d 1h ago" in alerts[0].message
+
+
+def test_parse_envio_borrower_default_watch_rows_skips_grace_period() -> None:
+    module = load_3jane_module()
+    market_id = "0x" + "78" * 32
+    borrower = "0x00000000000000000000000000000000000000a3"
+    cycle_end = 1_700_000_000
+
+    parsed = module.parse_envio_borrower_default_watch_rows(
+        [
+            {
+                "marketId": market_id,
+                "borrower": borrower,
+                "amountDue": str(250_000 * module.ONE_SHARE),
+                "cycleEnd": str(cycle_end),
+                "gracePeriod": str(7 * module.SECONDS_PER_DAY),
+                "delinquencyPeriod": str(23 * module.SECONDS_PER_DAY),
+            },
+        ],
+        cycle_end + 3 * module.SECONDS_PER_DAY,
+    )
+
+    assert parsed == []
+
+
+def test_parse_envio_borrower_default_watch_rows_default_started_forces_default() -> None:
+    module = load_3jane_module()
+    market_id = "0x" + "9a" * 32
+    borrower = "0x00000000000000000000000000000000000000a4"
+    cycle_end = 1_700_000_000
+    default_at = cycle_end + 30 * module.SECONDS_PER_DAY
+
+    parsed = module.parse_envio_borrower_default_watch_rows(
+        [
+            {
+                "marketId": market_id,
+                "borrower": borrower,
+                "amountDue": str(250_000 * module.ONE_SHARE),
+                "cycleId": "8",
+                "cycleEnd": str(cycle_end),
+                "defaultStarted": True,
+            },
+        ],
+        default_at - module.SECONDS_PER_DAY,
+    )
+
+    assert len(parsed) == 1
+    assert parsed[0].repayment_status == "Default"
+    assert parsed[0].default_bucket == "default"
+    assert parsed[0].seconds_since_default == 0

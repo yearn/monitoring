@@ -94,7 +94,7 @@ THREE_JANE_BORROWER_DEFAULT_WATCH_QUERY = """
 query GetThreeJaneBorrowerDefaultWatch($limit: Int!, $offset: Int!) {
   ThreeJaneBorrowerMarket(
     where: { settled: { _neq: true } }
-    order_by: { lastComputedBlock: asc }
+    order_by: { lastSeenBlock: asc }
     limit: $limit
     offset: $offset
   ) {
@@ -106,13 +106,12 @@ query GetThreeJaneBorrowerDefaultWatch($limit: Int!, $offset: Int!) {
     cycleId
     cycleEnd
     endingBalance
+    gracePeriod
+    delinquencyPeriod
     defaultAt
-    secondsToDefault
-    secondsSinceDefault
-    repaymentStatus
-    defaultBucket
+    defaultStarted
     settled
-    lastComputedBlock
+    lastSeenBlock
   }
 }
 """
@@ -127,6 +126,7 @@ class BorrowerRepaymentSnapshot:
     amount_due_raw: int
     ending_balance_raw: int
     credit_raw: int
+    default_started: bool
     repayment_status: str
     default_at: int
     seconds_to_default: int
@@ -195,6 +195,58 @@ def _is_actionable_repayment_status(status: str) -> bool:
     return status in {"Delinquent", "Default"}
 
 
+def current_unix_timestamp() -> int:
+    return int(datetime.now(tz=timezone.utc).timestamp())
+
+
+def select_default_watch_bucket(repayment_status: str, seconds_to_default: int) -> str | None:
+    if repayment_status == "Default":
+        return "default"
+    if repayment_status != "Delinquent":
+        return None
+    if seconds_to_default <= SECONDS_PER_DAY:
+        return "1d"
+    if seconds_to_default <= 3 * SECONDS_PER_DAY:
+        return "3d"
+    if seconds_to_default <= 7 * SECONDS_PER_DAY:
+        return "7d"
+    if seconds_to_default <= 14 * SECONDS_PER_DAY:
+        return "14d"
+    return "delinquent"
+
+
+def compute_default_watch_status(
+    amount_due_raw: int,
+    cycle_end: int,
+    grace_period: int,
+    delinquency_period: int,
+    default_started: bool,
+    now_timestamp: int,
+) -> tuple[str, int, int, str | None] | None:
+    if amount_due_raw <= 0 or cycle_end <= 0:
+        return None
+
+    grace_end = cycle_end + grace_period
+    default_at = grace_end + delinquency_period
+    seconds_to_default = default_at - now_timestamp
+
+    if default_started or now_timestamp >= default_at:
+        repayment_status = "Default"
+        seconds_since_default = max(0, now_timestamp - default_at)
+    elif now_timestamp > grace_end:
+        repayment_status = "Delinquent"
+        seconds_since_default = 0
+    else:
+        return None
+
+    return (
+        repayment_status,
+        seconds_to_default,
+        seconds_since_default,
+        select_default_watch_bucket(repayment_status, seconds_to_default),
+    )
+
+
 def http_json(url: str, body: dict[str, Any]) -> dict[str, Any] | None:
     """POST JSON and return parsed JSON, or None on transient/indexer errors."""
     req = urllib.request.Request(
@@ -230,8 +282,13 @@ def _extract_envio_borrower_default_watch_rows(payload: dict[str, Any]) -> list[
     return rows if isinstance(rows, list) else []
 
 
-def parse_envio_borrower_default_watch_rows(rows: list[dict[str, Any]]) -> list[BorrowerRepaymentSnapshot]:
-    """Parse Envio-computed 3Jane borrower default risk rows."""
+def parse_envio_borrower_default_watch_rows(
+    rows: list[dict[str, Any]], now_timestamp: int | None = None
+) -> list[BorrowerRepaymentSnapshot]:
+    """Parse Envio 3Jane borrower rows and compute current default risk."""
+    if now_timestamp is None:
+        now_timestamp = current_unix_timestamp()
+
     parsed: list[BorrowerRepaymentSnapshot] = []
     seen: set[tuple[str, str]] = set()
 
@@ -240,16 +297,24 @@ def parse_envio_borrower_default_watch_rows(rows: list[dict[str, Any]]) -> list[
             continue
         market_id = _normalize_market_id(row.get("marketId") or row.get("market_id") or row.get("market"))
         borrower = _normalize_borrower(row.get("borrower") or row.get("onBehalf"))
-        bucket = row.get("defaultBucket") or row.get("default_bucket")
-        repayment_status = str(row.get("repaymentStatus") or "Unknown")
         amount_due_raw = _as_int(row.get("amountDue"))
-        if (
-            market_id is None
-            or borrower is None
-            or not isinstance(bucket, str)
-            or amount_due_raw <= 0
-            or not _is_actionable_repayment_status(repayment_status)
-        ):
+        cycle_end = _as_int(row.get("cycleEnd"))
+        grace_period = _as_int(row.get("gracePeriod"), 7 * SECONDS_PER_DAY)
+        delinquency_period = _as_int(row.get("delinquencyPeriod"), 23 * SECONDS_PER_DAY)
+        default_started = _as_bool(row.get("defaultStarted"))
+        default_watch_status = compute_default_watch_status(
+            amount_due_raw,
+            cycle_end,
+            grace_period,
+            delinquency_period,
+            default_started,
+            now_timestamp,
+        )
+        if market_id is None or borrower is None or default_watch_status is None:
+            continue
+
+        repayment_status, seconds_to_default, seconds_since_default, bucket = default_watch_status
+        if bucket is None or not _is_actionable_repayment_status(repayment_status):
             continue
         key = (market_id, borrower.lower())
         if key in seen:
@@ -260,14 +325,15 @@ def parse_envio_borrower_default_watch_rows(rows: list[dict[str, Any]]) -> list[
                 market_id=market_id,
                 borrower=borrower,
                 cycle_id=_as_int(row.get("cycleId")),
-                cycle_end=_as_int(row.get("cycleEnd")),
+                cycle_end=cycle_end,
                 amount_due_raw=amount_due_raw,
                 ending_balance_raw=_as_int(row.get("endingBalance")),
                 credit_raw=_as_int(row.get("credit")),
+                default_started=default_started,
                 repayment_status=repayment_status,
-                default_at=_as_int(row.get("defaultAt")),
-                seconds_to_default=_as_int(row.get("secondsToDefault")),
-                seconds_since_default=_as_int(row.get("secondsSinceDefault")),
+                default_at=cycle_end + grace_period + delinquency_period,
+                seconds_to_default=seconds_to_default,
+                seconds_since_default=seconds_since_default,
                 default_bucket=bucket,
             )
         )
@@ -276,10 +342,11 @@ def parse_envio_borrower_default_watch_rows(rows: list[dict[str, Any]]) -> list[
 
 
 def load_borrower_default_watch_snapshots_from_envio() -> list[BorrowerRepaymentSnapshot]:
-    """Load Envio-computed 3Jane borrower default watch rows."""
+    """Load Envio 3Jane borrower rows and compute current default watch candidates."""
     snapshots: list[BorrowerRepaymentSnapshot] = []
     seen: set[tuple[str, str]] = set()
     offset = 0
+    now_timestamp = current_unix_timestamp()
 
     while True:
         payload = gql_request(THREE_JANE_BORROWER_DEFAULT_WATCH_QUERY, {"limit": ENVIO_PAGE_SIZE, "offset": offset})
@@ -290,7 +357,7 @@ def load_borrower_default_watch_snapshots_from_envio() -> list[BorrowerRepayment
             return snapshots
 
         rows = _extract_envio_borrower_default_watch_rows(payload)
-        page = parse_envio_borrower_default_watch_rows(rows)
+        page = parse_envio_borrower_default_watch_rows(rows, now_timestamp)
         for snapshot in page:
             key = (snapshot.market_id, snapshot.borrower.lower())
             if key not in seen:
@@ -373,7 +440,7 @@ def check_borrower_default_watch_snapshot(snapshot: BorrowerRepaymentSnapshot) -
 
 
 def check_borrower_default_watch(_client, _protocol_config) -> None:  # type: ignore[no-untyped-def]
-    """Alert on Envio-computed 3Jane borrower default buckets."""
+    """Alert on 3Jane borrower default buckets computed from Envio rows."""
     snapshots = load_borrower_default_watch_snapshots_from_envio()
     if not snapshots:
         return
