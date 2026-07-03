@@ -265,7 +265,7 @@ def http_json(url: str, body: dict[str, Any]) -> dict[str, Any] | None:
 
 def gql_request(query: str, variables: dict[str, Any]) -> dict[str, Any] | None:
     if not ENVIO_GRAPHQL_URL:
-        logger.info("ENVIO_GRAPHQL_URL is not set; skipping borrower default watch")
+        logger.warning("ENVIO_GRAPHQL_URL is not set; skipping borrower default watch")
         return None
     return http_json(ENVIO_GRAPHQL_URL, {"query": query, "variables": variables})
 
@@ -295,7 +295,7 @@ def parse_envio_borrower_default_watch_rows(
     for row in rows:
         if not isinstance(row, dict) or _as_bool(row.get("settled")):
             continue
-        market_id = _normalize_market_id(row.get("marketId") or row.get("market_id") or row.get("market"))
+        market_id = _normalize_market_id(row.get("marketId"))
         borrower = _normalize_borrower(row.get("borrower") or row.get("onBehalf"))
         amount_due_raw = _as_int(row.get("amountDue"))
         cycle_end = _as_int(row.get("cycleEnd"))
