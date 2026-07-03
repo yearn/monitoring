@@ -43,6 +43,8 @@ protocols:
         description: "Any floor change; alert-once when floor > sUSD3 backing"
       - name: "Protocol Pause"
         description: "Alert-once when ProtocolConfig IS_PAUSED flips true"
+      - name: "Borrower Default Watch"
+        description: "Envio-backed MorphoCredit borrower watch; MEDIUM alerts when unpaid obligations become delinquent after grace or reach default"
       - name: "Timelock"
         description: "CallScheduled events from 24h and 7-day TimelockControllers via Envio"
 
