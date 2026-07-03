@@ -49,6 +49,15 @@
 
 Set `ENVIO_GRAPHQL_URL` to the 3Jane Envio GraphQL endpoint to enable proactive borrower monitoring. Without this env var, the borrower default watch is skipped and all other 3Jane checks continue normally.
 
+Borrowers move through repayment states based on the active repayment obligation:
+
+- `Current`: no unpaid obligation, or the payment cycle is still open.
+- `GracePeriod`: the cycle ended and `amountDue > 0`, but the borrower is still inside the grace window. This does not alert.
+- `Delinquent`: the grace window has passed and `amountDue > 0`, but the default timestamp has not been reached yet. This is the proactive warning period, and the monitor alerts at `delinquent`, `14d`, `7d`, `3d`, and `1d` buckets.
+- `Default`: the default timestamp has passed, or the protocol emitted `DefaultStarted`. The monitor sends a MEDIUM alert and includes how long the borrower has been defaulted.
+
+By default, `defaultAt = cycleEnd + 7 days grace + 23 days delinquency`. These windows come from `gracePeriod` and `delinquencyPeriod` on the indexed borrower row.
+
 The monitor expects Envio to expose a `ThreeJaneBorrowerMarket` entity with at least:
 
 | Field | Purpose |
