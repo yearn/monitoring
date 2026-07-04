@@ -14,6 +14,7 @@
 - **Debt Cap:** `ProtocolConfig.getDebtCap()` vs cached prior. Alerts on any change — signals governance scaling the protocol up or down.
 - **Nominal sUSD3 Backing Floor:** `ProtocolConfig.config(keccak256("SUSD3_NOMINAL_BACKING_FLOOR"))` vs cached prior. Alerts on any change (governance lever). Separate alert-once when the floor exceeds sUSD3's USD3 holdings valued in USDC — sUSD3 redemptions can be blocked while floor > backing.
 - **Protocol Pause:** `ProtocolConfig.config(keccak256("IS_PAUSED"))`. Alert-once on transition to true. Distinct from per-vault `isShutdown()` — pauses the underlying credit market.
+- **Borrower Default Watch:** optional Envio-backed borrower default risk feed. The Envio indexer maintains `ThreeJaneBorrowerMarket` rows from MorphoCredit events, and the monitor computes the current delinquent/default status at runtime. Alerts are **MEDIUM only** and deduped per borrower/cycle/default milestone.
 
 ## Key Contracts
 
@@ -41,7 +42,43 @@
 | Nominal backing floor change | Any change to `SUSD3_NOMINAL_BACKING_FLOOR` | MEDIUM |
 | Nominal floor breach | Floor > sUSD3 backing valued in USDC (alert-once) | MEDIUM |
 | Protocol paused | `IS_PAUSED` transitions to true (alert-once) | CRITICAL |
+| Borrower delinquent/default watch | New milestone: delinquent, ≤14d, ≤7d, ≤3d, ≤1d, default | MEDIUM |
 | Monitoring run failure | Uncaught exception in `main()` | LOW |
+
+## Borrower default watch
+
+Set `ENVIO_GRAPHQL_URL` to the 3Jane Envio GraphQL endpoint to enable proactive borrower monitoring. Without this env var, the borrower default watch is skipped and all other 3Jane checks continue normally.
+
+Borrowers move through repayment states based on the active repayment obligation:
+
+- `Current`: no unpaid obligation, or the payment cycle is still open.
+- `GracePeriod`: the cycle ended and `amountDue > 0`, but the borrower is still inside the grace window. This does not alert.
+- `Delinquent`: the grace window has passed and `amountDue > 0`, but the default timestamp has not been reached yet. This is the proactive warning period, and the monitor alerts at `delinquent`, `14d`, `7d`, `3d`, and `1d` buckets.
+- `Default`: the default timestamp has passed, or the protocol emitted `DefaultStarted`. The monitor sends a MEDIUM alert and includes how long the borrower has been defaulted.
+
+By default, `defaultAt = cycleEnd + 7 days grace + 23 days delinquency`. These windows come from `gracePeriod` and `delinquencyPeriod` on the indexed borrower row.
+
+The monitor expects Envio to expose a `ThreeJaneBorrowerMarket` entity with at least:
+
+| Field | Purpose |
+|-------|---------|
+| `marketId` | MorphoCredit market id (`bytes32`) |
+| `borrower` | Borrower address |
+| `credit` | Latest indexed credit line |
+| `amountDue` | Latest indexed repayment amount due |
+| `cycleId` | Payment cycle id for the current obligation |
+| `cycleEnd` | Indexed cycle end timestamp |
+| `endingBalance` | Borrower balance at cycle close |
+| `gracePeriod` | Grace period in seconds |
+| `delinquencyPeriod` | Delinquency period in seconds |
+| `defaultAt` | Event-derived default timestamp |
+| `defaultStarted` | Whether `DefaultStarted` has been emitted for the borrower |
+| `settled` | Whether the account was settled and should be skipped |
+| `lastSeenBlock` | Ordering/pagination |
+
+The indexer should populate/update that entity from `SetCreditLine`, `Borrow`, `Repay`, `PaymentCycleCreated`, `RepaymentObligationPosted`, `RepaymentTracked`, `DefaultStarted`, `DefaultCleared`, and `AccountSettled` events on `MorphoCredit`.
+
+The current countdown and alert bucket are intentionally computed in this monitoring script, not in Envio, because they depend on wall-clock time. Grace and delinquency windows default to 7 days and 23 days respectively in the indexer, and can be overridden there with `THREE_JANE_GRACE_PERIOD_SECONDS` and `THREE_JANE_DELINQUENCY_PERIOD_SECONDS`.
 
 ## Alert dispatch
 

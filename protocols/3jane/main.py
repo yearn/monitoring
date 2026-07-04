@@ -18,6 +18,14 @@ Monitors:
 - Protocol-wide pause — alerts once when ProtocolConfig IS_PAUSED flips to true
 """
 
+import json
+import os
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
+
 from web3 import Web3
 
 from utils.abi import load_abi
@@ -46,10 +54,15 @@ WAUSDC_ADDRESS = "0xD4fa2D31b7968E448877f69A96DE69f5de8cD23E"
 INSURANCE_FUND_ADDRESS = "0x4507B5B23340D248457d955a211C8B0634D29935"
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
+# --- External data sources ---
+ENVIO_GRAPHQL_URL = os.getenv("ENVIO_GRAPHQL_URL")
+ENVIO_PAGE_SIZE = int(os.getenv("THREE_JANE_ENVIO_PAGE_SIZE", "1000"))
+
 # USDC has 6 decimals, USD3 and sUSD3 inherit this
 DECIMALS = 6
 ONE_SHARE = 10**DECIMALS
 RATE_SCALE = 10**18
+SECONDS_PER_DAY = 86_400
 
 # --- Cache Keys ---
 CACHE_KEY_USD3_PPS = "3JANE_USD3_PPS"
@@ -63,6 +76,7 @@ CACHE_KEY_NOMINAL_FLOOR = "3JANE_NOMINAL_FLOOR"
 CACHE_KEY_FLOOR_BREACH = "3JANE_FLOOR_BREACH"
 CACHE_KEY_IS_PAUSED = "3JANE_IS_PAUSED"
 CACHE_KEY_INSURANCE_FUND_SHARES = "3JANE_INSURANCE_FUND_SHARES"
+CACHE_KEY_BORROWER_DEFAULT_WATCH_PREFIX = "3JANE_BORROWER_DEFAULT_WATCH"
 
 # --- ProtocolConfig keys (keccak256 of the string label) ---
 CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR = Web3.keccak(text="SUSD3_NOMINAL_BACKING_FLOOR")
@@ -75,6 +89,49 @@ USD3_OC_HIGH_THRESHOLD = 1.11  # Alert when USD3 OC drops below the 111% target
 USD3_OC_CRITICAL_THRESHOLD = 1.06  # Alert when USD3 OC drops below 106%
 INSURANCE_FUND_OUTFLOW_THRESHOLD = 50_000  # USDC
 WITHDRAW_LIMIT_THRESHOLD = 4_000_000  # USDC, alert when USD3 availableWithdrawLimit falls below
+
+THREE_JANE_BORROWER_DEFAULT_WATCH_QUERY = """
+query GetThreeJaneBorrowerDefaultWatch($limit: Int!, $offset: Int!) {
+  ThreeJaneBorrowerMarket(
+    where: { settled: { _neq: true } }
+    order_by: { lastSeenBlock: asc }
+    limit: $limit
+    offset: $offset
+  ) {
+    id
+    marketId
+    borrower
+    credit
+    amountDue
+    cycleId
+    cycleEnd
+    endingBalance
+    gracePeriod
+    delinquencyPeriod
+    defaultAt
+    defaultStarted
+    settled
+    lastSeenBlock
+  }
+}
+"""
+
+
+@dataclass(frozen=True)
+class BorrowerRepaymentSnapshot:
+    market_id: str
+    borrower: str
+    cycle_id: int
+    cycle_end: int
+    amount_due_raw: int
+    ending_balance_raw: int
+    credit_raw: int
+    default_started: bool
+    repayment_status: str
+    default_at: int
+    seconds_to_default: int
+    seconds_since_default: int
+    default_bucket: str | None
 
 
 def get_cache_value(key: str) -> float:
@@ -102,6 +159,295 @@ def get_cache_int(key: str) -> int:
 def set_cache_value(key: str, value: int | float) -> None:
     """Write a numeric value to cache."""
     write_last_value_to_file(CACHE_FILENAME, key, value)
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes"}
+    return bool(value)
+
+
+def _normalize_market_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    market_id = value.lower()
+    if market_id.startswith("0x") and len(market_id) == 66:
+        return market_id
+    return None
+
+
+def _normalize_borrower(value: Any) -> str | None:
+    if not isinstance(value, str) or not Web3.is_address(value):
+        return None
+    return Web3.to_checksum_address(value)
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_actionable_repayment_status(status: str) -> bool:
+    return status in {"Delinquent", "Default"}
+
+
+def current_unix_timestamp() -> int:
+    return int(datetime.now(tz=timezone.utc).timestamp())
+
+
+def select_default_watch_bucket(repayment_status: str, seconds_to_default: int) -> str | None:
+    if repayment_status == "Default":
+        return "default"
+    if repayment_status != "Delinquent":
+        return None
+    if seconds_to_default <= SECONDS_PER_DAY:
+        return "1d"
+    if seconds_to_default <= 3 * SECONDS_PER_DAY:
+        return "3d"
+    if seconds_to_default <= 7 * SECONDS_PER_DAY:
+        return "7d"
+    if seconds_to_default <= 14 * SECONDS_PER_DAY:
+        return "14d"
+    return "delinquent"
+
+
+def compute_default_watch_status(
+    amount_due_raw: int,
+    cycle_end: int,
+    grace_period: int,
+    delinquency_period: int,
+    default_started: bool,
+    now_timestamp: int,
+) -> tuple[str, int, int, str | None] | None:
+    if amount_due_raw <= 0 or cycle_end <= 0:
+        return None
+
+    grace_end = cycle_end + grace_period
+    default_at = grace_end + delinquency_period
+    seconds_to_default = default_at - now_timestamp
+
+    if default_started or now_timestamp >= default_at:
+        repayment_status = "Default"
+        seconds_since_default = max(0, now_timestamp - default_at)
+    elif now_timestamp > grace_end:
+        repayment_status = "Delinquent"
+        seconds_since_default = 0
+    else:
+        return None
+
+    return (
+        repayment_status,
+        seconds_to_default,
+        seconds_since_default,
+        select_default_watch_bucket(repayment_status, seconds_to_default),
+    )
+
+
+def http_json(url: str, body: dict[str, Any]) -> dict[str, Any] | None:
+    """POST JSON and return parsed JSON, or None on transient/indexer errors."""
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        logger.warning("3Jane Envio request failed; skipping borrower default watch this run: %s", exc)
+        return None
+
+
+def gql_request(query: str, variables: dict[str, Any]) -> dict[str, Any] | None:
+    if not ENVIO_GRAPHQL_URL:
+        logger.warning("ENVIO_GRAPHQL_URL is not set; skipping borrower default watch")
+        return None
+    return http_json(ENVIO_GRAPHQL_URL, {"query": query, "variables": variables})
+
+
+def _extract_envio_borrower_default_watch_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return []
+    rows = (
+        data.get("ThreeJaneBorrowerMarket")
+        or data.get("threeJaneBorrowerMarkets")
+        or data.get("threeJaneBorrowerMarket")
+    )
+    return rows if isinstance(rows, list) else []
+
+
+def parse_envio_borrower_default_watch_rows(
+    rows: list[dict[str, Any]], now_timestamp: int | None = None
+) -> list[BorrowerRepaymentSnapshot]:
+    """Parse Envio 3Jane borrower rows and compute current default risk."""
+    if now_timestamp is None:
+        now_timestamp = current_unix_timestamp()
+
+    parsed: list[BorrowerRepaymentSnapshot] = []
+    seen: set[tuple[str, str]] = set()
+
+    for row in rows:
+        if not isinstance(row, dict) or _as_bool(row.get("settled")):
+            continue
+        market_id = _normalize_market_id(row.get("marketId"))
+        borrower = _normalize_borrower(row.get("borrower") or row.get("onBehalf"))
+        amount_due_raw = _as_int(row.get("amountDue"))
+        cycle_end = _as_int(row.get("cycleEnd"))
+        grace_period = _as_int(row.get("gracePeriod"), 7 * SECONDS_PER_DAY)
+        delinquency_period = _as_int(row.get("delinquencyPeriod"), 23 * SECONDS_PER_DAY)
+        default_started = _as_bool(row.get("defaultStarted"))
+        default_watch_status = compute_default_watch_status(
+            amount_due_raw,
+            cycle_end,
+            grace_period,
+            delinquency_period,
+            default_started,
+            now_timestamp,
+        )
+        if market_id is None or borrower is None or default_watch_status is None:
+            continue
+
+        repayment_status, seconds_to_default, seconds_since_default, bucket = default_watch_status
+        if bucket is None or not _is_actionable_repayment_status(repayment_status):
+            continue
+        key = (market_id, borrower.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        parsed.append(
+            BorrowerRepaymentSnapshot(
+                market_id=market_id,
+                borrower=borrower,
+                cycle_id=_as_int(row.get("cycleId")),
+                cycle_end=cycle_end,
+                amount_due_raw=amount_due_raw,
+                ending_balance_raw=_as_int(row.get("endingBalance")),
+                credit_raw=_as_int(row.get("credit")),
+                default_started=default_started,
+                repayment_status=repayment_status,
+                default_at=cycle_end + grace_period + delinquency_period,
+                seconds_to_default=seconds_to_default,
+                seconds_since_default=seconds_since_default,
+                default_bucket=bucket,
+            )
+        )
+
+    return parsed
+
+
+def load_borrower_default_watch_snapshots_from_envio() -> list[BorrowerRepaymentSnapshot]:
+    """Load Envio 3Jane borrower rows and compute current default watch candidates."""
+    snapshots: list[BorrowerRepaymentSnapshot] = []
+    seen: set[tuple[str, str]] = set()
+    offset = 0
+    now_timestamp = current_unix_timestamp()
+
+    while True:
+        payload = gql_request(THREE_JANE_BORROWER_DEFAULT_WATCH_QUERY, {"limit": ENVIO_PAGE_SIZE, "offset": offset})
+        if payload is None:
+            return snapshots
+        if payload.get("errors"):
+            logger.warning("3Jane Envio GraphQL errors; skipping borrower default watch: %s", payload["errors"])
+            return snapshots
+
+        rows = _extract_envio_borrower_default_watch_rows(payload)
+        page = parse_envio_borrower_default_watch_rows(rows, now_timestamp)
+        for snapshot in page:
+            key = (snapshot.market_id, snapshot.borrower.lower())
+            if key not in seen:
+                seen.add(key)
+                snapshots.append(snapshot)
+
+        if len(rows) < ENVIO_PAGE_SIZE:
+            return snapshots
+        offset += ENVIO_PAGE_SIZE
+
+
+def format_utc_timestamp(timestamp: int) -> str:
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def format_duration(seconds: int) -> str:
+    if seconds <= 0:
+        return "now"
+    days = seconds // SECONDS_PER_DAY
+    hours = (seconds % SECONDS_PER_DAY) // 3600
+    minutes = (seconds % 3600) // 60
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes and not days:
+        parts.append(f"{minutes}m")
+    return " ".join(parts) if parts else f"{seconds}s"
+
+
+def _borrower_default_cache_key(snapshot: BorrowerRepaymentSnapshot, bucket: str) -> str:
+    return (
+        f"{CACHE_KEY_BORROWER_DEFAULT_WATCH_PREFIX}:"
+        f"{snapshot.market_id}:{snapshot.borrower.lower()}:"
+        f"{snapshot.cycle_id}:{snapshot.default_at}:{bucket}"
+    )
+
+
+def _default_watch_bucket_was_sent(snapshot: BorrowerRepaymentSnapshot, bucket: str) -> bool:
+    return str(get_last_value_for_key_from_file(CACHE_FILENAME, _borrower_default_cache_key(snapshot, bucket))) == "1"
+
+
+def _mark_default_watch_bucket_sent(snapshot: BorrowerRepaymentSnapshot, bucket: str) -> None:
+    write_last_value_to_file(CACHE_FILENAME, _borrower_default_cache_key(snapshot, bucket), 1)
+
+
+def check_borrower_default_watch_snapshot(snapshot: BorrowerRepaymentSnapshot) -> None:
+    """Send a MEDIUM-only borrower default countdown alert when a new bucket is reached."""
+    bucket = snapshot.default_bucket
+    if bucket is None or _default_watch_bucket_was_sent(snapshot, bucket):
+        return
+
+    amount_due = snapshot.amount_due_raw / ONE_SHARE
+    ending_balance = snapshot.ending_balance_raw / ONE_SHARE
+    credit = snapshot.credit_raw / ONE_SHARE
+    time_left = format_duration(snapshot.seconds_to_default)
+    time_since_default = format_duration(snapshot.seconds_since_default)
+    default_at = format_utc_timestamp(snapshot.default_at)
+    cycle_end = format_utc_timestamp(snapshot.cycle_end)
+    default_timing_line = (
+        f"⏳ Defaulted at: {default_at} ({time_since_default} ago)"
+        if snapshot.repayment_status == "Default"
+        else f"⏳ Default at: {default_at} ({time_left})"
+    )
+
+    message = (
+        f"⚠️ *3Jane Borrower Default Watch*\n"
+        f"📊 Status: {snapshot.repayment_status} ({bucket})\n"
+        f"👤 Borrower: `{snapshot.borrower}`\n"
+        f"🏦 Market: `{snapshot.market_id}`\n"
+        f"💰 Amount due: {format_usd(amount_due)} | Ending balance: {format_usd(ending_balance)}\n"
+        f"📏 Credit line: {format_usd(credit)}\n"
+        f"🗓️ Cycle end: {cycle_end}\n"
+        f"{default_timing_line}\n"
+        f"🔗 [Borrower](https://etherscan.io/address/{snapshot.borrower})"
+    )
+    send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
+    _mark_default_watch_bucket_sent(snapshot, bucket)
+
+
+def check_borrower_default_watch(_client, _protocol_config) -> None:  # type: ignore[no-untyped-def]
+    """Alert on 3Jane borrower default buckets computed from Envio rows."""
+    snapshots = load_borrower_default_watch_snapshots_from_envio()
+    if not snapshots:
+        return
+
+    logger.info("3Jane borrower default watch — Envio alert candidates: %d", len(snapshots))
+    for snapshot in snapshots:
+        check_borrower_default_watch_snapshot(snapshot)
 
 
 def check_pps(usd3_pps_float: float, susd3_pps_float: float) -> None:
@@ -616,6 +962,7 @@ def main() -> None:
         check_debt_cap(client)
         check_nominal_backing_floor(nominal_floor, susd3_backing)
         check_protocol_paused(is_paused)
+        check_borrower_default_watch(client, protocol_config)
 
         logger.info(
             "Monitoring complete — USD3 PPS: %.8f, TVL: %s | sUSD3 PPS: %.8f, TVL: %s",
