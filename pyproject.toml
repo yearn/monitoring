@@ -5,6 +5,7 @@ name = "monitoring-scripts-py"
 version = "0.1.0"
 description = "Monitoring scripts for blockchain protocols"
 readme = "README.md"
+license = "AGPL-3.0-only"
 requires-python = ">=3.12"
 dependencies = [
     "aiohappyeyeballs>=2.6.1",
