@@ -97,3 +97,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for full style guidelines, project conv
 ## Details
 
 For more details about this repository, check out AI generated docs using DeepWiki at [https://deepwiki.com/yearn/monitoring](https://deepwiki.com/yearn/monitoring).
+
+## License
+
+This repository is licensed under the GNU Affero General Public License v3.0. See [LICENSE](./LICENSE).
