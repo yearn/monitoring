@@ -168,12 +168,23 @@ def set_cache_value(key: str, value: int | float) -> None:
     write_last_value_to_file(CACHE_FILENAME, key, value)
 
 
-def should_alert_value_drop(cache_key: str, value: float, threshold: float) -> bool:
-    """Deduplicate a lower-is-worse threshold alert, like the debt cap check.
+def _get_alerted_value(cache_key: str) -> float:
+    """Read the last alerted value for a threshold alert (-1 = none outstanding)."""
+    raw_cached = get_last_value_for_key_from_file(CACHE_FILENAME, cache_key)
+    try:
+        return float(raw_cached) if isinstance(raw_cached, str) else -1.0
+    except ValueError:
+        return -1.0
 
-    The value that triggered the last alert is cached; repeat runs stay silent
-    until the metric drops below the cached value (worsens). Recovering to or
-    above the threshold clears the cache so the next breach alerts again.
+
+def should_alert_value_drop(cache_key: str, value: float, threshold: float) -> bool:
+    """Decide whether a lower-is-worse threshold alert should be sent.
+
+    Deduped like the debt cap check: repeat runs stay silent until the metric
+    drops below the last alerted value (worsens). Recovering to or above the
+    threshold clears the cache so the next breach alerts again. The caller
+    must record the value with mark_alerted_value() only after send_alert()
+    returns, so a failed Telegram send retries on the next run.
 
     Args:
         cache_key: Cache key holding the last alerted value (-1 = none outstanding).
@@ -181,24 +192,25 @@ def should_alert_value_drop(cache_key: str, value: float, threshold: float) -> b
         threshold: Alert when the value drops below this.
 
     Returns:
-        True when a new alert should be sent; updates the cache as a side effect.
+        True when a new alert should be sent.
     """
-    raw_cached = get_last_value_for_key_from_file(CACHE_FILENAME, cache_key)
-    try:
-        cached = float(raw_cached) if isinstance(raw_cached, str) else -1.0
-    except ValueError:
-        cached = -1.0
-
     if value >= threshold:
-        if cached >= 0:
-            set_cache_value(cache_key, -1)
+        clear_alerted_value(cache_key)
         return False
 
-    if 0 <= cached <= value:
-        return False
+    cached = _get_alerted_value(cache_key)
+    return not 0 <= cached <= value
 
+
+def mark_alerted_value(cache_key: str, value: float) -> None:
+    """Record the value a threshold alert fired for; call after send_alert() returns."""
     set_cache_value(cache_key, value)
-    return True
+
+
+def clear_alerted_value(cache_key: str) -> None:
+    """Clear an outstanding threshold alert so the next breach alerts again."""
+    if _get_alerted_value(cache_key) >= 0:
+        set_cache_value(cache_key, -1)
 
 
 def _as_bool(value: Any) -> bool:
@@ -601,6 +613,8 @@ def check_junior_buffer(susd3_backing: float, deployed_credit: float) -> None:
         deployed_credit: Borrowed waUSDC in the credit market, converted to USDC.
     """
     if deployed_credit <= 0:
+        # No deployed credit means nothing at risk: clear any outstanding alert.
+        clear_alerted_value(CACHE_KEY_JUNIOR_BUFFER_ALERTED)
         return
 
     buffer_ratio = susd3_backing / deployed_credit
@@ -620,6 +634,7 @@ def check_junior_buffer(susd3_backing: float, deployed_credit: float) -> None:
             f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
         )
         send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
+        mark_alerted_value(CACHE_KEY_JUNIOR_BUFFER_ALERTED, buffer_ratio)
 
 
 def check_usd3_oc(susd3_backing: float, deployed_credit: float) -> None:
@@ -635,6 +650,8 @@ def check_usd3_oc(susd3_backing: float, deployed_credit: float) -> None:
         deployed_credit: Borrowed waUSDC in the credit market, converted to USDC.
     """
     if deployed_credit <= 0:
+        # No deployed credit means nothing at risk: clear any outstanding alert.
+        clear_alerted_value(CACHE_KEY_USD3_OC_ALERTED)
         return
 
     senior_at_risk = deployed_credit - susd3_backing
@@ -645,7 +662,7 @@ def check_usd3_oc(susd3_backing: float, deployed_credit: float) -> None:
             format_usd(deployed_credit),
         )
         # Fully covered counts as recovered: clear any outstanding OC alert.
-        should_alert_value_drop(CACHE_KEY_USD3_OC_ALERTED, USD3_OC_HIGH_THRESHOLD, USD3_OC_HIGH_THRESHOLD)
+        clear_alerted_value(CACHE_KEY_USD3_OC_ALERTED)
         return
 
     oc_ratio = deployed_credit / senior_at_risk
@@ -680,6 +697,7 @@ def check_usd3_oc(susd3_backing: float, deployed_credit: float) -> None:
         f"🔗 [USD3](https://etherscan.io/address/{USD3_ADDRESS})"
     )
     send_alert(Alert(severity, message, PROTOCOL))
+    mark_alerted_value(CACHE_KEY_USD3_OC_ALERTED, oc_ratio)
 
 
 def check_insurance_fund(
@@ -736,6 +754,7 @@ def check_withdraw_limit(withdraw_limit: float) -> None:
             f"🔗 [USD3](https://etherscan.io/address/{USD3_ADDRESS})"
         )
         send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
+        mark_alerted_value(CACHE_KEY_WITHDRAW_LIMIT_ALERTED, withdraw_limit)
 
 
 def check_vault_shutdown(client, usd3_vault, susd3_vault) -> None:  # type: ignore[no-untyped-def]

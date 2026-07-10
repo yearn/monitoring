@@ -202,6 +202,54 @@ def test_usd3_oc_full_coverage_rearms_alert(monkeypatch: pytest.MonkeyPatch) -> 
     assert alerts[1].severity == module.AlertSeverity.HIGH
 
 
+def test_withdraw_limit_retries_when_send_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+
+    def failing_send(_alert) -> None:
+        raise RuntimeError("telegram down")
+
+    monkeypatch.setattr(module, "send_alert", failing_send)
+    with pytest.raises(RuntimeError):
+        module.check_withdraw_limit(3_500_000)  # breach, but delivery fails → not cached
+
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+    module.check_withdraw_limit(3_500_000)  # same value retries → alert
+    module.check_withdraw_limit(3_500_000)  # now cached → silent
+
+    assert len(alerts) == 1
+    assert "Available withdraw limit: $3.50M" in alerts[0].message
+
+
+def test_junior_buffer_zero_deployed_credit_rearms(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_junior_buffer(4_000_000, 40_000_000)  # 10% → alert
+    module.check_junior_buffer(0, 0)  # book unwound → clears cache
+    module.check_junior_buffer(4_800_000, 40_000_000)  # 12%, above old cached 10% → alert
+
+    assert len(alerts) == 2
+    assert "12.00% of deployed credit" in alerts[1].message
+
+
+def test_usd3_oc_zero_deployed_credit_rearms(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_usd3_oc(9_000_000, 100_000_000)  # OC 1.0989 → alert
+    module.check_usd3_oc(0, 0)  # book unwound → clears cache
+    module.check_usd3_oc(9_500_000, 100_000_000)  # OC 1.1050, above old cached → alert
+
+    assert len(alerts) == 2
+    assert alerts[1].severity == module.AlertSeverity.HIGH
+
+
 def test_junior_buffer_dedupes_same_ratio(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
