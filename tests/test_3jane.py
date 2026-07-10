@@ -17,9 +17,18 @@ def load_3jane_module() -> ModuleType:
     return module
 
 
+def stub_cache(monkeypatch: pytest.MonkeyPatch, module: ModuleType) -> dict[str, str]:
+    """Replace the module's cache reads/writes with an in-memory dict."""
+    cache: dict[str, str] = {}
+    monkeypatch.setattr(module, "get_last_value_for_key_from_file", lambda _filename, key: cache.get(key, 0))
+    monkeypatch.setattr(module, "set_cache_value", lambda key, value: cache.__setitem__(key, str(value)))
+    return cache
+
+
 def test_junior_buffer_uses_backing_over_deployed_credit(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
+    stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
     module.check_junior_buffer(7_504_000, 37_776_000)
@@ -30,6 +39,7 @@ def test_junior_buffer_uses_backing_over_deployed_credit(monkeypatch: pytest.Mon
 def test_junior_buffer_alert_describes_deployed_credit(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
+    stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
     module.check_junior_buffer(5_000_000, 40_000_000)
@@ -43,6 +53,7 @@ def test_junior_buffer_alert_describes_deployed_credit(monkeypatch: pytest.Monke
 def test_usd3_oc_does_not_alert_above_high_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
+    stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
     module.check_usd3_oc(11_000_000, 100_000_000)
@@ -53,6 +64,7 @@ def test_usd3_oc_does_not_alert_above_high_threshold(monkeypatch: pytest.MonkeyP
 def test_usd3_oc_alerts_high_below_target(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
+    stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
     module.check_usd3_oc(9_000_000, 100_000_000)
@@ -67,6 +79,7 @@ def test_usd3_oc_alerts_high_below_target(monkeypatch: pytest.MonkeyPatch) -> No
 def test_usd3_oc_alerts_critical_below_critical_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
+    stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
     module.check_usd3_oc(5_000_000, 100_000_000)
@@ -107,6 +120,7 @@ def test_insurance_fund_ignores_yield_and_small_outflows(monkeypatch: pytest.Mon
 def test_withdraw_limit_alerts_below_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
+    stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
     module.check_withdraw_limit(3_500_000)
@@ -120,12 +134,87 @@ def test_withdraw_limit_alerts_below_threshold(monkeypatch: pytest.MonkeyPatch) 
 def test_withdraw_limit_no_alert_at_or_above_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
+    stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
     module.check_withdraw_limit(module.WITHDRAW_LIMIT_THRESHOLD)
     module.check_withdraw_limit(4_548_324)
 
     assert alerts == []
+
+
+def test_withdraw_limit_dedupes_until_value_drops_further(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_withdraw_limit(3_500_000)  # breach → alert
+    module.check_withdraw_limit(3_500_000)  # same value → silent
+    module.check_withdraw_limit(3_800_000)  # partial recovery, still breached → silent
+    module.check_withdraw_limit(3_200_000)  # dropped below cached → alert
+
+    assert len(alerts) == 2
+    assert "Available withdraw limit: $3.50M" in alerts[0].message
+    assert "Available withdraw limit: $3.20M" in alerts[1].message
+
+
+def test_withdraw_limit_rearms_after_recovery_above_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_withdraw_limit(3_500_000)  # breach → alert
+    module.check_withdraw_limit(4_500_000)  # recovered → clears cache
+    module.check_withdraw_limit(3_900_000)  # new breach above old cached value → alert
+
+    assert len(alerts) == 2
+    assert "Available withdraw limit: $3.90M" in alerts[1].message
+
+
+def test_usd3_oc_dedupes_but_realerts_on_drop_to_critical(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_usd3_oc(9_000_000, 100_000_000)  # OC 1.0989 → HIGH alert
+    module.check_usd3_oc(9_000_000, 100_000_000)  # same value → silent
+    module.check_usd3_oc(5_000_000, 100_000_000)  # OC 1.0526 → CRITICAL alert
+
+    assert len(alerts) == 2
+    assert alerts[0].severity == module.AlertSeverity.HIGH
+    assert alerts[1].severity == module.AlertSeverity.CRITICAL
+
+
+def test_usd3_oc_full_coverage_rearms_alert(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_usd3_oc(9_000_000, 100_000_000)  # OC 1.0989 → HIGH alert
+    module.check_usd3_oc(100_000_000, 100_000_000)  # fully covered → clears cache
+    module.check_usd3_oc(9_500_000, 100_000_000)  # OC 1.1050, above old cached → alert
+
+    assert len(alerts) == 2
+    assert alerts[1].severity == module.AlertSeverity.HIGH
+
+
+def test_junior_buffer_dedupes_same_ratio(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_junior_buffer(5_000_000, 40_000_000)  # 12.5% → alert
+    module.check_junior_buffer(5_000_000, 40_000_000)  # same → silent
+    module.check_junior_buffer(4_000_000, 40_000_000)  # 10% → alert
+
+    assert len(alerts) == 2
+    assert "12.50% of deployed credit" in alerts[0].message
+    assert "10.00% of deployed credit" in alerts[1].message
 
 
 def test_insurance_shares_round_trip_exactly_through_sqlite(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
