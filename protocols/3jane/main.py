@@ -12,6 +12,10 @@ Monitors:
 - USD3 OC — alerts when senior-tranche overcollateralization drops below thresholds
 - Insurance fund — alerts on waUSDC outflows of at least $50k
 - Withdraw liquidity — alerts when USD3 availableWithdrawLimit falls below $4M
+
+Threshold alerts (junior buffer, USD3 OC, withdraw liquidity) are deduped via
+cache: the alerted value is stored and no new alert is sent until the value
+drops below it; recovering above the threshold re-arms the alert.
 - Vault shutdown status — alerts once if either vault enters emergency shutdown
 - Debt cap changes — alerts when ProtocolConfig debt cap is modified
 - Nominal sUSD3 backing floor — alerts on change and when floor > sUSD3 backing
@@ -77,6 +81,9 @@ CACHE_KEY_FLOOR_BREACH = "3JANE_FLOOR_BREACH"
 CACHE_KEY_IS_PAUSED = "3JANE_IS_PAUSED"
 CACHE_KEY_INSURANCE_FUND_SHARES = "3JANE_INSURANCE_FUND_SHARES"
 CACHE_KEY_BORROWER_DEFAULT_WATCH_PREFIX = "3JANE_BORROWER_DEFAULT_WATCH"
+CACHE_KEY_JUNIOR_BUFFER_ALERTED = "3JANE_JUNIOR_BUFFER_ALERTED"
+CACHE_KEY_USD3_OC_ALERTED = "3JANE_USD3_OC_ALERTED"
+CACHE_KEY_WITHDRAW_LIMIT_ALERTED = "3JANE_WITHDRAW_LIMIT_ALERTED"
 
 # --- ProtocolConfig keys (keccak256 of the string label) ---
 CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR = Web3.keccak(text="SUSD3_NOMINAL_BACKING_FLOOR")
@@ -159,6 +166,51 @@ def get_cache_int(key: str) -> int:
 def set_cache_value(key: str, value: int | float) -> None:
     """Write a numeric value to cache."""
     write_last_value_to_file(CACHE_FILENAME, key, value)
+
+
+def _get_alerted_value(cache_key: str) -> float:
+    """Read the last alerted value for a threshold alert (-1 = none outstanding)."""
+    raw_cached = get_last_value_for_key_from_file(CACHE_FILENAME, cache_key)
+    try:
+        return float(raw_cached) if isinstance(raw_cached, str) else -1.0
+    except ValueError:
+        return -1.0
+
+
+def should_alert_value_drop(cache_key: str, value: float, threshold: float) -> bool:
+    """Decide whether a lower-is-worse threshold alert should be sent.
+
+    Deduped like the debt cap check: repeat runs stay silent until the metric
+    drops below the last alerted value (worsens). Recovering to or above the
+    threshold clears the cache so the next breach alerts again. The caller
+    must record the value with mark_alerted_value() only after send_alert()
+    returns, so a failed Telegram send retries on the next run.
+
+    Args:
+        cache_key: Cache key holding the last alerted value (-1 = none outstanding).
+        value: Current metric value; lower is worse.
+        threshold: Alert when the value drops below this.
+
+    Returns:
+        True when a new alert should be sent.
+    """
+    if value >= threshold:
+        clear_alerted_value(cache_key)
+        return False
+
+    cached = _get_alerted_value(cache_key)
+    return not 0 <= cached <= value
+
+
+def mark_alerted_value(cache_key: str, value: float) -> None:
+    """Record the value a threshold alert fired for; call after send_alert() returns."""
+    set_cache_value(cache_key, value)
+
+
+def clear_alerted_value(cache_key: str) -> None:
+    """Clear an outstanding threshold alert so the next breach alerts again."""
+    if _get_alerted_value(cache_key) >= 0:
+        set_cache_value(cache_key, -1)
 
 
 def _as_bool(value: Any) -> bool:
@@ -554,12 +606,15 @@ def check_junior_buffer(susd3_backing: float, deployed_credit: float) -> None:
     A thin buffer means USD3 holders are closer to bearing losses directly.
     This matches the protocol's backing metric: sUSD3 backing value divided by
     deployed credit. The caller supplies both values converted to USDC.
+    Deduped via cache: re-alerts only when the ratio drops further.
 
     Args:
         susd3_backing: USD3 held by sUSD3, valued in USDC.
         deployed_credit: Borrowed waUSDC in the credit market, converted to USDC.
     """
     if deployed_credit <= 0:
+        # No deployed credit means nothing at risk: clear any outstanding alert.
+        clear_alerted_value(CACHE_KEY_JUNIOR_BUFFER_ALERTED)
         return
 
     buffer_ratio = susd3_backing / deployed_credit
@@ -570,7 +625,7 @@ def check_junior_buffer(susd3_backing: float, deployed_credit: float) -> None:
         format_usd(deployed_credit),
     )
 
-    if buffer_ratio < JUNIOR_BUFFER_THRESHOLD:
+    if should_alert_value_drop(CACHE_KEY_JUNIOR_BUFFER_ALERTED, buffer_ratio, JUNIOR_BUFFER_THRESHOLD):
         message = (
             f"⚠️ *3Jane Junior Buffer Low*\n"
             f"📊 sUSD3 buffer: {buffer_ratio:.2%} of deployed credit\n"
@@ -579,6 +634,7 @@ def check_junior_buffer(susd3_backing: float, deployed_credit: float) -> None:
             f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
         )
         send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
+        mark_alerted_value(CACHE_KEY_JUNIOR_BUFFER_ALERTED, buffer_ratio)
 
 
 def check_usd3_oc(susd3_backing: float, deployed_credit: float) -> None:
@@ -586,13 +642,16 @@ def check_usd3_oc(susd3_backing: float, deployed_credit: float) -> None:
 
     USD3 OC is deployed credit divided by senior at-risk credit after sUSD3
     absorbs first losses: deployed / (deployed - sUSD3). Alert thresholds use
-    the direct OC ratio, so 111% means OC is below 1.11x.
+    the direct OC ratio, so 111% means OC is below 1.11x. Deduped via cache:
+    re-alerts only when the ratio drops further (e.g. crossing into critical).
 
     Args:
         susd3_backing: USD3 held by sUSD3, valued in USDC.
         deployed_credit: Borrowed waUSDC in the credit market, converted to USDC.
     """
     if deployed_credit <= 0:
+        # No deployed credit means nothing at risk: clear any outstanding alert.
+        clear_alerted_value(CACHE_KEY_USD3_OC_ALERTED)
         return
 
     senior_at_risk = deployed_credit - susd3_backing
@@ -602,6 +661,8 @@ def check_usd3_oc(susd3_backing: float, deployed_credit: float) -> None:
             format_usd(susd3_backing),
             format_usd(deployed_credit),
         )
+        # Fully covered counts as recovered: clear any outstanding OC alert.
+        clear_alerted_value(CACHE_KEY_USD3_OC_ALERTED)
         return
 
     oc_ratio = deployed_credit / senior_at_risk
@@ -615,16 +676,17 @@ def check_usd3_oc(susd3_backing: float, deployed_credit: float) -> None:
         format_usd(senior_at_risk),
     )
 
+    if not should_alert_value_drop(CACHE_KEY_USD3_OC_ALERTED, oc_ratio, USD3_OC_HIGH_THRESHOLD):
+        return
+
     if oc_ratio < USD3_OC_CRITICAL_THRESHOLD:
         severity = AlertSeverity.CRITICAL
         title = "3Jane USD3 OC Critical"
         threshold = USD3_OC_CRITICAL_THRESHOLD
-    elif oc_ratio < USD3_OC_HIGH_THRESHOLD:
+    else:
         severity = AlertSeverity.HIGH
         title = "3Jane USD3 OC Low"
         threshold = USD3_OC_HIGH_THRESHOLD
-    else:
-        return
 
     message = (
         f"🚨 *{title}*\n"
@@ -635,6 +697,7 @@ def check_usd3_oc(susd3_backing: float, deployed_credit: float) -> None:
         f"🔗 [USD3](https://etherscan.io/address/{USD3_ADDRESS})"
     )
     send_alert(Alert(severity, message, PROTOCOL))
+    mark_alerted_value(CACHE_KEY_USD3_OC_ALERTED, oc_ratio)
 
 
 def check_insurance_fund(
@@ -675,13 +738,14 @@ def check_withdraw_limit(withdraw_limit: float) -> None:
     availableWithdrawLimit is the USDC the USD3 vault can immediately honor for
     withdrawals. When it falls below the threshold, withdrawals may queue or
     stall, signalling a liquidity squeeze on the senior tranche.
+    Deduped via cache: re-alerts only when the limit drops further.
 
     Args:
         withdraw_limit: USD3 availableWithdrawLimit in USDC.
     """
     logger.info("USD3 available withdraw limit: %s", format_usd(withdraw_limit))
 
-    if withdraw_limit < WITHDRAW_LIMIT_THRESHOLD:
+    if should_alert_value_drop(CACHE_KEY_WITHDRAW_LIMIT_ALERTED, withdraw_limit, WITHDRAW_LIMIT_THRESHOLD):
         message = (
             f"🚨 *3Jane USD3 Withdraw Liquidity Low*\n"
             f"📉 Available withdraw limit: {format_usd(withdraw_limit)} "
@@ -690,6 +754,7 @@ def check_withdraw_limit(withdraw_limit: float) -> None:
             f"🔗 [USD3](https://etherscan.io/address/{USD3_ADDRESS})"
         )
         send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
+        mark_alerted_value(CACHE_KEY_WITHDRAW_LIMIT_ALERTED, withdraw_limit)
 
 
 def check_vault_shutdown(client, usd3_vault, susd3_vault) -> None:  # type: ignore[no-untyped-def]
