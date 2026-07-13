@@ -28,6 +28,7 @@ profiles:
       - { name: "morpho-markets",         script: protocols/morpho/markets.py }
       - { name: "morpho-markets-v2",      script: protocols/morpho/markets_v2.py }
       - { name: "aave",                   script: protocols/aave/main.py }
+      - { name: "spark",                  script: protocols/spark/main.py }
       - { name: "lido-steth",             script: protocols/lido/steth/main.py }
       - { name: "lrt-pegs-curve",         script: protocols/lrt-pegs/curve/main.py }
       - { name: "lrt-pegs-fluid",         script: protocols/lrt-pegs/fluid/main.py }
@@ -49,6 +50,7 @@ profiles:
       - { name: "compound-proposals",     script: protocols/compound/proposals.py }
       - { name: "fluid-proposals",        script: protocols/fluid/proposals.py }
       - { name: "maker-proposals",        script: protocols/maker/proposals.py }
+      - { name: "spark-proposals",        script: protocols/spark/proposals.py }
 
   daily:
     cron: "19 8 * * *"

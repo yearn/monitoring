@@ -343,6 +343,21 @@ protocols:
       - name: "Safe Multisig"
         description: "3/6 multisig monitoring on Mainnet, Optimism, and Arbitrum"
 
+  spark:
+    display_name: "Spark"
+    description: "SparkLend utilization and Spark governance monitoring"
+    cadence: "Hourly"
+    tasks:
+      - protocols/spark/main.py
+      - protocols/spark/proposals.py
+    monitors:
+      - name: "Utilization"
+        description: "SparkLend mainnet market utilization above 99%"
+      - name: "Governance Proposals"
+        description: "New open proposals in Snapshot space sparkfi.eth (Spark governance portal)"
+      - name: "DSPause / Timelock"
+        description: "Tenderly alert on plot() in DSPause covering Spark spells (16-hour execution delay via Sky governance)"
+
   stables:
     display_name: "Stablecoins"
     description: "Cross-protocol stablecoin peg, oracle, and large-transfer monitoring"
