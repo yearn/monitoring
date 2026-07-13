@@ -17,25 +17,11 @@ logger = get_logger(PROTOCOL)
 
 ABI_ATOKEN = load_abi("protocols/aave/abi/AToken.json")
 
-# Active, non-frozen SparkLend reserves (Pool 0xC13e21B648A5Ee794902342038FF3aDAB66BE987).
+# Active, non-deprecated SparkLend reserves (Pool 0xC13e21B648A5Ee794902342038FF3aDAB66BE987).
+# Deprecated markets (DAI, sDAI, USDC, sUSDS, LBTC) and frozen reserves are excluded.
 ADDRESSES_BY_CHAIN = {
     # spToken, underlying, symbol
     Chain.MAINNET: [
-        (
-            "0x4DEDf26112B3Ec8eC46e7E31EA5e123490B05B8B",
-            "0x6B175474E89094C44Da98b954EedeAC495271d0F",
-            "DAI",
-        ),
-        (
-            "0x78f897F0fE2d3B5690EbAe7f19862DEacedF10a7",
-            "0x83F20F44975D03b1b09e64809B757c47f942BEeA",
-            "sDAI",
-        ),
-        (
-            "0x377C3bd93f2a2984E1E7bE6A5C22c525eD4A4815",
-            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-            "USDC",
-        ),
         (
             "0x59cD1C87501baa753d0B5B5Ab5D8416A45cD71DB",
             "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
@@ -67,19 +53,9 @@ ADDRESSES_BY_CHAIN = {
             "cbBTC",
         ),
         (
-            "0x6715bc100A183cc65502F05845b589c1919ca3d3",
-            "0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD",
-            "sUSDS",
-        ),
-        (
             "0xC02aB1A5eaA8d1B114EF786D9bde108cD4364359",
             "0xdC035D45d973E3EC169d2276DDab16f1e407384F",
             "USDS",
-        ),
-        (
-            "0xa9d4EcEBd48C282a70CfD3c469d6C8F178a5738E",
-            "0x8236a87084f8B84306f72007F36F2618A5634494",
-            "LBTC",
         ),
         (
             "0x779224df1c756b4EDD899854F32a53E8c2B2ce5d",

@@ -2,7 +2,7 @@
 
 ## Utilization
 
-`main.py` checks utilization rates of all active, non-frozen [SparkLend](https://etherscan.io/address/0xC13e21B648A5Ee794902342038FF3aDAB66BE987) markets on mainnet (Aave v3 fork, same logic as `protocols/aave/main.py`). Sends a Telegram alert when a market's utilization is above 99%.
+`main.py` checks utilization rates of active, non-deprecated [SparkLend](https://etherscan.io/address/0xC13e21B648A5Ee794902342038FF3aDAB66BE987) markets on mainnet (Aave v3 fork, same logic as `protocols/aave/main.py`): WETH, wstETH, WBTC, USDT, weETH, cbBTC, USDS, PYUSD. Deprecated markets (DAI, sDAI, USDC, sUSDS, LBTC) are excluded. Sends a Telegram alert when a market's utilization is above 99%.
 
 Run: `python protocols/spark/main.py`
 
