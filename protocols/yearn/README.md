@@ -50,7 +50,10 @@ For each supported chain (Mainnet, Polygon, Base, Arbitrum, Katana):
 
 ### Alerts
 
-If any unendorsed vaults are found, a Telegram alert is sent to the Yearn group listing each address grouped by chain. If the message exceeds the Telegram character limit, a short summary with a link to the GitHub Actions logs is sent instead.
+If any newly unendorsed vaults are found, a Telegram alert is sent to the Yearn
+group listing each address grouped by chain. After a vault has been included in
+an alert once, the monitor caches that chain/address pair and suppresses repeat
+alerts for it.
 
 ### Usage
 
@@ -263,4 +266,3 @@ All chains use the same contract address: `0x88ba032be87d5ef1fbe87336b7090767f36
 | Polygon | [polygonscan.com](https://polygonscan.com/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
 | Katana | [katanascan.com](https://katanascan.com/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
 | Optimism | [optimistic.etherscan.io](https://optimistic.etherscan.io/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
-

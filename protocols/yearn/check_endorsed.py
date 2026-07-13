@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from web3 import Web3
 
 from utils.alert import Alert, AlertSeverity, send_alert
+from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import Chain
 from utils.logger import get_logger
 from utils.web3_wrapper import ChainManager
@@ -27,6 +28,7 @@ YDAEMON_BASE_URL = "https://ydaemon.yearn.fi/vaults/v3"
 YDAEMON_PARAMS = "hideAlways=true&strategiesDetails=withDetails&strategiesCondition=inQueue"
 
 REGISTRY_ADDRESS = Web3.to_checksum_address("0xd40ecF29e001c76Dcc4cC0D9cd50520CE845B038")
+CACHE_KEY_PREFIX = "yearn_endorsed_alerted"
 REGISTRY_ABI = [
     {
         "inputs": [{"internalType": "address", "name": "", "type": "address"}],
@@ -38,6 +40,46 @@ REGISTRY_ABI = [
 ]
 
 CHAINS = [Chain.MAINNET, Chain.POLYGON, Chain.BASE, Chain.ARBITRUM, Chain.KATANA]
+
+
+def alerted_cache_key(chain: Chain, address: str) -> str:
+    """Return the persistent cache key for an already-alerted vault."""
+    return f"{CACHE_KEY_PREFIX}_{chain.chain_id}_{address.lower()}"
+
+
+def was_already_alerted(chain: Chain, address: str) -> bool:
+    """Return whether this unendorsed vault has already triggered an alert."""
+    cached = get_last_value_for_key_from_file(cache_filename, alerted_cache_key(chain, address))
+    return str(cached) == "1"
+
+
+def mark_alerted(chain: Chain, address: str) -> None:
+    """Persist that this unendorsed vault has triggered an alert."""
+    write_last_value_to_file(cache_filename, alerted_cache_key(chain, address), 1)
+
+
+def filter_new_unendorsed(errors: Dict[Chain, List[str]]) -> Dict[Chain, List[str]]:
+    """Remove unendorsed vaults that have already been alerted before."""
+    new_errors: Dict[Chain, List[str]] = {}
+    for chain, addresses in errors.items():
+        new_addresses = [addr for addr in addresses if not was_already_alerted(chain, addr)]
+        suppressed = len(addresses) - len(new_addresses)
+        if suppressed:
+            logger.info(
+                "Suppressed %d previously alerted unendorsed vaults on %s",
+                suppressed,
+                chain.name,
+            )
+        if new_addresses:
+            new_errors[chain] = new_addresses
+    return new_errors
+
+
+def mark_alerted_errors(errors: Dict[Chain, List[str]]) -> None:
+    """Mark every vault included in a sent alert as already alerted."""
+    for chain, addresses in errors.items():
+        for address in addresses:
+            mark_alerted(chain, address)
 
 
 def fetch_ydaemon_vaults(chain: Chain) -> List[str]:
@@ -108,7 +150,7 @@ def build_alert_message(errors: Dict[Chain, List[str]], total_checked: int) -> s
     total_errors = sum(len(addrs) for addrs in errors.values())
     lines = [
         "👹 *yDaemon Endorsed Check*",
-        f"Checked {total_checked} vaults, found {total_errors} unendorsed:\n",
+        f"Checked {total_checked} vaults, found {total_errors} newly unendorsed:\n",
     ]
     for chain, addresses in errors.items():
         lines.append(f"*{chain.name}* ({len(addresses)}):")
@@ -148,12 +190,24 @@ def main() -> None:
     total_errors = sum(len(addrs) for addrs in all_errors.values())
     logger.info("Done. %d/%d vaults unendorsed", total_errors, total_checked)
 
+    new_errors = filter_new_unendorsed(all_errors)
+    new_total_errors = sum(len(addrs) for addrs in new_errors.values())
+
     if not all_errors:
         logger.info("All vaults endorsed, no alert needed")
         return
 
-    message = build_alert_message(all_errors, total_checked)
+    if not new_errors:
+        logger.info(
+            "All %d unendorsed vaults were previously alerted, no alert needed",
+            total_errors,
+        )
+        return
+
+    logger.info("Alerting on %d newly unendorsed vaults", new_total_errors)
+    message = build_alert_message(new_errors, total_checked)
     send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
+    mark_alerted_errors(new_errors)
 
 
 if __name__ == "__main__":
