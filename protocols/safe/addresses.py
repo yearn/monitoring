@@ -64,6 +64,12 @@ ALL_SAFE_ADDRESSES = [
     ["AAVE", "polygon-main", "0x1A0581dd5C7C3DA4Ba1CDa7e0BcA7286afc4973b"],
     ["AAVE", "arbitrum-main", "0x1A0581dd5C7C3DA4Ba1CDa7e0BcA7286afc4973b"],
     [
+        "SPARK",
+        "mainnet",
+        "0x44efFc473e81632B12486866AA1678edbb7BEeC3",
+        "SparkLend Freezer Multisig",
+    ],
+    [
         "MORPHO",
         "mainnet",
         "0x84258B3C495d8e9b10D0d4A7867392F149Da4274",
