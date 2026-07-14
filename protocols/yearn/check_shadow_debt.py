@@ -7,7 +7,7 @@ but is NOT in the vault's default queue. This causes:
   - Reported APR to be incomplete (likely understated)
   - Vault depositors to see inaccurate APR
 
-This script fetches all vaults from yDaemon, queries their default queues and
+This script fetches all vaults from Kong, queries their default queues and
 strategy debt allocations, and alerts if any strategies with debt are missing
 from the default queue.
 """
@@ -21,6 +21,7 @@ import requests
 from dotenv import load_dotenv
 from web3 import Web3
 
+from protocols.yearn.kong import STRATEGY_SOURCE_ALL, fetch_kong_vaults
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import Chain
@@ -32,10 +33,6 @@ load_dotenv()
 logger = get_logger("yearn.check_shadow_debt")
 
 PROTOCOL = "yearn"
-
-YDAEMON_BASE_URL = "https://ydaemon.yearn.fi/vaults/v3"
-# Get all strategies regardless of queue status - we'll check queue membership on-chain
-YDAEMON_PARAMS = "hideAlways=true&strategiesDetails=withDetails"
 
 VAULT_ABI = load_abi("common-abi/YearnV3Vault.json")
 
@@ -85,8 +82,8 @@ class ShadowDebtIssue:
     vault_decimals: int
 
 
-def fetch_ydaemon_vaults(chain: Chain) -> List[Dict]:
-    """Fetch vault data from yDaemon API for a given chain.
+def fetch_kong_shadow_debt_vaults(chain: Chain) -> List[Dict]:
+    """Fetch vault data from Kong for a given chain.
 
     Args:
         chain: The chain to fetch vaults for.
@@ -94,31 +91,8 @@ def fetch_ydaemon_vaults(chain: Chain) -> List[Dict]:
     Returns:
         List of vault data dicts with address, symbol, decimals, and strategies.
     """
-    url = f"{YDAEMON_BASE_URL}?{YDAEMON_PARAMS}&chainIDs={chain.chain_id}"
-    logger.info("Fetching vaults from yDaemon for %s", chain.name)
-    response = requests.get(url, timeout=30)
-    response.raise_for_status()
-    vaults = response.json()
-
-    result = []
-    for vault in vaults:
-        if "address" not in vault:
-            continue
-
-        # Extract strategy addresses from yDaemon data
-        # yDaemon returns strategies as an array of strategy objects
-        strategies = vault.get("strategies", [])
-        all_strategies = [s["address"] for s in strategies if isinstance(s, dict) and "address" in s]
-
-        result.append(
-            {
-                "address": vault["address"].lower(),
-                "symbol": vault.get("symbol", "UNKNOWN"),
-                "decimals": vault.get("decimals"),  # Will be validated/fetched on-chain if missing
-                "known_strategies": [s.lower() for s in all_strategies],
-            }
-        )
-
+    logger.info("Fetching vaults from Kong for %s", chain.name)
+    result = fetch_kong_vaults(chain, strategy_source=STRATEGY_SOURCE_ALL)
     logger.info("Found %d vaults on %s", len(result), chain.name)
     return result
 
@@ -389,7 +363,7 @@ def check_vault_shadow_debt(chain: Chain, vault_data: Dict, min_debt_threshold: 
 
     Args:
         chain: The chain.
-        vault_data: Vault data from yDaemon.
+        vault_data: Vault data from Kong.
         min_debt_threshold: Minimum debt threshold in tokens.
 
     Returns:
@@ -466,9 +440,9 @@ def main() -> None:
         logger.info("Checking chain %s", chain.name)
 
         try:
-            vaults = fetch_ydaemon_vaults(chain)
+            vaults = fetch_kong_shadow_debt_vaults(chain)
         except requests.RequestException as e:
-            logger.error("Failed to fetch yDaemon data for %s: %s", chain.name, e)
+            logger.error("Failed to fetch Kong data for %s: %s", chain.name, e)
             continue
 
         if not vaults:
