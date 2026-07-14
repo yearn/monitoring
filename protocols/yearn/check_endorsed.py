@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Verify Yearn v3 yDaemon vaults are endorsed on-chain in the registry.
+"""Verify Yearn v3 Kong vaults are endorsed on-chain in the registry.
 
-Fetches vault metadata from yDaemon per chain and checks each address via
+Fetches vault metadata from Kong per chain and checks each address via
 the registry contract's isEndorsed function. Sends a Telegram alert if any
 vaults are not endorsed.
 """
@@ -12,6 +12,7 @@ import requests
 from dotenv import load_dotenv
 from web3 import Web3
 
+from protocols.yearn.kong import STRATEGY_SOURCE_DEFAULT_QUEUE, fetch_kong_vaults
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import Chain
@@ -23,9 +24,6 @@ load_dotenv()
 logger = get_logger("yearn.check_endorsed")
 
 PROTOCOL = "yearn"
-
-YDAEMON_BASE_URL = "https://ydaemon.yearn.fi/vaults/v3"
-YDAEMON_PARAMS = "hideAlways=true&strategiesDetails=withDetails&strategiesCondition=inQueue"
 
 REGISTRY_ADDRESS = Web3.to_checksum_address("0xd40ecF29e001c76Dcc4cC0D9cd50520CE845B038")
 CACHE_KEY_PREFIX = "yearn_endorsed_alerted"
@@ -82,8 +80,8 @@ def mark_alerted_errors(errors: Dict[Chain, List[str]]) -> None:
             mark_alerted(chain, address)
 
 
-def fetch_ydaemon_vaults(chain: Chain) -> List[str]:
-    """Fetch vault addresses from yDaemon API for a given chain.
+def fetch_kong_vault_addresses(chain: Chain) -> List[str]:
+    """Fetch active vault addresses from Kong for a given chain.
 
     Args:
         chain: The chain to fetch vaults for.
@@ -91,11 +89,8 @@ def fetch_ydaemon_vaults(chain: Chain) -> List[str]:
     Returns:
         List of vault addresses.
     """
-    url = f"{YDAEMON_BASE_URL}?{YDAEMON_PARAMS}&chainIDs={chain.chain_id}"
-    response = requests.get(url, timeout=30)
-    response.raise_for_status()
-    vaults = response.json()
-    return [vault["address"].lower() for vault in vaults if "address" in vault]
+    vaults = fetch_kong_vaults(chain, strategy_source=STRATEGY_SOURCE_DEFAULT_QUEUE)
+    return [str(vault["address"]) for vault in vaults]
 
 
 def fetch_onchain_endorsed(chain: Chain, addresses: List[str]) -> Dict[str, bool]:
@@ -149,7 +144,7 @@ def build_alert_message(errors: Dict[Chain, List[str]], total_checked: int) -> s
     """
     total_errors = sum(len(addrs) for addrs in errors.values())
     lines = [
-        "👹 *yDaemon Endorsed Check*",
+        "👹 *Kong Endorsed Check*",
         f"Checked {total_checked} vaults, found {total_errors} newly unendorsed:\n",
     ]
     for chain, addresses in errors.items():
@@ -162,7 +157,7 @@ def build_alert_message(errors: Dict[Chain, List[str]], total_checked: int) -> s
 
 def main() -> None:
     """Run the endorsed vault check across all configured chains."""
-    logger.info("Starting yDaemon endorsed vault check")
+    logger.info("Starting Kong endorsed vault check")
 
     all_errors: Dict[Chain, List[str]] = {}
     total_checked = 0
@@ -170,9 +165,9 @@ def main() -> None:
     for chain in CHAINS:
         logger.info("Checking chain %s (id=%d)", chain.name, chain.chain_id)
         try:
-            addresses = fetch_ydaemon_vaults(chain)
+            addresses = fetch_kong_vault_addresses(chain)
         except requests.RequestException as e:
-            logger.error("Failed to fetch yDaemon data for %s: %s", chain.name, e)
+            logger.error("Failed to fetch Kong data for %s: %s", chain.name, e)
             continue
 
         if not addresses:

@@ -18,6 +18,7 @@ import requests
 from dotenv import load_dotenv
 from web3 import Web3
 
+from protocols.yearn.kong import STRATEGY_SOURCE_DEFAULT_QUEUE, fetch_kong_vaults
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_path
 from utils.chains import Chain
@@ -29,10 +30,6 @@ load_dotenv()
 logger = get_logger("yearn.check_stuck_triggers")
 
 PROTOCOL = "yearn"
-
-# yDaemon API configuration
-YDAEMON_BASE_URL = "https://ydaemon.yearn.fi/vaults/v3"
-YDAEMON_PARAMS = "hideAlways=true&strategiesDetails=withDetails&strategiesCondition=inQueue"
 
 # CommonReportTrigger contract (same address on all chains)
 COMMON_REPORT_TRIGGER = Web3.to_checksum_address("0xf8dF17a35c88AbB25e83C92f9D293B4368b9D52D")
@@ -123,8 +120,8 @@ class StuckTrigger:
     reason: Optional[str] = None
 
 
-def fetch_ydaemon_vaults(chain: Chain) -> List[dict]:
-    """Fetch vault metadata from yDaemon API.
+def fetch_kong_trigger_vaults(chain: Chain) -> List[dict]:
+    """Fetch vault metadata from Kong.
 
     Args:
         chain: The chain to fetch vaults for.
@@ -132,17 +129,14 @@ def fetch_ydaemon_vaults(chain: Chain) -> List[dict]:
     Returns:
         List of vault objects with addresses and strategies.
     """
-    url = f"{YDAEMON_BASE_URL}?{YDAEMON_PARAMS}&chainIDs={chain.chain_id}"
-    response = requests.get(url, timeout=30)
-    response.raise_for_status()
-    return response.json()
+    return fetch_kong_vaults(chain, strategy_source=STRATEGY_SOURCE_DEFAULT_QUEUE)
 
 
 def extract_strategies_from_vaults(vaults: List[dict]) -> List[str]:
     """Extract unique strategy addresses from vault data.
 
     Args:
-        vaults: List of vault objects from yDaemon.
+        vaults: List of vault objects from Kong.
 
     Returns:
         List of unique strategy addresses (lowercase).
@@ -163,7 +157,7 @@ def check_triggers_for_chain(
 
     Args:
         chain: The chain to check triggers on.
-        vaults: List of vault objects from yDaemon.
+        vaults: List of vault objects from Kong.
         standalone_strategies: Optional list of standalone strategy addresses to check.
 
     Returns:
@@ -184,21 +178,21 @@ def check_triggers_for_chain(
             vault_addr = Web3.to_checksum_address(vault["address"])
             if "strategies" in vault:
                 for strategy in vault["strategies"]:
-                    strategy_addr = Web3.to_checksum_address(strategy["address"])
-                    key = f"vault_report_{vault_addr.lower()}_{strategy_addr.lower()}"
-                    batch.add(trigger_contract.functions.vaultReportTrigger(vault_addr, strategy_addr))
+                    strategy_addr_checksum = Web3.to_checksum_address(strategy["address"])
+                    key = f"vault_report_{vault_addr.lower()}_{strategy_addr_checksum.lower()}"
+                    batch.add(trigger_contract.functions.vaultReportTrigger(vault_addr, strategy_addr_checksum))
                     query_map.append(key)
 
         # Check standalone strategy report triggers
         if standalone_strategies:
-            for strategy_addr in standalone_strategies:
-                strategy_addr_checksum = Web3.to_checksum_address(strategy_addr)
-                key = f"strategy_report_{strategy_addr}"
+            for raw_strategy_addr in standalone_strategies:
+                strategy_addr_checksum = Web3.to_checksum_address(raw_strategy_addr)
+                key = f"strategy_report_{raw_strategy_addr}"
                 batch.add(trigger_contract.functions.strategyReportTrigger(strategy_addr_checksum))
                 query_map.append(key)
 
                 # Also check tend triggers for standalone strategies
-                key_tend = f"strategy_tend_{strategy_addr}"
+                key_tend = f"strategy_tend_{raw_strategy_addr}"
                 batch.add(trigger_contract.functions.strategyTendTrigger(strategy_addr_checksum))
                 query_map.append(key_tend)
 
@@ -489,8 +483,8 @@ def main() -> None:
         logger.info("Checking chain %s (id=%d)", chain.name, chain.chain_id)
 
         try:
-            # Fetch vault data from yDaemon
-            vaults = fetch_ydaemon_vaults(chain)
+            # Fetch vault data from Kong
+            vaults = fetch_kong_trigger_vaults(chain)
             logger.info("Found %d vaults for %s", len(vaults), chain.name)
 
             # Extract strategies from vaults
@@ -516,7 +510,7 @@ def main() -> None:
                     current_reasons[f"{chain.chain_id}_{trigger_key}"] = reason
 
         except requests.RequestException as e:
-            logger.error("Failed to fetch yDaemon data for %s: %s", chain.name, e)
+            logger.error("Failed to fetch Kong data for %s: %s", chain.name, e)
             continue
         except Exception as e:
             logger.error("Error checking triggers for %s: %s", chain.name, e, exc_info=True)

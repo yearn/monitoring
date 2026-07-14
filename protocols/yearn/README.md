@@ -38,15 +38,17 @@ Optional flags:
 
 ## Endorsed Vault Check
 
-The script `yearn/check_endorsed.py` verifies that all Yearn v3 vaults listed in the yDaemon API are actually endorsed on-chain in the registry contract. It runs daily via the [monitoring runner](../automation/jobs.yaml).
+The script `yearn/check_endorsed.py` verifies that active Yearn v3 vaults
+listed in Kong are actually endorsed on-chain in the registry contract. It runs
+daily via the [monitoring runner](../automation/jobs.yaml).
 
 ### How It Works
 
 For each supported chain (Mainnet, Polygon, Base, Arbitrum, Katana):
 
-1. Fetches all v3 vault addresses from the [yDaemon API](https://ydaemon.yearn.fi).
+1. Fetches active v3 vault addresses from the [Kong API](https://kong.yearn.fi/api/gql).
 2. Calls `isEndorsed(address)` on the registry contract (`0xd40ecF29e001c76Dcc4cC0D9cd50520CE845B038`).
-3. Collects any vault that is listed in yDaemon but **not** endorsed on-chain.
+3. Collects any Kong-listed vault that is **not** endorsed on-chain.
 
 ### Alerts
 
@@ -84,7 +86,7 @@ If a vault has active strategies with debt that are NOT in this queue, the weigh
 
 For each vault on each supported chain (Mainnet, Polygon, Base, Arbitrum, Katana):
 
-1. Fetches vault data from the [yDaemon API](https://ydaemon.yearn.fi), including all known strategies
+1. Fetches vault data from the [Kong API](https://kong.yearn.fi/api/gql), including all known strategies
 2. Queries the vault's default queue via `get_default_queue()`
 3. Batch-queries `strategies(address)` for each known strategy to get debt allocation
 4. Identifies strategies with `current_debt > 0` that are **not** in the default queue
@@ -135,7 +137,7 @@ The CommonReportTrigger contract (`0xf8dF17a35c88AbB25e83C92f9D293B4368b9D52D`) 
 
 For each supported chain (Mainnet, Polygon, Base, Arbitrum, Katana):
 
-1. Fetches all v3 vaults and their strategies from the [yDaemon API](https://ydaemon.yearn.fi)
+1. Fetches all v3 vaults and default-queue strategies from the [Kong API](https://kong.yearn.fi/api/gql)
 2. Batch-queries the CommonReportTrigger contract for:
    - `vaultReportTrigger(vault, strategy)` - For all vault/strategy pairs
    - `strategyReportTrigger(strategy)` - For standalone strategies
@@ -147,7 +149,7 @@ For each supported chain (Mainnet, Polygon, Base, Arbitrum, Katana):
 ### Data Sources
 
 - **On-chain RPC calls**: Queries CommonReportTrigger contract functions directly
-- **yDaemon API**: Fetches vault and strategy addresses to monitor
+- **Kong API**: Fetches vault and strategy addresses to monitor
 - **Cache file**: JSON file (`tks-trigger-cache.json`) tracks trigger states over time
 
 ### Alerts
