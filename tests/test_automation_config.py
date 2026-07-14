@@ -70,7 +70,7 @@ class TestLoadJobsConfig(unittest.TestCase):
                     cron: "19 8 * * 0"
                     enabled: false
                     tasks:
-                      - { name: "endorsed", script: yearn/check_endorsed.py }
+                      - { name: "disabled", script: yearn/disabled.py }
                 """,
             )
             cfg = load_jobs_config(path)

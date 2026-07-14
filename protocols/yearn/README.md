@@ -36,35 +36,6 @@ Optional flags:
 
 =======
 
-## Endorsed Vault Check
-
-The script `yearn/check_endorsed.py` verifies that active Yearn v3 vaults
-listed in Kong are actually endorsed on-chain in the registry contract. It runs
-daily via the [monitoring runner](../automation/jobs.yaml).
-
-### How It Works
-
-For each supported chain (Mainnet, Polygon, Base, Arbitrum, Katana):
-
-1. Fetches active v3 vault addresses from the [Kong API](https://kong.yearn.fi/api/gql).
-2. Calls `isEndorsed(address)` on the registry contract (`0xd40ecF29e001c76Dcc4cC0D9cd50520CE845B038`).
-3. Collects any Kong-listed vault that is **not** endorsed on-chain.
-
-### Alerts
-
-If any newly unendorsed vaults are found, a Telegram alert is sent to the Yearn
-group listing each address grouped by chain. After a vault has been included in
-an alert once, the monitor caches that chain/address pair and suppresses repeat
-alerts for it.
-
-### Usage
-
-```bash
-uv run yearn/check_endorsed.py
-```
-
-=======
-
 ## Shadow Debt Check
 
 The script `yearn/check_shadow_debt.py` detects "shadow debt" issues in Yearn v3 vaults - when strategies have allocated debt but are NOT in the vault's default queue. This causes APR oracle calculations to be incomplete.

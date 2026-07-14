@@ -67,7 +67,6 @@ profiles:
       - { name: "tenderly",             script: utils/tenderly/tenderly.py }
       - { name: "yearn-check-shadow-debt", script: protocols/yearn/check_shadow_debt.py, enabled: false }
       - { name: "compound",             script: protocols/compound/main.py }
-      - { name: "yearn-check-endorsed", script: protocols/yearn/check_endorsed.py }
       - { name: "yearn-check-timelock-delay", script: protocols/yearn/check_timelock_delay.py }
       - { name: "prune-alerts",         script: utils/prune_alerts.py }
 
