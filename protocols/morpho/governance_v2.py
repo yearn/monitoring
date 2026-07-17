@@ -25,16 +25,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List
 
-import requests
 from web3 import Web3
 
 from protocols.morpho._shared import (
-    API_URL,
-    SUPPORTED_CHAINS,
+    PROTOCOL,
     MorphoV2MonitoringError,
-    get_v2_vault_config,
+    execute_graphql,
     get_vault_url,
+    require_configured_keys,
 )
+from protocols.morpho.config import VAULTS_V2_BY_CHAIN, get_vault_query_config
 from protocols.morpho.v2_decoders import decode_submit, submit_data_key
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import (
@@ -44,10 +44,8 @@ from utils.cache import (
     write_last_value_to_file,
 )
 from utils.chains import Chain
-from utils.http_client import request_with_retry
 from utils.logger import get_logger
 
-PROTOCOL = "morpho"
 logger = get_logger("morpho.governance_v2")
 
 # Cache value-type tags used with utils.cache.morpho_key.
@@ -112,7 +110,6 @@ class V2GovernanceSnapshot:
     name: str
     address: str  # checksummed
     chain: Chain
-    risk_level: int
     owner: str  # checksummed
     curator: str
     sentinels: List[str]  # checksummed, sorted
@@ -144,38 +141,29 @@ def fetch_governance_snapshots() -> Dict[Chain, List[V2GovernanceSnapshot]]:
     Issues a single ``vaultV2s(where: { address_in })`` query and joins the
     result back to the static list to inherit the configured risk level.
     """
-    addr_to_meta, addresses, chain_ids = get_v2_vault_config()
+    addr_to_meta, addresses, chain_ids = get_vault_query_config(VAULTS_V2_BY_CHAIN, governance_only=True)
 
     if not addresses:
         return {}
 
-    try:
-        response = request_with_retry(
-            "post",
-            API_URL,
-            json={
-                "query": _GOVERNANCE_QUERY,
-                "variables": {"addresses": addresses, "chainIds": chain_ids},
-            },
-        )
-    except requests.RequestException as e:
-        raise MorphoV2MonitoringError(f"Failed to fetch Morpho Vault V2 governance: {e}") from e
-
-    payload = response.json()
-    if "errors" in payload:
-        raise MorphoV2MonitoringError(f"Morpho GraphQL errors fetching Vault V2 governance: {payload['errors']}")
-
-    items = payload.get("data", {}).get("vaultV2s", {}).get("items") or []
+    data = execute_graphql(
+        _GOVERNANCE_QUERY,
+        {"addresses": addresses, "chainIds": chain_ids},
+        "Vault V2 governance",
+        error_type=MorphoV2MonitoringError,
+    )
+    items = data.get("vaultV2s", {}).get("items") or []
     by_addr: dict[str, dict[str, Any]] = {item["address"].lower(): item for item in items}
-    missing_addresses = sorted(set(addr_to_meta) - set(by_addr))
-    if missing_addresses:
-        raise MorphoV2MonitoringError(
-            "Morpho API omitted configured Vault V2 governance addresses: " + ", ".join(missing_addresses)
-        )
+    require_configured_keys(
+        addr_to_meta,
+        by_addr,
+        "Vault V2 governance addresses",
+        error_type=MorphoV2MonitoringError,
+    )
 
-    result: Dict[Chain, List[V2GovernanceSnapshot]] = {chain: [] for chain in SUPPORTED_CHAINS}
+    result: Dict[Chain, List[V2GovernanceSnapshot]] = {chain: [] for chain in VAULTS_V2_BY_CHAIN}
 
-    for addr_lc, (chain, name, risk_level) in addr_to_meta.items():
+    for addr_lc, (chain, config) in addr_to_meta.items():
         item = by_addr[addr_lc]
 
         sentinels = [_checksum_or_empty(s["sentinel"]["address"]) for s in (item.get("sentinels") or [])]
@@ -193,10 +181,9 @@ def fetch_governance_snapshots() -> Dict[Chain, List[V2GovernanceSnapshot]]:
 
         result.setdefault(chain, []).append(
             V2GovernanceSnapshot(
-                name=name,
+                name=config.name,
                 address=_checksum_or_empty(item["address"]),
                 chain=chain,
-                risk_level=risk_level,
                 owner=_checksum_or_empty((item.get("owner") or {}).get("address") or ""),
                 curator=_checksum_or_empty((item.get("curator") or {}).get("address") or ""),
                 sentinels=sorted(sentinels),

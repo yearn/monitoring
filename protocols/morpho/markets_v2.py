@@ -9,8 +9,7 @@ for each vault reads its adapters on-chain and:
   V2 introduces a *new* unknown v1 vault that operators should add.
 * For ``MorphoMarketV1AdapterV2`` (V2 wraps Morpho Blue markets directly) —
   reads ``expectedSupplyAssets`` per market, fetches market metadata via
-  GraphQL, and runs the existing v1 risk-tier scoring (``MARKETS_RISK_*`` +
-  ``ALLOCATION_TIERS`` + ``MAX_RISK_THRESHOLDS``).
+  GraphQL, and applies the shared risk-tier policy from ``risk.py``.
 
 Bad debt is pulled per market from the same GraphQL endpoint v1 uses. Normal
 Vault V2 liquidity uses the API's immediately withdrawable ``liquidityUsd``;
@@ -21,27 +20,31 @@ YV-collateral strategy vaults use the combined v1/v2 coverage check in
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-import requests
 from web3 import Web3
 
 from protocols.morpho._shared import (
-    API_URL,
-    SUPPORTED_CHAINS,
+    PROTOCOL,
     MarketMetrics,
     MorphoV2MonitoringError,
+    execute_graphql,
     fetch_market_metrics,
+    format_low_liquidity_message,
     get_market_url,
-    get_v2_vault_config,
     get_vault_url,
+    require_configured_keys,
 )
-from protocols.morpho.markets import (
-    BAD_DEBT_RATIO,
+from protocols.morpho.config import (
+    VAULTS_V1_BY_CHAIN,
+    VAULTS_V2_BY_CHAIN,
+    get_vault_query_config,
+    is_collateral_vault,
+)
+from protocols.morpho.risk import (
     LIQUIDITY_THRESHOLD,
     MAX_RISK_THRESHOLDS,
-    VAULTS_BY_CHAIN,
-    get_market_allocation_threshold,
+    assess_exposure,
     get_market_risk_level,
-    is_yv_collateral_v2_vault,
+    is_low_liquidity,
 )
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
@@ -52,11 +55,9 @@ from utils.cache import (
     write_last_value_to_file,
 )
 from utils.chains import Chain
-from utils.http_client import request_with_retry
 from utils.logger import get_logger
 from utils.web3_wrapper import ChainManager, Web3Client
 
-PROTOCOL = "morpho"
 logger = get_logger("morpho.markets_v2")
 
 ABI_VAULT_V2 = load_abi("protocols/morpho/abi/vault_v2.json")
@@ -144,48 +145,39 @@ def discover_v2_vaults_by_chain() -> Dict[Chain, List[V2Vault]]:
     joins the result back to the static list to inherit the configured risk
     level. Raises if the API omits any configured vault.
     """
-    addr_to_meta, addresses, chain_ids = get_v2_vault_config()
+    addr_to_meta, addresses, chain_ids = get_vault_query_config(VAULTS_V2_BY_CHAIN)
 
     if not addresses:
         return {}
 
-    try:
-        response = request_with_retry(
-            "post",
-            API_URL,
-            json={
-                "query": _STATE_QUERY,
-                "variables": {"addresses": addresses, "chainIds": chain_ids},
-            },
-        )
-    except requests.RequestException as e:
-        raise MorphoV2MonitoringError(f"Failed to fetch Morpho Vault V2 state: {e}") from e
-
-    data = response.json()
-    if "errors" in data:
-        raise MorphoV2MonitoringError(f"Morpho GraphQL errors fetching Vault V2 state: {data['errors']}")
-
-    items = data.get("data", {}).get("vaultV2s", {}).get("items") or []
+    data = execute_graphql(
+        _STATE_QUERY,
+        {"addresses": addresses, "chainIds": chain_ids},
+        "Vault V2 state",
+        error_type=MorphoV2MonitoringError,
+    )
+    items = data.get("vaultV2s", {}).get("items") or []
     by_addr: dict[str, dict[str, Any]] = {item["address"].lower(): item for item in items}
-    missing_addresses = sorted(set(addr_to_meta) - set(by_addr))
-    if missing_addresses:
-        raise MorphoV2MonitoringError(
-            "Morpho API omitted configured Vault V2 addresses: " + ", ".join(missing_addresses)
-        )
+    require_configured_keys(
+        addr_to_meta,
+        by_addr,
+        "Vault V2 addresses",
+        error_type=MorphoV2MonitoringError,
+    )
 
-    result: Dict[Chain, List[V2Vault]] = {chain: [] for chain in SUPPORTED_CHAINS}
-    for addr_lc, (chain, name, risk_level) in addr_to_meta.items():
+    result: Dict[Chain, List[V2Vault]] = {chain: [] for chain in VAULTS_V2_BY_CHAIN}
+    for addr_lc, (chain, config) in addr_to_meta.items():
         item = by_addr[addr_lc]
         result.setdefault(chain, []).append(
             V2Vault(
-                name=name,
+                name=config.name,
                 address=Web3.to_checksum_address(item["address"]),
                 chain=chain,
                 asset_address=item["asset"]["address"],
                 asset_symbol=item["asset"]["symbol"],
                 curator=(item.get("curator") or {}).get("address") or "",
                 owner=(item.get("owner") or {}).get("address") or "",
-                risk_level=risk_level,
+                risk_level=config.risk_level,
                 total_assets_usd=float(item.get("totalAssetsUsd") or 0),
                 liquidity_usd=float(item.get("liquidityUsd") or 0),
                 graphql_adapters=(item.get("adapters") or {}).get("items") or [],
@@ -335,20 +327,28 @@ def _assess_market(
 
     allocation_ratio = min(allocation_usd / vault_total_assets_usd, 1.0)
     risk_level = get_market_risk_level(market_id, vault.chain)
-    threshold = get_market_allocation_threshold(risk_level, vault.risk_level)
+    assessment = assess_exposure(
+        allocation_ratio,
+        risk_level,
+        vault.risk_level,
+        bad_debt_usd=market.bad_debt.usd,
+        borrow_assets_usd=market.state.borrow_assets_usd,
+    )
     market_label = _market_label(market, market_id, vault.chain)
     allocation_violation = None
-    if allocation_ratio > threshold:
-        allocation_violation = f"- {market_label} (risk {risk_level}): {allocation_ratio:.1%} (max: {threshold:.1%})"
+    if assessment.allocation_exceeded:
+        allocation_violation = (
+            f"- {market_label} (risk {risk_level}): {assessment.allocation_ratio:.1%} "
+            f"(max: {assessment.allocation_threshold:.1%})"
+        )
 
     bad_debt_usd = market.bad_debt.usd
-    borrow_usd = market.state.borrow_assets_usd
     bad_debt_alert = None
-    if borrow_usd > 0 and bad_debt_usd / borrow_usd > BAD_DEBT_RATIO:
-        bad_debt_alert = f"- {market_label}: ${bad_debt_usd:,.2f} ({bad_debt_usd / borrow_usd:.2%} of borrowed)"
+    if assessment.bad_debt_exceeded:
+        bad_debt_alert = f"- {market_label}: ${bad_debt_usd:,.2f} ({assessment.bad_debt_ratio:.2%} of borrowed)"
 
     return MarketAssessment(
-        risk_score=risk_level * allocation_ratio,
+        risk_score=assessment.risk_score,
         allocation_violation=allocation_violation,
         bad_debt_alert=bad_debt_alert,
     )
@@ -430,7 +430,7 @@ def analyze_vault_adapter(vault: V2Vault, adapter: AdapterInfo) -> None:
     allocation_ratio = _adapter_allocation_ratio(vault, adapter.address)
     if allocation_ratio is not None and allocation_ratio < MIN_VAULT_ADAPTER_ALLOCATION_RATIO:
         return
-    monitored = {str(entry[1]).lower() for entry in VAULTS_BY_CHAIN.get(vault.chain, [])}
+    monitored = {config.address.lower() for config in VAULTS_V1_BY_CHAIN.get(vault.chain, ())}
     wrapped_lc = adapter.wrapped_v1_vault.lower()
     if wrapped_lc in monitored:
         return
@@ -446,7 +446,7 @@ def analyze_vault_adapter(vault: V2Vault, adapter: AdapterInfo) -> None:
             AlertSeverity.LOW,
             f"ℹ️ V2 [{vault.name}]({vault_url}) on {vault.chain.name} wraps unmonitored v1 vault "
             f"`{adapter.wrapped_v1_vault}` — consider adding it to "
-            f"morpho/markets.py:VAULTS_BY_CHAIN.",
+            f"morpho/config.py:VAULTS_V1_BY_CHAIN.",
             PROTOCOL,
         )
     )
@@ -470,25 +470,24 @@ def analyze_v2_vault(client: Web3Client, vault: V2Vault) -> None:
     if market_adapters:
         score_market_allocations(vault, market_adapters, vault.total_assets_usd)
 
-    if not is_yv_collateral_v2_vault(vault.address, vault.chain):
+    if not is_collateral_vault(vault.address, vault.chain, version=2):
         check_low_liquidity(vault)
 
 
 def check_low_liquidity(vault: V2Vault) -> None:
     """Alert when a non-collateral Vault V2 has less than 1% withdrawable liquidity."""
-    if vault.total_assets_usd < 10_000:
-        return
-
-    liquidity_ratio = vault.liquidity_usd / vault.total_assets_usd
-    if liquidity_ratio >= LIQUIDITY_THRESHOLD:
+    if not is_low_liquidity(vault.total_assets_usd, vault.liquidity_usd):
         return
 
     vault_url = get_vault_url(vault.address, vault.chain)
-    message = (
-        f"⚠️ Low liquidity in V2 [{vault.name}]({vault_url}) on {vault.chain.name}\n"
-        f"💰 Liquidity: ${vault.liquidity_usd:,.2f} "
-        f"({liquidity_ratio:.1%} of ${vault.total_assets_usd:,.2f})\n"
-        f"📊 Min threshold: {LIQUIDITY_THRESHOLD:.1%}\n"
+    message = format_low_liquidity_message(
+        vault.name,
+        vault_url,
+        vault.chain,
+        vault.total_assets_usd,
+        vault.liquidity_usd,
+        LIQUIDITY_THRESHOLD,
+        version_label="V2",
     )
     send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
 

@@ -1,7 +1,9 @@
 """Shared helpers used by both v1 and v2 Morpho monitors."""
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
+
+import requests
 
 from utils.chains import Chain
 from utils.http_client import request_with_retry
@@ -9,6 +11,7 @@ from utils.logger import get_logger
 
 API_URL = "https://api.morpho.org/graphql"
 MORPHO_URL = "https://app.morpho.org"
+PROTOCOL = "morpho"
 
 logger = get_logger("morpho.shared")
 
@@ -21,53 +24,43 @@ class MorphoV2MonitoringError(MorphoMonitoringError):
     """Raised when configured Morpho Vault V2 monitoring is incomplete."""
 
 
-# Yearn-curated Morpho V2 vaults — sourced from
-# https://app.morpho.org/curator/yearn?v2=true (filtered via GraphQL by
-# Yearn's curator addresses). Imported by both ``markets_v2.py`` and
-# ``governance_v2.py``. To add a new vault, append a
-# ``[name, address, risk_level]`` row to the appropriate chain. Risk levels
-# follow the same 1–5 scheme as v1 ``markets.py:VAULTS_BY_CHAIN``.
-VAULTS_V2_BY_CHAIN: Dict[Chain, List[List[Any]]] = {
-    Chain.MAINNET: [
-        # name, address, risk level
-        ["Yearn USDC", "0xaA8d9E2aBa210639cE6C7cE21385e7c673ACa6f3", 1],
-        ["Yearn OG WETH V2", "0xbe518068EB6135117207256F8C9aFf81B4382DB1", 1],
-        [
-            "Yearn OG USDC",
-            "0xB885F6d448dA7E2C642Ec31190B629E40E87B069",
-            2,
-        ],
-        ["Sentora RLUSD Main", "0x6dC58a0FdfC8D694e571DC59B9A52EEEa780E6bf", 2],
-        ["Sentora PaypalUSD Main", "0xb576765fB15505433aF24FEe2c0325895C559FB2", 2],
-    ],
-    Chain.BASE: [
-        ["Yearn OG USDC V2", "0xe7D0DBE3493830e2Ab62619211A2BfF0Fc60dB42", 2],
-        ["Yearn OG WETH V2", "0x2EfD54529329AD364B8Df988CE3BAb5Ff256ab3E", 2],
-        ["OUSD Vault V2", "0x2Ba14b2e1E7D2189D3550b708DFCA01f899f33c1", 2],
-    ],
-    Chain.KATANA: [
-        ["Yearn OG USDC", "0xca44cbe1FB03691d43d2d93AA460e2fCB03878fE", 1],
-        ["Yearn OG USDT", "0x4284d4F9f4d61eA57B8F0943547c7C19C5B9B249", 1],
-        # ["Yearn OG WBTC", "0x22c01834e1A261F8BebCa7D7B459db2F389785FF", 1],
-        ["Yearn OG ETH", "0x5920A6FC553af799542EDA628AdfCc9eA52e141C", 1],
-        ["Yearn KAT", "0x9b1aE9548E4B46cEB6650f6CEc702bAf5CF2b8CC", 1],
-        ["Yearn Degen USDC", "0xA2d38c8A3D810EBcF4C2075821c5eC8F976bb692", 3],
-        ["Gauntlet USDT", "0xaC596AD9771a8d0D4DF108ae0406e6f913aEdceb", 1],
-        ["Steakhouse High Yield USDC", "0xbeeff2d5d126d4809195EeA02b605423917bb6c6", 2],
-        ["Steakhouse Prime USDC", "0xbeef042bAD4472c3F7Eb9A73070703788b5362D7", 1],
-    ],
-}
+def execute_graphql(
+    query: str,
+    variables: dict[str, Any],
+    context: str,
+    *,
+    error_type: type[MorphoMonitoringError] = MorphoMonitoringError,
+) -> dict[str, Any]:
+    """Execute a strict Morpho GraphQL request and return its data object."""
+    try:
+        response = request_with_retry("post", API_URL, json={"query": query, "variables": variables})
+    except requests.RequestException as exc:
+        raise error_type(f"Failed to fetch {context}: {exc}") from exc
 
-SUPPORTED_CHAINS: List[Chain] = list(VAULTS_V2_BY_CHAIN.keys())
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise error_type(f"Morpho returned invalid JSON while fetching {context}") from exc
+
+    if payload.get("errors"):
+        raise error_type(f"Morpho GraphQL errors fetching {context}: {payload['errors']}")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise error_type(f"Morpho GraphQL returned no data while fetching {context}")
+    return data
 
 
-def get_v2_vault_config() -> tuple[dict[str, tuple[Chain, str, int]], list[str], list[int]]:
-    """Flatten configured Vault V2 rows for GraphQL queries and response joins."""
-    entries = [(chain, entry) for chain, vaults in VAULTS_V2_BY_CHAIN.items() for entry in vaults]
-    metadata = {str(entry[1]).lower(): (chain, str(entry[0]), int(str(entry[2]))) for chain, entry in entries}
-    addresses = [str(entry[1]) for _, entry in entries]
-    chain_ids = sorted({chain.chain_id for chain, _ in entries})
-    return metadata, addresses, chain_ids
+def require_configured_keys(
+    expected: Iterable[str],
+    found: Iterable[str],
+    context: str,
+    *,
+    error_type: type[MorphoMonitoringError] = MorphoMonitoringError,
+) -> None:
+    """Raise when a GraphQL collection omits any configured key."""
+    missing = sorted({key.lower() for key in expected} - {key.lower() for key in found})
+    if missing:
+        raise error_type(f"Morpho API omitted configured {context}: " + ", ".join(missing))
 
 
 def get_chain_name(chain: Chain) -> str:
@@ -87,6 +80,26 @@ def get_vault_url(vault_address: str, chain: Chain) -> str:
     return f"{MORPHO_URL}/{get_chain_name(chain)}/vault/{vault_address}"
 
 
+def format_low_liquidity_message(
+    vault_name: str,
+    vault_url: str,
+    chain: Chain,
+    total_assets_usd: float,
+    liquidity_usd: float,
+    threshold: float,
+    *,
+    version_label: str = "",
+) -> str:
+    """Format the common V1/V2 low-liquidity alert body."""
+    liquidity_ratio = liquidity_usd / total_assets_usd
+    prefix = f"{version_label} " if version_label else ""
+    return (
+        f"⚠️ Low liquidity in {prefix}[{vault_name}]({vault_url}) on {chain.name}\n"
+        f"💰 Liquidity: ${liquidity_usd:,.2f} ({liquidity_ratio:.1%} of ${total_assets_usd:,.2f})\n"
+        f"📊 Min threshold: {threshold:.1%}\n"
+    )
+
+
 def fetch_market_metadata(market_id: str, chain: Chain) -> dict[str, Any] | None:
     """Fetch symbols and loan decimals for a Morpho market.
 
@@ -95,24 +108,26 @@ def fetch_market_metadata(market_id: str, chain: Chain) -> dict[str, Any] | None
     query = """
     query GetMarket($marketId: String!, $chainId: Int!) {
         marketById(marketId: $marketId, chainId: $chainId) {
+            lltv
             loanAsset { symbol, decimals }
             collateralAsset { symbol }
         }
     }
     """
     try:
-        response = request_with_retry(
-            "post",
-            API_URL,
-            json={"query": query, "variables": {"marketId": market_id, "chainId": chain.chain_id}},
+        data = execute_graphql(
+            query,
+            {"marketId": market_id, "chainId": chain.chain_id},
+            f"market metadata for {market_id} on {chain.name}",
         )
-        market = response.json()["data"]["marketById"]
+        market = data["marketById"]
         collateral_symbol = market["collateralAsset"]["symbol"] if market.get("collateralAsset") else "idle"
         loan_asset = market["loanAsset"]
         return {
             "name": f"{collateral_symbol}/{loan_asset['symbol']}",
             "loan_symbol": loan_asset["symbol"],
             "loan_decimals": int(loan_asset["decimals"]),
+            "lltv": int(market.get("lltv") or 0),
         }
     except Exception as e:
         logger.warning("Failed to fetch market metadata for %s: %s", market_id, e)
@@ -228,13 +243,13 @@ def fetch_market_metrics(market_ids: List[str], chain: Chain) -> Dict[str, Marke
     }
     """
     keys = [mid.lower() for mid in market_ids]
-    response = request_with_retry(
-        "post", API_URL, json={"query": query, "variables": {"keys": keys, "chainId": chain.chain_id}}
+    data = execute_graphql(
+        query,
+        {"keys": keys, "chainId": chain.chain_id},
+        f"market metrics on {chain.name}",
+        error_type=MorphoV2MonitoringError,
     )
-    payload = response.json()
-    if "errors" in payload:
-        raise MorphoV2MonitoringError(f"Morpho GraphQL errors fetching market metrics: {payload['errors']}")
-    items = payload.get("data", {}).get("markets", {}).get("items", []) or []
+    items = data.get("markets", {}).get("items", []) or []
     metrics = {item["marketId"].lower(): _parse_market_metrics(item) for item in items}
     missing_market_ids = sorted(set(keys) - set(metrics))
     if missing_market_ids:

@@ -5,7 +5,6 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from protocols.morpho._shared import (
-    VAULTS_V2_BY_CHAIN,
     Asset,
     BadDebt,
     MarketMetrics,
@@ -13,8 +12,8 @@ from protocols.morpho._shared import (
     MorphoMonitoringError,
     MorphoV2MonitoringError,
 )
+from protocols.morpho.config import VAULTS_V2_BY_CHAIN, get_collateral_vaults_by_asset
 from protocols.morpho.markets import (
-    VAULTS_V2_WITH_YV_COLLATERAL_BY_ASSET,
     YV_COLLATERAL_AT_RISK_POINTS,
     YV_COLLATERAL_STABLE_PRICE_SHOCK,
     calculate_combined_metrics,
@@ -36,33 +35,32 @@ from utils.chains import Chain
 
 class TestMorphoV2Configuration(unittest.TestCase):
     def test_katana_collateral_strategy_vaults_are_monitored(self) -> None:
-        configured = {str(entry[1]).lower(): int(entry[2]) for entry in VAULTS_V2_BY_CHAIN[Chain.KATANA]}
+        configured = {vault.address.lower() for vault in VAULTS_V2_BY_CHAIN[Chain.KATANA]}
         expected = {
-            "0x4284d4f9f4d61ea57b8f0943547c7c19c5b9b249": 1,
-            "0xca44cbe1fb03691d43d2d93aa460e2fcb03878fe": 1,
-            "0xa2d38c8a3d810ebcf4c2075821c5ec8f976bb692": 3,
-            "0xac596ad9771a8d0d4df108ae0406e6f913aedceb": 1,
-            "0x5920a6fc553af799542eda628adfcc9ea52e141c": 1,
-            "0xbeeff2d5d126d4809195eea02b605423917bb6c6": 3,
-            "0xbeef042bad4472c3f7eb9a73070703788b5362d7": 1,
+            "0x4284d4f9f4d61ea57b8f0943547c7c19c5b9b249",
+            "0xca44cbe1fb03691d43d2d93aa460e2fcb03878fe",
+            "0xa2d38c8a3d810ebcf4c2075821c5ec8f976bb692",
+            "0xac596ad9771a8d0d4df108ae0406e6f913aedceb",
+            "0x5920a6fc553af799542eda628adfcc9ea52e141c",
+            "0xbeeff2d5d126d4809195eea02b605423917bb6c6",
+            "0xbeef042bad4472c3f7eb9a73070703788b5362d7",
         }
 
-        for address, risk_level in expected.items():
-            self.assertEqual(configured[address], risk_level)
+        self.assertTrue(expected <= configured)
 
         collateral_vaults = {
-            vault[1].lower()
-            for vaults in VAULTS_V2_WITH_YV_COLLATERAL_BY_ASSET[Chain.KATANA].values()
+            vault.address.lower()
+            for vaults in get_collateral_vaults_by_asset(Chain.KATANA, version=2).values()
             for vault in vaults
         }
-        self.assertEqual(collateral_vaults, expected.keys())
+        self.assertEqual(collateral_vaults, expected)
 
     def test_discovery_fails_if_api_omits_configured_vaults(self) -> None:
         response = MagicMock()
         response.json.return_value = {"data": {"vaultV2s": {"items": []}}}
 
         with (
-            patch("protocols.morpho.markets_v2.request_with_retry", return_value=response),
+            patch("protocols.morpho._shared.request_with_retry", return_value=response),
             self.assertRaisesRegex(MorphoV2MonitoringError, "omitted configured Vault V2"),
         ):
             discover_v2_vaults_by_chain()
@@ -130,7 +128,7 @@ class TestMorphoCollateralLiquidity(unittest.TestCase):
         response.json.return_value = {"errors": [{"message": "unavailable"}]}
 
         with (
-            patch("protocols.morpho.markets.request_with_retry", return_value=response),
+            patch("protocols.morpho._shared.request_with_retry", return_value=response),
             self.assertRaisesRegex(MorphoMonitoringError, "errors fetching collateral at risk"),
         ):
             get_markets_collateral_at_risk_usd({"0x" + "ab" * 32: 0.02}, Chain.KATANA)
@@ -146,7 +144,7 @@ class TestMorphoCollateralLiquidity(unittest.TestCase):
         }
 
         with (
-            patch("protocols.morpho.markets.request_with_retry", return_value=response),
+            patch("protocols.morpho._shared.request_with_retry", return_value=response),
             self.assertRaisesRegex(MorphoMonitoringError, "omitted configured Vault V1"),
         ):
             fetch_configured_vaults()

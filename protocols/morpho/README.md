@@ -15,16 +15,15 @@ The script checks if there are any new values pending in the timelock for a give
 
 ### How to Add a New Vault
 
-Add the vault address to either the `MAINNET_VAULTS` or `BASE_VAULTS` variable in [governance.py#L21](./governance.py#L21) to monitor governance changes.
+Add a `VaultConfig` to `VAULTS_V1_BY_CHAIN` in [config.py](./config.py). Governance monitoring is enabled by default; set `monitor_governance=False` only when the vault should remain market-only.
 
 ## Vaults & Markets
 
 Morpho Vaults consist of multiple markets, each defining key parameters such as LTV, interest rate models, and oracle data.
 
-Market monitoring is configured via the vault definitions in [markets.py#L13](./markets.py#L13). The script fetches all markets for each vault and checks the following metrics:
+Market monitoring is configured through [config.py](./config.py), while shared market and liquidity policy lives in [risk.py](./risk.py). The script fetches all markets for each vault and checks the following metrics:
 
 - **Bad Debt Ratio:** If the bad debt ratio exceeds 0.5% of total borrowed assets, a Telegram message is sent.
-- **Utilization Ratio:** If the utilization ratio exceeds 95%, a Telegram message is sent.
 - **Vault Risk Level:** If the computed risk level of a vault exceeds its maximum threshold, a Telegram message is sent.
 - **Market Allocation Ratio:** If any market's allocation ratio exceeds its risk-adjusted threshold, a Telegram message is sent.
 
@@ -32,36 +31,36 @@ Additional insights on Morpho vault risks are available at [Llama Risk blog](htt
 
 ### Risk Levels
 
-The overall risk level of a Morpho Vault is determined by the risk levels of its markets. For more details, refer to the comments in [markets.py#L36](./markets.py#L36). Markets and vaults are categorized by their risk level and blockchain, with Level 1 representing the safest configuration.
+The overall risk level of a Morpho Vault is determined by the risk levels of its markets. Markets and thresholds are defined in [risk.py](./risk.py); vault scores are defined in [config.py](./config.py). Both are mutable operating configuration and are intentionally not fixed by tests. Level 1 represents the safest configuration.
 
 ### Oracle validation
 
-When adding or checking market rows in [markets.py](./markets.py), use [morpho-oracle-validation.md](./morpho-oracle-validation.md): resolve `uniqueKey` and `oracle.address` via the Morpho GraphQL API, validate feeds on-chain (typically `MorphoChainlinkOracleV2` getters and `description()`), then classify feeds (Chainlink, RedStone, Chronicle, API3, or unknown) using on-chain hints plus official listings — [Chainlink](https://docs.chain.link/data-feeds/price-feeds/addresses) / [data.chain.link](https://data.chain.link), [RedStone](https://docs.redstone.finance/), [Chronicle Oracles](https://chroniclelabs.org/dashboard/oracles), [Api3 Market](https://market.api3.org/) (see §4 in that doc).
+When adding or checking market rows in [risk.py](./risk.py), use [morpho-oracle-validation.md](./morpho-oracle-validation.md): resolve `uniqueKey` and `oracle.address` via the Morpho GraphQL API, validate feeds on-chain (typically `MorphoChainlinkOracleV2` getters and `description()`), then classify feeds (Chainlink, RedStone, Chronicle, API3, or unknown) using on-chain hints plus official listings — [Chainlink](https://docs.chain.link/data-feeds/price-feeds/addresses) / [data.chain.link](https://data.chain.link), [RedStone](https://docs.redstone.finance/), [Chronicle Oracles](https://chroniclelabs.org/dashboard/oracles), [Api3 Market](https://market.api3.org/) (see §4 in that doc).
 
 ### How to Add a New Vault
 
-To monitor a new Morpho vault, add its address to the `VAULTS_BY_CHAIN` variable in [markets.py#L13](./markets.py#L13). This ensures that both the vault's overall metrics and its individual markets are monitored.
+To monitor a new Morpho vault, add a `VaultConfig` to `VAULTS_V1_BY_CHAIN` or `VAULTS_V2_BY_CHAIN` in [config.py](./config.py). This is the single source used by market and governance monitoring.
 
-**For YV Collateral Vaults:** If Morpho vault is using Yearn V3 Vault (YV collateral vault) as collateral, additional configuration is needed. Add all Morpho Vaults that are used as strategies in Yearn V3 Vault to `VAULTS_WITH_YV_COLLATERAL_BY_ASSET` mapping, organized by chain and underlying asset address. This enables combined liquidity monitoring for all vaults with the same asset.
+**For YV Collateral Vaults:** Set `collateral_asset` on each V1 or V2 `VaultConfig` used by the Yearn strategy. Vaults with the same underlying asset are grouped automatically for combined liquidity monitoring.
 
 ### Bad Debt
 
-Bad debt is fetched from the Morpho GraphQL API. Each market is checked for bad debt; if any market exhibits bad debt, a Telegram message is sent. The script runs hourly via the [monitoring runner](../automation/jobs.yaml). The monitoring logic is implemented in [markets.py#L166](./markets.py#L166).
+Bad debt is fetched from the Morpho GraphQL API. Each market is checked for bad debt; if any market exhibits bad debt, a Telegram message is sent. The script runs hourly via the [monitoring runner](../../automation/jobs.yaml). The monitoring logic is implemented in [markets.py](./markets.py).
 
-### Utilization & Liquidity
+### Liquidity
 
-The utilization ratio for each market is calculated as the ratio of borrowed assets to total collateral assets. If this ratio exceeds 95%, a Telegram message is sent. The script runs hourly via the [monitoring runner](../automation/jobs.yaml), and the monitoring logic is defined in [markets.py#L263](./markets.py#L263). Note that liquidity is the inverse of utilization—high utilization implies low liquidity (e.g., 95% utilization corresponds to 5% liquidity).
+The standard check alerts when immediately withdrawable vault liquidity falls below the shared threshold in [risk.py](./risk.py). YV-collateral strategy vaults use the market-aware coverage check below instead of the standard percentage threshold.
 
 #### YV Collateral Vault Liquidity Monitoring
 
 For vaults that are used as collateral in Yearn v3 strategies (YV collateral vaults), the system implements market-aware unwind liquidity monitoring. Instead of checking each vault individually, vaults with the same underlying asset are grouped together and their withdrawable liquidity is aggregated.
 
-**Configuration:** YV collateral strategy vaults are defined in the `VAULTS_WITH_YV_COLLATERAL_BY_ASSET` and `VAULTS_V2_WITH_YV_COLLATERAL_BY_ASSET` mappings in [markets.py](./markets.py), organized by chain and asset address. Keep both generations configured while liquidity migrates from v1 to v2. Watched direct YV-collateral markets are explicitly defined in `YV_COLLATERAL_MARKETS_BY_ASSET`, using the same underlying asset addresses.
+**Configuration:** YV collateral strategy vaults set `collateral_asset` in [config.py](./config.py). Keep both generations configured while liquidity migrates from V1 to V2. Watched direct YV-collateral markets are defined in `YV_COLLATERAL_MARKETS_BY_ASSET` in the same file.
 
 **Thresholds:**
 
-- **Regular vaults:** Defined in the `LIQUIDITY_THRESHOLD` variable in [markets.py#L25](./markets.py#L25).
-- **YV collateral vaults:** Require enough combined withdrawable liquidity to cover collateral at risk in direct YV-collateral Morpho markets, plus a liquidation buffer (`YV_COLLATERAL_*` constants in [markets.py#L26](./markets.py#L26)). Price shock is selected from market LLTV: 2% for LLTV >= 86%, 15% for LLTV <= 77%, otherwise 10%.
+- **Regular vaults:** Defined by `LIQUIDITY_THRESHOLD` in [risk.py](./risk.py) and shared by V1 and V2.
+- **YV collateral vaults:** Require enough combined withdrawable liquidity to cover collateral at risk in direct YV-collateral Morpho markets, plus a liquidation buffer (`YV_COLLATERAL_*` constants in [markets.py](./markets.py)). Price shock is selected from market LLTV: 2% for LLTV >= 86%, 15% for LLTV <= 77%, otherwise 10%.
 
 **Logic:** For each asset group (e.g., all USDC vaults at one chain), the system:
 
@@ -88,15 +87,7 @@ Where:
 - **Allocation:** The percentage of the vault's assets allocated to that market.
 - **Total Risk Level:** The sum of the weighted risks across all markets.
 
-This computed risk level is compared against predefined maximum thresholds defined in [markets.py#L134](./markets.py#L134):
-
-- **Risk Level 1:** Maximum threshold of 1.15
-- **Risk Level 2:** Maximum threshold of 2.30
-- **Risk Level 3:** Maximum threshold of 3.45
-- **Risk Level 4:** Maximum threshold of 4.60
-- **Risk Level 5:** Maximum threshold of 5.00
-
-Each tier is `level × 1.15` (capped at 5.00), so a Risk-1 vault may hold up to ~15% of its assets in Risk-2 markets before an alert triggers.
+This computed risk level is compared against the mutable `MAX_RISK_THRESHOLDS` configuration in [risk.py](./risk.py).
 
 If a vault's total risk level exceeds its threshold, an alert is triggered via a Telegram message.
 
@@ -104,23 +95,7 @@ If a vault's total risk level exceeds its threshold, an alert is triggered via a
 
 The system monitors each market's allocation within a vault to ensure it does not exceed its risk-adjusted threshold. Each market has a maximum allocation threshold based on its inherent risk tier and the vault's overall risk level.
 
-The base allocation limits by risk tier (as defined in [markets.py#L125](./markets.py#L125)) are:
-
-- **Risk Level 1:** 100%
-- **Risk Level 2:** 30%
-- **Risk Level 3:** 10%
-- **Risk Level 4:** 5%
-- **Risk Level 5:** 1%
-
-These limits apply to vaults with a risk level of 1. For vaults with higher risk levels, the thresholds become more permissive. The adjustment is calculated in the [get_market_allocation_threshold](./markets.py#L143) function.
-
-Examples:
-
-- A Risk-1 vault accepts up to 30% of its total assets in a Risk-2 market.
-- A Risk-2 vault accepts up to 80% of its total assets in a Risk-2 market.
-- A Risk-3 vault accepts up to 100% of its total assets in a Risk-2 market.
-- A Risk-2 vault accepts up to 10% of its total assets in a Risk-4 market.
-- A Risk-3 vault accepts up to 30% of its total assets in a Risk-4 market.
+The mutable base allocation limits and vault-level adjustment are defined by `ALLOCATION_TIERS` and `get_market_allocation_threshold` in [risk.py](./risk.py). Higher-risk vault configurations can accept more exposure to a given market tier.
 
 The system monitors the allocation ratio for each market hourly:
 
@@ -135,12 +110,12 @@ If any market's allocation exceeds its adjusted threshold, an alert is triggered
 Morpho's [Vault V2](https://github.com/morpho-org/vault-v2) replaces the v1 single-vault timelock with a **per-function timelock** keyed by arbitrary calldata, plus a richer adapter system. Yearn-curated v2 vaults are monitored separately:
 
 - [`governance_v2.py`](./governance_v2.py) — daily, pulls a per-vault governance **snapshot** from Morpho's GraphQL API (`vaultV2s.pendingConfigs` + `owner` / `curator` / `sentinels` / `allocators` / `adapters`) and diffs it against the persisted cache. Mirrors v1's pull-based approach (`pendingTimelock` / `pendingGuardian` / `pendingCap`) so RPC usage stays bounded. Alerts on: new pending timelocked operations, executed or revoked operations, owner / curator changes, sentinel / allocator / adapter set changes.
-- [`markets_v2.py`](./markets_v2.py) — hourly, walks each v2 vault's adapters and runs the existing v1 risk-tier scoring against the underlying Morpho Blue markets when the vault uses `MorphoMarketV1AdapterV2`. It also checks the API's immediately withdrawable `liquidityUsd` against the standard 1% threshold. V2 vaults used by YV-collateral strategies skip the individual threshold because `markets.py` performs the more relevant combined collateral-at-risk coverage check. For `MorphoVaultV1Adapter`, the wrapped v1 vault keeps receiving its full v1 analysis via `markets.py`; we only flag the case where v2 introduces a new wrapped v1 vault that operators should add to `VAULTS_BY_CHAIN`.
+- [`markets_v2.py`](./markets_v2.py) — hourly, walks each v2 vault's adapters and applies the shared [risk.py](./risk.py) policy against underlying Morpho Blue markets when the vault uses `MorphoMarketV1AdapterV2`. It also checks the API's immediately withdrawable `liquidityUsd` against the shared 1% threshold. V2 vaults used by YV-collateral strategies skip the individual threshold because `markets.py` performs the more relevant combined collateral-at-risk coverage check. For `MorphoVaultV1Adapter`, the wrapped v1 vault keeps receiving its full v1 analysis via `markets.py`; we only flag a wrapped v1 vault absent from `VAULTS_V1_BY_CHAIN`.
 - [`v2_decoders.py`](./v2_decoders.py) — selector→signature map and decoders for every v2 timelocked function (and the three `idData` tag prefixes used by `increaseAbsoluteCap`/`increaseRelativeCap`).
 
 ### Vault list
 
-Monitored v2 vaults live in [`VAULTS_V2_BY_CHAIN`](./markets_v2.py) — same shape as the v1 [`VAULTS_BY_CHAIN`](./markets.py#L29), one `[name, address, risk_level]` row per vault. The initial list is sourced from [Yearn's curator page on Morpho](https://app.morpho.org/curator/yearn?v2=true) (filtered via GraphQL by Yearn's curator addresses) and is kept manually so a third-party squatting on the name doesn't get monitored as a Yearn vault.
+Monitored V1 and V2 vaults live in [`config.py`](./config.py) as typed `VaultConfig` rows. The V2 list is sourced from [Yearn's curator page on Morpho](https://app.morpho.org/curator/yearn?v2=true) and remains explicit so a third party using a similar name is not monitored automatically.
 
 To add a new v2 vault, append a row to the chain's list and pick a risk tier (1–5).
 

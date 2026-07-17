@@ -28,7 +28,6 @@ def _snapshot(pending_configs: list[PendingConfig]) -> V2GovernanceSnapshot:
         name="Sentora PaypalUSD Main",
         address=Web3.to_checksum_address(VAULT),
         chain=Chain.MAINNET,
-        risk_level=3,
         owner="",
         curator="",
         sentinels=[],
@@ -88,7 +87,7 @@ class TestMorphoV2GovernanceFetch(unittest.TestCase):
         response.json.return_value = {"data": {"vaultV2s": {"items": []}}}
 
         with (
-            patch("protocols.morpho.governance_v2.request_with_retry", return_value=response),
+            patch("protocols.morpho._shared.request_with_retry", return_value=response),
             self.assertRaisesRegex(MorphoV2MonitoringError, "omitted configured Vault V2 governance"),
         ):
             governance_v2.fetch_governance_snapshots()

@@ -284,7 +284,7 @@ protocols:
       - name: "V2 Governance"
         description: "Pending timelocked operations, owner/curator changes, sentinel/allocator/adapter changes"
       - name: "V2 Unmonitored Vault Wrappers"
-        description: "V2 vault wrapping a v1 vault not in markets.py:VAULTS_BY_CHAIN"
+        description: "V2 vault wrapping a v1 vault not in config.py:VAULTS_V1_BY_CHAIN"
       - name: "Safe Multisig"
         description: "Morpho eUSDe predeposit vault owner Safe queue"
 
