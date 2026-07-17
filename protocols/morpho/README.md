@@ -15,7 +15,7 @@ The script checks if there are any new values pending in the timelock for a give
 
 ### How to Add a New Vault
 
-Add a `VaultConfig` to `VAULTS_V1_BY_CHAIN` in [config.py](./config.py). Governance monitoring is enabled by default; set `monitor_governance=False` only when the vault should remain market-only.
+Add a `VaultConfig` to `VAULTS_V1_BY_CHAIN` in [config.py](./config.py). Every configured V1 vault receives both market and governance monitoring.
 
 ## Vaults & Markets
 

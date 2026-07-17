@@ -141,7 +141,7 @@ def fetch_governance_snapshots() -> Dict[Chain, List[V2GovernanceSnapshot]]:
     Issues a single ``vaultV2s(where: { address_in })`` query and joins the
     result back to the static list to inherit the configured risk level.
     """
-    addr_to_meta, addresses, chain_ids = get_vault_query_config(VAULTS_V2_BY_CHAIN, governance_only=True)
+    addr_to_meta, addresses, chain_ids = get_vault_query_config(VAULTS_V2_BY_CHAIN)
 
     if not addresses:
         return {}

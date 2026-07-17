@@ -288,7 +288,7 @@ def check_timelock_and_guardian(name: str, morpho_contract: Any, chain: Chain, c
 
 def get_data_for_chain(chain: Chain) -> None:
     client = ChainManager.get_client(chain)
-    vaults = tuple(vault for vault in VAULTS_V1_BY_CHAIN[chain] if vault.monitor_governance)
+    vaults = VAULTS_V1_BY_CHAIN[chain]
 
     logger.info("Processing Morpho Vaults on %s ...", chain.name)
     logger.debug("Vaults: %s", vaults)

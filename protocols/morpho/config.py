@@ -19,7 +19,6 @@ class VaultConfig:
     address: str
     risk_level: int
     collateral_asset: str | None = None
-    monitor_governance: bool = True
 
 
 VAULTS_V1_BY_CHAIN: dict[Chain, tuple[VaultConfig, ...]] = {
@@ -29,7 +28,7 @@ VAULTS_V1_BY_CHAIN: dict[Chain, tuple[VaultConfig, ...]] = {
         VaultConfig("Yearn WBTC", "0x2bB005127069A0F0325Fb7370967E8A2b64FB77E", 1),
         VaultConfig("Yearn OG WETH", "0xE89371eAaAC6D46d4C3ED23453241987916224FC", 2),
         VaultConfig("Yearn OG USDC", "0xF9bdDd4A9b3A45f980e11fDDE96e16364dDBEc49", 2),
-        VaultConfig("OUSD", "0x5B8b9FA8e4145eE06025F642cAdB1B47e5F39F04", 2, monitor_governance=False),
+        VaultConfig("OUSD", "0x5B8b9FA8e4145eE06025F642cAdB1B47e5F39F04", 2),
         VaultConfig("Vault Bridge USDC", "0xBEefb9f61CC44895d8AEc381373555a64191A9c4", 1),
         VaultConfig("Vault Bridge USDT", "0xc54b4E08C1Dcc199fdd35c6b5Ab589ffD3428a8d", 1),
         VaultConfig("Vault Bridge WETH", "0x31A5684983EeE865d943A696AAC155363bA024f9", 1),
@@ -39,7 +38,7 @@ VAULTS_V1_BY_CHAIN: dict[Chain, tuple[VaultConfig, ...]] = {
         VaultConfig("Moonwell Flagship USDC", "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca", 1),
         VaultConfig("Yearn OG USDC", "0xef417a2512C5a41f69AE4e021648b69a7CdE5D03", 2),
         VaultConfig("Yearn OG WETH", "0x1D795E29044A62Da42D927c4b179269139A28A6B", 2),
-        VaultConfig("OUSD", "0x581Cc9a73Ec7431723A4a80699B8f801205841F1", 2, monitor_governance=False),
+        VaultConfig("OUSD", "0x581Cc9a73Ec7431723A4a80699B8f801205841F1", 2),
     ),
     Chain.KATANA: (
         VaultConfig("Yearn OG WETH", "0xFaDe0C546f44e33C134c4036207B314AC643dc2E", 1, KATANA_WETH),
@@ -121,15 +120,9 @@ def iter_vaults(vaults_by_chain: dict[Chain, tuple[VaultConfig, ...]]) -> Iterab
 
 def get_vault_query_config(
     vaults_by_chain: dict[Chain, tuple[VaultConfig, ...]],
-    *,
-    governance_only: bool = False,
 ) -> tuple[dict[str, tuple[Chain, VaultConfig]], list[str], list[int]]:
     """Flatten vault configuration for GraphQL queries and response joins."""
-    entries = [
-        (chain, vault)
-        for chain, vault in iter_vaults(vaults_by_chain)
-        if not governance_only or vault.monitor_governance
-    ]
+    entries = list(iter_vaults(vaults_by_chain))
     metadata = {vault.address.lower(): (chain, vault) for chain, vault in entries}
     addresses = [vault.address for _, vault in entries]
     chain_ids = sorted({chain.chain_id for chain, _ in entries})
