@@ -283,7 +283,7 @@ protocols:
         description: "Pending supply caps, market removals, timelock changes, guardian changes"
       - name: "V2 Governance"
         description: "Pending timelocked operations, owner/curator changes, sentinel/allocator/adapter changes"
-      - name: "V2 Unmonitored Vault Wrappers"
+      - name: "V2 Wrapped V1 Coverage"
         description: "V2 vault wrapping a v1 vault not in config.py:VAULTS_V1_BY_CHAIN"
       - name: "Safe Multisig"
         description: "Morpho eUSDe predeposit vault owner Safe queue"
