@@ -1,7 +1,18 @@
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from web3 import Web3
 
+from protocols.morpho._shared import (
+    PROTOCOL,
+    MorphoMonitoringError,
+    execute_graphql,
+    fetch_market_metadata,
+    get_market_url,
+    get_vault_url,
+)
+from protocols.morpho.config import VAULTS_V1_BY_CHAIN
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import (
@@ -10,78 +21,26 @@ from utils.cache import (
 )
 from utils.chains import Chain
 from utils.formatting import format_token_amount, format_with_suffix
-from utils.http_client import request_with_retry
 from utils.logger import get_logger
 from utils.web3_wrapper import ChainManager
 
-PROTOCOL = "morpho"
 logger = get_logger("morpho.governance")
-MORPHO_URL = "https://app.morpho.org"
-API_URL = "https://api.morpho.org/graphql"
 
 PENDING_CAP_TYPE = "pending_cap"
 REMOVABLE_AT_TYPE = "removable_at"
-
-# Map vaults by chain
-VAULTS_BY_CHAIN = {
-    Chain.MAINNET: [
-        # ["Steakhouse USDC", "0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB"],
-        # ["Steakhouse USDT", "0xbEef047a543E45807105E51A8BBEFCc5950fcfBa"],
-        # ["Gauntlet WETH Prime", "0x2371e134e3455e0593363cBF89d3b6cf53740618"],
-        # ["Gauntlet USDC Prime", "0xdd0f28e19C1780eb6396170735D45153D261490d"],
-        # ["Gauntlet USDT Prime", "0x8CB3649114051cA5119141a34C200D65dc0Faa73"],
-        # ["Gauntlet WETH Core", "0x4881Ef0BF6d2365D3dd6499ccd7532bcdBCE0658"],
-        # ["Gauntlet USDC Core", "0x8eB67A509616cd6A7c1B3c8C21D48FF57df3d458"],
-        ["VaultBridge USDC", "0xBEefb9f61CC44895d8AEc381373555a64191A9c4"],
-        ["VaultBridge USDT", "0xc54b4E08C1Dcc199fdd35c6b5Ab589ffD3428a8d"],
-        ["VaultBridge WETH", "0x31A5684983EeE865d943A696AAC155363bA024f9"],
-        ["VaultBridge WBTC", "0x812B2C6Ab3f4471c0E43D4BB61098a9211017427"],
-        ["Yearn OG WETH", "0xE89371eAaAC6D46d4C3ED23453241987916224FC"],
-        ["Yearn OG USDC", "0xF9bdDd4A9b3A45f980e11fDDE96e16364dDBEc49"],
-        ["Yearn USDT", "0x0963232eB842BAF53E8e517691f81745C1F228a0"],
-        ["Yearn WBTC", "0x2bB005127069A0F0325Fb7370967E8A2b64FB77E"],
-        ["Yearn USDC", "0x68Aea7b82Df6CcdF76235D46445Ed83f85F845A3"],
-    ],
-    Chain.BASE: [
-        ["Moonwell Flagship USDC", "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca"],
-        ["Yearn OG USDC", "0xef417a2512C5a41f69AE4e021648b69a7CdE5D03"],
-        ["Yearn OG WETH", "0x1D795E29044A62Da42D927c4b179269139A28A6B"],
-    ],
-    Chain.KATANA: [
-        ["Gauntlet WBTC", "0xf243523996ADbb273F0B237B53f30017C4364bBC"],
-        ["Gauntlet USDC", "0xE4248e2105508FcBad3fe95691551d1AF14015f7"],
-        ["Gauntlet USDT", "0x1ecDC3F2B5E90bfB55fF45a7476FF98A8957388E"],
-        ["Gauntlet WETH", "0xC5e7AB07030305fc925175b25B93b285d40dCdFf"],
-        ["Steakhouse Prime USDC", "0x61D4F9D3797BA4dA152238c53a6f93Fb665C3c1d"],
-        ["Steakhouse High Yield USDC", "0x1445A01a57D7B7663CfD7B4EE0a8Ec03B379aabD"],
-        ["Yearn OG WETH", "0xFaDe0C546f44e33C134c4036207B314AC643dc2E"],
-        ["Yearn OG USDC", "0xCE2b8e464Fc7b5E58710C24b7e5EBFB6027f29D7"],
-        ["Yearn OG USDT", "0x8ED68f91AfbE5871dCE31ae007a936ebE8511d47"],
-        ["Yearn OG WBTC", "0xe107cCdeb8e20E499545C813f98Cc90619b29859"],
-    ],
-}
-
-
 ABI_MORPHO = load_abi("protocols/morpho/abi/morpho.json")
 
 
-def get_chain_name(chain: Chain):
-    if chain == Chain.MAINNET:
-        return "ethereum"
-    else:
-        return chain.name.lower()
+@dataclass(frozen=True)
+class MarketGovernanceState:
+    """Pending governance state for one market in a V1 vault."""
 
-
-def get_market_url(market, chain: Chain):
-    return f"{MORPHO_URL}/{get_chain_name(chain)}/market/{market}"
-
-
-def get_vault_url_by_name(vault_name, chain: Chain):
-    vaults = VAULTS_BY_CHAIN[chain]
-    for name, address in vaults:
-        if name == vault_name:
-            return f"{MORPHO_URL}/{get_chain_name(chain)}/vault/{address}"
-    return None
+    vault_address: str
+    market_id: str
+    pending_cap: int
+    pending_cap_timestamp: int
+    current_cap: int
+    removable_at: int
 
 
 def fetch_pending_cap_market_ids(vault_address: str, chain: Chain) -> list[str]:
@@ -113,15 +72,12 @@ def fetch_pending_cap_market_ids(vault_address: str, chain: Chain) -> list[str]:
     }
     """
     try:
-        response = request_with_retry(
-            "post",
-            API_URL,
-            json={"query": query, "variables": {"address": vault_address, "chainId": chain.chain_id}},
+        data = execute_graphql(
+            query,
+            {"address": vault_address, "chainId": chain.chain_id},
+            f"pending caps for {vault_address} on {chain.name}",
         )
-        data = response.json()
-        items = (
-            (((data.get("data") or {}).get("vaultByAddress") or {}).get("state") or {}).get("pendingConfigs") or {}
-        ).get("items") or []
+        items = (((data.get("vaultByAddress") or {}).get("state") or {}).get("pendingConfigs") or {}).get("items") or []
         market_ids = []
         for item in items:
             if item.get("functionName") != "SetCap":
@@ -132,43 +88,18 @@ def fetch_pending_cap_market_ids(vault_address: str, chain: Chain) -> list[str]:
             if marketId:
                 market_ids.append(marketId)
         return market_ids
-    except Exception as e:
+    except MorphoMonitoringError as e:
         logger.warning("Failed to fetch pending caps for vault %s: %s", vault_address, e)
         return []
 
 
 def fetch_market_info(market_id: str, chain: Chain) -> tuple[str, int | None]:
-    """Fetch market name and loan asset decimals from Morpho GraphQL API.
-
-    Returns a tuple of (name, decimals) where name is a human-readable label like
-    'WBTC/USDC (86.00%)'. On failure returns (market_id, None).
-    """
-    query = """
-    query GetMarket($marketId: String!, $chainId: Int!) {
-        marketById(marketId: $marketId, chainId: $chainId) {
-            lltv
-            loanAsset { symbol, decimals }
-            collateralAsset { symbol }
-        }
-    }
-    """
-    try:
-        response = request_with_retry(
-            "post",
-            API_URL,
-            json={"query": query, "variables": {"marketId": market_id, "chainId": chain.chain_id}},
-        )
-        data = response.json()
-        market = data["data"]["marketById"]
-        collateral_symbol = market["collateralAsset"]["symbol"] if market.get("collateralAsset") else "idle"
-        loan_asset = market["loanAsset"]
-        loan_symbol = loan_asset["symbol"]
-        decimals = int(loan_asset["decimals"])
-        lltv_pct = int(market["lltv"]) / 1e18 * 100
-        return f"{collateral_symbol}/{loan_symbol} ({lltv_pct:.2f}%)", decimals
-    except Exception as e:
-        logger.warning("Failed to fetch market info for %s: %s", market_id, e)
+    """Return the shared market label with LLTV and loan-token decimals."""
+    metadata = fetch_market_metadata(market_id, chain)
+    if metadata is None:
         return market_id, None
+    lltv_pct = metadata["lltv"] / 1e18 * 100
+    return f"{metadata['name']} ({lltv_pct:.2f}%)", int(metadata["loan_decimals"])
 
 
 def format_cap(cap: int, decimals: int | None) -> str:
@@ -178,140 +109,158 @@ def format_cap(cap: int, decimals: int | None) -> str:
     """
     if decimals is None or decimals <= 0:
         return f"{cap:,}"
-    return format_with_suffix(format_token_amount(cap, decimals))
+    return str(format_with_suffix(format_token_amount(cap, decimals)))
 
 
-def check_markets_pending_cap(name, morpho_contract, chain, w3):
-    with w3.batch_requests() as batch:
+def _load_vault_market_ids(morpho_contract: Any, chain: Chain, client: Any) -> list[bytes]:
+    """Load accepted and pending-cap market IDs for one V1 vault."""
+    with client.batch_requests() as batch:
         batch.add(morpho_contract.functions.supplyQueueLength())
         batch.add(morpho_contract.functions.withdrawQueueLength())
+        lengths = client.execute_batch(batch)
+    if len(lengths) != 2:
+        raise ValueError(f"Expected 2 queue length responses, got {len(lengths)}")
 
-        length_responses = w3.execute_batch(batch)
-        if len(length_responses) != 2:
-            raise ValueError(
-                "Expected 2 responses from batch(supplyQueueLength+withdrawQueueLength), got: ",
-                len(length_responses),
-            )
-        length_of_supply_queue = length_responses[0]
-        length_of_withdraw_queue = length_responses[1]
+    supply_length, withdraw_length = lengths
+    with client.batch_requests() as batch:
+        for index in range(supply_length):
+            batch.add(morpho_contract.functions.supplyQueue(index))
+        for index in range(withdraw_length):
+            batch.add(morpho_contract.functions.withdrawQueue(index))
+        queued_markets = client.execute_batch(batch)
+    expected_count = supply_length + withdraw_length
+    if len(queued_markets) != expected_count:
+        raise ValueError(f"Expected {expected_count} queue responses, got {len(queued_markets)}")
 
-    vault_address = morpho_contract.address
-    with w3.batch_requests() as batch:
-        for i in range(length_of_supply_queue):
-            batch.add(morpho_contract.functions.supplyQueue(i))
-        for i in range(length_of_withdraw_queue):
-            batch.add(morpho_contract.functions.withdrawQueue(i))
-        market_responses = w3.execute_batch(batch)
-        if len(market_responses) != length_of_supply_queue + length_of_withdraw_queue:
-            raise ValueError(
-                "Expected ",
-                length_of_supply_queue + length_of_withdraw_queue,
-                " responses from batch(supplyQueue+withdrawQueue), got: ",
-                len(market_responses),
-            )
-
-    # supplyQueue/withdrawQueue only contain markets that have been accepted at least once.
-    # Brand-new markets with a pending cap (submitCap called, acceptCap not yet run) are not
-    # in any queue, so the GraphQL pendingCaps lookup is needed to catch them.
-    pending_cap_market_ids = {
-        bytes.fromhex(market_id.removeprefix("0x")) for market_id in fetch_pending_cap_market_ids(vault_address, chain)
+    pending_markets = {
+        bytes.fromhex(market_id.removeprefix("0x"))
+        for market_id in fetch_pending_cap_market_ids(morpho_contract.address, chain)
     }
-    markets = list(set(market_responses) | pending_cap_market_ids)
+    return list(set(queued_markets) | pending_markets)
 
-    with w3.batch_requests() as batch:
-        for market in markets:
-            batch.add(morpho_contract.functions.pendingCap(market))
-            batch.add(morpho_contract.functions.config(market))
-        pending_cap_and_config_responses = w3.execute_batch(batch)
-        if len(pending_cap_and_config_responses) != len(markets) * 2:
-            raise ValueError(
-                "Expected ",
-                len(markets) * 2,
-                " responses from batch(pedningCap+config), got: ",
-                len(pending_cap_and_config_responses),
+
+def _load_market_governance_states(
+    morpho_contract: Any,
+    market_ids: list[bytes],
+    client: Any,
+) -> list[MarketGovernanceState]:
+    """Batch pending-cap and config reads for V1 vault markets."""
+    with client.batch_requests() as batch:
+        for market_id in market_ids:
+            batch.add(morpho_contract.functions.pendingCap(market_id))
+            batch.add(morpho_contract.functions.config(market_id))
+        responses = client.execute_batch(batch)
+    expected_count = len(market_ids) * 2
+    if len(responses) != expected_count:
+        raise ValueError(f"Expected {expected_count} pendingCap/config responses, got {len(responses)}")
+
+    states = []
+    for index, market_id in enumerate(market_ids):
+        pending_cap, pending_timestamp = responses[index * 2]
+        config = responses[index * 2 + 1]
+        states.append(
+            MarketGovernanceState(
+                vault_address=morpho_contract.address,
+                market_id=Web3.to_hex(market_id),
+                pending_cap=pending_cap,
+                pending_cap_timestamp=pending_timestamp,
+                current_cap=config[0],
+                removable_at=config[2],
             )
-
-    for i in range(0, len(markets)):
-        market_id = markets[i]
-        market = Web3.to_hex(market_id)
-
-        # Multiply by 2 because there were 2 responses per market and get
-        pending_value = pending_cap_and_config_responses[i * 2]
-        pending_cap_value = pending_value[0]
-        pending_cap_timestamp = pending_value[1]
-
-        # get the current config of the market
-        config = pending_cap_and_config_responses[i * 2 + 1]  # Use i * 2 + 1 for config
-        current_cap = config[0]  # current cap value is at index 0 in config struct
-
-        # generat urls
-        market_url = get_market_url(market, chain)
-        vault_url = get_vault_url_by_name(name, chain)
-
-        # pending_cap check
-        # Don't skip past timestamps: a pending cap whose timelock has expired but hasn't been
-        # accepted yet is still pending action, and may have been missed by earlier runs (e.g.,
-        # if the market was brand-new and not yet visible to the on-chain queue iteration).
-        # The cache check below dedupes so we only alert once per unique timestamp.
-        if pending_cap_timestamp > 0:
-            last_executed_morpho = get_last_executed_morpho_from_file(vault_address, market, PENDING_CAP_TYPE)
-
-            if pending_cap_timestamp > last_executed_morpho:
-                time = datetime.fromtimestamp(pending_cap_timestamp).strftime("%Y-%m-%d %H:%M:%S")
-                market_name, decimals = fetch_market_info(market, chain)
-                pending_cap_str = format_cap(pending_cap_value, decimals)
-                if current_cap == 0:
-                    message = (
-                        f"Adding new market [{market_name}]({market_url}) with cap {pending_cap_str} "
-                        f"to vault [{name}]({vault_url}) on {chain.name}. "
-                        f"Queued for {time}"
-                    )
-                else:
-                    difference_in_percentage = ((pending_cap_value - current_cap) / current_cap) * 100
-                    current_cap_str = format_cap(current_cap, decimals)
-                    message = (
-                        f"Updating cap to new cap {pending_cap_str}, current cap {current_cap_str}, "
-                        f"difference: {difference_in_percentage:.2f}%. \n"
-                        f"For vault [{name}]({vault_url}) for market: [{market_name}]({market_url}) on {chain.name}. "
-                        f"Queued for {time}"
-                    )
-                send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
-                write_last_executed_morpho_to_file(vault_address, market, PENDING_CAP_TYPE, pending_cap_timestamp)
-            else:
-                logger.info(
-                    "Skipping pending cap update for vault %s(%s) for market: %s because it was already executed",
-                    name,
-                    vault_url,
-                    market_url,
-                )
-
-        # removable_at check
-        removable_at = config[2]  # removable_at value is at index 2 in config struct
-        if removable_at > 0:
-            if removable_at > get_last_executed_morpho_from_file(vault_address, market, REMOVABLE_AT_TYPE):
-                time = datetime.fromtimestamp(removable_at).strftime("%Y-%m-%d %H:%M:%S")
-                market_name, _ = fetch_market_info(market, chain)
-                send_alert(
-                    Alert(
-                        AlertSeverity.MEDIUM,
-                        f"Vault [{name}]({vault_url}) queued to remove market: [{market_name}]({market_url}) at {time}",
-                        PROTOCOL,
-                    )
-                )
-                write_last_executed_morpho_to_file(vault_address, market, REMOVABLE_AT_TYPE, removable_at)
-            else:
-                logger.info(
-                    "Skipping removable_at update for vault %s(%s) for market: %s because it was already executed",
-                    name,
-                    vault_url,
-                    market_url,
-                )
+        )
+    return states
 
 
-def check_pending_role_change(name, morpho_contract, role_type, timestamp, chain):
+def _check_pending_cap(name: str, state: MarketGovernanceState, chain: Chain) -> None:
+    """Alert once for a new pending V1 market cap."""
+    if state.pending_cap_timestamp <= 0:
+        return
+    last_timestamp = get_last_executed_morpho_from_file(
+        state.vault_address,
+        state.market_id,
+        PENDING_CAP_TYPE,
+    )
+    if state.pending_cap_timestamp <= last_timestamp:
+        logger.info("Skipping previously alerted cap update for %s market %s", name, state.market_id)
+        return
+
+    market_url = get_market_url(state.market_id, chain)
+    vault_url = get_vault_url(state.vault_address, chain)
+    market_name, decimals = fetch_market_info(state.market_id, chain)
+    pending_cap = format_cap(state.pending_cap, decimals)
+    queued_for = datetime.fromtimestamp(state.pending_cap_timestamp).strftime("%Y-%m-%d %H:%M:%S")
+    if state.current_cap == 0:
+        message = (
+            f"Adding new market [{market_name}]({market_url}) with cap {pending_cap} "
+            f"to vault [{name}]({vault_url}) on {chain.name}. Queued for {queued_for}"
+        )
+    else:
+        difference = ((state.pending_cap - state.current_cap) / state.current_cap) * 100
+        current_cap = format_cap(state.current_cap, decimals)
+        message = (
+            f"Updating cap to new cap {pending_cap}, current cap {current_cap}, difference: {difference:.2f}%. \n"
+            f"For vault [{name}]({vault_url}) for market: [{market_name}]({market_url}) on {chain.name}. "
+            f"Queued for {queued_for}"
+        )
+    send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
+    write_last_executed_morpho_to_file(
+        state.vault_address,
+        state.market_id,
+        PENDING_CAP_TYPE,
+        state.pending_cap_timestamp,
+    )
+
+
+def _check_market_removal(name: str, state: MarketGovernanceState, chain: Chain) -> None:
+    """Alert once for a newly queued V1 market removal."""
+    if state.removable_at <= 0:
+        return
+    last_timestamp = get_last_executed_morpho_from_file(
+        state.vault_address,
+        state.market_id,
+        REMOVABLE_AT_TYPE,
+    )
+    if state.removable_at <= last_timestamp:
+        logger.info("Skipping previously alerted market removal for %s market %s", name, state.market_id)
+        return
+
+    market_url = get_market_url(state.market_id, chain)
+    vault_url = get_vault_url(state.vault_address, chain)
+    market_name, _ = fetch_market_info(state.market_id, chain)
+    removable_at = datetime.fromtimestamp(state.removable_at).strftime("%Y-%m-%d %H:%M:%S")
+    message = f"Vault [{name}]({vault_url}) queued to remove market: [{market_name}]({market_url}) at {removable_at}"
+    send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
+    write_last_executed_morpho_to_file(
+        state.vault_address,
+        state.market_id,
+        REMOVABLE_AT_TYPE,
+        state.removable_at,
+    )
+
+
+def check_market_governance_state(name: str, state: MarketGovernanceState, chain: Chain) -> None:
+    """Check pending cap and removal changes for one V1 market."""
+    _check_pending_cap(name, state, chain)
+    _check_market_removal(name, state, chain)
+
+
+def check_markets_pending_cap(name: str, morpho_contract: Any, chain: Chain, client: Any) -> None:
+    """Check V1 market cap and removal governance for one vault."""
+    market_ids = _load_vault_market_ids(morpho_contract, chain, client)
+    for state in _load_market_governance_states(morpho_contract, market_ids, client):
+        check_market_governance_state(name, state, chain)
+
+
+def check_pending_role_change(
+    name: str,
+    morpho_contract: Any,
+    role_type: str,
+    timestamp: int,
+    chain: Chain,
+) -> None:
     market_id = ""  # use empty string for all markets because the value is used per vault
     if timestamp > get_last_executed_morpho_from_file(morpho_contract.address, market_id, role_type):
-        vault_url = get_vault_url_by_name(name, chain)
+        vault_url = get_vault_url(morpho_contract.address, chain)
         send_alert(
             Alert(
                 AlertSeverity.HIGH,
@@ -322,7 +271,7 @@ def check_pending_role_change(name, morpho_contract, role_type, timestamp, chain
         write_last_executed_morpho_to_file(morpho_contract.address, market_id, role_type, timestamp)
 
 
-def check_timelock_and_guardian(name, morpho_contract, chain, client):
+def check_timelock_and_guardian(name: str, morpho_contract: Any, chain: Chain, client: Any) -> None:
     with morpho_contract.w3.batch_requests() as batch:
         batch.add(morpho_contract.functions.pendingTimelock())
         batch.add(morpho_contract.functions.pendingGuardian())
@@ -337,20 +286,20 @@ def check_timelock_and_guardian(name, morpho_contract, chain, client):
     check_pending_role_change(name, morpho_contract, "guardian", guardian, chain)
 
 
-def get_data_for_chain(chain: Chain):
+def get_data_for_chain(chain: Chain) -> None:
     client = ChainManager.get_client(chain)
-    vaults = VAULTS_BY_CHAIN[chain]
+    vaults = VAULTS_V1_BY_CHAIN[chain]
 
     logger.info("Processing Morpho Vaults on %s ...", chain.name)
     logger.debug("Vaults: %s", vaults)
 
     for vault in vaults:
-        morpho_contract = client.eth.contract(address=vault[1], abi=ABI_MORPHO)
-        check_markets_pending_cap(vault[0], morpho_contract, chain, client)
-        check_timelock_and_guardian(vault[0], morpho_contract, chain, client)
+        morpho_contract = client.eth.contract(address=vault.address, abi=ABI_MORPHO)
+        check_markets_pending_cap(vault.name, morpho_contract, chain, client)
+        check_timelock_and_guardian(vault.name, morpho_contract, chain, client)
 
 
-def main():
+def main() -> None:
     get_data_for_chain(Chain.MAINNET)
     get_data_for_chain(Chain.KATANA)
     get_data_for_chain(Chain.BASE)

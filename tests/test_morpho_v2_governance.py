@@ -1,10 +1,12 @@
 import unittest
-from unittest.mock import patch
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 from eth_abi import encode as abi_encode
 from web3 import Web3
 
 from protocols.morpho import governance_v2
+from protocols.morpho._shared import MorphoV2MonitoringError
 from protocols.morpho.governance_v2 import PendingConfig, V2GovernanceSnapshot
 from protocols.morpho.v2_decoders import submit_data_key
 from utils.chains import Chain
@@ -17,8 +19,8 @@ def _selector(sig: str) -> bytes:
     return bytes(Web3.keccak(text=sig)[:4])
 
 
-def _build(sig: str, types: list[str], values: list) -> bytes:
-    return _selector(sig) + abi_encode(types, values)
+def _build(sig: str, types: list[str], values: list[Any]) -> bytes:
+    return _selector(sig) + bytes(abi_encode(types, values))
 
 
 def _snapshot(pending_configs: list[PendingConfig]) -> V2GovernanceSnapshot:
@@ -26,7 +28,6 @@ def _snapshot(pending_configs: list[PendingConfig]) -> V2GovernanceSnapshot:
         name="Sentora PaypalUSD Main",
         address=Web3.to_checksum_address(VAULT),
         chain=Chain.MAINNET,
-        risk_level=3,
         owner="",
         curator="",
         sentinels=[],
@@ -37,13 +38,13 @@ def _snapshot(pending_configs: list[PendingConfig]) -> V2GovernanceSnapshot:
 
 
 class TestMorphoV2GovernancePendingLabels(unittest.TestCase):
-    def test_resolved_pending_alert_uses_cached_function_name(self):
+    def test_resolved_pending_alert_uses_cached_function_name(self) -> None:
         state: dict[str, str] = {}
 
-        def read_value(_filename: str, key: str):
+        def read_value(_filename: str, key: str) -> str | int:
             return state.get(key, 0)
 
-        def write_value(_filename: str, key: str, value):
+        def write_value(_filename: str, key: str, value: object) -> None:
             state[key] = str(value)
 
         data = _build("addAdapter(address)", ["address"], [A1])
@@ -69,7 +70,7 @@ class TestMorphoV2GovernancePendingLabels(unittest.TestCase):
         self.assertNotIn(f"`{data_hash[:10]}…`", alert.message)
         self.assertIn("was executed", alert.message)
 
-    def test_resolved_pending_alert_without_cached_function_keeps_hash_only_message(self):
+    def test_resolved_pending_alert_without_cached_function_keeps_hash_only_message(self) -> None:
         data_hash = "3d6d72861e" + "0" * 54
 
         with patch("protocols.morpho.governance_v2.send_alert") as send:
@@ -78,6 +79,18 @@ class TestMorphoV2GovernancePendingLabels(unittest.TestCase):
         alert = send.call_args.args[0]
         self.assertIn(f"Pending operation `{data_hash[:10]}…` was executed", alert.message)
         self.assertNotIn(f"(`{data_hash[:10]}…`)", alert.message)
+
+
+class TestMorphoV2GovernanceFetch(unittest.TestCase):
+    def test_fetch_fails_if_api_omits_configured_vaults(self) -> None:
+        response = MagicMock()
+        response.json.return_value = {"data": {"vaultV2s": {"items": []}}}
+
+        with (
+            patch("protocols.morpho._shared.request_with_retry", return_value=response),
+            self.assertRaisesRegex(MorphoV2MonitoringError, "omitted configured Vault V2 governance"),
+        ):
+            governance_v2.fetch_governance_snapshots()
 
 
 if __name__ == "__main__":
