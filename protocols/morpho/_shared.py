@@ -53,7 +53,7 @@ VAULTS_V2_BY_CHAIN: Dict[Chain, List[List[Any]]] = {
         ["Yearn KAT", "0x9b1aE9548E4B46cEB6650f6CEc702bAf5CF2b8CC", 1],
         ["Yearn Degen USDC", "0xA2d38c8A3D810EBcF4C2075821c5eC8F976bb692", 3],
         ["Gauntlet USDT", "0xaC596AD9771a8d0D4DF108ae0406e6f913aEdceb", 1],
-        ["Steakhouse High Yield USDC", "0xbeeff2d5d126d4809195EeA02b605423917bb6c6", 3],
+        ["Steakhouse High Yield USDC", "0xbeeff2d5d126d4809195EeA02b605423917bb6c6", 2],
         ["Steakhouse Prime USDC", "0xbeef042bAD4472c3F7Eb9A73070703788b5362D7", 1],
     ],
 }
