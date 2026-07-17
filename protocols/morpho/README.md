@@ -89,6 +89,16 @@ Where:
 
 This computed risk level is compared against the mutable `MAX_RISK_THRESHOLDS` configuration in [risk.py](./risk.py).
 
+The current maximum total-risk thresholds are:
+
+- **Risk Level 1:** 1.15
+- **Risk Level 2:** 2.30
+- **Risk Level 3:** 3.45
+- **Risk Level 4:** 4.60
+- **Risk Level 5:** 5.00
+
+For example, a Risk Level 2 vault alerts when its weighted total risk exceeds 2.30. These values are a snapshot for readability; [risk.py](./risk.py) remains the source of truth and may be updated as risk assessments change.
+
 If a vault's total risk level exceeds its threshold, an alert is triggered via a Telegram message.
 
 ### Market Allocation Ratio
@@ -96,6 +106,23 @@ If a vault's total risk level exceeds its threshold, an alert is triggered via a
 The system monitors each market's allocation within a vault to ensure it does not exceed its risk-adjusted threshold. Each market has a maximum allocation threshold based on its inherent risk tier and the vault's overall risk level.
 
 The mutable base allocation limits and vault-level adjustment are defined by `ALLOCATION_TIERS` and `get_market_allocation_threshold` in [risk.py](./risk.py). Higher-risk vault configurations can accept more exposure to a given market tier.
+
+The current base limits are:
+
+- **Risk Level 1 market:** 101% configured, effectively allowing a full allocation
+- **Risk Level 2 market:** 30%
+- **Risk Level 3 market:** 10%
+- **Risk Level 4 market:** 5%
+- **Risk Level 5 or unknown market:** 1%
+
+The vault risk level reduces the market tier used to select the limit by one step for each level above Risk Level 1, with a floor of Risk Level 1. For example:
+
+- A Risk Level 1 vault may allocate up to 30% to a Risk Level 2 market.
+- A Risk Level 2 vault may allocate fully to a Risk Level 2 market because its adjusted market tier is Risk Level 1.
+- A Risk Level 2 vault may allocate up to 10% to a Risk Level 4 market.
+- A Risk Level 3 vault may allocate up to 30% to a Risk Level 4 market.
+
+Allocation ratios are capped at 100% by the monitor, so the configured 101% Risk Level 1 limit acts as a full-allocation allowance. As with the total-risk thresholds, [risk.py](./risk.py) is the source of truth for these mutable values.
 
 The system monitors the allocation ratio for each market hourly:
 
