@@ -13,6 +13,14 @@ MORPHO_URL = "https://app.morpho.org"
 logger = get_logger("morpho.shared")
 
 
+class MorphoMonitoringError(RuntimeError):
+    """Raised when Morpho monitoring cannot produce a complete result."""
+
+
+class MorphoV2MonitoringError(MorphoMonitoringError):
+    """Raised when configured Morpho Vault V2 monitoring is incomplete."""
+
+
 # Yearn-curated Morpho V2 vaults — sourced from
 # https://app.morpho.org/curator/yearn?v2=true (filtered via GraphQL by
 # Yearn's curator addresses). Imported by both ``markets_v2.py`` and
@@ -38,23 +46,35 @@ VAULTS_V2_BY_CHAIN: Dict[Chain, List[List[Any]]] = {
         ["OUSD Vault V2", "0x2Ba14b2e1E7D2189D3550b708DFCA01f899f33c1", 2],
     ],
     Chain.KATANA: [
-        # ["Yearn OG USDC", "0xca44cbe1FB03691d43d2d93AA460e2fCB03878fE", 1],
-        # ["Yearn OG USDT", "0x4284d4F9f4d61eA57B8F0943547c7C19C5B9B249", 1],
+        ["Yearn OG USDC", "0xca44cbe1FB03691d43d2d93AA460e2fCB03878fE", 1],
+        ["Yearn OG USDT", "0x4284d4F9f4d61eA57B8F0943547c7C19C5B9B249", 1],
         # ["Yearn OG WBTC", "0x22c01834e1A261F8BebCa7D7B459db2F389785FF", 1],
-        # ["Yearn OG ETH", "0x5920A6FC553af799542EDA628AdfCc9eA52e141C", 1],
+        ["Yearn OG ETH", "0x5920A6FC553af799542EDA628AdfCc9eA52e141C", 1],
         ["Yearn KAT", "0x9b1aE9548E4B46cEB6650f6CEc702bAf5CF2b8CC", 1],
         ["Yearn Degen USDC", "0xA2d38c8A3D810EBcF4C2075821c5eC8F976bb692", 3],
+        ["Gauntlet USDT", "0xaC596AD9771a8d0D4DF108ae0406e6f913aEdceb", 1],
+        ["Steakhouse High Yield USDC", "0xbeeff2d5d126d4809195EeA02b605423917bb6c6", 3],
+        ["Steakhouse Prime USDC", "0xbeef042bAD4472c3F7Eb9A73070703788b5362D7", 1],
     ],
 }
 
 SUPPORTED_CHAINS: List[Chain] = list(VAULTS_V2_BY_CHAIN.keys())
 
 
+def get_v2_vault_config() -> tuple[dict[str, tuple[Chain, str, int]], list[str], list[int]]:
+    """Flatten configured Vault V2 rows for GraphQL queries and response joins."""
+    entries = [(chain, entry) for chain, vaults in VAULTS_V2_BY_CHAIN.items() for entry in vaults]
+    metadata = {str(entry[1]).lower(): (chain, str(entry[0]), int(str(entry[2]))) for chain, entry in entries}
+    addresses = [str(entry[1]) for _, entry in entries]
+    chain_ids = sorted({chain.chain_id for chain, _ in entries})
+    return metadata, addresses, chain_ids
+
+
 def get_chain_name(chain: Chain) -> str:
     """Return the chain segment used in Morpho frontend URLs."""
     if chain == Chain.MAINNET:
         return "ethereum"
-    return chain.name.lower()
+    return str(chain.name).lower()
 
 
 def get_market_url(market_id: str, chain: Chain) -> str:
@@ -183,7 +203,7 @@ def fetch_market_metrics(market_ids: List[str], chain: Chain) -> Dict[str, Marke
     """Fetch state + bad debt for a batch of market IDs.
 
     Returns a dict keyed by lowercase market_id mapping to a ``MarketMetrics``
-    dataclass. Empty dict on GraphQL error or empty input.
+    dataclass. Raises if Morpho returns errors or omits a requested market.
     """
     if not market_ids:
         return {}
@@ -213,7 +233,10 @@ def fetch_market_metrics(market_ids: List[str], chain: Chain) -> Dict[str, Marke
     )
     payload = response.json()
     if "errors" in payload:
-        logger.warning("GraphQL error fetching market metrics: %s", payload["errors"])
-        return {}
+        raise MorphoV2MonitoringError(f"Morpho GraphQL errors fetching market metrics: {payload['errors']}")
     items = payload.get("data", {}).get("markets", {}).get("items", []) or []
-    return {item["marketId"].lower(): _parse_market_metrics(item) for item in items}
+    metrics = {item["marketId"].lower(): _parse_market_metrics(item) for item in items}
+    missing_market_ids = sorted(set(keys) - set(metrics))
+    if missing_market_ids:
+        raise MorphoV2MonitoringError("Morpho API omitted configured market IDs: " + ", ".join(missing_market_ids))
+    return metrics

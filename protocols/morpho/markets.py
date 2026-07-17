@@ -11,11 +11,11 @@ from typing import Any, Dict, List
 
 import requests
 
+from protocols.morpho._shared import MorphoMonitoringError
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import Chain
 from utils.http_client import request_with_retry
 from utils.logger import get_logger
-from utils.telegram import send_error_message
 
 # Configuration constants
 API_URL = "https://api.morpho.org/graphql"
@@ -26,10 +26,9 @@ BAD_DEBT_RATIO = 0.005  # 0.5% of total borrowed tvl
 LIQUIDITY_THRESHOLD = 0.01  # 1% of total assets
 YV_COLLATERAL_LIQUIDATION_BUFFER = 1.25  # require 25% more withdrawable liquidity than collateral at risk
 YV_COLLATERAL_MIN_BORROW_USD = 10_000  # skip dust markets
-YV_COLLATERAL_MIN_GROUP_ASSETS_USD = 10_000  # skip liquidity groups with negligible assets
 YV_COLLATERAL_MIN_AT_RISK_USD = 10_000  # skip markets with negligible collateral at risk
-YV_COLLATERAL_AT_RISK_POINTS = 20  # requested granularity for Morpho's collateral-at-risk curve
-YV_COLLATERAL_STABLE_PRICE_SHOCK = 0.05
+YV_COLLATERAL_AT_RISK_POINTS = 50  # 2% increments for the stable-market shock
+YV_COLLATERAL_STABLE_PRICE_SHOCK = 0.02
 YV_COLLATERAL_VOLATILE_PRICE_SHOCK = 0.15
 YV_COLLATERAL_FALLBACK_PRICE_SHOCK = 0.10
 
@@ -131,6 +130,27 @@ VAULTS_WITH_YV_COLLATERAL_BY_ASSET = {
         #     ["SteakhousePrime AUSD", "0x82c4C641CCc38719ae1f0FBd16A64808d838fDfD"],
         #     ["Gauntlet AUSD", "0x9540441C503D763094921dbE4f13268E6d1d3B56"],
         # ],
+    },
+}
+
+
+# Morpho Vault V2s used by Yearn strategies in vaults accepted as collateral.
+# Keep v1 and v2 entries during migrations so the liquidity check covers both.
+VAULTS_V2_WITH_YV_COLLATERAL_BY_ASSET = {
+    Chain.KATANA: {
+        "0x203A662b0BD271A6ed5a60EdFbd04bFce608FD36": [
+            ["Yearn OG USDC", "0xca44cbe1FB03691d43d2d93AA460e2fCB03878fE"],
+            ["Yearn Degen USDC", "0xA2d38c8A3D810EBcF4C2075821c5eC8F976bb692"],
+            ["Steakhouse High Yield USDC", "0xbeeff2d5d126d4809195EeA02b605423917bb6c6"],
+            ["Steakhouse Prime USDC", "0xbeef042bAD4472c3F7Eb9A73070703788b5362D7"],
+        ],
+        "0x2DCa96907fde857dd3D816880A0df407eeB2D2F2": [
+            ["Yearn OG USDT", "0x4284d4F9f4d61eA57B8F0943547c7C19C5B9B249"],
+            ["Gauntlet USDT", "0xaC596AD9771a8d0D4DF108ae0406e6f913aEdceb"],
+        ],
+        "0xEE7D8BCFb72bC1880D0Cf19822eB0A2e6577aB62": [
+            ["Yearn OG ETH", "0x5920A6FC553af799542EDA628AdfCc9eA52e141C"],
+        ],
     },
 }
 
@@ -417,12 +437,33 @@ def get_market_allocation_threshold(market_risk_level: int, vault_risk_level: in
     return ALLOCATION_TIERS[adjusted_risk]
 
 
+def get_market_risk_level(market_id: str, chain: Chain) -> int:
+    """Return the configured 1-5 risk tier for a Morpho market."""
+    for risk_level, markets_by_chain in (
+        (1, MARKETS_RISK_1),
+        (2, MARKETS_RISK_2),
+        (3, MARKETS_RISK_3),
+        (4, MARKETS_RISK_4),
+        (5, MARKETS_RISK_5),
+    ):
+        if market_id.lower() in (configured_id.lower() for configured_id in markets_by_chain.get(chain, [])):
+            return risk_level
+    return 5
+
+
+def get_vault_risk_level(vault_address: str, chain: Chain) -> int:
+    """Return a configured vault risk tier or fail for an unknown vault."""
+    for vault in VAULTS_BY_CHAIN.get(chain, []):
+        if str(vault[1]).lower() == vault_address.lower():
+            return int(str(vault[2]))
+    raise ValueError(f"Vault {vault_address} not found in VAULTS_BY_CHAIN config")
+
+
 def get_chain_name(chain: Chain) -> str:
     """Convert chain to name used in Morpho URLs."""
     if chain == Chain.MAINNET:
         return "ethereum"
-    else:
-        return chain.name.lower()
+    return str(chain.name).lower()
 
 
 def get_market_url(market: Dict[str, Any]) -> str:
@@ -483,7 +524,7 @@ def bad_debt_alert(
             send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
 
-def check_allocation_and_risk(vault_data):
+def check_allocation_and_risk(vault_data: Dict[str, Any]) -> None:
     """
     Check per-market allocation and total vault risk level.
     Sends a consolidated alert if any markets exceed allocation thresholds.
@@ -496,17 +537,8 @@ def check_allocation_and_risk(vault_data):
     vault_name = vault_data["name"]
     vault_url = get_vault_url(vault_data)
     chain = Chain.from_chain_id(vault_data["chain"]["id"])
-    # Find vault in VAULTS_BY_CHAIN to get risk level
     vault_address = vault_data["address"]
-    risk_level = None
-    for vault in VAULTS_BY_CHAIN[chain]:
-        if vault[1].lower() == vault_address.lower():
-            risk_level = vault[2]
-            break
-
-    if risk_level is None:
-        # Throw error if vault not found in config
-        raise ValueError(f"Vault {vault_address} not found in VAULTS_BY_CHAIN config")
+    risk_level = get_vault_risk_level(vault_address, chain)
 
     total_risk_level = 0.0
     allocation_violations: list[str] = []
@@ -525,17 +557,7 @@ def check_allocation_and_risk(vault_data):
             continue
         allocation_ratio = min(market_supply / total_assets, 1.0)  # prevent allocation ratio from exceeding 100%
 
-        # Determine market risk level
-        if market_id in MARKETS_RISK_1[chain]:
-            market_risk_level = 1
-        elif market_id in MARKETS_RISK_2[chain]:
-            market_risk_level = 2
-        elif market_id in MARKETS_RISK_3[chain]:
-            market_risk_level = 3
-        elif market_id in MARKETS_RISK_4[chain]:
-            market_risk_level = 4
-        else:
-            market_risk_level = 5
+        market_risk_level = get_market_risk_level(market_id, chain)
 
         allocation_threshold = get_market_allocation_threshold(market_risk_level, risk_level)
         risk_multiplier = market_risk_level
@@ -599,6 +621,14 @@ def is_yv_collateral_vault(vault_address: str, chain: Chain) -> bool:
     return False
 
 
+def is_yv_collateral_v2_vault(vault_address: str, chain: Chain) -> bool:
+    """Return whether a Morpho Vault V2 supplies Yearn-collateral unwind liquidity."""
+    for vaults in VAULTS_V2_WITH_YV_COLLATERAL_BY_ASSET.get(chain, {}).values():
+        if any(vault_addr.lower() == vault_address.lower() for _, vault_addr in vaults):
+            return True
+    return False
+
+
 def get_yv_collateral_vaults_by_asset(chain: Chain) -> Dict[str, List[str]]:
     """
     Get YV collateral vaults organized by asset address.
@@ -609,7 +639,7 @@ def get_yv_collateral_vaults_by_asset(chain: Chain) -> Dict[str, List[str]]:
     Returns:
         Dictionary with asset address as key and list of vault addresses as value
     """
-    result = {}
+    result: Dict[str, List[str]] = {}
 
     if chain not in VAULTS_WITH_YV_COLLATERAL_BY_ASSET:
         return result
@@ -621,9 +651,17 @@ def get_yv_collateral_vaults_by_asset(chain: Chain) -> Dict[str, List[str]]:
     return result
 
 
+def get_yv_collateral_v2_vaults_by_asset(chain: Chain) -> Dict[str, List[str]]:
+    """Get configured Morpho Vault V2 strategy addresses grouped by asset."""
+    return {
+        asset_address.lower(): [vault[1] for vault in vaults]
+        for asset_address, vaults in VAULTS_V2_WITH_YV_COLLATERAL_BY_ASSET.get(chain, {}).items()
+    }
+
+
 def group_vaults_by_chain(vaults_data: List[Dict[str, Any]]) -> Dict[Chain, List[Dict[str, Any]]]:
     """Group vaults by their chain."""
-    vaults_by_chain = {}
+    vaults_by_chain: Dict[Chain, List[Dict[str, Any]]] = {}
     for vault_data in vaults_data:
         chain = Chain.from_chain_id(vault_data["chain"]["id"])
         if chain not in vaults_by_chain:
@@ -653,22 +691,68 @@ def find_yv_vaults_for_asset(
 
 
 def calculate_combined_metrics(asset_yv_vaults: List[Dict[str, Any]]) -> tuple[float, float, List[str]]:
-    """Calculate combined total assets, liquidity, and vault names for a group of vaults."""
+    """Calculate combined v1/v2 total assets, liquidity, and vault names."""
     combined_total_assets = 0
-    combined_liquidity = 0
+    unshared_liquidity = 0.0
+    liquidity_sources: Dict[str, List[float]] = {}
     vault_names = []
 
     for vault in asset_yv_vaults:
-        total_assets = vault["state"]["totalAssetsUsd"] or 0
-        liquidity = vault["liquidity"]["usd"] or 0
+        if vault.get("__typename") == "VaultV2":
+            total_assets = vault.get("totalAssetsUsd") or 0
+            liquidity = vault.get("liquidityUsd") or 0
+            vault_name = f"{vault['name']} (V2)"
+        else:
+            total_assets = vault["state"]["totalAssetsUsd"] or 0
+            liquidity = vault["liquidity"]["usd"] or 0
+            vault_name = vault["name"]
 
         # Only include vaults with meaningful assets (>= 10k)
         if total_assets >= 10_000:
             combined_total_assets += total_assets
-            combined_liquidity += liquidity
-            vault_names.append(vault["name"])
+            vault_names.append(vault_name)
+            sources = _get_vault_liquidity_sources(vault, liquidity)
+            source_total = sum(source[1] for source in sources)
+            scale = min(liquidity / source_total, 1.0) if source_total else 0.0
+            attributed_liquidity = source_total * scale
+            unshared_liquidity += max(liquidity - attributed_liquidity, 0)
+
+            for source_key, source_liquidity, source_cap in sources:
+                source_liquidity *= scale
+                if source_key in liquidity_sources:
+                    liquidity_sources[source_key][0] += source_liquidity
+                    liquidity_sources[source_key][1] = min(liquidity_sources[source_key][1], source_cap)
+                else:
+                    liquidity_sources[source_key] = [source_liquidity, source_cap]
+
+    shared_liquidity = sum(min(liquidity, cap) for liquidity, cap in liquidity_sources.values())
+    combined_liquidity = unshared_liquidity + shared_liquidity
 
     return combined_total_assets, combined_liquidity, vault_names
+
+
+def _get_vault_liquidity_sources(vault: Dict[str, Any], reported_liquidity: float) -> List[tuple[str, float, float]]:
+    """Return market-backed liquidity contributions as (market, amount, market cap)."""
+    if vault.get("__typename") == "VaultV2":
+        idle_liquidity = min(float(vault.get("idleAssetsUsd") or 0), reported_liquidity)
+        market = (vault.get("liquidityData") or {}).get("market")
+        market_liquidity = (market or {}).get("state", {}).get("liquidityAssetsUsd")
+        if market is None or market_liquidity is None:
+            return []
+        adapter_liquidity = max(reported_liquidity - idle_liquidity, 0)
+        return [(market["marketId"].lower(), adapter_liquidity, float(market_liquidity))]
+
+    sources = []
+    for allocation in vault.get("state", {}).get("allocation") or []:
+        market = allocation.get("market") or {}
+        market_liquidity = market.get("state", {}).get("liquidityAssetsUsd")
+        if allocation.get("withdrawQueueIndex") is None or market.get("collateralAsset") is None:
+            continue
+        if market_liquidity is None:
+            continue
+        supplied = float(allocation.get("supplyAssetsUsd") or 0)
+        sources.append((market["marketId"].lower(), min(supplied, float(market_liquidity)), float(market_liquidity)))
+    return sources
 
 
 def parse_lltv(lltv: str | int | None) -> float:
@@ -691,13 +775,30 @@ def get_yv_collateral_price_shock(lltv: str | int | None) -> float:
     return YV_COLLATERAL_FALLBACK_PRICE_SHOCK
 
 
-def get_yv_collateral_liquidity_by_asset(chain: Chain, chain_vaults: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def get_yv_collateral_liquidity_by_asset(
+    chain: Chain,
+    chain_vaults: List[Dict[str, Any]],
+    chain_v2_vaults: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
     """Build withdrawable liquidity groups for Yearn-vault collateral underlying assets."""
     yv_vaults_by_asset = get_yv_collateral_vaults_by_asset(chain)
-    liquidity_by_asset = {}
+    yv_v2_vaults_by_asset = get_yv_collateral_v2_vaults_by_asset(chain)
+    liquidity_by_asset: Dict[str, Dict[str, Any]] = {}
 
-    for asset_address, yv_vault_addresses in yv_vaults_by_asset.items():
-        asset_yv_vaults = find_yv_vaults_for_asset(chain_vaults, asset_address, yv_vault_addresses)
+    asset_addresses = yv_vaults_by_asset.keys() | yv_v2_vaults_by_asset.keys()
+    for asset_address in asset_addresses:
+        asset_yv_vaults = find_yv_vaults_for_asset(
+            chain_vaults,
+            asset_address,
+            yv_vaults_by_asset.get(asset_address, []),
+        )
+        asset_yv_vaults.extend(
+            find_yv_vaults_for_asset(
+                chain_v2_vaults,
+                asset_address,
+                yv_v2_vaults_by_asset.get(asset_address, []),
+            )
+        )
 
         if not asset_yv_vaults:
             continue
@@ -709,13 +810,12 @@ def get_yv_collateral_liquidity_by_asset(chain: Chain, chain_vaults: List[Dict[s
             vault_names,
         ) = calculate_combined_metrics(asset_yv_vaults)
 
-        if combined_total_assets < YV_COLLATERAL_MIN_GROUP_ASSETS_USD:
+        if combined_total_assets < 10_000:
             logger.info(
-                "Skipping %s YV collateral liquidity group: total assets $%s below threshold",
+                "%s YV collateral liquidity group has only $%s total assets; retaining zero/low liquidity coverage",
                 asset_symbol,
                 f"{combined_total_assets:,.2f}",
             )
-            continue
 
         asset_key = asset_address.lower()
         group_data = {
@@ -724,7 +824,7 @@ def get_yv_collateral_liquidity_by_asset(chain: Chain, chain_vaults: List[Dict[s
             "combined_total_assets": combined_total_assets,
             "combined_liquidity": combined_liquidity,
             "vault_names": vault_names,
-            "vault_count": len(asset_yv_vaults),
+            "vault_count": len(vault_names),
         }
         if asset_key in liquidity_by_asset:
             existing = liquidity_by_asset[asset_key]
@@ -741,12 +841,12 @@ def get_yv_collateral_liquidity_by_asset(chain: Chain, chain_vaults: List[Dict[s
         else:
             liquidity_by_asset[asset_key] = group_data
 
-        liquidity_ratio = combined_liquidity / combined_total_assets
+        liquidity_ratio = combined_liquidity / combined_total_assets if combined_total_assets else 0
         logger.info(
             "YV collateral liquidity group %s on %s: %s vaults, $%s total assets, $%s liquidity (%s)",
             asset_symbol,
             chain.name,
-            len(asset_yv_vaults),
+            len(vault_names),
             f"{combined_total_assets:,.2f}",
             f"{combined_liquidity:,.2f}",
             f"{liquidity_ratio:.1%}",
@@ -757,7 +857,7 @@ def get_yv_collateral_liquidity_by_asset(chain: Chain, chain_vaults: List[Dict[s
 
 def collect_yv_collateral_markets(
     chain: Chain,
-    chain_vaults: List[Dict[str, Any]],
+    configured_markets: List[Dict[str, Any]],
     liquidity_by_asset: Dict[str, Dict[str, Any]],
 ) -> Dict[str, tuple[Dict[str, Any], Dict[str, Any]]]:
     """Collect configured direct Yearn vault collateral markets."""
@@ -769,38 +869,33 @@ def collect_yv_collateral_markets(
     }
     markets: Dict[str, tuple[Dict[str, Any], Dict[str, Any]]] = {}
 
-    for vault_data in chain_vaults:
-        for allocation in vault_data["state"]["allocation"]:
-            market = allocation.get("market") or {}
-            if market.get("collateralAsset") is None:
-                continue
+    for market in configured_markets:
+        collateral_asset = market.get("collateralAsset")
+        if collateral_asset is None or collateral_asset.get("chain", {}).get("id") != chain.chain_id:
+            continue
 
-            market_id = market["marketId"]
-            asset_address = market_to_asset.get(market_id.lower())
-            if asset_address is None:
-                continue
+        market_id = market["marketId"]
+        asset_address = market_to_asset.get(market_id.lower())
+        if asset_address is None:
+            continue
 
-            market_state = market.get("state") or {}
-            borrow_usd = market_state.get("borrowAssetsUsd") or 0
-            if borrow_usd < YV_COLLATERAL_MIN_BORROW_USD:
-                continue
+        borrow_usd = market.get("state", {}).get("borrowAssetsUsd") or 0
+        if borrow_usd < YV_COLLATERAL_MIN_BORROW_USD:
+            continue
 
-            liquidity_group = liquidity_by_asset.get(asset_address)
-            if liquidity_group is None:
-                logger.warning(
-                    "Skipping configured YV collateral market %s on %s: no liquidity group for asset %s",
-                    market_id,
-                    chain.name,
-                    asset_address,
-                )
-                continue
+        liquidity_group = liquidity_by_asset.get(asset_address)
+        if liquidity_group is None:
+            raise MorphoMonitoringError(
+                f"No {chain.name} liquidity group for configured YV collateral market {market_id} "
+                f"and asset {asset_address}"
+            )
 
-            markets[market_id] = (market, liquidity_group)
+        markets[market_id] = (market, liquidity_group)
 
     return markets
 
 
-def get_markets_collateral_at_risk_usd(market_shocks: Dict[str, float], chain: Chain) -> Dict[str, float] | None:
+def get_markets_collateral_at_risk_usd(market_shocks: Dict[str, float], chain: Chain) -> Dict[str, float]:
     """Fetch Morpho collateral at risk for many markets in a single aliased request.
 
     Args:
@@ -808,7 +903,7 @@ def get_markets_collateral_at_risk_usd(market_shocks: Dict[str, float], chain: C
         chain: Chain the markets live on.
 
     Returns:
-        Mapping of market id to collateral-at-risk USD at its target price, or None if the request fails.
+        Mapping of market id to collateral-at-risk USD at its target price.
     """
     if not market_shocks:
         return {}
@@ -840,13 +935,13 @@ def get_markets_collateral_at_risk_usd(market_shocks: Dict[str, float], chain: C
     try:
         response = request_with_retry("post", API_URL, json=json_data)
     except requests.RequestException as e:
-        logger.error("Failed to fetch collateral at risk on %s: %s", chain.name, e)
-        return None
+        raise MorphoMonitoringError(f"Failed to fetch collateral at risk on {chain.name}: {e}") from e
 
     data = response.json()
     if "errors" in data:
-        logger.error("GraphQL error fetching collateral at risk on %s: %s", chain.name, data)
-        return None
+        raise MorphoMonitoringError(
+            f"Morpho GraphQL errors fetching collateral at risk on {chain.name}: {data['errors']}"
+        )
 
     response_data = data.get("data") or {}
     collateral_at_risk_by_market: Dict[str, float] = {}
@@ -865,10 +960,12 @@ def get_markets_collateral_at_risk_usd(market_shocks: Dict[str, float], chain: C
 
 
 def check_yv_collateral_market_liquidity(
-    chain: Chain, chain_vaults: List[Dict[str, Any]], liquidity_by_asset: Dict[str, Dict[str, Any]]
+    chain: Chain,
+    configured_markets: List[Dict[str, Any]],
+    liquidity_by_asset: Dict[str, Dict[str, Any]],
 ) -> None:
     """Alert only when underlying liquidity cannot cover risky direct YV collateral liquidations."""
-    markets = collect_yv_collateral_markets(chain, chain_vaults, liquidity_by_asset)
+    markets = collect_yv_collateral_markets(chain, configured_markets, liquidity_by_asset)
     if not markets:
         return
 
@@ -877,8 +974,6 @@ def check_yv_collateral_market_liquidity(
         for market_id, (market, liquidity_group) in markets.items()
     }
     collateral_at_risk_by_market = get_markets_collateral_at_risk_usd(market_shocks, chain)
-    if collateral_at_risk_by_market is None:
-        return
 
     checks_by_asset: Dict[str, Dict[str, Any]] = {}
     for market_id, (market, liquidity_group) in markets.items():
@@ -960,7 +1055,11 @@ def check_individual_liquidity_for_chain(chain: Chain, chain_vaults: List[Dict[s
             check_low_liquidity(vault_data)
 
 
-def check_low_liquidity_combined(vaults_data: List[Dict[str, Any]]) -> None:
+def check_low_liquidity_combined(
+    vaults_data: List[Dict[str, Any]],
+    v2_vaults_data: List[Dict[str, Any]],
+    configured_markets: List[Dict[str, Any]],
+) -> None:
     """
     Check liquidity for vaults, with special logic for VAULTS_WITH_YV_COLLATERAL_BY_ASSET.
     For YV collateral vaults, combine all vaults with the same asset and check if
@@ -968,18 +1067,21 @@ def check_low_liquidity_combined(vaults_data: List[Dict[str, Any]]) -> None:
     """
     # Group vaults by chain for processing
     vaults_by_chain = group_vaults_by_chain(vaults_data)
+    v2_vaults_by_chain = group_vaults_by_chain(v2_vaults_data)
 
     # Process each chain separately
-    for chain, chain_vaults in vaults_by_chain.items():
+    for chain in vaults_by_chain.keys() | v2_vaults_by_chain.keys():
+        chain_vaults = vaults_by_chain.get(chain, [])
+        chain_v2_vaults = v2_vaults_by_chain.get(chain, [])
         # Check market-aware YV collateral unwind liquidity
-        yv_liquidity_by_asset = get_yv_collateral_liquidity_by_asset(chain, chain_vaults)
-        check_yv_collateral_market_liquidity(chain, chain_vaults, yv_liquidity_by_asset)
+        yv_liquidity_by_asset = get_yv_collateral_liquidity_by_asset(chain, chain_vaults, chain_v2_vaults)
+        check_yv_collateral_market_liquidity(chain, configured_markets, yv_liquidity_by_asset)
 
         # Check individual liquidity for non-YV collateral vaults
         check_individual_liquidity_for_chain(chain, chain_vaults)
 
 
-def check_low_liquidity(vault_data):
+def check_low_liquidity(vault_data: Dict[str, Any]) -> None:
     """
     Send telegram message if low liquidity is detected.
     """
@@ -1007,22 +1109,11 @@ def check_low_liquidity(vault_data):
         send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
 
 
-def main() -> None:
-    """
-    Check markets for low liquidity, high allocation and bad debt.
-    Send telegram message if data cannot be fetched.
-    """
-    logger.info("Checking Morpho markets...")
-
-    # Collect all vault addresses from all chains
-    vault_addresses = []
-    for chain, vaults in VAULTS_BY_CHAIN.items():
-        vault_addresses.extend([vault[1] for vault in vaults])
-
-    query = """
-    query GetVaults($addresses: [String!]!) {
+_VAULTS_QUERY = """
+    query GetVaults($addresses: [String!]!, $v2Addresses: [String!]!, $marketIds: [String!]!) {
         vaults(where: { address_in: $addresses } ) {
             items {
+                __typename
                 address
                 name
                 chain {
@@ -1041,6 +1132,7 @@ def main() -> None:
                     allocation {
                         supplyCap
                         supplyAssetsUsd
+                        withdrawQueueIndex
                         pendingSupplyCapUsd
                         pendingSupplyCapValidAt
                         market {
@@ -1061,6 +1153,7 @@ def main() -> None:
                                 utilization
                                 borrowAssetsUsd
                                 supplyAssetsUsd
+                                liquidityAssetsUsd
                             }
                             badDebt {
                                 underlying
@@ -1071,38 +1164,136 @@ def main() -> None:
                 }
             }
         }
+        vaultV2s(first: 200, where: { address_in: $v2Addresses }) {
+            items {
+                __typename
+                address
+                name
+                chain { id }
+                asset { address symbol name }
+                totalAssetsUsd
+                idleAssetsUsd
+                liquidityUsd
+                liquidityData {
+                    __typename
+                    ... on MarketV1LiquidityData {
+                        market {
+                            marketId
+                            state { liquidityAssetsUsd }
+                        }
+                    }
+                }
+            }
+        }
+        markets(first: 200, where: { uniqueKey_in: $marketIds }) {
+            items {
+                marketId
+                lltv
+                loanAsset { address symbol }
+                collateralAsset {
+                    address
+                    symbol
+                    chain { id }
+                }
+                state { borrowAssetsUsd }
+            }
+        }
     }
-    """
+"""
 
-    json_data = {"query": query, "variables": {"addresses": vault_addresses}}
+
+def get_configured_v2_collateral_vault_addresses() -> List[str]:
+    """Return every configured Vault V2 used by a YV-collateral strategy."""
+    return [
+        vault[1]
+        for vaults_by_asset in VAULTS_V2_WITH_YV_COLLATERAL_BY_ASSET.values()
+        for vaults in vaults_by_asset.values()
+        for vault in vaults
+    ]
+
+
+def get_configured_yv_collateral_market_ids() -> List[str]:
+    """Return every direct YV-collateral Morpho market configured for coverage checks."""
+    return [
+        market_id
+        for markets_by_asset in YV_COLLATERAL_MARKETS_BY_ASSET.values()
+        for market_ids in markets_by_asset.values()
+        for market_id in market_ids
+    ]
+
+
+def fetch_configured_vaults() -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Fetch configured v1 vaults, v2 collateral vaults, and direct collateral markets."""
+    vault_addresses = [str(vault[1]) for vaults in VAULTS_BY_CHAIN.values() for vault in vaults]
+    v2_vault_addresses = get_configured_v2_collateral_vault_addresses()
+    market_ids = get_configured_yv_collateral_market_ids()
+
+    json_data = {
+        "query": _VAULTS_QUERY,
+        "variables": {
+            "addresses": vault_addresses,
+            "v2Addresses": v2_vault_addresses,
+            "marketIds": market_ids,
+        },
+    }
 
     try:
         response = request_with_retry("post", API_URL, json=json_data)
     except requests.RequestException as e:
-        send_error_message(
-            f"🚨 Problem with fetching data for Morpho markets: {e.response.status_code} 🚨",
-            PROTOCOL,
-        )
-        return
+        status_code = e.response.status_code if e.response is not None else "unknown"
+        raise MorphoMonitoringError(f"Failed to fetch configured Morpho data: HTTP {status_code}") from e
 
     data = response.json()
     if "errors" in data:
-        send_error_message(
-            f"🚨 GraphQL error when fetching Morpho data. Response code: {response.status_code} 🚨",
-            PROTOCOL,
-        )
-        return
+        raise MorphoMonitoringError(f"Morpho GraphQL errors fetching configured data: {data['errors']}")
 
     vaults_data = data.get("data", {}).get("vaults", {}).get("items", [])
-    if len(vaults_data) == 0:
-        send_error_message(
-            "🚨 No vaults data found for Morpho markets 🚨",
-            PROTOCOL,
+    found_v1_addresses = {vault["address"].lower() for vault in vaults_data}
+    missing_v1_addresses = [address for address in vault_addresses if address.lower() not in found_v1_addresses]
+    if missing_v1_addresses:
+        raise MorphoMonitoringError(
+            "Morpho API omitted configured Vault V1 addresses: " + ", ".join(missing_v1_addresses)
         )
-        return
+
+    v2_vaults_data = data.get("data", {}).get("vaultV2s", {}).get("items", [])
+    found_v2_addresses = {vault["address"].lower() for vault in v2_vaults_data}
+    missing_v2_addresses = [address for address in v2_vault_addresses if address.lower() not in found_v2_addresses]
+    if missing_v2_addresses:
+        raise MorphoMonitoringError(
+            "Morpho API omitted configured YV-collateral Vault V2 addresses: " + ", ".join(missing_v2_addresses)
+        )
+
+    markets_data = data.get("data", {}).get("markets", {}).get("items", [])
+    found_market_ids = {market["marketId"].lower() for market in markets_data}
+    missing_market_ids = [market_id for market_id in market_ids if market_id.lower() not in found_market_ids]
+    if missing_market_ids:
+        raise MorphoMonitoringError(
+            "Morpho API omitted configured YV-collateral market IDs: " + ", ".join(missing_market_ids)
+        )
+
+    return vaults_data, v2_vaults_data, markets_data
+
+
+def get_active_vault_markets(vault_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return non-idle markets with a cap and more than $10k supplied."""
+    vault_markets = []
+    for allocation in vault_data["state"]["allocation"]:
+        market_supply_usd = allocation.get("market", {}).get("state", {}).get("supplyAssetsUsd")
+        if int(allocation.get("supplyCap", 0)) == 0 or (market_supply_usd or 0) <= 1e4:
+            continue
+        market = allocation["market"]
+        if market["collateralAsset"] is not None:
+            vault_markets.append(market)
+    return vault_markets
+
+
+def main() -> None:
+    """Check markets for low liquidity, high allocation, risk, and bad debt."""
+    logger.info("Checking Morpho markets...")
+    vaults_data, v2_vaults_data, configured_markets = fetch_configured_vaults()
 
     # Check combined liquidity for all vaults (handles YV collateral grouping)
-    check_low_liquidity_combined(vaults_data)
+    check_low_liquidity_combined(vaults_data, v2_vaults_data, configured_markets)
 
     alerted_markets: set[str] = set()
 
@@ -1110,20 +1301,10 @@ def main() -> None:
         # Check per-market allocation and total risk level
         check_allocation_and_risk(vault_data)
 
-        # Check bad debt for each market in the vault
-        vault_markets = []
-        for allocation in vault_data["state"]["allocation"]:
-            market_supply_usd = allocation.get("market", {}).get("state", {}).get("supplyAssetsUsd")
-            if int(allocation.get("supplyCap", 0)) > 0 and (market_supply_usd or 0) > 1e4:  # skip low value markets
-                market = allocation["market"]
-                if market["collateralAsset"] is not None:
-                    # market without collateral asset is idle asset
-                    vault_markets.append(market)
-
         vault_name = vault_data["name"]
         vault_url = get_vault_url(vault_data)
         chain = Chain.from_chain_id(vault_data["chain"]["id"])
-        bad_debt_alert(vault_markets, vault_name, vault_url, chain, alerted_markets)
+        bad_debt_alert(get_active_vault_markets(vault_data), vault_name, vault_url, chain, alerted_markets)
 
 
 if __name__ == "__main__":

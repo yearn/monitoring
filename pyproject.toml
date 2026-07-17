@@ -141,6 +141,12 @@ disallow_untyped_decorators = true
 no_implicit_optional = true
 strict_optional = true
 
+[tool.pytest.ini_options]
+filterwarnings = [
+    # web3 imports this compatibility module; monitoring code does not use the deprecated API.
+    "ignore:websockets\\.legacy is deprecated:DeprecationWarning:websockets\\.legacy",
+]
+
 [[tool.mypy.overrides]]
 module = ["web3.*", "cytoolz.*"]
 ignore_missing_imports = true

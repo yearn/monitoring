@@ -56,18 +56,18 @@ The utilization ratio for each market is calculated as the ratio of borrowed ass
 
 For vaults that are used as collateral in Yearn v3 strategies (YV collateral vaults), the system implements market-aware unwind liquidity monitoring. Instead of checking each vault individually, vaults with the same underlying asset are grouped together and their withdrawable liquidity is aggregated.
 
-**Configuration:** YV collateral vaults are defined in the `VAULTS_WITH_YV_COLLATERAL_BY_ASSET` mapping in [markets.py](./markets.py), organized by chain and asset address. Watched direct YV-collateral markets are explicitly defined in `YV_COLLATERAL_MARKETS_BY_ASSET`, using the same underlying asset addresses.
+**Configuration:** YV collateral strategy vaults are defined in the `VAULTS_WITH_YV_COLLATERAL_BY_ASSET` and `VAULTS_V2_WITH_YV_COLLATERAL_BY_ASSET` mappings in [markets.py](./markets.py), organized by chain and asset address. Keep both generations configured while liquidity migrates from v1 to v2. Watched direct YV-collateral markets are explicitly defined in `YV_COLLATERAL_MARKETS_BY_ASSET`, using the same underlying asset addresses.
 
 **Thresholds:**
 
 - **Regular vaults:** Defined in the `LIQUIDITY_THRESHOLD` variable in [markets.py#L25](./markets.py#L25).
-- **YV collateral vaults:** Require enough combined withdrawable liquidity to cover collateral at risk in direct YV-collateral Morpho markets, plus a liquidation buffer (`YV_COLLATERAL_*` constants in [markets.py#L26](./markets.py#L26)). Price shock is selected from market LLTV: 5% for LLTV >= 86%, 15% for LLTV <= 77%, otherwise 10%.
+- **YV collateral vaults:** Require enough combined withdrawable liquidity to cover collateral at risk in direct YV-collateral Morpho markets, plus a liquidation buffer (`YV_COLLATERAL_*` constants in [markets.py#L26](./markets.py#L26)). Price shock is selected from market LLTV: 2% for LLTV >= 86%, 15% for LLTV <= 77%, otherwise 10%.
 
 **Logic:** For each asset group (e.g., all USDC vaults at one chain), the system:
 
-1. Calculates combined total assets across all vaults with the same asset
-2. Calculates combined available liquidity across all vaults with the same asset
-3. Finds configured direct Yearn vault collateral markets such as `yvvbUSDC/vbUSDT`
+1. Calculates combined total assets across all configured v1 and v2 strategy vaults with the same asset
+2. Calculates combined immediately withdrawable liquidity across those vaults. Shared Morpho market liquidity is capped once per market so v1 and v2 vaults cannot double-count the same cash. For v2 this uses the API's `liquidityUsd` value (idle assets plus the selected liquidity adapter) and conservatively excludes force-deallocatable liquidity
+3. Queries configured direct Yearn vault collateral markets such as `yvvbUSDC/vbUSDT` independently of vault allocations, so a v1 allocation removal cannot disable the check
 4. Fetches Morpho collateral-at-risk data at the configured adverse price shock
 5. Sums collateral at risk per underlying asset group
 6. Sends alerts only if combined withdrawable liquidity is below total collateral at risk plus buffer
@@ -135,7 +135,7 @@ If any market's allocation exceeds its adjusted threshold, an alert is triggered
 Morpho's [Vault V2](https://github.com/morpho-org/vault-v2) replaces the v1 single-vault timelock with a **per-function timelock** keyed by arbitrary calldata, plus a richer adapter system. Yearn-curated v2 vaults are monitored separately:
 
 - [`governance_v2.py`](./governance_v2.py) — daily, pulls a per-vault governance **snapshot** from Morpho's GraphQL API (`vaultV2s.pendingConfigs` + `owner` / `curator` / `sentinels` / `allocators` / `adapters`) and diffs it against the persisted cache. Mirrors v1's pull-based approach (`pendingTimelock` / `pendingGuardian` / `pendingCap`) so RPC usage stays bounded. Alerts on: new pending timelocked operations, executed or revoked operations, owner / curator changes, sentinel / allocator / adapter set changes.
-- [`markets_v2.py`](./markets_v2.py) — hourly, walks each v2 vault's adapters and runs the existing v1 risk-tier scoring against the underlying Morpho Blue markets when the vault uses `MorphoMarketV1AdapterV2`. For `MorphoVaultV1Adapter` (today's common case) the wrapped v1 vault keeps receiving its full v1 analysis via `markets.py`; we only flag the case where v2 introduces a new wrapped v1 vault that operators should add to `VAULTS_BY_CHAIN`.
+- [`markets_v2.py`](./markets_v2.py) — hourly, walks each v2 vault's adapters and runs the existing v1 risk-tier scoring against the underlying Morpho Blue markets when the vault uses `MorphoMarketV1AdapterV2`. It also checks the API's immediately withdrawable `liquidityUsd` against the standard 1% threshold. V2 vaults used by YV-collateral strategies skip the individual threshold because `markets.py` performs the more relevant combined collateral-at-risk coverage check. For `MorphoVaultV1Adapter`, the wrapped v1 vault keeps receiving its full v1 analysis via `markets.py`; we only flag the case where v2 introduces a new wrapped v1 vault that operators should add to `VAULTS_BY_CHAIN`.
 - [`v2_decoders.py`](./v2_decoders.py) — selector→signature map and decoders for every v2 timelocked function (and the three `idData` tag prefixes used by `increaseAbsoluteCap`/`increaseRelativeCap`).
 
 ### Vault list
@@ -164,9 +164,9 @@ Both scripts share `MORPHO_FILENAME` (default `cache-id.txt`). New key types add
 
 ```bash
 # Hourly (allocation + risk)
-python morpho/markets_v2.py
+python protocols/morpho/markets_v2.py
 # Daily (timelocks + role changes)
-python morpho/governance_v2.py
+python protocols/morpho/governance_v2.py
 ```
 
 Set `MORPHO_FILENAME=/tmp/morpho-cache.txt` to use an isolated cache while testing.

@@ -12,8 +12,10 @@ for each vault reads its adapters on-chain and:
   GraphQL, and runs the existing v1 risk-tier scoring (``MARKETS_RISK_*`` +
   ``ALLOCATION_TIERS`` + ``MAX_RISK_THRESHOLDS``).
 
-Bad debt is pulled per market from the same GraphQL endpoint v1 uses.
-Liquidity monitoring is deferred to phase 2 (see TODO at bottom).
+Bad debt is pulled per market from the same GraphQL endpoint v1 uses. Normal
+Vault V2 liquidity uses the API's immediately withdrawable ``liquidityUsd``;
+YV-collateral strategy vaults use the combined v1/v2 coverage check in
+``markets.py`` instead.
 """
 
 from dataclasses import dataclass, field
@@ -25,22 +27,21 @@ from web3 import Web3
 from protocols.morpho._shared import (
     API_URL,
     SUPPORTED_CHAINS,
-    VAULTS_V2_BY_CHAIN,
     MarketMetrics,
+    MorphoV2MonitoringError,
     fetch_market_metrics,
     get_market_url,
+    get_v2_vault_config,
     get_vault_url,
 )
 from protocols.morpho.markets import (
     BAD_DEBT_RATIO,
-    MARKETS_RISK_1,
-    MARKETS_RISK_2,
-    MARKETS_RISK_3,
-    MARKETS_RISK_4,
-    MARKETS_RISK_5,
+    LIQUIDITY_THRESHOLD,
     MAX_RISK_THRESHOLDS,
     VAULTS_BY_CHAIN,
     get_market_allocation_threshold,
+    get_market_risk_level,
+    is_yv_collateral_v2_vault,
 )
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
@@ -64,7 +65,6 @@ ABI_VAULT_ADAPTER = load_abi("protocols/morpho/abi/morpho_vault_v1_adapter.json"
 
 ADAPTER_KIND_MARKET = "MorphoMarketV1AdapterV2"
 ADAPTER_KIND_VAULT = "MorphoVaultV1Adapter"
-ADAPTER_KIND_UNKNOWN = "Unknown"
 
 # Cache tag for "this wrapped v1 vault has already been flagged as unmonitored" —
 # without this, every hourly run would re-spam the channel.
@@ -87,6 +87,7 @@ class V2Vault:
     owner: str
     risk_level: int
     total_assets_usd: float = 0.0
+    liquidity_usd: float = 0.0
     graphql_adapters: List[Dict[str, Any]] = field(default_factory=list)
 
 
@@ -99,6 +100,15 @@ class AdapterInfo:
     wrapped_v1_vault: Optional[str] = None  # set for MorphoVaultV1Adapter
     market_ids: List[str] = field(default_factory=list)  # set for MorphoMarketV1AdapterV2
     expected_supply_assets: List[int] = field(default_factory=list)  # parallel to market_ids
+
+
+@dataclass(frozen=True)
+class MarketAssessment:
+    """Risk contribution and optional alert lines for one Morpho market."""
+
+    risk_score: float
+    allocation_violation: Optional[str] = None
+    bad_debt_alert: Optional[str] = None
 
 
 # ----------------------------------------------------------------------------
@@ -117,6 +127,7 @@ query VaultV2State($addresses: [String!]!, $chainIds: [Int!]!) {
       owner { address }
       asset { address symbol }
       totalAssetsUsd
+      liquidityUsd
       adapters {
         items { address type assetsUsd }
       }
@@ -131,17 +142,9 @@ def discover_v2_vaults_by_chain() -> Dict[Chain, List[V2Vault]]:
 
     Issues a single GraphQL ``vaultV2s(where: { address_in })`` query, then
     joins the result back to the static list to inherit the configured risk
-    level. Vaults missing from the GraphQL response are logged and skipped.
+    level. Raises if the API omits any configured vault.
     """
-    addr_to_meta: dict[str, tuple[Chain, str, int]] = {}
-    addresses: list[str] = []
-    chain_ids: list[int] = []
-    for chain, vaults in VAULTS_V2_BY_CHAIN.items():
-        chain_ids.append(chain.chain_id)
-        for entry in vaults:
-            name, address, risk = str(entry[0]), Web3.to_checksum_address(str(entry[1])), int(str(entry[2]))
-            addr_to_meta[address.lower()] = (chain, name, risk)
-            addresses.append(address)
+    addr_to_meta, addresses, chain_ids = get_v2_vault_config()
 
     if not addresses:
         return {}
@@ -152,27 +155,27 @@ def discover_v2_vaults_by_chain() -> Dict[Chain, List[V2Vault]]:
             API_URL,
             json={
                 "query": _STATE_QUERY,
-                "variables": {"addresses": addresses, "chainIds": sorted(set(chain_ids))},
+                "variables": {"addresses": addresses, "chainIds": chain_ids},
             },
         )
     except requests.RequestException as e:
-        logger.warning("Failed to fetch v2 vault state: %s", e)
-        return {chain: [] for chain in SUPPORTED_CHAINS}
+        raise MorphoV2MonitoringError(f"Failed to fetch Morpho Vault V2 state: {e}") from e
 
     data = response.json()
     if "errors" in data:
-        logger.warning("GraphQL errors fetching v2 state: %s", data["errors"])
-        return {chain: [] for chain in SUPPORTED_CHAINS}
+        raise MorphoV2MonitoringError(f"Morpho GraphQL errors fetching Vault V2 state: {data['errors']}")
 
     items = data.get("data", {}).get("vaultV2s", {}).get("items") or []
     by_addr: dict[str, dict[str, Any]] = {item["address"].lower(): item for item in items}
+    missing_addresses = sorted(set(addr_to_meta) - set(by_addr))
+    if missing_addresses:
+        raise MorphoV2MonitoringError(
+            "Morpho API omitted configured Vault V2 addresses: " + ", ".join(missing_addresses)
+        )
 
     result: Dict[Chain, List[V2Vault]] = {chain: [] for chain in SUPPORTED_CHAINS}
     for addr_lc, (chain, name, risk_level) in addr_to_meta.items():
-        item = by_addr.get(addr_lc)
-        if item is None:
-            logger.warning("V2 vault %s on %s missing from GraphQL response", addr_lc, chain.name)
-            continue
+        item = by_addr[addr_lc]
         result.setdefault(chain, []).append(
             V2Vault(
                 name=name,
@@ -184,6 +187,7 @@ def discover_v2_vaults_by_chain() -> Dict[Chain, List[V2Vault]]:
                 owner=(item.get("owner") or {}).get("address") or "",
                 risk_level=risk_level,
                 total_assets_usd=float(item.get("totalAssetsUsd") or 0),
+                liquidity_usd=float(item.get("liquidityUsd") or 0),
                 graphql_adapters=(item.get("adapters") or {}).get("items") or [],
             )
         )
@@ -204,8 +208,7 @@ def list_adapters(client: Web3Client, vault_address: str) -> List[str]:
     try:
         length = vault.functions.adaptersLength().call()
     except Exception as e:
-        logger.warning("adaptersLength() reverted for %s: %s", vault_address, e)
-        return []
+        raise MorphoV2MonitoringError(f"Failed to read adaptersLength() for Vault V2 {vault_address}: {e}") from e
     if length == 0:
         return []
     with client.batch_requests() as batch:
@@ -254,28 +257,12 @@ def classify_adapter(client: Web3Client, adapter_address: str) -> AdapterInfo:
             wrapped_v1_vault=Web3.to_checksum_address(wrapped),
         )
     except Exception as e:
-        logger.warning("Adapter %s could not be classified: %s", adapter_address, e)
-        return AdapterInfo(address=adapter_address, kind=ADAPTER_KIND_UNKNOWN)
+        raise MorphoV2MonitoringError(f"Adapter {adapter_address} could not be classified: {e}") from e
 
 
 # ----------------------------------------------------------------------------
 # Risk / allocation analysis
 # ----------------------------------------------------------------------------
-
-
-def _market_risk_level(market_id: str, chain: Chain) -> int:
-    """Look up the Morpho Blue market's risk tier from v1 tables (1-5)."""
-    mid = market_id.lower()
-    for tier, table in (
-        (1, MARKETS_RISK_1),
-        (2, MARKETS_RISK_2),
-        (3, MARKETS_RISK_3),
-        (4, MARKETS_RISK_4),
-        (5, MARKETS_RISK_5),
-    ):
-        if mid in (m.lower() for m in table.get(chain, [])):
-            return tier
-    return 5
 
 
 def score_market_allocations(
@@ -293,86 +280,112 @@ def score_market_allocations(
     if vault_total_assets_usd <= 0 or not market_adapters:
         return
 
-    # Sum allocations per market_id across adapters, in case the same market
-    # is wired through more than one adapter.
-    underlying_per_market: dict[str, int] = {}
-    for adapter in market_adapters:
-        for market_id, expected_assets in zip(adapter.market_ids, adapter.expected_supply_assets, strict=True):
-            mid = market_id.lower()
-            underlying_per_market[mid] = underlying_per_market.get(mid, 0) + int(expected_assets)
-
+    underlying_per_market = _aggregate_expected_assets(market_adapters)
     if not underlying_per_market:
         return
 
     metrics = fetch_market_metrics(list(underlying_per_market.keys()), vault.chain)
-
     total_risk_score = 0.0
     allocation_violations: list[str] = []
     bad_debt_alerts: list[str] = []
 
     for market_id, expected_assets in underlying_per_market.items():
-        market = metrics.get(market_id)
-        if not market:
-            logger.info("No GraphQL data for market %s; skipping", market_id)
+        assessment = _assess_market(vault, market_id, expected_assets, metrics, vault_total_assets_usd)
+        if assessment is None:
             continue
+        total_risk_score += assessment.risk_score
+        if assessment.allocation_violation is not None:
+            allocation_violations.append(assessment.allocation_violation)
+        if assessment.bad_debt_alert is not None:
+            bad_debt_alerts.append(assessment.bad_debt_alert)
 
-        allocation_usd = _allocation_to_usd(market, expected_assets)
-        if allocation_usd is None:
-            logger.info("Cannot derive USD allocation for market %s; skipping", market_id)
-            continue
-        allocation_ratio = min(allocation_usd / vault_total_assets_usd, 1.0)
-        risk_level = _market_risk_level(market_id, vault.chain)
-        threshold = get_market_allocation_threshold(risk_level, vault.risk_level)
-        total_risk_score += risk_level * allocation_ratio
-
-        market_label = _market_label(market, market_id, vault.chain)
-        if allocation_ratio > threshold:
-            allocation_violations.append(
-                f"- {market_label} (risk {risk_level}): {allocation_ratio:.1%} (max: {threshold:.1%})"
-            )
-
-        # Bad debt — same threshold as v1.
-        bad_debt_usd = market.bad_debt.usd
-        borrow_usd = market.state.borrow_assets_usd
-        if borrow_usd > 0 and bad_debt_usd / borrow_usd > BAD_DEBT_RATIO:
-            bad_debt_alerts.append(
-                f"- {market_label}: ${bad_debt_usd:,.2f} ({bad_debt_usd / borrow_usd:.2%} of borrowed)"
-            )
-
-    vault_url = get_vault_url(vault.address, vault.chain)
-    if allocation_violations:
-        send_alert(
-            Alert(
-                AlertSeverity.HIGH,
-                f"🔺 V2 high allocation in [{vault.name}]({vault_url}) (risk {vault.risk_level}) "
-                f"on {vault.chain.name}\n" + "\n".join(allocation_violations),
-                PROTOCOL,
-            )
-        )
-
-    if bad_debt_alerts:
-        send_alert(
-            Alert(
-                AlertSeverity.HIGH,
-                f"🚨 V2 bad debt in [{vault.name}]({vault_url}) on {vault.chain.name}\n" + "\n".join(bad_debt_alerts),
-                PROTOCOL,
-            )
-        )
-
+    _send_market_assessment_alerts(vault, allocation_violations, bad_debt_alerts)
     total_risk_score = round(total_risk_score, 2)
     logger.info("V2 vault %s on %s — total risk score %.2f", vault.name, vault.chain.name, total_risk_score)
-    max_risk = MAX_RISK_THRESHOLDS[vault.risk_level]
-    if total_risk_score > max_risk:
-        send_alert(
-            Alert(
-                AlertSeverity.HIGH,
-                f"⚠️ V2 high risk in [{vault.name}]({vault_url}) (risk {vault.risk_level}) "
-                f"on {vault.chain.name}\n"
-                f"🔢 Risk level: {total_risk_score:.2f} (max: {max_risk:.2f})\n"
-                f"🔢 Total assets: ${vault_total_assets_usd:,.2f}",
-                PROTOCOL,
-            )
+    _alert_vault_risk(vault, vault_total_assets_usd, total_risk_score)
+
+
+def _aggregate_expected_assets(market_adapters: List[AdapterInfo]) -> dict[str, int]:
+    """Sum expected assets by market across every adapter."""
+    underlying_per_market: dict[str, int] = {}
+    for adapter in market_adapters:
+        for market_id, expected_assets in zip(adapter.market_ids, adapter.expected_supply_assets, strict=True):
+            market_id = market_id.lower()
+            underlying_per_market[market_id] = underlying_per_market.get(market_id, 0) + int(expected_assets)
+    return underlying_per_market
+
+
+def _assess_market(
+    vault: V2Vault,
+    market_id: str,
+    expected_assets: int,
+    metrics: Dict[str, MarketMetrics],
+    vault_total_assets_usd: float,
+) -> Optional[MarketAssessment]:
+    """Calculate risk and alert details for one market exposure."""
+    market = metrics.get(market_id)
+    if market is None:
+        logger.info("No GraphQL data for market %s; skipping", market_id)
+        return None
+
+    allocation_usd = _allocation_to_usd(market, expected_assets)
+    if allocation_usd is None:
+        logger.info("Cannot derive USD allocation for market %s; skipping", market_id)
+        return None
+
+    allocation_ratio = min(allocation_usd / vault_total_assets_usd, 1.0)
+    risk_level = get_market_risk_level(market_id, vault.chain)
+    threshold = get_market_allocation_threshold(risk_level, vault.risk_level)
+    market_label = _market_label(market, market_id, vault.chain)
+    allocation_violation = None
+    if allocation_ratio > threshold:
+        allocation_violation = f"- {market_label} (risk {risk_level}): {allocation_ratio:.1%} (max: {threshold:.1%})"
+
+    bad_debt_usd = market.bad_debt.usd
+    borrow_usd = market.state.borrow_assets_usd
+    bad_debt_alert = None
+    if borrow_usd > 0 and bad_debt_usd / borrow_usd > BAD_DEBT_RATIO:
+        bad_debt_alert = f"- {market_label}: ${bad_debt_usd:,.2f} ({bad_debt_usd / borrow_usd:.2%} of borrowed)"
+
+    return MarketAssessment(
+        risk_score=risk_level * allocation_ratio,
+        allocation_violation=allocation_violation,
+        bad_debt_alert=bad_debt_alert,
+    )
+
+
+def _send_market_assessment_alerts(
+    vault: V2Vault,
+    allocation_violations: List[str],
+    bad_debt_alerts: List[str],
+) -> None:
+    """Send consolidated allocation and bad-debt alerts for one vault."""
+    vault_url = get_vault_url(vault.address, vault.chain)
+    if allocation_violations:
+        message = (
+            f"🔺 V2 high allocation in [{vault.name}]({vault_url}) (risk {vault.risk_level}) "
+            f"on {vault.chain.name}\n" + "\n".join(allocation_violations)
         )
+        send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
+
+    if bad_debt_alerts:
+        message = f"🚨 V2 bad debt in [{vault.name}]({vault_url}) on {vault.chain.name}\n" + "\n".join(bad_debt_alerts)
+        send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
+
+
+def _alert_vault_risk(vault: V2Vault, vault_total_assets_usd: float, total_risk_score: float) -> None:
+    """Alert when a Vault V2 weighted risk score exceeds its tier limit."""
+    max_risk = MAX_RISK_THRESHOLDS[vault.risk_level]
+    if total_risk_score <= max_risk:
+        return
+
+    vault_url = get_vault_url(vault.address, vault.chain)
+    message = (
+        f"⚠️ V2 high risk in [{vault.name}]({vault_url}) (risk {vault.risk_level}) on {vault.chain.name}\n"
+        f"🔢 Risk level: {total_risk_score:.2f} (max: {max_risk:.2f})\n"
+        f"🔢 Total assets: ${vault_total_assets_usd:,.2f}"
+    )
+    send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
 
 def _allocation_to_usd(market: MarketMetrics, expected_assets: int) -> Optional[float]:
@@ -452,10 +465,32 @@ def analyze_v2_vault(client: Web3Client, vault: V2Vault) -> None:
         elif adapter.kind == ADAPTER_KIND_VAULT:
             analyze_vault_adapter(vault, adapter)
         else:
-            logger.warning("Skipping unknown adapter kind for %s", adapter.address)
+            raise MorphoV2MonitoringError(f"Unsupported adapter kind {adapter.kind} for {adapter.address}")
 
     if market_adapters:
         score_market_allocations(vault, market_adapters, vault.total_assets_usd)
+
+    if not is_yv_collateral_v2_vault(vault.address, vault.chain):
+        check_low_liquidity(vault)
+
+
+def check_low_liquidity(vault: V2Vault) -> None:
+    """Alert when a non-collateral Vault V2 has less than 1% withdrawable liquidity."""
+    if vault.total_assets_usd < 10_000:
+        return
+
+    liquidity_ratio = vault.liquidity_usd / vault.total_assets_usd
+    if liquidity_ratio >= LIQUIDITY_THRESHOLD:
+        return
+
+    vault_url = get_vault_url(vault.address, vault.chain)
+    message = (
+        f"⚠️ Low liquidity in V2 [{vault.name}]({vault_url}) on {vault.chain.name}\n"
+        f"💰 Liquidity: ${vault.liquidity_usd:,.2f} "
+        f"({liquidity_ratio:.1%} of ${vault.total_assets_usd:,.2f})\n"
+        f"📊 Min threshold: {LIQUIDITY_THRESHOLD:.1%}\n"
+    )
+    send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
 
 
 # ----------------------------------------------------------------------------
@@ -471,6 +506,7 @@ def main() -> None:
         logger.info("No matching V2 vaults found yet.")
         return
 
+    failures: List[str] = []
     for chain, vaults in vaults_by_chain.items():
         if not vaults:
             continue
@@ -478,14 +514,13 @@ def main() -> None:
         for vault in vaults:
             try:
                 analyze_v2_vault(client, vault)
-            except Exception:
+            except Exception as e:
                 logger.exception("Failed to analyze V2 vault %s on %s", vault.address, chain.name)
+                failures.append(f"{vault.name} on {chain.name}: {type(e).__name__}: {e}")
 
+    if failures:
+        raise MorphoV2MonitoringError("Failed Morpho Vault V2 analyses: " + "; ".join(failures))
 
-# TODO: phase 2 — implement liquidity monitoring once we have real V2 vaults to
-# observe. Aggregating per-adapter `realAssets()` against a chosen liquid floor
-# is non-trivial because borrowed Morpho Blue markets require per-market
-# headroom rather than vault-level idle assets.
 
 if __name__ == "__main__":
     from utils.runner import run_with_alert

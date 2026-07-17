@@ -28,7 +28,13 @@ from typing import Any, Dict, List
 import requests
 from web3 import Web3
 
-from protocols.morpho._shared import API_URL, SUPPORTED_CHAINS, VAULTS_V2_BY_CHAIN, get_vault_url
+from protocols.morpho._shared import (
+    API_URL,
+    SUPPORTED_CHAINS,
+    MorphoV2MonitoringError,
+    get_v2_vault_config,
+    get_vault_url,
+)
 from protocols.morpho.v2_decoders import decode_submit, submit_data_key
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import (
@@ -96,7 +102,7 @@ class PendingConfig:
     @property
     def data_hash(self) -> str:
         """Stable cache-key hash for this pending operation."""
-        return submit_data_key(self.data)
+        return str(submit_data_key(self.data))
 
 
 @dataclass
@@ -129,7 +135,7 @@ def _hex_to_bytes(value: str) -> bytes:
 def _checksum_or_empty(value: str) -> str:
     if not value:
         return ""
-    return Web3.to_checksum_address(value)
+    return str(Web3.to_checksum_address(value))
 
 
 def fetch_governance_snapshots() -> Dict[Chain, List[V2GovernanceSnapshot]]:
@@ -138,15 +144,7 @@ def fetch_governance_snapshots() -> Dict[Chain, List[V2GovernanceSnapshot]]:
     Issues a single ``vaultV2s(where: { address_in })`` query and joins the
     result back to the static list to inherit the configured risk level.
     """
-    addr_to_meta: dict[str, tuple[Chain, str, int]] = {}
-    addresses: list[str] = []
-    chain_ids: list[int] = []
-    for chain, vaults in VAULTS_V2_BY_CHAIN.items():
-        chain_ids.append(chain.chain_id)
-        for entry in vaults:
-            name, address, risk = str(entry[0]), _checksum_or_empty(str(entry[1])), int(str(entry[2]))
-            addr_to_meta[address.lower()] = (chain, name, risk)
-            addresses.append(address)
+    addr_to_meta, addresses, chain_ids = get_v2_vault_config()
 
     if not addresses:
         return {}
@@ -157,28 +155,28 @@ def fetch_governance_snapshots() -> Dict[Chain, List[V2GovernanceSnapshot]]:
             API_URL,
             json={
                 "query": _GOVERNANCE_QUERY,
-                "variables": {"addresses": addresses, "chainIds": sorted(set(chain_ids))},
+                "variables": {"addresses": addresses, "chainIds": chain_ids},
             },
         )
     except requests.RequestException as e:
-        logger.warning("Failed to fetch v2 governance snapshot: %s", e)
-        return {chain: [] for chain in SUPPORTED_CHAINS}
+        raise MorphoV2MonitoringError(f"Failed to fetch Morpho Vault V2 governance: {e}") from e
 
     payload = response.json()
     if "errors" in payload:
-        logger.warning("GraphQL errors fetching v2 governance: %s", payload["errors"])
-        return {chain: [] for chain in SUPPORTED_CHAINS}
+        raise MorphoV2MonitoringError(f"Morpho GraphQL errors fetching Vault V2 governance: {payload['errors']}")
 
     items = payload.get("data", {}).get("vaultV2s", {}).get("items") or []
     by_addr: dict[str, dict[str, Any]] = {item["address"].lower(): item for item in items}
+    missing_addresses = sorted(set(addr_to_meta) - set(by_addr))
+    if missing_addresses:
+        raise MorphoV2MonitoringError(
+            "Morpho API omitted configured Vault V2 governance addresses: " + ", ".join(missing_addresses)
+        )
 
     result: Dict[Chain, List[V2GovernanceSnapshot]] = {chain: [] for chain in SUPPORTED_CHAINS}
 
     for addr_lc, (chain, name, risk_level) in addr_to_meta.items():
-        item = by_addr.get(addr_lc)
-        if item is None:
-            logger.warning("V2 vault %s on %s missing from GraphQL response", addr_lc, chain.name)
-            continue
+        item = by_addr[addr_lc]
 
         sentinels = [_checksum_or_empty(s["sentinel"]["address"]) for s in (item.get("sentinels") or [])]
         allocators = [_checksum_or_empty(a["allocator"]["address"]) for a in (item.get("allocators") or [])]
@@ -271,7 +269,7 @@ def _explorer_link(chain: Chain, tx_hash: str) -> str:
 def _operation_label(snapshot: V2GovernanceSnapshot, pc: PendingConfig) -> str:
     decoded = decode_submit(pc.data, snapshot.chain)
     if decoded:
-        return decoded
+        return str(decoded)
     return pc.function_name or f"`{pc.data_hash[:10]}…`"
 
 
@@ -284,7 +282,7 @@ def _operation_function_name(pc: PendingConfig, operation_label: str) -> str:
 
 
 def _pending_function_key(snapshot: V2GovernanceSnapshot, data_hash: str) -> str:
-    return morpho_key(snapshot.address.lower(), data_hash, PENDING_FUNCTION_TYPE)
+    return str(morpho_key(snapshot.address.lower(), data_hash, PENDING_FUNCTION_TYPE))
 
 
 def _alert_pending_new(snapshot: V2GovernanceSnapshot, pc: PendingConfig, operation_label: str) -> None:
@@ -450,14 +448,19 @@ def main() -> None:
         logger.info("No matching V2 vaults found; nothing to monitor yet.")
         return
 
+    failures: List[str] = []
     for chain, vaults in snapshots_by_chain.items():
         if not vaults:
             continue
         for vault in vaults:
             try:
                 diff_and_alert(vault)
-            except Exception:
+            except Exception as e:
                 logger.exception("Failed to process governance for %s on %s", vault.address, chain.name)
+                failures.append(f"{vault.name} on {chain.name}: {type(e).__name__}: {e}")
+
+    if failures:
+        raise MorphoV2MonitoringError("Failed Morpho Vault V2 governance checks: " + "; ".join(failures))
 
 
 if __name__ == "__main__":
