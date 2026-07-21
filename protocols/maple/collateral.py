@@ -40,8 +40,9 @@ SYRUP_USDT_POOL_ID = "0x356b8d89c1e1239cbbb9de4815c39a1474d5ba7d"
 # 1 = low risk, 2 = medium risk, 3 = high risk
 ASSET_RISK_SCORES: dict[str, int] = {
     "BTC": 1,
-    "ETH": 1,
+    "WBTC": 1,
     "cbBTC": 1,
+    "ETH": 1,
     "sUSDS": 1,
     "weETH": 2,
     "SOL": 2,
