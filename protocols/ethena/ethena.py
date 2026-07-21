@@ -111,7 +111,19 @@ def get_usde_supply() -> float | None:
 
 
 def get_total_collateral_usd() -> float | None:
-    """Return USD value of all collateral backing USDe."""
+    """Return USD value of collateral backing USDe (Ethena's NET-backing figure).
+
+    NOTE: ``COLLATERAL_URL`` carries ``?latest=true``, which returns Ethena's
+    freshest aggregate ``totalBackingAssetsInUsd`` and an EMPTY breakdown array.
+    That aggregate is a *net backing* number that tracks supply ~1:1 (ratio ≈
+    1.00). The SAME endpoint without ``latest=true`` instead returns a detailed
+    77-item breakdown whose total is *gross collateral* (~2.7% above supply, e.g.
+    $4.14B vs $4.03B) but is a stale snapshot (items lag ~6h). LlamaRisk reports
+    the gross figure and matches Ethena's full breakdown to ~0.04%.
+
+    So this check (net) and llama_risk_check (gross) deliberately measure
+    different quantities and will differ by ~2.7% by design — see the README.
+    """
     data = fetch_json(COLLATERAL_URL)
     if not data:
         return None
