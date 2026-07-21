@@ -121,8 +121,12 @@ protocols:
     tasks:
       - protocols/ethena/ethena.py
     monitors:
-      - name: "USDe Backing Ratio"
-        description: "Collateral / supply < 1.0 via Ethena transparency API (CRITICAL)"
+      - name: "USDe Backing Ratio (Ethena API)"
+        description: "(collateral + reserve fund) / supply < 1.0 (CRITICAL) or < 1.005 (HIGH) via Ethena transparency API"
+      - name: "USDe Backing Ratio (LlamaRisk)"
+        description: "Independent (collateral + reserve fund) / supply < 1.0 (CRITICAL) or < 1.005 (HIGH) via LlamaRisk"
+      - name: "On-Chain Supply Consistency"
+        description: "LlamaRisk USDe/sUSDe supply vs on-chain totalSupply() differs by > 0.5%"
       - name: "Data Freshness"
         description: "Collateral, chain, or reserve data older than 12 hours"
 
