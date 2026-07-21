@@ -313,9 +313,9 @@ def llama_risk_check() -> None:
 
     # Cross-validate LlamaRisk supply figures against on-chain totalSupply().
     # NOTE: skip if LlamaRisk data is stale — it would be out of sync with chain state.
-    parsed_timestamp = _parse_timestamp(llama_risk.chain_metrics.timestamp)
-    llama_risk_is_old = parsed_timestamp is None or datetime.now() - parsed_timestamp > timedelta(hours=2)
-    if llama_risk_is_old:
+    # Use is_stale_timestamp (naive-UTC comparison) so this is correct on non-UTC hosts;
+    # a plain datetime.now() would use local time and mark fresh data stale under DST.
+    if is_stale_timestamp(llama_risk.chain_metrics.timestamp, max_age_hours=2):
         logger.warning("[%s] data is old, skipping on-chain validation: %s", LLAMARISK_SOURCE, llama_risk.timestamp)
         return
 
