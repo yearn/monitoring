@@ -15,6 +15,7 @@ logger = get_logger(PROTOCOL)
 # Ethena transparency API endpoints (usable from our VPS; were previously blocked for GitHub Actions IPs)
 SUPPLY_URL = "https://app.ethena.fi/api/solvency/token-supply?symbol=USDe"
 COLLATERAL_URL = "https://app.ethena.fi/api/positions/current/collateral?latest=true"
+RESERVE_FUND_URL = "https://app.ethena.fi/api/solvency/reserve-fund"
 LLAMARISK_URL = "https://api.llamarisk.com/protocols/ethena/overview/all/?format=json"
 
 USDE_ADDRESS = "0x4c9EDD5852cd905f086C759E8383e09bff1E68B3"
@@ -26,6 +27,11 @@ ABI_ERC20 = load_abi("common-abi/ERC20.json")
 COLLATERAL_RATIO_TRIGGER = 1.005  # must be overcollateralized by at least 0.5%
 
 REQUEST_TIMEOUT = 15  # seconds
+
+# Provider labels so every alert makes clear which data source triggered it.
+# The two backing checks run independently against different providers.
+ETHENA_SOURCE = "Ethena API"
+LLAMARISK_SOURCE = "LlamaRisk"
 
 
 @dataclass
@@ -113,6 +119,32 @@ def get_total_collateral_usd() -> float | None:
     return float(data["totalBackingAssetsInUsd"])
 
 
+def get_reserve_fund() -> float | None:
+    """Return the latest USD value of Ethena's reserve fund.
+
+    The endpoint returns a full time series under ``queryIndex[0].yields`` as
+    ``{timestamp, value}`` points; we take the most recent one and treat stale
+    data (older than 3 hours) as unavailable.
+    """
+    data = fetch_json(RESERVE_FUND_URL)
+    if not data:
+        return None
+
+    try:
+        series = data["queryIndex"][0]["yields"]
+        latest = series[-1]
+    except (KeyError, IndexError, TypeError):
+        logger.error("Unexpected reserve fund response shape: %s", data)
+        return None
+
+    timestamp = latest.get("timestamp")
+    if timestamp and is_stale_timestamp(timestamp):
+        logger.warning("Reserve fund data from ethena is old: %s", timestamp)
+        return None
+
+    return float(latest["value"])
+
+
 def get_llamarisk_data() -> LlamaRiskData | None:
     """Return data from LlamaRisk API."""
     data = fetch_json(LLAMARISK_URL)
@@ -190,7 +222,7 @@ def get_tokens_supply() -> tuple[float, float] | tuple[None, None]:
     except Exception as e:
         error_message = f"Error creating contract instances: {e}. Check ABI paths and contract addresses."
         logger.error("%s", error_message)
-        return  # Cannot proceed without contracts
+        return None, None  # Cannot proceed without contracts
 
     usde_supply = None
     susde_supply = None
@@ -215,57 +247,43 @@ def get_tokens_supply() -> tuple[float, float] | tuple[None, None]:
     return usde_supply, susde_supply
 
 
-def llama_risk_check():
-    llama_risk = get_llamarisk_data()
+def llama_risk_check() -> None:
+    """Independent USDe backing check using LlamaRisk's transparency data.
 
+    Runs alongside (and independently of) ``ethena_backing_check`` so the two
+    providers cross-check each other: if one API is wrong or stale, the other
+    still reports. Every alert is prefixed with ``LLAMARISK_SOURCE`` so it is
+    obvious which provider fired.
+
+    Backing = collateral + reserve fund. Alerts CRITICAL when total backing no
+    longer covers supply (ratio < 1) and HIGH when the buffer thins below
+    COLLATERAL_RATIO_TRIGGER. Also validates LlamaRisk's supply figures against
+    on-chain ``totalSupply()`` and warns (MEDIUM) if they diverge materially.
+    """
+    llama_risk = get_llamarisk_data()
     if llama_risk is None:
-        send_error_message("⚠️ Failed to fetch data", PROTOCOL)
+        send_error_message(f"⚠️ [{LLAMARISK_SOURCE}] Failed to fetch backing data", PROTOCOL)
         return
 
-    # NOTE: ethena data is not available, so we use llama_risk data only
-    # supply = get_usde_supply()
-    # collateral = get_total_collateral_usd()
     supply = llama_risk.chain_metrics.total_usde_supply
     collateral = llama_risk.collateral_value
-    value_diff_trigger = 0.001  # 0.1%
-    if abs(supply - llama_risk.chain_metrics.total_usde_supply) / supply > value_diff_trigger:
-        send_alert(
-            Alert(
-                AlertSeverity.MEDIUM,
-                f"⚠️ USDe: supply values are not similar: ethena {supply} != llama_risk {llama_risk.chain_metrics.total_usde_supply}",
-                PROTOCOL,
-            )
-        )
+    reserve_fund = llama_risk.reserve_fund
+    if supply == 0:
+        send_error_message(f"⚠️ [{LLAMARISK_SOURCE}] Supply reported as 0; skipping backing check", PROTOCOL)
         return
 
-    if abs(collateral - llama_risk.collateral_value) / collateral > value_diff_trigger:
-        send_alert(
-            Alert(
-                AlertSeverity.MEDIUM,
-                f"⚠️ USDe: collateral values are not similar: ethena {collateral} != llama_risk {llama_risk.collateral_value}",
-                PROTOCOL,
-            )
-        )
-        return
+    total_backing = collateral + reserve_fund
+    ratio = total_backing / supply
 
-    # NOTE: don't check on-chain data if llama_risk data is old because it will be out of sync
-    parsed_timestamp = _parse_timestamp(llama_risk.chain_metrics.timestamp)
-    llama_risk_is_old = parsed_timestamp is None or datetime.now() - parsed_timestamp > timedelta(hours=2)
-    total_backing_assets = llama_risk.collateral_value + llama_risk.reserve_fund
-
-    if llama_risk_is_old:
-        # NOTE: skip validating old data, we already got telegram message
-        logger.warning("LlamaRisk data is old: %s", llama_risk.timestamp)
-        return
-
-    ratio = total_backing_assets / supply
-
-    error_messages = []
     if ratio < 1:
         send_alert(
             Alert(
                 AlertSeverity.CRITICAL,
-                f"🚨 USDe is not fully backed!\nCollateral/Supply ratio = {ratio:.4f}. \nLlamaRisk timestamp: {llama_risk.timestamp}",
+                f"🚨 [{LLAMARISK_SOURCE}] USDe NOT FULLY BACKED!\n"
+                f"Backing Assets: ${total_backing:,.2f} (collateral ${collateral:,.2f} + reserve ${reserve_fund:,.2f})\n"
+                f"Total Supply: {supply:,.2f}\n"
+                f"Backing Ratio: {ratio:.4f} ({ratio * 100 - 100:+.2f}%)\n"
+                f"LlamaRisk timestamp: {llama_risk.timestamp}",
                 PROTOCOL,
             )
         )
@@ -273,43 +291,60 @@ def llama_risk_check():
         send_alert(
             Alert(
                 AlertSeverity.HIGH,
-                f"🚨 USDe is almost not fully backed!\nCollateral/Supply ratio = {ratio:.4f}. \nLlamaRisk timestamp: {llama_risk.timestamp}",
+                f"🚨 [{LLAMARISK_SOURCE}] USDe backing buffer is thin!\n"
+                f"Backing Assets: ${total_backing:,.2f} (collateral ${collateral:,.2f} + reserve ${reserve_fund:,.2f})\n"
+                f"Total Supply: {supply:,.2f}\n"
+                f"Backing Ratio: {ratio:.4f} ({ratio * 100 - 100:+.2f}%)\n"
+                f"LlamaRisk timestamp: {llama_risk.timestamp}",
                 PROTOCOL,
             )
         )
 
-    # Validate LlamaRisk data with on-chain data
-    usde_supply, susde_supply = get_tokens_supply()
-    # remove decimasl because llama risk values are without it
-    usde_supply = usde_supply / 1e18
-    susde_supply = susde_supply / 1e18
     logger.info(
-        "[%s] Ethena – collateral: %s USD | supply: %s | ratio: %s\nonchain data: usde supply = %s | susde supply = %s",
-        llama_risk.timestamp,
+        "[%s] backing: $%s (collateral $%s + reserve $%s) | supply: %s | ratio: %s | timestamp: %s",
+        LLAMARISK_SOURCE,
+        f"{total_backing:,.2f}",
         f"{collateral:,.2f}",
+        f"{reserve_fund:,.2f}",
         f"{supply:,.2f}",
         f"{ratio:.4f}",
-        f"{usde_supply / 1e18:,.2f}",
-        f"{susde_supply / 1e18:,.2f}",
+        llama_risk.timestamp,
     )
 
-    # NOTE: set higher value_diff_trigger because on-chain and off-chain values are not in sync
+    # Cross-validate LlamaRisk supply figures against on-chain totalSupply().
+    # NOTE: skip if LlamaRisk data is stale — it would be out of sync with chain state.
+    parsed_timestamp = _parse_timestamp(llama_risk.chain_metrics.timestamp)
+    llama_risk_is_old = parsed_timestamp is None or datetime.now() - parsed_timestamp > timedelta(hours=2)
+    if llama_risk_is_old:
+        logger.warning("[%s] data is old, skipping on-chain validation: %s", LLAMARISK_SOURCE, llama_risk.timestamp)
+        return
+
+    usde_supply, susde_supply = get_tokens_supply()
+    if usde_supply is None or susde_supply is None:
+        return  # get_tokens_supply already reported the failure
+
+    # LlamaRisk values are token amounts without decimals, so scale on-chain wei down.
+    usde_supply /= 1e18
+    susde_supply /= 1e18
+
+    # NOTE: higher tolerance because on-chain and off-chain values are not perfectly in sync.
     value_diff_trigger = 0.005  # 0.5%
+    error_messages = []
     if abs(usde_supply - supply) / supply > value_diff_trigger:
         error_messages.append(
-            "USDe supply values are not similar onchain diffrent from LlamaRisk: "
-            f"{supply} != {usde_supply} (diff: {abs(usde_supply - supply) / supply})"
+            f"USDe supply differs on-chain vs LlamaRisk: {supply:,.2f} != {usde_supply:,.2f} "
+            f"(diff: {abs(usde_supply - supply) / supply:.4%})"
         )
 
-    if abs(susde_supply - llama_risk.chain_metrics.total_susde_supply) / susde_supply > value_diff_trigger:
+    susde_llama = llama_risk.chain_metrics.total_susde_supply
+    if susde_llama and abs(susde_supply - susde_llama) / susde_supply > value_diff_trigger:
         error_messages.append(
-            "sUSDe supply values are not similar onchain diffrent from LlamaRisk: "
-            f"{susde_supply} != {llama_risk.chain_metrics.total_susde_supply} "
-            f"(diff: {abs(susde_supply - llama_risk.chain_metrics.total_susde_supply) / susde_supply})"
+            f"sUSDe supply differs on-chain vs LlamaRisk: {susde_llama:,.2f} != {susde_supply:,.2f} "
+            f"(diff: {abs(susde_supply - susde_llama) / susde_supply:.4%})"
         )
 
     if error_messages:
-        message = "⚠️ " + "\n".join(error_messages)
+        message = f"⚠️ [{LLAMARISK_SOURCE}] " + "\n".join(error_messages)
         send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
 
 
@@ -323,41 +358,74 @@ def ethena_backing_check() -> None:
     USDe PoR is not published as a public on-chain feed, so we rely on Ethena's own
     transparency data.
 
-    Alerts CRITICAL when collateral no longer covers supply (ratio < 1). USDe targets
-    ~1:1 collateral backing with a SEPARATE reserve fund as the buffer, so the
-    collateral-only ratio sits just above 1.0 in normal operation — applying
-    COLLATERAL_RATIO_TRIGGER (which assumes the reserve fund is included) here would
-    false-positive.
+    Backing = collateral + reserve fund. USDe targets ~1:1 collateral backing with a
+    SEPARATE reserve fund as the buffer, so the collateral-only figure hovers right
+    around 1.0 and dips fractionally below it in normal operation. Including the reserve
+    fund (fetched from Ethena's own /solvency/reserve-fund endpoint) gives the true
+    solvency ratio and lets us apply COLLATERAL_RATIO_TRIGGER without false-positiving.
+
+    Alerts CRITICAL when total backing no longer covers supply (ratio < 1) and HIGH when
+    the buffer thins below COLLATERAL_RATIO_TRIGGER.
     """
     supply = get_usde_supply()
     collateral = get_total_collateral_usd()
-    if supply is None or collateral is None or supply == 0:
+    reserve_fund = get_reserve_fund()
+    if supply is None or collateral is None or reserve_fund is None or supply == 0:
         send_error_message("⚠️ ETHENA: Failed to fetch backing data from Ethena transparency API", PROTOCOL)
         return
 
-    backing_ratio = collateral / supply
+    total_backing = collateral + reserve_fund
+    backing_ratio = total_backing / supply
     if backing_ratio < 1:
         send_alert(
             Alert(
                 AlertSeverity.CRITICAL,
-                f"🚨 USDe NOT FULLY BACKED!\n"
-                f"Backing Assets: ${collateral:,.2f}\nTotal Supply: {supply:,.2f}\n"
+                f"🚨 [{ETHENA_SOURCE}] USDe NOT FULLY BACKED!\n"
+                f"Backing Assets: ${total_backing:,.2f} (collateral ${collateral:,.2f} + reserve ${reserve_fund:,.2f})\n"
+                f"Total Supply: {supply:,.2f}\n"
+                f"Backing Ratio: {backing_ratio:.4f} ({backing_ratio * 100 - 100:+.2f}%)",
+                PROTOCOL,
+            )
+        )
+    elif backing_ratio < COLLATERAL_RATIO_TRIGGER:
+        send_alert(
+            Alert(
+                AlertSeverity.HIGH,
+                f"🚨 [{ETHENA_SOURCE}] USDe backing buffer is thin!\n"
+                f"Backing Assets: ${total_backing:,.2f} (collateral ${collateral:,.2f} + reserve ${reserve_fund:,.2f})\n"
+                f"Total Supply: {supply:,.2f}\n"
                 f"Backing Ratio: {backing_ratio:.4f} ({backing_ratio * 100 - 100:+.2f}%)",
                 PROTOCOL,
             )
         )
 
     logger.info(
-        "Ethena transparency API – backing: $%s | supply: %s | ratio: %s",
+        "[%s] backing: $%s (collateral $%s + reserve $%s) | supply: %s | ratio: %s",
+        ETHENA_SOURCE,
+        f"{total_backing:,.2f}",
         f"{collateral:,.2f}",
+        f"{reserve_fund:,.2f}",
         f"{supply:,.2f}",
         f"{backing_ratio:.4f}",
     )
 
 
+def main() -> None:
+    """Run both backing checks independently.
+
+    Each provider is checked in isolation so a failure (or false positive) in one
+    data source never suppresses the other. Any unhandled error in one check is
+    contained and reported without aborting the other.
+    """
+    for check in (ethena_backing_check, llama_risk_check):
+        try:
+            check()
+        except Exception:
+            logger.exception("%s crashed", check.__name__)
+            send_error_message(f"⚠️ {check.__name__} crashed unexpectedly", PROTOCOL)
+
+
 if __name__ == "__main__":
     from utils.runner import run_with_alert
 
-    # NOTE: LlamaRisk data (llama_risk_check) is not reliable and the former Chaos Labs /
-    # Oracle Security PoR endpoint is decommissioned; use Ethena's transparency API directly.
-    run_with_alert(ethena_backing_check, PROTOCOL)
+    run_with_alert(main, PROTOCOL)
