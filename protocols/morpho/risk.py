@@ -111,8 +111,6 @@ MARKETS_RISK_2 = {
         "0xba3ba077d9c838696b76e29a394ae9f0d1517a372e30fd9a0fc19c516fb4c5a7",  # cbBTC/USDC -> lltv 86%, oracle: MorphoChainlinkOracleV2, Api3 cbBTC/USD + Api3 USDC/USD.
         "0x15bb2a6af0c909eed19fb1f2ceeead34ecbdcba626de752c6b09389ee14eec32",  # kBTC/RLUSD -> lltv 86%, oracle: Chainlink BTC/USD and Chainlink RLUSD/USD.
         "0xe51f9aaad25d0e755429cf77076b3c2d37cb1228ed81f8a5482f2102c220eef5",  # kBTC/PYUSD -> lltv 86%, oracle: Chainlink BTC/USD and Chainlink PYUSD/USD.
-        "0xe3df58f9d3011b7481ff36b939fa5f8da642f34ea5792d25d3958dbf1efa26d7",  # USD3/USDC -> lltv 91.5%, oracle: MorphoChainlinkOracleV2, USD3 ERC4626 vault rate (underlying USDC). No price feeds; USDC = $1.
-        "0xf8c5aa31ea6b2a068a9eddb46dd110cae57bf0f12be9583a3f9a818effecba89",  # PT-USD3-17DEC2026/USDC -> lltv 86%, oracle: MorphoChainlinkOracleV2, PendleSparkLinearDiscountOracle PT feed for PT-USD3. No quote feed (USDC = $1). Discount 30% per year.
     ],
     Chain.BASE: [
         "0x6aa81f51dfc955df598e18006deae56ce907ac02b0b5358705f1a28fcea23cc0",  # wstETH/WETH -> lltv 96.5%, oracle: Chainlink wstETH-stETH Exchange Rate
@@ -169,6 +167,8 @@ MARKETS_RISK_3 = {
         "0xdf034d0351a4c0af947e1a37ecd5ccbce60d72eac90de6fcad48c74e2869d14c",  # PT-iUSD-25JUN2026/USDC -> lltv 91.5%, oracle: same stack as PT-siUSD row but Ojo PT Feed (Pendle-compatible) for PT leg; InfiniFi RT + dummy USDC.
         "0xc6ae8e71e11ef511acee3f6cc6ad2af67b862877d459e3789905f537c85db5e3",  # PT-sUSDE-25SEP2025/DAI -> lltv 91.5%, oracle: PendleSparkLinearDiscountOracle with linear discount oracle for sUSDE. No price oracle for DAI, USDe = DAI.
         "0x27b9a0a5bfee98a31eb51e3850250d103a9f8e41673c782defc66aa943af0e65",  # PT-srUSDe-2APR2026/USDC -> lltv 91.5%, oracle: Pendle PT exchange rate(PT to asset) srUSDe. USDC = 1 using dummy oracle.
+        "0xe3df58f9d3011b7481ff36b939fa5f8da642f34ea5792d25d3958dbf1efa26d7",  # USD3/USDC -> lltv 91.5%, oracle: MorphoChainlinkOracleV2, USD3 ERC4626 vault rate (underlying USDC). No price feeds; USDC = $1.
+        "0xf8c5aa31ea6b2a068a9eddb46dd110cae57bf0f12be9583a3f9a818effecba89",  # PT-USD3-17DEC2026/USDC -> lltv 86%, oracle: MorphoChainlinkOracleV2, PendleSparkLinearDiscountOracle PT feed for PT-USD3. No quote feed (USDC = $1). Discount 30% per year.
     ],
     Chain.BASE: [
         "0x4944a1169bc07b441473b830308ffe5bb535c10a9f824e33988b60738120c48e",  # LBTC/cbBTC -> lltv 91.5%, oracle: Custom moonwell oracle. Base feed is fetched from upgradeable oracle which uses 2 oracles. Primary oracle is redstone oracle, if the price changes more than 2% than it uses fallback oracle chainlink oracle. Chainlink didn't have an exchange rate feed. Redstone was the only provider for the LBTC reserves.
