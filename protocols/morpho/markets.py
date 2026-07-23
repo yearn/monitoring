@@ -30,6 +30,7 @@ from protocols.morpho.config import (
 from protocols.morpho.risk import (
     LIQUIDITY_THRESHOLD,
     MAX_RISK_THRESHOLDS,
+    MIN_VAULT_ASSETS_USD,
     assess_exposure,
     get_market_risk_level,
     is_bad_debt_excessive,
@@ -101,7 +102,7 @@ def check_allocation_and_risk(vault_data: Dict[str, Any]) -> None:
     Sends a separate alert if total risk level exceeds the vault's maximum.
     """
     total_assets = vault_data.get("state", {}).get("totalAssetsUsd", 0) or 0
-    if total_assets == 0:
+    if total_assets < MIN_VAULT_ASSETS_USD:
         return
 
     vault_name = vault_data["name"]
@@ -208,8 +209,8 @@ def calculate_combined_metrics(asset_yv_vaults: List[Dict[str, Any]]) -> tuple[f
             liquidity = vault["liquidity"]["usd"] or 0
             vault_name = vault["name"]
 
-        # Only include vaults with meaningful assets (>= 10k)
-        if total_assets >= 10_000:
+        # Only include vaults with meaningful assets
+        if total_assets >= MIN_VAULT_ASSETS_USD:
             combined_total_assets += total_assets
             vault_names.append(vault_name)
             sources = _get_vault_liquidity_sources(vault, liquidity)
@@ -311,7 +312,7 @@ def get_yv_collateral_liquidity_by_asset(
             vault_names,
         ) = calculate_combined_metrics(asset_yv_vaults)
 
-        if combined_total_assets < 10_000:
+        if combined_total_assets < MIN_VAULT_ASSETS_USD:
             logger.info(
                 "%s YV collateral liquidity group has only $%s total assets; retaining zero/low liquidity coverage",
                 asset_symbol,
@@ -756,6 +757,17 @@ def main() -> None:
     alerted_markets: set[str] = set()
 
     for vault_data in vaults_data:
+        total_assets = vault_data.get("state", {}).get("totalAssetsUsd", 0) or 0
+        if total_assets < MIN_VAULT_ASSETS_USD:
+            logger.info(
+                "Skipping vault %s on chain %s: TVL $%s below $%s min",
+                vault_data["name"],
+                vault_data["chain"]["id"],
+                f"{total_assets:,.2f}",
+                f"{MIN_VAULT_ASSETS_USD:,.0f}",
+            )
+            continue
+
         # Check per-market allocation and total risk level
         check_allocation_and_risk(vault_data)
 

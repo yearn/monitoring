@@ -42,6 +42,7 @@ from protocols.morpho.config import (
 from protocols.morpho.risk import (
     LIQUIDITY_THRESHOLD,
     MAX_RISK_THRESHOLDS,
+    MIN_VAULT_ASSETS_USD,
     assess_exposure,
     get_market_risk_level,
     is_low_liquidity,
@@ -455,6 +456,16 @@ def analyze_vault_adapter(vault: V2Vault, adapter: AdapterInfo) -> None:
 
 def analyze_v2_vault(client: Web3Client, vault: V2Vault) -> None:
     """Run all v2 monitoring checks for a single vault."""
+    if vault.total_assets_usd < MIN_VAULT_ASSETS_USD:
+        logger.info(
+            "Skipping V2 vault %s on %s: TVL $%s below $%s min",
+            vault.name,
+            vault.chain.name,
+            f"{vault.total_assets_usd:,.2f}",
+            f"{MIN_VAULT_ASSETS_USD:,.0f}",
+        )
+        return
+
     adapter_addresses = list_adapters(client, vault.address)
     adapters = [classify_adapter(client, addr) for addr in adapter_addresses]
 

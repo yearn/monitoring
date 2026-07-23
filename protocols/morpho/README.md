@@ -21,7 +21,7 @@ Add a `VaultConfig` to `VAULTS_V1_BY_CHAIN` in [config.py](./config.py). Every c
 
 Morpho Vaults consist of multiple markets, each defining key parameters such as LTV, interest rate models, and oracle data.
 
-Market monitoring is configured through [config.py](./config.py), while shared market and liquidity policy lives in [risk.py](./risk.py). The script fetches all markets for each vault and checks the following metrics:
+Market monitoring is configured through [config.py](./config.py), while shared market and liquidity policy lives in [risk.py](./risk.py). Vaults with TVL below `MIN_VAULT_ASSETS_USD` ($10k) are skipped. The script fetches all markets for each vault and checks the following metrics:
 
 - **Bad Debt Ratio:** If the bad debt ratio exceeds 0.5% of total borrowed assets, a Telegram message is sent.
 - **Vault Risk Level:** If the computed risk level of a vault exceeds its maximum threshold, a Telegram message is sent.
