@@ -23,14 +23,30 @@ from protocols.morpho.markets import (
     get_yv_collateral_liquidity_by_asset,
 )
 from protocols.morpho.markets_v2 import (
-    AdapterInfo,
     V2Vault,
+    _parse_market_allocations,
     check_low_liquidity,
     discover_v2_vaults_by_chain,
-    list_adapters,
+    main,
     score_market_allocations,
 )
 from utils.chains import Chain
+
+
+def _sample_metrics(market_id: str, asset_address: str = "0x" + "22" * 20) -> MarketMetrics:
+    return MarketMetrics(
+        market_id=market_id,
+        loan_asset=Asset(address=asset_address, symbol="USDC"),
+        collateral_asset=Asset(address="0x" + "44" * 20, symbol="WETH"),
+        state=MarketState(
+            utilization=0.5,
+            borrow_assets=100,
+            supply_assets=100,
+            borrow_assets_usd=100,
+            supply_assets_usd=100,
+        ),
+        bad_debt=BadDebt(underlying=0, usd=0),
+    )
 
 
 class TestMorphoV2Configuration(unittest.TestCase):
@@ -65,14 +81,56 @@ class TestMorphoV2Configuration(unittest.TestCase):
         ):
             discover_v2_vaults_by_chain()
 
-    def test_adapter_read_failure_is_not_silently_treated_as_empty(self) -> None:
-        client = MagicMock()
-        client.get_contract.return_value.functions.adaptersLength.return_value.call.side_effect = RuntimeError(
-            "RPC unavailable"
-        )
+    def test_discovery_rejects_non_market_adapters(self) -> None:
+        item = {
+            "adapters": {
+                "items": [
+                    {
+                        "address": "0x" + "33" * 20,
+                        "type": "MetaMorpho",
+                        "assetsUsd": 100_000,
+                    }
+                ]
+            }
+        }
 
-        with self.assertRaisesRegex(MorphoV2MonitoringError, "Failed to read adaptersLength"):
-            list_adapters(client, "0x" + "11" * 20)
+        with self.assertRaisesRegex(MorphoV2MonitoringError, "unsupported adapter type"):
+            _parse_market_allocations(item, "Example", Chain.MAINNET)
+
+    def test_parse_market_allocations_aggregates_morpho_market_v1_positions(self) -> None:
+        market_a = "0x" + "aa" * 32
+        market_b = "0x" + "bb" * 32
+        item = {
+            "adapters": {
+                "items": [
+                    {
+                        "address": "0x" + "33" * 20,
+                        "type": "MorphoMarketV1",
+                        "positions": {
+                            "items": [
+                                {
+                                    "market": {"marketId": market_a},
+                                    "state": {"supplyAssetsUsd": 10_000},
+                                },
+                                {
+                                    "market": {"marketId": market_a},
+                                    "state": {"supplyAssetsUsd": 5_000},
+                                },
+                                {
+                                    "market": {"marketId": market_b},
+                                    "state": {"supplyAssetsUsd": 0},
+                                },
+                            ]
+                        },
+                    }
+                ]
+            }
+        }
+
+        self.assertEqual(
+            _parse_market_allocations(item, "Example", Chain.MAINNET),
+            {market_a: 15_000.0},
+        )
 
     def test_market_scoring_consolidates_all_v2_risk_alerts(self) -> None:
         market_id = "0x" + "ab" * 32
@@ -82,41 +140,95 @@ class TestMorphoV2Configuration(unittest.TestCase):
             chain=Chain.MAINNET,
             asset_address="0x" + "22" * 20,
             asset_symbol="USDC",
-            curator="",
-            owner="",
             risk_level=1,
+            total_assets_usd=100,
+            market_allocations_usd={market_id: 80},
         )
-        adapter = AdapterInfo(
-            address="0x" + "33" * 20,
-            kind="MorphoMarketV1AdapterV2",
-            market_ids=[market_id],
-            expected_supply_assets=[80],
-        )
-        metrics = MarketMetrics(
-            market_id=market_id,
-            loan_asset=Asset(address=vault.asset_address, symbol="USDC"),
-            collateral_asset=Asset(address="0x" + "44" * 20, symbol="WETH"),
-            state=MarketState(
-                utilization=0.5,
-                borrow_assets=100,
-                supply_assets=100,
-                borrow_assets_usd=100,
-                supply_assets_usd=100,
-            ),
-            bad_debt=BadDebt(underlying=1, usd=1),
-        )
+        metrics = {
+            market_id: MarketMetrics(
+                market_id=market_id,
+                loan_asset=Asset(address=vault.asset_address, symbol="USDC"),
+                collateral_asset=Asset(address="0x" + "44" * 20, symbol="WETH"),
+                state=MarketState(
+                    utilization=0.5,
+                    borrow_assets=100,
+                    supply_assets=100,
+                    borrow_assets_usd=100,
+                    supply_assets_usd=100,
+                ),
+                bad_debt=BadDebt(underlying=1, usd=1),
+            )
+        }
 
-        with (
-            patch("protocols.morpho.markets_v2.fetch_market_metrics", return_value={market_id: metrics}),
-            patch("protocols.morpho.markets_v2.send_alert") as send,
-        ):
-            score_market_allocations(vault, [adapter], 100)
+        with patch("protocols.morpho.markets_v2.send_alert") as send:
+            score_market_allocations(vault, metrics)
 
         messages = [call.args[0].message for call in send.call_args_list]
         self.assertEqual(len(messages), 3)
         self.assertTrue(any("V2 high allocation" in message for message in messages))
         self.assertTrue(any("V2 bad debt" in message for message in messages))
         self.assertTrue(any("V2 high risk" in message for message in messages))
+
+    def test_main_batches_metrics_per_chain_and_continues_after_failure(self) -> None:
+        market_a = "0x" + "aa" * 32
+        market_b = "0x" + "bb" * 32
+        market_c = "0x" + "cc" * 32
+        vault_mainnet_a = V2Vault(
+            name="Mainnet A",
+            address="0x" + "11" * 20,
+            chain=Chain.MAINNET,
+            asset_address="0x" + "22" * 20,
+            asset_symbol="USDC",
+            risk_level=1,
+            total_assets_usd=100_000,
+            market_allocations_usd={market_a: 40_000, market_b: 60_000},
+        )
+        vault_mainnet_b = V2Vault(
+            name="Mainnet B",
+            address="0x" + "33" * 20,
+            chain=Chain.MAINNET,
+            asset_address="0x" + "22" * 20,
+            asset_symbol="USDC",
+            risk_level=1,
+            total_assets_usd=50_000,
+            market_allocations_usd={market_b: 50_000},
+        )
+        vault_base = V2Vault(
+            name="Base Vault",
+            address="0x" + "55" * 20,
+            chain=Chain.BASE,
+            asset_address="0x" + "66" * 20,
+            asset_symbol="USDC",
+            risk_level=1,
+            total_assets_usd=100_000,
+            market_allocations_usd={market_c: 100_000},
+        )
+        base_metrics = {market_c: _sample_metrics(market_c, vault_base.asset_address)}
+
+        def fetch_side_effect(market_ids: list[str], chain: Chain) -> dict[str, MarketMetrics]:
+            if chain == Chain.MAINNET:
+                self.assertEqual(market_ids, sorted({market_a, market_b}))
+                raise MorphoV2MonitoringError("mainnet metrics unavailable")
+            self.assertEqual(chain, Chain.BASE)
+            self.assertEqual(market_ids, [market_c])
+            return base_metrics
+
+        with (
+            patch(
+                "protocols.morpho.markets_v2.discover_v2_vaults_by_chain",
+                return_value={
+                    Chain.MAINNET: [vault_mainnet_a, vault_mainnet_b],
+                    Chain.BASE: [vault_base],
+                },
+            ),
+            patch("protocols.morpho.markets_v2.fetch_market_metrics", side_effect=fetch_side_effect) as fetch,
+            patch("protocols.morpho.markets_v2.analyze_v2_vault") as analyze,
+            self.assertRaisesRegex(MorphoV2MonitoringError, "markets on MAINNET"),
+        ):
+            main()
+
+        self.assertEqual(fetch.call_count, 2)
+        analyze.assert_called_once_with(vault_base, base_metrics)
 
 
 class TestMorphoCollateralLiquidity(unittest.TestCase):
@@ -239,8 +351,6 @@ class TestMorphoCollateralLiquidity(unittest.TestCase):
             chain=Chain.MAINNET,
             asset_address="0x" + "22" * 20,
             asset_symbol="USDC",
-            curator="",
-            owner="",
             risk_level=1,
             total_assets_usd=100_000,
             liquidity_usd=500,
