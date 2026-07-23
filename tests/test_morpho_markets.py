@@ -23,11 +23,9 @@ from protocols.morpho.markets import (
     get_yv_collateral_liquidity_by_asset,
 )
 from protocols.morpho.markets_v2 import (
-    AdapterInfo,
     V2Vault,
     check_low_liquidity,
     discover_v2_vaults_by_chain,
-    list_adapters,
     score_market_allocations,
 )
 from utils.chains import Chain
@@ -65,14 +63,23 @@ class TestMorphoV2Configuration(unittest.TestCase):
         ):
             discover_v2_vaults_by_chain()
 
-    def test_adapter_read_failure_is_not_silently_treated_as_empty(self) -> None:
-        client = MagicMock()
-        client.get_contract.return_value.functions.adaptersLength.return_value.call.side_effect = RuntimeError(
-            "RPC unavailable"
-        )
+    def test_discovery_rejects_non_market_adapters(self) -> None:
+        from protocols.morpho.markets_v2 import _parse_market_allocations
 
-        with self.assertRaisesRegex(MorphoV2MonitoringError, "Failed to read adaptersLength"):
-            list_adapters(client, "0x" + "11" * 20)
+        item = {
+            "adapters": {
+                "items": [
+                    {
+                        "address": "0x" + "33" * 20,
+                        "type": "MetaMorpho",
+                        "assetsUsd": 100_000,
+                    }
+                ]
+            }
+        }
+
+        with self.assertRaisesRegex(MorphoV2MonitoringError, "unsupported adapter type"):
+            _parse_market_allocations(item, "Example", Chain.MAINNET)
 
     def test_market_scoring_consolidates_all_v2_risk_alerts(self) -> None:
         market_id = "0x" + "ab" * 32
@@ -82,35 +89,28 @@ class TestMorphoV2Configuration(unittest.TestCase):
             chain=Chain.MAINNET,
             asset_address="0x" + "22" * 20,
             asset_symbol="USDC",
-            curator="",
-            owner="",
             risk_level=1,
+            total_assets_usd=100,
+            market_allocations_usd={market_id: 80},
         )
-        adapter = AdapterInfo(
-            address="0x" + "33" * 20,
-            kind="MorphoMarketV1AdapterV2",
-            market_ids=[market_id],
-            expected_supply_assets=[80],
-        )
-        metrics = MarketMetrics(
-            market_id=market_id,
-            loan_asset=Asset(address=vault.asset_address, symbol="USDC"),
-            collateral_asset=Asset(address="0x" + "44" * 20, symbol="WETH"),
-            state=MarketState(
-                utilization=0.5,
-                borrow_assets=100,
-                supply_assets=100,
-                borrow_assets_usd=100,
-                supply_assets_usd=100,
-            ),
-            bad_debt=BadDebt(underlying=1, usd=1),
-        )
+        metrics = {
+            market_id: MarketMetrics(
+                market_id=market_id,
+                loan_asset=Asset(address=vault.asset_address, symbol="USDC"),
+                collateral_asset=Asset(address="0x" + "44" * 20, symbol="WETH"),
+                state=MarketState(
+                    utilization=0.5,
+                    borrow_assets=100,
+                    supply_assets=100,
+                    borrow_assets_usd=100,
+                    supply_assets_usd=100,
+                ),
+                bad_debt=BadDebt(underlying=1, usd=1),
+            )
+        }
 
-        with (
-            patch("protocols.morpho.markets_v2.fetch_market_metrics", return_value={market_id: metrics}),
-            patch("protocols.morpho.markets_v2.send_alert") as send,
-        ):
-            score_market_allocations(vault, [adapter], 100)
+        with patch("protocols.morpho.markets_v2.send_alert") as send:
+            score_market_allocations(vault, metrics)
 
         messages = [call.args[0].message for call in send.call_args_list]
         self.assertEqual(len(messages), 3)
@@ -239,8 +239,6 @@ class TestMorphoCollateralLiquidity(unittest.TestCase):
             chain=Chain.MAINNET,
             asset_address="0x" + "22" * 20,
             asset_symbol="USDC",
-            curator="",
-            owner="",
             risk_level=1,
             total_assets_usd=100_000,
             liquidity_usd=500,
