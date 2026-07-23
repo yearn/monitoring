@@ -189,6 +189,9 @@ def _parse_market_allocations(item: Dict[str, Any], vault_name: str, chain: Chai
         for position in positions:
             market_id = ((position.get("market") or {}).get("marketId") or "").lower()
             supply_usd = float((position.get("state") or {}).get("supplyAssetsUsd") or 0)
+            # Skip dust/idle positions (same idea as v1's >$10k active-market filter):
+            # zero vault supply means no allocation/risk contribution and no vault-level
+            # bad-debt alert for that market.
             if not market_id or supply_usd <= 0:
                 continue
             allocations[market_id] = allocations.get(market_id, 0.0) + supply_usd
@@ -206,7 +209,8 @@ def score_market_allocations(
     metrics: Dict[str, MarketMetrics],
 ) -> None:
     """Score every market allocation on a vault and emit consolidated alerts."""
-    if vault.total_assets_usd <= 0 or not vault.market_allocations_usd:
+    # TVL floor is enforced in analyze_v2_vault; empty allocations are a no-op.
+    if not vault.market_allocations_usd:
         return
 
     total_risk_score = 0.0
