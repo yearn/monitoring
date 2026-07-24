@@ -18,7 +18,7 @@ from eth_abi import decode as abi_decode
 from eth_utils import to_checksum_address
 from web3 import Web3
 
-from protocols.morpho._shared import fetch_market_metadata, get_market_url
+from protocols.morpho._shared import fetch_asset_metadata, fetch_market_metadata, get_market_url
 from utils.calldata.decoder import resolve_selector
 from utils.chains import Chain
 from utils.formatting import format_token_amount, format_with_suffix
@@ -90,6 +90,37 @@ def _format_address(addr: str) -> str:
     return to_checksum_address(addr)
 
 
+def _address_link(addr: str, chain: Chain | None) -> str:
+    """Render a checksummed address as a Markdown link to the chain's explorer.
+
+    Falls back to the bare checksummed address when no explorer is configured or
+    the chain is unknown (e.g. when decoding without chain context).
+    """
+    checksummed = _format_address(addr)
+    base = chain.explorer_url if chain else None
+    if not base:
+        return checksummed
+    return f"[{checksummed}]({base}/address/{checksummed})"
+
+
+def _token_link(addr: str, chain: Chain | None) -> str:
+    """Render a token as ``[SYMBOL](explorer/address)``, resolving the symbol.
+
+    Fetches the ERC-20 symbol via Morpho's asset API when a chain is available;
+    falls back to the bare checksummed-address link (``_address_link``) when the
+    symbol can't be resolved or no chain is provided.
+    """
+    checksummed = _format_address(addr)
+    base = chain.explorer_url if chain else None
+    if chain is None or not base:
+        return _address_link(addr, chain)
+    metadata = fetch_asset_metadata(addr, chain)
+    symbol = metadata["symbol"] if metadata and metadata.get("symbol") else None
+    if not symbol:
+        return _address_link(addr, chain)
+    return f"[{symbol}]({base}/address/{checksummed})"
+
+
 def _format_wad_pct(value: int) -> str:
     return f"{value / WAD * 100:.4f}%"
 
@@ -137,8 +168,8 @@ def decode_id_data(id_data: bytes, chain: Chain | None = None) -> str:
                     return f"market [{metadata['name']}]({get_market_url(market_id, chain)})"
             return (
                 f"market `{market_id}` "
-                f"(loan {_format_address(loan)}, collateral {_format_address(collateral)}, "
-                f"lltv {lltv / WAD * 100:.2f}%) on adapter {_format_address(adapter)}"
+                f"(loan {_address_link(loan, chain)}, collateral {_address_link(collateral, chain)}, "
+                f"lltv {lltv / WAD * 100:.2f}%) on adapter {_address_link(adapter, chain)}"
             )
 
     try:
@@ -147,13 +178,31 @@ def decode_id_data(id_data: bytes, chain: Chain | None = None) -> str:
         return f"<unparseable idData 0x{id_data.hex()}>"
 
     if tag == "this":
-        return f"adapterId for adapter {_format_address(addr)}"
+        return f"adapterId for adapter {_address_link(addr, chain)}"
     if tag == "collateralToken":
-        return f"collateral token {_format_address(addr)}"
-    return f"id tag '{tag}' addr {_format_address(addr)}"
+        return f"collateral token {_token_link(addr, chain)}"
+    return f"id tag '{tag}' addr {_address_link(addr, chain)}"
 
 
-def _format_cap_change(id_data: bytes, new_cap: int, chain: Chain | None = None) -> str:
+def _format_cap_value(
+    new_cap: int,
+    *,
+    is_relative: bool,
+    decimals: int | None = None,
+    symbol: str | None = None,
+) -> str:
+    """Render a cap value.
+
+    Relative caps (``increaseRelativeCap``) are WAD-scaled ratios of the vault's
+    total assets (``1e18`` = 100%), so they render as a percentage. Absolute caps
+    are token amounts and render with the asset's decimals/symbol when known.
+    """
+    if is_relative:
+        return _format_wad_pct(new_cap)
+    return _format_cap_amount(new_cap, decimals, symbol)
+
+
+def _format_cap_change(id_data: bytes, new_cap: int, chain: Chain | None = None, *, is_relative: bool = False) -> str:
     market_params_type = "(address,address,address,address,uint256)"
     if chain is not None:
         try:
@@ -166,10 +215,18 @@ def _format_cap_change(id_data: bytes, new_cap: int, chain: Chain | None = None)
                 market_id = _market_id_from_params(loan, collateral, oracle, irm, lltv)
                 metadata = fetch_market_metadata(market_id, chain)
                 if metadata:
-                    cap = _format_cap_amount(new_cap, metadata["loan_decimals"], metadata["loan_symbol"])
+                    cap = _format_cap_value(
+                        new_cap,
+                        is_relative=is_relative,
+                        decimals=metadata["loan_decimals"],
+                        symbol=metadata["loan_symbol"],
+                    )
                     return f"market [{metadata['name']}]({get_market_url(market_id, chain)}) → cap {cap}"
 
-    return f"{decode_id_data(id_data)} → cap {new_cap}"
+    # Fallback path (collateralToken / adapter id, or missing market metadata).
+    # Absolute caps here have no resolvable denomination, so show the raw value.
+    cap = _format_wad_pct(new_cap) if is_relative else f"{new_cap}"
+    return f"{decode_id_data(id_data, chain)} → cap {cap}"
 
 
 def _encode_market_params(loan: str, collateral: str, oracle: str, irm: str, lltv: int) -> bytes:
@@ -207,7 +264,7 @@ def _format_args(sig: str, args: tuple[Any, ...], chain: Chain | None = None) ->
         return _format_address(addr)
     if name in ("increaseAbsoluteCap", "increaseRelativeCap"):
         id_data, new_cap = args
-        return _format_cap_change(id_data, new_cap, chain)
+        return _format_cap_change(id_data, new_cap, chain, is_relative=(name == "increaseRelativeCap"))
     if name in ("increaseTimelock", "decreaseTimelock"):
         sel_bytes, duration = args
         return f"{_resolve_inner_selector(sel_bytes)} → {duration}s"
