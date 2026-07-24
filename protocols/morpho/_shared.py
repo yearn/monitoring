@@ -134,6 +134,35 @@ def fetch_market_metadata(market_id: str, chain: Chain) -> dict[str, Any] | None
         return None
 
 
+def fetch_asset_metadata(address: str, chain: Chain) -> dict[str, Any] | None:
+    """Fetch the symbol and decimals for an ERC-20 token by address.
+
+    Uses Morpho's ``assetByAddress`` query. Returns None on error so alert
+    rendering can fall back to the raw address.
+    """
+    query = """
+    query GetAsset($address: String!, $chainId: Int!) {
+        assetByAddress(address: $address, chainId: $chainId) {
+            symbol
+            decimals
+        }
+    }
+    """
+    try:
+        data = execute_graphql(
+            query,
+            {"address": address, "chainId": chain.chain_id},
+            f"asset metadata for {address} on {chain.name}",
+        )
+        asset = data.get("assetByAddress")
+        if not asset:
+            return None
+        return {"symbol": asset["symbol"], "decimals": int(asset["decimals"])}
+    except Exception as e:
+        logger.warning("Failed to fetch asset metadata for %s: %s", address, e)
+        return None
+
+
 def fetch_market_name(market_id: str, chain: Chain) -> str:
     """Fetch a human-readable name like 'WBTC/USDC' for a market_id.
 

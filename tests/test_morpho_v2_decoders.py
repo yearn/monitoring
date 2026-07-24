@@ -219,6 +219,27 @@ class TestDecodeIdData(unittest.TestCase):
         self.assertNotIn(f"adapter {Web3.to_checksum_address(A5)}", decoded)
         self.assertIn("cap 80.00M RLUSD", decoded)
 
+    def test_increase_relative_cap_with_market_params_renders_pct(self):
+        market_params = (A1, A2, A3, A4, 91 * 10**16)
+        id_data = abi_encode(
+            ["string", "address", "(address,address,address,address,uint256)"],
+            ["this/marketParams", A5, market_params],
+        )
+        data = _build(
+            "increaseRelativeCap(bytes,uint256)",
+            ["bytes", "uint256"],
+            [id_data, 10**18],  # 1e18 WAD = 100%
+        )
+
+        metadata = {"name": "weETH/vbUSDC", "loan_symbol": "vbUSDC", "loan_decimals": 6}
+        with patch("protocols.morpho.v2_decoders.fetch_market_metadata", return_value=metadata):
+            decoded = decode_submit(data, Chain.MAINNET)
+
+        self.assertIn("market [weETH/vbUSDC]", decoded)
+        # Relative cap → percentage, not a misleading token amount.
+        self.assertIn("cap 100.0000%", decoded)
+        self.assertNotIn("vbUSDC)", decoded)
+
     def test_increase_relative_cap_with_collateral_tag(self):
         id_data = abi_encode(["string", "address"], ["collateralToken", A1])
         data = _build(
@@ -228,7 +249,34 @@ class TestDecodeIdData(unittest.TestCase):
         )
         decoded = decode_submit(data)
         self.assertIn("increaseRelativeCap", decoded)
+        # No chain → symbol/link can't be resolved; falls back to bare address.
         self.assertIn(f"collateral token {Web3.to_checksum_address(A1)}", decoded)
+        # Relative cap renders as a percentage (5e17 WAD = 50%).
+        self.assertIn("cap 50.0000%", decoded)
+
+    def test_collateral_token_links_symbol_and_renders_relative_cap_pct(self):
+        id_data = abi_encode(["string", "address"], ["collateralToken", A1])
+        data = _build(
+            "increaseRelativeCap(bytes,uint256)",
+            ["bytes", "uint256"],
+            [id_data, 10**18],  # 1e18 WAD = 100%
+        )
+        addr = Web3.to_checksum_address(A1)
+        metadata = {"symbol": "weETH", "decimals": 18}
+        with patch("protocols.morpho.v2_decoders.fetch_asset_metadata", return_value=metadata) as fetch:
+            decoded = decode_submit(data, Chain.KATANA)
+
+        fetch.assert_called_once()
+        self.assertIn(f"collateral token [weETH](https://katanascan.com/address/{addr})", decoded)
+        self.assertIn("cap 100.0000%", decoded)
+
+    def test_collateral_token_falls_back_to_address_when_symbol_unresolved(self):
+        id_data = abi_encode(["string", "address"], ["collateralToken", A1])
+        data = _build("increaseRelativeCap(bytes,uint256)", ["bytes", "uint256"], [id_data, 10**18])
+        addr = Web3.to_checksum_address(A1)
+        with patch("protocols.morpho.v2_decoders.fetch_asset_metadata", return_value=None):
+            decoded = decode_submit(data, Chain.KATANA)
+        self.assertIn(f"collateral token [{addr}](https://katanascan.com/address/{addr})", decoded)
 
 
 class TestSubmitDataKey(unittest.TestCase):

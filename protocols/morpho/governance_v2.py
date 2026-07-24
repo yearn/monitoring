@@ -272,18 +272,46 @@ def _pending_function_key(snapshot: V2GovernanceSnapshot, data_hash: str) -> str
     return str(morpho_key(snapshot.address.lower(), data_hash, PENDING_FUNCTION_TYPE))
 
 
-def _alert_pending_new(snapshot: V2GovernanceSnapshot, pc: PendingConfig, operation_label: str) -> None:
-    send_alert(
-        Alert(
-            AlertSeverity.MEDIUM,
-            f"⏳ V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) "
-            f"on {snapshot.chain.name}\n"
+def _alert_pending_new(snapshot: V2GovernanceSnapshot, pending: List[tuple[PendingConfig, str]]) -> None:
+    """Alert on newly-submitted timelocked operation(s) for a single vault.
+
+    Multiple operations submitted on the same vault (e.g. a batched multicall
+    submit) are grouped into one Telegram message. When every operation shares
+    the same execution time and tx hash, those are shown once in the footer;
+    otherwise they are rendered per operation.
+    """
+    if not pending:
+        return
+
+    header = f"⏳ V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) on {snapshot.chain.name}"
+
+    if len(pending) == 1:
+        pc, operation_label = pending[0]
+        message = (
+            f"{header}\n"
             f"📥 Submitted: {operation_label}\n"
             f"⏰ Executable at: {_format_ts(pc.valid_at)} {_format_countdown(pc.valid_at)}\n"
-            f"🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}",
-            PROTOCOL,
+            f"🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}"
         )
-    )
+        send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
+        return
+
+    lines = [header, f"📥 Submitted {len(pending)} operations:"]
+    shared_valid_at = len({pc.valid_at for pc, _ in pending}) == 1
+    shared_tx = len({pc.tx_hash for pc, _ in pending}) == 1
+    if shared_valid_at and shared_tx:
+        for _, operation_label in pending:
+            lines.append(f"  • {operation_label}")
+        pc0 = pending[0][0]
+        lines.append(f"⏰ Executable at: {_format_ts(pc0.valid_at)} {_format_countdown(pc0.valid_at)}")
+        lines.append(f"🔗 Tx: {_explorer_link(snapshot.chain, pc0.tx_hash)}")
+    else:
+        for pc, operation_label in pending:
+            lines.append(f"  • {operation_label}")
+            lines.append(f"     ⏰ Executable at: {_format_ts(pc.valid_at)} {_format_countdown(pc.valid_at)}")
+            lines.append(f"     🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}")
+
+    send_alert(Alert(AlertSeverity.MEDIUM, "\n".join(lines), PROTOCOL))
 
 
 def _alert_pending_resolved(
@@ -358,6 +386,7 @@ def _diff_pending(snapshot: V2GovernanceSnapshot) -> None:
     addr = snapshot.address.lower()
 
     current_keys: set[str] = set()
+    new_pending: List[tuple[PendingConfig, str]] = []
     for pc in snapshot.pending_configs:
         current_keys.add(pc.data_hash)
         operation_label = _operation_label(snapshot, pc)
@@ -367,8 +396,11 @@ def _diff_pending(snapshot: V2GovernanceSnapshot) -> None:
         # Already alerted at this validAt, or marked executed.
         if last == pc.valid_at or last == EXECUTED:
             continue
-        _alert_pending_new(snapshot, pc, operation_label)
+        new_pending.append((pc, operation_label))
         _write(cache_key, pc.valid_at)
+
+    # Group all newly-submitted operations for this vault into one alert.
+    _alert_pending_new(snapshot, new_pending)
 
     # Detect resolved entries: anything in last-run's index that isn't in the
     # current pending list.

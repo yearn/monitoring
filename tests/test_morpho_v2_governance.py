@@ -81,6 +81,69 @@ class TestMorphoV2GovernancePendingLabels(unittest.TestCase):
         self.assertNotIn(f"(`{data_hash[:10]}…`)", alert.message)
 
 
+class TestMorphoV2GovernancePendingGrouping(unittest.TestCase):
+    def test_multiple_new_pending_grouped_into_single_alert(self) -> None:
+        state: dict[str, str] = {}
+
+        def read_value(_filename: str, key: str) -> str | int:
+            return state.get(key, 0)
+
+        def write_value(_filename: str, key: str, value: object) -> None:
+            state[key] = str(value)
+
+        tx = "0x" + "12" * 32
+        data_a = _build("addAdapter(address)", ["address"], [A1])
+        data_b = _build("removeAdapter(address)", ["address"], [A1])
+        pcs = [
+            PendingConfig(valid_at=100, function_name="addAdapter", data=data_a, tx_hash=tx),
+            PendingConfig(valid_at=100, function_name="removeAdapter", data=data_b, tx_hash=tx),
+        ]
+
+        with (
+            patch("protocols.morpho.governance_v2.get_last_value_for_key_from_file", side_effect=read_value),
+            patch("protocols.morpho.governance_v2.write_last_value_to_file", side_effect=write_value),
+            patch("protocols.morpho.governance_v2.send_alert") as send,
+        ):
+            governance_v2._diff_pending(_snapshot(pcs))
+
+        # Both submissions collapse into one Telegram message.
+        self.assertEqual(send.call_count, 1)
+        message = send.call_args.args[0].message
+        self.assertIn("Submitted 2 operations:", message)
+        self.assertIn("addAdapter", message)
+        self.assertIn("removeAdapter", message)
+        # Shared execution time / tx are rendered once in the footer.
+        self.assertEqual(message.count("⏰ Executable at:"), 1)
+        self.assertEqual(message.count("🔗 Tx:"), 1)
+
+    def test_single_new_pending_uses_unnumbered_format(self) -> None:
+        state: dict[str, str] = {}
+
+        with (
+            patch(
+                "protocols.morpho.governance_v2.get_last_value_for_key_from_file",
+                side_effect=lambda _f, key: state.get(key, 0),
+            ),
+            patch(
+                "protocols.morpho.governance_v2.write_last_value_to_file",
+                side_effect=lambda _f, key, value: state.__setitem__(key, str(value)),
+            ),
+            patch("protocols.morpho.governance_v2.send_alert") as send,
+        ):
+            pc = PendingConfig(
+                valid_at=100,
+                function_name="addAdapter",
+                data=_build("addAdapter(address)", ["address"], [A1]),
+                tx_hash="0x" + "12" * 32,
+            )
+            governance_v2._diff_pending(_snapshot([pc]))
+
+        self.assertEqual(send.call_count, 1)
+        message = send.call_args.args[0].message
+        self.assertIn("📥 Submitted: addAdapter", message)
+        self.assertNotIn("operations:", message)
+
+
 class TestMorphoV2GovernanceFetch(unittest.TestCase):
     def test_fetch_fails_if_api_omits_configured_vaults(self) -> None:
         response = MagicMock()
