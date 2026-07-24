@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -25,29 +26,101 @@ def stub_cache(monkeypatch: pytest.MonkeyPatch, module: ModuleType) -> dict[str,
     return cache
 
 
-def test_junior_buffer_uses_backing_over_deployed_credit(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_junior_buffer_does_not_alert_in_design_range(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
+    # 19.86% sits in the steady-state design range; no alert.
     module.check_junior_buffer(7_504_000, 37_776_000)
 
     assert alerts == []
 
 
-def test_junior_buffer_alert_describes_deployed_credit(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_junior_buffer_does_not_alert_on_steady_state_drift(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
-    module.check_junior_buffer(5_000_000, 40_000_000)
+    # Small steady-state drift within the design range does not alert.
+    module.check_junior_buffer(7_504_000, 37_776_000)  # 19.86% baseline
+    module.check_junior_buffer(7_300_000, 37_776_000)  # 19.32% — 0.54pp drop, below 3pp
+
+    assert alerts == []
+
+
+def test_junior_buffer_alerts_on_structural_floor_breach(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_junior_buffer(3_000_000, 40_000_000)  # 7.5% < 8% floor
 
     assert len(alerts) == 1
-    assert alerts[0].severity == module.AlertSeverity.HIGH
-    assert "12.50% of deployed credit" in alerts[0].message
-    assert "sUSD3 backing: $5.00M | Deployed: $40.00M" in alerts[0].message
+    assert alerts[0].severity == module.AlertSeverity.LOW
+    assert "Junior Buffer Drifting" in alerts[0].message
+    assert "7.50%" in alerts[0].message
+    assert "structural floor" in alerts[0].message
+    assert "sUSD3 backing: $3.00M | Deployed: $40.00M" in alerts[0].message
+
+
+def test_junior_buffer_alerts_on_deterioration_from_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_junior_buffer(6_000_000, 40_000_000)  # 15% — primes baseline
+    module.check_junior_buffer(2_500_000, 40_000_000)  # 6.25% — both floor breach and 8.75pp drop
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == module.AlertSeverity.LOW
+    assert "Junior Buffer Drifting" in alerts[0].message
+    # Floor check takes precedence in the reason line.
+    assert "structural floor" in alerts[0].message
+
+
+def test_junior_buffer_alerts_on_drop_above_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_junior_buffer(8_000_000, 40_000_000)  # 20% baseline
+    module.check_junior_buffer(4_500_000, 40_000_000)  # 11.25% — 8.75pp drop, above 8% floor
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == module.AlertSeverity.LOW
+    assert "leverage drift" in alerts[0].message
+    assert "20.00% → 11.25%" in alerts[0].message
+    assert "-8.75pp" in alerts[0].message
+
+
+def test_junior_buffer_silent_on_small_drop_below_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_junior_buffer(8_000_000, 40_000_000)  # 20% baseline
+    module.check_junior_buffer(7_500_000, 40_000_000)  # 18.75% — 1.25pp drop, below 3pp threshold
+
+    assert alerts == []
+
+
+def test_junior_buffer_silent_at_floor_with_no_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """First-run check at the design value must not alert (no baseline to drop from)."""
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_junior_buffer(4_000_000, 40_000_000)  # 10% — design value, no prior baseline
+
+    assert alerts == []
 
 
 def test_usd3_oc_does_not_alert_above_high_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -222,18 +295,21 @@ def test_withdraw_limit_retries_when_send_fails(monkeypatch: pytest.MonkeyPatch)
     assert "Available withdraw limit: $3.50M" in alerts[0].message
 
 
-def test_junior_buffer_zero_deployed_credit_rearms(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_junior_buffer_zero_deployed_credit_clears_state(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
-    stub_cache(monkeypatch, module)
+    cache = stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
-    module.check_junior_buffer(4_000_000, 40_000_000)  # 10% → alert
-    module.check_junior_buffer(0, 0)  # book unwound → clears cache
-    module.check_junior_buffer(4_800_000, 40_000_000)  # 12%, above old cached 10% → alert
+    module.check_junior_buffer(6_000_000, 40_000_000)  # 15% primes baseline (no alert, in design range)
+    module.check_junior_buffer(2_000_000, 40_000_000)  # 5% floor breach → alert
+    module.check_junior_buffer(0, 0)  # book unwound → clears alert and baseline
+    module.check_junior_buffer(7_000_000, 40_000_000)  # 17.5% — no baseline, no alert
+    module.check_junior_buffer(2_000_000, 40_000_000)  # 5% again → fresh alert
 
     assert len(alerts) == 2
-    assert "12.00% of deployed credit" in alerts[1].message
+    assert cache[module.CACHE_KEY_JUNIOR_BUFFER_ALERTED] == str(2_000_000 / 40_000_000)
+    assert cache[module.CACHE_KEY_JUNIOR_BUFFER_BASELINE] == str(2_000_000 / 40_000_000)
 
 
 def test_usd3_oc_zero_deployed_credit_rearms(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -250,19 +326,20 @@ def test_usd3_oc_zero_deployed_credit_rearms(monkeypatch: pytest.MonkeyPatch) ->
     assert alerts[1].severity == module.AlertSeverity.HIGH
 
 
-def test_junior_buffer_dedupes_same_ratio(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_junior_buffer_dedupes_same_deterioration(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
-    module.check_junior_buffer(5_000_000, 40_000_000)  # 12.5% → alert
-    module.check_junior_buffer(5_000_000, 40_000_000)  # same → silent
-    module.check_junior_buffer(4_000_000, 40_000_000)  # 10% → alert
+    module.check_junior_buffer(8_000_000, 40_000_000)  # 20% baseline
+    module.check_junior_buffer(4_500_000, 40_000_000)  # 11.25% drop → alert
+    module.check_junior_buffer(4_500_000, 40_000_000)  # same → silent
+    module.check_junior_buffer(2_500_000, 40_000_000)  # 6.25% further drop (floor breach) → alert
 
     assert len(alerts) == 2
-    assert "12.50% of deployed credit" in alerts[0].message
-    assert "10.00% of deployed credit" in alerts[1].message
+    assert "20.00% → 11.25%" in alerts[0].message
+    assert "structural floor" in alerts[1].message
 
 
 def test_insurance_shares_round_trip_exactly_through_sqlite(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -501,3 +578,370 @@ def test_parse_envio_borrower_default_watch_rows_default_started_forces_default(
     assert parsed[0].repayment_status == "Default"
     assert parsed[0].default_bucket == "default"
     assert parsed[0].seconds_since_default == 0
+
+
+# ----------------------------------------------------------------------
+# At-risk exposure aggregation
+# ----------------------------------------------------------------------
+
+
+def _borrower(
+    module: ModuleType,
+    *,
+    borrower: str,
+    ending_balance: int,
+    amount_due: int,
+    repayment_status: str,
+    default_bucket: str,
+    cycle_id: int = 1,
+) -> Any:
+    return module.BorrowerRepaymentSnapshot(
+        market_id="0x" + "11" * 32,
+        borrower=borrower,
+        cycle_id=cycle_id,
+        cycle_end=1_700_000_000,
+        amount_due_raw=amount_due * module.ONE_SHARE,
+        ending_balance_raw=ending_balance * module.ONE_SHARE,
+        credit_raw=(ending_balance * 2) * module.ONE_SHARE,
+        default_started=repayment_status == "Default",
+        repayment_status=repayment_status,
+        default_at=1_700_000_000 + 30 * module.SECONDS_PER_DAY,
+        seconds_to_default=2 * module.SECONDS_PER_DAY,
+        seconds_since_default=0,
+        default_bucket=default_bucket,
+    )
+
+
+def test_compute_at_risk_exposure_empty_input() -> None:
+    module = load_3jane_module()
+    at_risk = module.compute_at_risk_exposure([])
+
+    assert at_risk == module.AtRiskExposure(0.0, 0.0, 0.0, 0.0, 0.0, module.ZERO_ADDRESS, 0)
+
+
+def test_compute_at_risk_exposure_weights_by_bucket() -> None:
+    module = load_3jane_module()
+    borrower_a = "0x00000000000000000000000000000000000000A1"
+    borrower_b = "0x00000000000000000000000000000000000000A2"
+    borrower_c = "0x00000000000000000000000000000000000000A3"
+    snapshots = [
+        _borrower(
+            module,
+            borrower=borrower_a,
+            ending_balance=1_000_000,
+            amount_due=100_000,
+            repayment_status="Default",
+            default_bucket="default",  # weight 1.0
+        ),
+        _borrower(
+            module,
+            borrower=borrower_b,
+            ending_balance=2_000_000,
+            amount_due=200_000,
+            repayment_status="Delinquent",
+            default_bucket="3d",  # weight 0.7
+        ),
+        _borrower(
+            module,
+            borrower=borrower_c,
+            ending_balance=500_000,
+            amount_due=50_000,
+            repayment_status="Delinquent",
+            default_bucket="14d",  # weight 0.3
+        ),
+    ]
+
+    at_risk = module.compute_at_risk_exposure(snapshots)
+
+    # Weighted: 1M*1.0 + 2M*0.7 + 0.5M*0.3 = 1M + 1.4M + 0.15M = 2.55M
+    assert at_risk.total_weighted == pytest.approx(2_550_000)
+    assert at_risk.total_raw == pytest.approx(3_500_000)
+    assert at_risk.default_exposure == pytest.approx(1_000_000)
+    assert at_risk.delinquent_exposure == pytest.approx(2_500_000)
+    assert at_risk.largest_borrower_exposure == pytest.approx(2_000_000)
+    assert at_risk.largest_borrower_address == module.Web3.to_checksum_address(borrower_b)
+    assert at_risk.count == 3
+
+
+def test_compute_at_risk_exposure_falls_back_to_amount_due() -> None:
+    module = load_3jane_module()
+    borrower = "0x00000000000000000000000000000000000000A1"
+    snapshots = [
+        _borrower(
+            module,
+            borrower=borrower,
+            ending_balance=0,  # not yet indexed
+            amount_due=250_000,
+            repayment_status="Delinquent",
+            default_bucket="7d",  # weight 0.5
+        ),
+    ]
+
+    at_risk = module.compute_at_risk_exposure(snapshots)
+
+    assert at_risk.total_weighted == pytest.approx(125_000)  # 250k * 0.5
+    assert at_risk.total_raw == pytest.approx(250_000)
+    assert at_risk.largest_borrower_exposure == pytest.approx(250_000)
+
+
+def test_compute_at_risk_exposure_ignores_zero_exposure() -> None:
+    module = load_3jane_module()
+    borrower = "0x00000000000000000000000000000000000000A1"
+    snapshots = [
+        _borrower(
+            module,
+            borrower=borrower,
+            ending_balance=0,
+            amount_due=0,  # no exposure → should be ignored
+            repayment_status="Default",
+            default_bucket="default",
+        ),
+    ]
+
+    at_risk = module.compute_at_risk_exposure(snapshots)
+
+    # Zero exposure is filtered out of all monetary fields, but count is preserved.
+    assert at_risk.total_weighted == 0.0
+    assert at_risk.total_raw == 0.0
+    assert at_risk.default_exposure == 0.0
+    assert at_risk.count == 1
+    assert at_risk.largest_borrower_address == module.ZERO_ADDRESS
+
+
+# ----------------------------------------------------------------------
+# Junior / senior coverage checks
+# ----------------------------------------------------------------------
+
+
+def _empty_at_risk(module: ModuleType) -> Any:
+    return module.AtRiskExposure(0.0, 0.0, 0.0, 0.0, 0.0, module.ZERO_ADDRESS, 0)
+
+
+def test_junior_coverage_no_alert_when_no_at_risk(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    cache = stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    # Prime an alert first so we can verify it gets cleared by the at_risk<=0 path.
+    module.check_junior_coverage(1_000_000, _at_risk(module, weighted=5_000_000))
+    assert len(alerts) == 1
+    assert cache[module.CACHE_KEY_JUNIOR_COVERAGE_ALERTED] != "-1"
+
+    module.check_junior_coverage(1_000_000, _empty_at_risk(module))
+
+    assert alerts == [alerts[0]]  # no new alert, just the primed one
+    assert cache[module.CACHE_KEY_JUNIOR_COVERAGE_ALERTED] == "-1"
+
+
+def test_junior_coverage_alerts_high_below_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    # sUSD3 backing 3M, at-risk 2M weighted -> 1.5x (< 2.0x) -> HIGH
+    module.check_junior_coverage(3_000_000, _at_risk(module, weighted=2_000_000))
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == module.AlertSeverity.HIGH
+    assert "Junior Tranche Coverage Low" in alerts[0].message
+    assert "1.50x" in alerts[0].message
+    assert "sUSD3 backing: $3.00M" in alerts[0].message
+
+
+def test_junior_coverage_silent_above_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    # 2.0x exactly is at threshold (not below) -> silent.
+    module.check_junior_coverage(4_000_000, _at_risk(module, weighted=2_000_000))
+    # Well above threshold -> silent.
+    module.check_junior_coverage(10_000_000, _at_risk(module, weighted=2_000_000))
+
+    assert alerts == []
+
+
+def test_junior_coverage_dedupes(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_junior_coverage(3_000_000, _at_risk(module, weighted=2_000_000))  # 1.5x → alert
+    module.check_junior_coverage(3_000_000, _at_risk(module, weighted=2_000_000))  # same → silent
+    module.check_junior_coverage(4_000_000, _at_risk(module, weighted=4_000_000))  # 1.0x → alert
+    # Recovery above threshold should re-arm
+    module.check_junior_coverage(10_000_000, _at_risk(module, weighted=2_000_000))  # 5x → clears
+    module.check_junior_coverage(3_500_000, _at_risk(module, weighted=2_000_000))  # 1.75x → alert again
+
+    assert len(alerts) == 3
+    assert "1.50x" in alerts[0].message
+    assert "1.00x" in alerts[1].message
+    assert "1.75x" in alerts[2].message
+
+
+def test_senior_coverage_no_alert_when_no_at_risk(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    cache = stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    # Prime an alert first
+    module.check_senior_coverage(1_000_000, 1_000_000, _at_risk(module, weighted=4_000_000))  # 0.5x → CRITICAL
+    assert len(alerts) == 1
+    assert cache[module.CACHE_KEY_SENIOR_COVERAGE_ALERTED] != "-1"
+
+    module.check_senior_coverage(1_000_000, 1_000_000, _empty_at_risk(module))
+
+    assert alerts == [alerts[0]]  # no new alert
+    assert cache[module.CACHE_KEY_SENIOR_COVERAGE_ALERTED] == "-1"
+
+
+def test_senior_coverage_alerts_high_above_critical(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    # insurance 1M + sUSD3 2M = 3M, at-risk 2.5M -> 1.2x (< 1.5x) -> HIGH (>= 1.0x)
+    module.check_senior_coverage(1_000_000, 2_000_000, _at_risk(module, weighted=2_500_000))
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == module.AlertSeverity.HIGH
+    assert "Senior Coverage Low" in alerts[0].message
+    assert "1.20x" in alerts[0].message
+    assert "Insurance: $1.00M | sUSD3: $2.00M" in alerts[0].message
+
+
+def test_senior_coverage_alerts_critical_below_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    # insurance 1M + sUSD3 1M = 2M, at-risk 5M -> 0.4x (< 1.0x) -> CRITICAL
+    module.check_senior_coverage(1_000_000, 1_000_000, _at_risk(module, weighted=5_000_000))
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == module.AlertSeverity.CRITICAL
+    assert "Senior Coverage CRITICAL" in alerts[0].message
+    assert "0.40x" in alerts[0].message
+    assert "First-loss stack: $2.00M" in alerts[0].message
+
+
+def test_senior_coverage_silent_above_high(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    # 1.5x exactly is at threshold (not below) -> silent
+    module.check_senior_coverage(1_500_000, 1_500_000, _at_risk(module, weighted=2_000_000))
+    # 2.0x is comfortably above -> silent
+    module.check_senior_coverage(2_000_000, 2_000_000, _at_risk(module, weighted=2_000_000))
+
+    assert alerts == []
+
+
+def test_senior_coverage_escalates_high_to_critical(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_senior_coverage(1_000_000, 2_000_000, _at_risk(module, weighted=2_500_000))  # 1.2x → HIGH
+    module.check_senior_coverage(1_000_000, 1_000_000, _at_risk(module, weighted=5_000_000))  # 0.4x → CRITICAL
+
+    assert len(alerts) == 2
+    assert alerts[0].severity == module.AlertSeverity.HIGH
+    assert alerts[1].severity == module.AlertSeverity.CRITICAL
+
+
+def test_senior_coverage_rearms_after_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_senior_coverage(1_000_000, 1_000_000, _at_risk(module, weighted=4_000_000))  # 0.5x → CRITICAL
+    module.check_senior_coverage(2_000_000, 2_000_000, _at_risk(module, weighted=2_000_000))  # 2.0x → re-arms
+    module.check_senior_coverage(1_500_000, 1_500_000, _at_risk(module, weighted=2_500_000))  # 1.2x → alert again
+
+    assert len(alerts) == 2
+    assert alerts[1].severity == module.AlertSeverity.HIGH
+
+
+def test_junior_and_senior_use_independent_cache_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A HIGH junior alert must not suppress an independent senior alert."""
+    module = load_3jane_module()
+    alerts: list = []
+    cache = stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_junior_coverage(3_000_000, _at_risk(module, weighted=2_000_000))  # 1.5x → HIGH
+    # Senior coverage is at 0.5x — independent of the junior alert.
+    module.check_senior_coverage(500_000, 500_000, _at_risk(module, weighted=2_000_000))  # 0.5x → CRITICAL
+
+    assert len(alerts) == 2
+    assert cache[module.CACHE_KEY_JUNIOR_COVERAGE_ALERTED] != "-1"
+    assert cache[module.CACHE_KEY_SENIOR_COVERAGE_ALERTED] != "-1"
+
+
+def test_coverage_skip_when_envio_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When `load_borrower_default_watch_snapshots_from_envio` returns None, main() must skip coverage."""
+    module = load_3jane_module()
+    alerts: list = []
+    cache = stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+    monkeypatch.setattr(module, "load_borrower_default_watch_snapshots_from_envio", lambda: None)
+
+    # Simulate the `main()` wiring: pass `None` through directly.
+    snapshots = module.load_borrower_default_watch_snapshots_from_envio()
+    at_risk = module.compute_at_risk_exposure(snapshots or [])
+    module.check_junior_coverage(3_000_000, at_risk)
+    module.check_senior_coverage(1_000_000, 2_000_000, at_risk)
+    # Default-watch should also silently skip on None.
+    module.check_borrower_default_watch(snapshots)
+
+    assert alerts == []
+    assert cache.get(module.CACHE_KEY_JUNIOR_COVERAGE_ALERTED, "-1") == "-1"
+    assert cache.get(module.CACHE_KEY_SENIOR_COVERAGE_ALERTED, "-1") == "-1"
+
+
+def test_at_risk_breakdown_includes_composition(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    at_risk = module.AtRiskExposure(
+        total_weighted=2_550_000,
+        total_raw=3_500_000,
+        default_exposure=1_000_000,
+        delinquent_exposure=2_500_000,
+        largest_borrower_exposure=2_000_000,
+        largest_borrower_address="0x00000000000000000000000000000000000000A2",
+        count=3,
+    )
+    module.check_junior_coverage(3_000_000, at_risk)
+
+    assert len(alerts) == 1
+    assert "At-risk (weighted): $2.55M" in alerts[0].message
+    assert "Unweighted: $3.50M (3 borrowers)" in alerts[0].message
+    assert "Default: $1.00M" in alerts[0].message
+    assert "Delinquent: $2.50M" in alerts[0].message
+
+
+def _at_risk(module: ModuleType, *, weighted: float, count: int = 1) -> Any:
+    return module.AtRiskExposure(
+        total_weighted=weighted,
+        total_raw=weighted,
+        default_exposure=weighted,
+        delinquent_exposure=0.0,
+        largest_borrower_exposure=weighted,
+        largest_borrower_address=module.ZERO_ADDRESS,
+        count=count,
+    )

@@ -8,14 +8,22 @@ sUSD3 is the junior (first-loss) tranche created by staking USD3.
 Monitors:
 - PPS (Price Per Share) for USD3 and sUSD3 — alerts on any decrease
 - TVL (Total Value Locked) via totalAssets() — alerts on >15% change
-- Junior tranche buffer — alerts when sUSD3 coverage drops below threshold
+- Junior tranche buffer — demoted LOW informational check on sUSD3 / Deployed;
+  only fires on a structural floor breach or a sharp drop from a cached
+  trailing baseline (not on the steady-state 10–15% design value)
+- Junior coverage — sUSD3 backing / weighted at-risk credit. HIGH alert
+  when the sUSD3 tranche alone cannot absorb the impaired book.
+- Senior coverage — (insurance fund + sUSD3 backing) / weighted at-risk
+  credit. HIGH below 1.5x and CRITICAL below 1.0x (USD3 directly at risk;
+  also dispatches emergency withdrawal).
 - USD3 OC — alerts when senior-tranche overcollateralization drops below thresholds
 - Insurance fund — alerts on waUSDC outflows of at least $50k
 - Withdraw liquidity — alerts when USD3 availableWithdrawLimit falls below $4M
 
-Threshold alerts (junior buffer, USD3 OC, withdraw liquidity) are deduped via
-cache: the alerted value is stored and no new alert is sent until the value
-drops below it; recovering above the threshold re-arms the alert.
+Threshold alerts (junior buffer, junior coverage, senior coverage, USD3 OC,
+withdraw liquidity) are deduped via cache: the alerted value is stored and
+no new alert is sent until the value drops below it; recovering above the
+threshold re-arms the alert.
 - Vault shutdown status — alerts once if either vault enters emergency shutdown
 - Debt cap changes — alerts when ProtocolConfig debt cap is modified
 - Nominal sUSD3 backing floor — alerts on change and when floor > sUSD3 backing
@@ -82,6 +90,9 @@ CACHE_KEY_IS_PAUSED = "3JANE_IS_PAUSED"
 CACHE_KEY_INSURANCE_FUND_SHARES = "3JANE_INSURANCE_FUND_SHARES"
 CACHE_KEY_BORROWER_DEFAULT_WATCH_PREFIX = "3JANE_BORROWER_DEFAULT_WATCH"
 CACHE_KEY_JUNIOR_BUFFER_ALERTED = "3JANE_JUNIOR_BUFFER_ALERTED"
+CACHE_KEY_JUNIOR_BUFFER_BASELINE = "3JANE_JUNIOR_BUFFER_BASELINE"
+CACHE_KEY_JUNIOR_COVERAGE_ALERTED = "3JANE_JUNIOR_COVERAGE_ALERTED"
+CACHE_KEY_SENIOR_COVERAGE_ALERTED = "3JANE_SENIOR_COVERAGE_ALERTED"
 CACHE_KEY_USD3_OC_ALERTED = "3JANE_USD3_OC_ALERTED"
 CACHE_KEY_WITHDRAW_LIMIT_ALERTED = "3JANE_WITHDRAW_LIMIT_ALERTED"
 
@@ -91,11 +102,28 @@ CFG_KEY_IS_PAUSED = Web3.keccak(text="IS_PAUSED")
 
 # --- Thresholds ---
 TVL_CHANGE_THRESHOLD = 0.15  # 15% TVL change alert
-JUNIOR_BUFFER_THRESHOLD = 0.15  # Alert when sUSD3 backing < 15% of deployed credit
+JUNIOR_BUFFER_THRESHOLD = 0.15  # (legacy, kept for tests) sUSD3 backing < 15% of deployed credit
+JUNIOR_BUFFER_FLOOR_THRESHOLD = 0.08  # Demoted LOW: structural floor at 8% of deployed credit
+JUNIOR_BUFFER_DROP_THRESHOLD = 0.03  # Demoted LOW: alert if ratio drops >=3pp from trailing baseline
+JUNIOR_COVERAGE_HIGH_THRESHOLD = 2.0  # sUSD3 / weighted at-risk credit; below 2x = HIGH
+SENIOR_COVERAGE_HIGH_THRESHOLD = 1.5  # (insurance + sUSD3) / weighted at-risk credit; below 1.5x = HIGH
+SENIOR_COVERAGE_CRITICAL_THRESHOLD = 1.0  # Below 1x = CRITICAL (USD3 directly exposed)
 USD3_OC_HIGH_THRESHOLD = 1.11  # Alert when USD3 OC drops below the 111% target
 USD3_OC_CRITICAL_THRESHOLD = 1.06  # Alert when USD3 OC drops below 106%
 INSURANCE_FUND_OUTFLOW_THRESHOLD = 50_000  # USDC
 WITHDRAW_LIMIT_THRESHOLD = 4_000_000  # USDC, alert when USD3 availableWithdrawLimit falls below
+
+# --- At-risk severity weights (expected-loss proxy) ---
+# Maps a `default_bucket` from `select_default_watch_bucket` to a severity weight.
+# Tuned against historical cure/charge-off rates; revisit once data is available.
+DEFAULT_BUCKET_WEIGHTS: dict[str, float] = {
+    "default": 1.0,  # borrower is in Default — full expected loss
+    "1d": 0.9,  # Delinquent, <=1 day to default
+    "3d": 0.7,  # Delinquent, <=3 days
+    "7d": 0.5,  # Delinquent, <=7 days
+    "14d": 0.3,  # Delinquent, <=14 days
+    "delinquent": 0.3,  # Delinquent, >14 days
+}
 
 THREE_JANE_BORROWER_DEFAULT_WATCH_QUERY = """
 query GetThreeJaneBorrowerDefaultWatch($limit: Int!, $offset: Int!) {
@@ -122,6 +150,30 @@ query GetThreeJaneBorrowerDefaultWatch($limit: Int!, $offset: Int!) {
   }
 }
 """
+
+
+@dataclass(frozen=True)
+class AtRiskExposure:
+    """Aggregate at-risk credit computed from `BorrowerRepaymentSnapshot` rows.
+
+    All monetary fields are valued in USDC (i.e. raw amounts divided by
+    `ONE_SHARE`). The headline metric is `total_weighted` — the severity-weighted
+    sum of borrower exposure, used as the denominator of the junior- and
+    senior-protection coverage ratios. Unweighted totals and per-status totals
+    are kept so alert messages can show the composition.
+
+    `largest_borrower_exposure` and `largest_borrower_address` expose the
+    single largest impaired borrower for optional concentration checks (one
+    whale defaulting can blow the buffer even if the aggregate looks fine).
+    """
+
+    total_weighted: float
+    total_raw: float
+    default_exposure: float
+    delinquent_exposure: float
+    largest_borrower_exposure: float
+    largest_borrower_address: str
+    count: int
 
 
 @dataclass(frozen=True)
@@ -211,6 +263,26 @@ def clear_alerted_value(cache_key: str) -> None:
     """Clear an outstanding threshold alert so the next breach alerts again."""
     if _get_alerted_value(cache_key) >= 0:
         set_cache_value(cache_key, -1)
+
+
+def should_alert_on_worsening(cache_key: str, value: float) -> bool:
+    """Decide whether to alert when the caller has already detected worsening.
+
+    Lower-is-worse dedup variant that does not check an absolute threshold.
+    Use when the alert condition (floor breach, baseline drop, etc.) is
+    computed by the caller and only deduplication is needed. The caller must
+    record the value with `mark_alerted_value()` after `send_alert()` returns,
+    so a failed Telegram send retries on the next run.
+
+    Args:
+        cache_key: Cache key holding the last alerted value (-1 = none).
+        value: Current metric value; lower is worse.
+
+    Returns:
+        True when a new alert should be sent.
+    """
+    cached = _get_alerted_value(cache_key)
+    return not 0 <= cached <= value
 
 
 def _as_bool(value: Any) -> bool:
@@ -393,8 +465,78 @@ def parse_envio_borrower_default_watch_rows(
     return parsed
 
 
-def load_borrower_default_watch_snapshots_from_envio() -> list[BorrowerRepaymentSnapshot]:
-    """Load Envio 3Jane borrower rows and compute current default watch candidates."""
+def _borrower_exposure_usdc(snapshot: BorrowerRepaymentSnapshot) -> float:
+    """Return the impaired borrower's outstanding exposure in USDC.
+
+    Prefers `ending_balance_raw` (the full balance at cycle close, capturing
+    the borrower's total outstanding position), and falls back to
+    `amount_due_raw` (the current instalment) if the ending balance has not
+    been indexed yet. Both values are returned in USDC (post decimal scaling).
+    """
+    ending_balance = snapshot.ending_balance_raw
+    amount_due = snapshot.amount_due_raw
+    if ending_balance > 0:
+        return float(ending_balance) / ONE_SHARE  # type: ignore[no-any-return]
+    return float(amount_due) / ONE_SHARE  # type: ignore[no-any-return]
+
+
+def compute_at_risk_exposure(
+    snapshots: list[BorrowerRepaymentSnapshot],
+) -> AtRiskExposure:
+    """Aggregate impaired-borrower exposure into a single `AtRiskExposure`.
+
+    `exposure_i` is the borrower's outstanding balance (see
+    `_borrower_exposure_usdc`) and `weight(status_i)` comes from
+    `DEFAULT_BUCKET_WEIGHTS` keyed by `default_bucket`. An empty input
+    returns a zero-valued `AtRiskExposure`, which the coverage checks treat
+    as the healthy "no impaired borrowers" case.
+    """
+    if not snapshots:
+        return AtRiskExposure(0.0, 0.0, 0.0, 0.0, 0.0, ZERO_ADDRESS, 0)
+
+    total_weighted = 0.0
+    total_raw = 0.0
+    default_exposure = 0.0
+    delinquent_exposure = 0.0
+    largest_exposure = 0.0
+    largest_address = ZERO_ADDRESS
+
+    for snapshot in snapshots:
+        exposure = _borrower_exposure_usdc(snapshot)
+        if exposure <= 0:
+            continue
+        total_raw += exposure
+        if snapshot.repayment_status == "Default":
+            default_exposure += exposure
+        elif snapshot.repayment_status == "Delinquent":
+            delinquent_exposure += exposure
+
+        weight = DEFAULT_BUCKET_WEIGHTS.get(snapshot.default_bucket or "", 0.0)
+        total_weighted += exposure * weight
+
+        if exposure > largest_exposure:
+            largest_exposure = exposure
+            largest_address = snapshot.borrower
+
+    return AtRiskExposure(
+        total_weighted=total_weighted,
+        total_raw=total_raw,
+        default_exposure=default_exposure,
+        delinquent_exposure=delinquent_exposure,
+        largest_borrower_exposure=largest_exposure,
+        largest_borrower_address=largest_address,
+        count=len(snapshots),
+    )
+
+
+def load_borrower_default_watch_snapshots_from_envio() -> list[BorrowerRepaymentSnapshot] | None:
+    """Load Envio 3Jane borrower rows and compute current default watch candidates.
+
+    Returns `None` when Envio is unavailable (URL not set, request failed, or
+    GraphQL errors) so callers can distinguish "no impaired borrowers" from
+    "data unavailable" and skip coverage checks accordingly. Returns an
+    empty list when Envio is reachable but no rows match the filter.
+    """
     snapshots: list[BorrowerRepaymentSnapshot] = []
     seen: set[tuple[str, str]] = set()
     offset = 0
@@ -403,10 +545,10 @@ def load_borrower_default_watch_snapshots_from_envio() -> list[BorrowerRepayment
     while True:
         payload = gql_request(THREE_JANE_BORROWER_DEFAULT_WATCH_QUERY, {"limit": ENVIO_PAGE_SIZE, "offset": offset})
         if payload is None:
-            return snapshots
+            return None
         if payload.get("errors"):
             logger.warning("3Jane Envio GraphQL errors; skipping borrower default watch: %s", payload["errors"])
-            return snapshots
+            return None
 
         rows = _extract_envio_borrower_default_watch_rows(payload)
         page = parse_envio_borrower_default_watch_rows(rows, now_timestamp)
@@ -491,9 +633,14 @@ def check_borrower_default_watch_snapshot(snapshot: BorrowerRepaymentSnapshot) -
     _mark_default_watch_bucket_sent(snapshot, bucket)
 
 
-def check_borrower_default_watch(_client, _protocol_config) -> None:  # type: ignore[no-untyped-def]
-    """Alert on 3Jane borrower default buckets computed from Envio rows."""
-    snapshots = load_borrower_default_watch_snapshots_from_envio()
+def check_borrower_default_watch(snapshots: list[BorrowerRepaymentSnapshot] | None) -> None:
+    """Alert on 3Jane borrower default buckets computed from Envio rows.
+
+    The snapshot list is loaded once in `main()` and shared with the coverage
+    checks (which also need per-borrower impairment data) so we never double-
+    fetch from Envio. `None` means Envio was unreachable; the caller already
+    logs that and skips this run.
+    """
     if not snapshots:
         return
 
@@ -600,41 +747,190 @@ def check_tvl(usd3_tvl: float, susd3_tvl: float) -> None:
 
 
 def check_junior_buffer(susd3_backing: float, deployed_credit: float) -> None:
-    """Check if sUSD3 junior tranche provides adequate first-loss coverage.
+    """Demoted informational check on the sUSD3-to-deployed-credit ratio.
 
-    The sUSD3 junior tranche absorbs losses before the senior USD3 tranche.
-    A thin buffer means USD3 holders are closer to bearing losses directly.
-    This matches the protocol's backing metric: sUSD3 backing value divided by
-    deployed credit. The caller supplies both values converted to USDC.
-    Deduped via cache: re-alerts only when the ratio drops further.
+    The historical `sUSD3 / Deployed` ratio is a structural design constant
+    (sUSD3 is a thin ~10–15% first-loss tranche) and is not a useful risk
+    signal on its own. The real loss-absorption check now lives in
+    `check_junior_coverage` / `check_senior_coverage`. This function is kept
+    only to flag two slow-moving concerns:
+
+    1. The ratio breaches a genuinely low structural floor (~8%).
+    2. The ratio has dropped sharply versus a cached trailing baseline,
+       signalling leverage drift.
+
+    Both fire at LOW severity and are deduped so repeat runs stay silent
+    until the ratio worsens; recovery above the prior alerted value re-arms.
 
     Args:
         susd3_backing: USD3 held by sUSD3, valued in USDC.
-        deployed_credit: Borrowed waUSDC in the credit market, converted to USDC.
+        deployed_credit: Borrowed waUSDC in the credit market, in USDC.
     """
     if deployed_credit <= 0:
-        # No deployed credit means nothing at risk: clear any outstanding alert.
+        # Book unwound: clear any outstanding alert and the trailing baseline.
         clear_alerted_value(CACHE_KEY_JUNIOR_BUFFER_ALERTED)
+        set_cache_value(CACHE_KEY_JUNIOR_BUFFER_BASELINE, 0)
         return
 
     buffer_ratio = susd3_backing / deployed_credit
+    previous_baseline = get_cache_value(CACHE_KEY_JUNIOR_BUFFER_BASELINE)
+
     logger.info(
-        "Junior buffer ratio: %.2f%% (sUSD3 backing: %s / deployed credit: %s)",
+        "Junior buffer ratio: %.2f%% (sUSD3 backing: %s / deployed credit: %s; baseline: %s)",
         buffer_ratio * 100,
         format_usd(susd3_backing),
         format_usd(deployed_credit),
+        f"{previous_baseline:.2%}" if previous_baseline > 0 else "n/a",
     )
 
-    if should_alert_value_drop(CACHE_KEY_JUNIOR_BUFFER_ALERTED, buffer_ratio, JUNIOR_BUFFER_THRESHOLD):
-        message = (
-            f"⚠️ *3Jane Junior Buffer Low*\n"
-            f"📊 sUSD3 buffer: {buffer_ratio:.2%} of deployed credit\n"
-            f"💰 sUSD3 backing: {format_usd(susd3_backing)} | Deployed: {format_usd(deployed_credit)}\n"
-            f"⚠️ First-loss coverage is thin — USD3 holders at higher risk\n"
-            f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
+    # Always refresh the trailing baseline so deterioration is measured
+    # against the most recent observed ratio.
+    set_cache_value(CACHE_KEY_JUNIOR_BUFFER_BASELINE, buffer_ratio)
+
+    floor_breach = buffer_ratio < JUNIOR_BUFFER_FLOOR_THRESHOLD
+    deterioration = previous_baseline > 0 and previous_baseline - buffer_ratio >= JUNIOR_BUFFER_DROP_THRESHOLD
+    if not (floor_breach or deterioration):
+        return
+
+    if floor_breach:
+        reason = f"sUSD3 buffer {buffer_ratio:.2%} < {JUNIOR_BUFFER_FLOOR_THRESHOLD:.0%} structural floor"
+    else:
+        drop_pp = (previous_baseline - buffer_ratio) * 100
+        reason = (
+            f"sUSD3 buffer dropped {previous_baseline:.2%} → {buffer_ratio:.2%} (-{drop_pp:.2f}pp) — leverage drift"
         )
-        send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
-        mark_alerted_value(CACHE_KEY_JUNIOR_BUFFER_ALERTED, buffer_ratio)
+
+    if not should_alert_on_worsening(CACHE_KEY_JUNIOR_BUFFER_ALERTED, buffer_ratio):
+        return
+
+    message = (
+        f"⚠️ *3Jane Junior Buffer Drifting*\n"
+        f"📊 sUSD3 / Deployed: {buffer_ratio:.2%}\n"
+        f"💰 sUSD3 backing: {format_usd(susd3_backing)} | Deployed: {format_usd(deployed_credit)}\n"
+        f"ℹ️ {reason}\n"
+        f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
+    )
+    send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
+    mark_alerted_value(CACHE_KEY_JUNIOR_BUFFER_ALERTED, buffer_ratio)
+
+
+def _format_at_risk_breakdown(at_risk: AtRiskExposure) -> str:
+    """Format an at-risk exposure breakdown for inclusion in alert messages."""
+    weighted = format_usd(at_risk.total_weighted)
+    raw = format_usd(at_risk.total_raw)
+    default_part = format_usd(at_risk.default_exposure)
+    delinquent_part = format_usd(at_risk.delinquent_exposure)
+    return (
+        f"💥 At-risk (weighted): {weighted} | Unweighted: {raw} ({at_risk.count} borrowers)\n"
+        f"📂 Default: {default_part} | Delinquent: {delinquent_part}"
+    )
+
+
+def check_junior_coverage(
+    susd3_backing: float,
+    at_risk: AtRiskExposure,
+) -> None:
+    """Alert when sUSD3 alone cannot absorb the at-risk credit (sUSD3 stakers).
+
+    Coverage = `susd3_backing / at_risk.total_weighted`. Below `2.0x` fires a
+    HIGH alert. This is the sUSD3 stakers' risk view and the *leading*
+    indicator that sUSD3 PPS is about to drop.
+
+    Edge cases:
+    - `at_risk.total_weighted <= 0` (no impaired borrowers) clears any
+      outstanding alert and returns silently — the healthy state never
+      alerts. Coverage is only meaningful when there is at-risk credit.
+
+    Dedup mirrors `should_alert_value_drop`: re-alerts only when the
+    coverage ratio drops below the last alerted value; recovery above the
+    2.0x threshold re-arms.
+    """
+    if at_risk.total_weighted <= 0:
+        clear_alerted_value(CACHE_KEY_JUNIOR_COVERAGE_ALERTED)
+        logger.info("Junior coverage skipped — no at-risk credit")
+        return
+
+    coverage = susd3_backing / at_risk.total_weighted
+    logger.info(
+        "Junior coverage: %.4fx (sUSD3 backing: %s / at-risk weighted: %s)",
+        coverage,
+        format_usd(susd3_backing),
+        format_usd(at_risk.total_weighted),
+    )
+
+    if not should_alert_value_drop(CACHE_KEY_JUNIOR_COVERAGE_ALERTED, coverage, JUNIOR_COVERAGE_HIGH_THRESHOLD):
+        return
+
+    message = (
+        f"⚠️ *3Jane Junior Tranche Coverage Low*\n"
+        f"📊 sUSD3 / at-risk: {coverage:.2f}x (threshold {JUNIOR_COVERAGE_HIGH_THRESHOLD:.1f}x)\n"
+        f"🛡️ sUSD3 backing: {format_usd(susd3_backing)}\n"
+        f"{_format_at_risk_breakdown(at_risk)}\n"
+        f"⚠️ sUSD3 alone cannot absorb the impaired credit — sUSD3 stakers at risk\n"
+        f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
+    )
+    send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
+    mark_alerted_value(CACHE_KEY_JUNIOR_COVERAGE_ALERTED, coverage)
+
+
+def check_senior_coverage(
+    insurance_fund_assets: float,
+    susd3_backing: float,
+    at_risk: AtRiskExposure,
+) -> None:
+    """Alert when the full first-loss stack cannot protect USD3 (senior holders).
+
+    Coverage = `(insurance_fund + susd3_backing) / at_risk.total_weighted`,
+    which is the sUSD3 stakers' coverage plus the Insurance Fund sitting
+    above sUSD3 in the loss waterfall. Below `1.5x` fires a HIGH alert;
+    below `1.0x` fires a CRITICAL alert (USD3 directly exposed to loss;
+    also triggers the emergency-withdrawal dispatch).
+
+    Edge cases mirror `check_junior_coverage`.
+
+    Dedup uses one cache key for both severities so a worsening run can
+    escalate HIGH → CRITICAL on the same run, while recovery above the
+    `1.5x` threshold re-arms the alert.
+    """
+    if at_risk.total_weighted <= 0:
+        clear_alerted_value(CACHE_KEY_SENIOR_COVERAGE_ALERTED)
+        logger.info("Senior coverage skipped — no at-risk credit")
+        return
+
+    first_loss_stack = insurance_fund_assets + susd3_backing
+    coverage = first_loss_stack / at_risk.total_weighted
+    logger.info(
+        "Senior coverage: %.4fx (insurance: %s + sUSD3: %s = %s / at-risk weighted: %s)",
+        coverage,
+        format_usd(insurance_fund_assets),
+        format_usd(susd3_backing),
+        format_usd(first_loss_stack),
+        format_usd(at_risk.total_weighted),
+    )
+
+    if not should_alert_value_drop(CACHE_KEY_SENIOR_COVERAGE_ALERTED, coverage, SENIOR_COVERAGE_HIGH_THRESHOLD):
+        return
+
+    if coverage < SENIOR_COVERAGE_CRITICAL_THRESHOLD:
+        severity = AlertSeverity.CRITICAL
+        title = "3Jane Senior Coverage CRITICAL"
+        threshold = SENIOR_COVERAGE_CRITICAL_THRESHOLD
+    else:
+        severity = AlertSeverity.HIGH
+        title = "3Jane Senior Coverage Low"
+        threshold = SENIOR_COVERAGE_HIGH_THRESHOLD
+
+    message = (
+        f"🚨 *{title}*\n"
+        f"📊 (Insurance + sUSD3) / at-risk: {coverage:.2f}x (threshold {threshold:.1f}x)\n"
+        f"🛡️ Insurance: {format_usd(insurance_fund_assets)} | sUSD3: {format_usd(susd3_backing)}\n"
+        f"💰 First-loss stack: {format_usd(first_loss_stack)}\n"
+        f"{_format_at_risk_breakdown(at_risk)}\n"
+        f"⚠️ USD3 holders directly exposed to impaired credit\n"
+        f"🔗 [USD3](https://etherscan.io/address/{USD3_ADDRESS})"
+    )
+    send_alert(Alert(severity, message, PROTOCOL))
+    mark_alerted_value(CACHE_KEY_SENIOR_COVERAGE_ALERTED, coverage)
 
 
 def check_usd3_oc(susd3_backing: float, deployed_credit: float) -> None:
@@ -1011,6 +1307,14 @@ def main() -> None:
             format_usd(deployed_credit),
         )
 
+        # Load Envio borrower snapshots once and share with the default-watch
+        # and coverage checks (they both need the same per-borrower impairment
+        # data, so we never double-fetch from Envio).
+        snapshots = load_borrower_default_watch_snapshots_from_envio()
+        if snapshots is None:
+            logger.warning("3Jane Envio data unavailable; coverage checks skipped this run")
+        at_risk = compute_at_risk_exposure(snapshots or [])
+
         # Run all checks
         check_pps(usd3_pps, susd3_pps)
         check_tvl(usd3_tvl, susd3_tvl)
@@ -1027,7 +1331,10 @@ def main() -> None:
         check_debt_cap(client)
         check_nominal_backing_floor(nominal_floor, susd3_backing)
         check_protocol_paused(is_paused)
-        check_borrower_default_watch(client, protocol_config)
+        check_borrower_default_watch(snapshots)
+        if snapshots is not None:
+            check_junior_coverage(susd3_backing, at_risk)
+            check_senior_coverage(insurance_fund_assets, susd3_backing, at_risk)
 
         logger.info(
             "Monitoring complete — USD3 PPS: %.8f, TVL: %s | sUSD3 PPS: %.8f, TVL: %s",

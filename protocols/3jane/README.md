@@ -6,7 +6,9 @@
 
 - **PPS (Price Per Share):** `convertToAssets(1e6)` on USD3 and sUSD3 vs cached prior run. Alerts on any decrease — indicates loan markdowns or defaults (critical since loans are unsecured).
 - **TVL (Total Value Locked):** `totalAssets()` on both vaults vs cached prior run. Alerts when absolute change is **≥15%**.
-- **Junior Buffer Ratio:** USD3 held by sUSD3, valued in USDC, as a percentage of deployed credit (`getMarketLiquidity().totalBorrowAssets` converted from waUSDC to USDC). Alerts below **15%** — thin first-loss coverage puts the senior tranche at risk. Deduped: re-alerts only when the ratio drops below the last alerted value; recovery above 15% re-arms. This matches the 3Jane backing UI's `sUSD3 / Deployed` loss-buffer metric.
+- **Junior Tranche Coverage:** sUSD3 backing (in USDC) divided by the **severity-weighted at-risk credit** (`Σ exposure × weight` over all Delinquent/Default borrowers, where weights come from the bucket table below). Alerts when the ratio is below **2.0x** as HIGH — sUSD3 alone cannot absorb the impaired book; sUSD3 stakers are at risk. Deduped: re-alerts only when coverage drops further; recovery above 2.0x re-arms. With no impaired borrowers, this check is silent regardless of the sUSD3/whole-book ratio.
+- **Senior Tranche Coverage:** `(Insurance Fund + sUSD3 backing)` divided by the same severity-weighted at-risk credit. Alerts when the ratio is below **1.5x** as HIGH and below **1.0x** as **CRITICAL** (USD3 directly exposed to impaired credit; the CRITICAL alert also dispatches the emergency-withdrawal hook). Deduped: re-alerts only when coverage drops further; recovery above 1.5x re-arms.
+- **Junior Buffer Drifting:** sUSD3 backing divided by deployed credit. The historical `sUSD3 / Deployed` ratio is a structural design constant (sUSD3 is a thin ~10–15% first-loss tranche) and is not a useful risk signal on its own; the real loss-absorption checks are the two coverage monitors above. This LOW-severity informational check only fires on either a structural floor breach at **8%** or a sharp drop of **≥3 percentage points** versus a cached trailing baseline. Deduped: re-alerts only when the ratio worsens; recovery above the prior alerted value re-arms.
 - **USD3 OC:** Deployed credit divided by senior at-risk credit after sUSD3 absorbs first loss: `Deployed / (Deployed - sUSD3)`. Alerts below the **111%** target as HIGH and below **106%** as CRITICAL. Deduped: re-alerts only when OC drops below the last alerted value (e.g. crossing into critical); recovery above 111% re-arms. This excludes indirect enhancement from underlying credit-line assets and warehouse equity slices.
 - **Insurance Fund:** Tracks the fund's raw waUSDC share balance and alerts when an outflow is worth **≥$50k USDC**. Caching shares instead of asset value prevents waUSDC yield from masking withdrawals.
 - **Withdraw Liquidity:** `availableWithdrawLimit()` on the USD3 vault. Alerts when it falls below **$4M** — low withdraw liquidity means senior-tranche withdrawals may queue or stall. Deduped: re-alerts only when the limit drops below the last alerted value; recovery above $4M re-arms.
@@ -14,7 +16,7 @@
 - **Debt Cap:** `ProtocolConfig.getDebtCap()` vs cached prior. Alerts on any change — signals governance scaling the protocol up or down.
 - **Nominal sUSD3 Backing Floor:** `ProtocolConfig.config(keccak256("SUSD3_NOMINAL_BACKING_FLOOR"))` vs cached prior. Alerts on any change (governance lever). Separate alert-once when the floor exceeds sUSD3's USD3 holdings valued in USDC — sUSD3 redemptions can be blocked while floor > backing.
 - **Protocol Pause:** `ProtocolConfig.config(keccak256("IS_PAUSED"))`. Alert-once on transition to true. Distinct from per-vault `isShutdown()` — pauses the underlying credit market.
-- **Borrower Default Watch:** optional Envio-backed borrower default risk feed. The Envio indexer maintains `ThreeJaneBorrowerMarket` rows from MorphoCredit events, and the monitor computes the current delinquent/default status at runtime. Alerts are **MEDIUM only** and deduped per borrower/cycle/default milestone.
+- **Borrower Default Watch:** optional Envio-backed borrower default risk feed. The Envio indexer maintains `ThreeJaneBorrowerMarket` rows from MorphoCredit events, and the monitor computes the current delinquent/default status at runtime. Alerts are **MEDIUM only** and deduped per borrower/cycle/default milestone. The same snapshot list also feeds the Junior/Senior Coverage checks (no double-fetch from Envio).
 
 ## Key Contracts
 
@@ -32,7 +34,10 @@
 | USD3 PPS decrease | Any decrease vs cached prior | CRITICAL |
 | sUSD3 PPS decrease | Any decrease vs cached prior | HIGH |
 | TVL change | ≥15% absolute change vs prior run | LOW |
-| Junior buffer ratio | sUSD3 backing < 15% of deployed credit | HIGH |
+| Junior tranche coverage | sUSD3 / weighted at-risk < 2.0x | HIGH |
+| Senior coverage low | (Insurance + sUSD3) / weighted at-risk < 1.5x | HIGH |
+| Senior coverage critical | (Insurance + sUSD3) / weighted at-risk < 1.0x (USD3 directly at risk; dispatches emergency withdrawal) | CRITICAL |
+| Junior buffer drifting | sUSD3 / Deployed < 8% (structural floor) or drop ≥3pp vs cached trailing baseline | LOW |
 | USD3 OC low | OC < 111% | HIGH |
 | USD3 OC critical | OC < 106% | CRITICAL |
 | Insurance fund outflow | ≥$50k USDC since prior run | MEDIUM |
@@ -44,6 +49,40 @@
 | Protocol paused | `IS_PAUSED` transitions to true (alert-once) | CRITICAL |
 | Borrower delinquent/default watch | New milestone: delinquent, ≤14d, ≤7d, ≤3d, ≤1d, default | MEDIUM |
 | Monitoring run failure | Uncaught exception in `main()` | LOW |
+
+## Loss waterfall and at-risk weighting
+
+3Jane has no on-chain collateral; loss risk comes entirely from borrowers not repaying. The waterfall in loss order is:
+
+1. **Insurance Fund** (~$1M waUSDC) — absorbs first
+2. **sUSD3 junior tranche** — absorbs next
+3. **USD3 senior tranche** — impaired only after 1 and 2 are exhausted
+
+The two coverage checks map directly to this waterfall:
+
+- **Junior Tranche Coverage** (`sUSD3 / weighted at-risk`) is the sUSD3 stakers' risk view and the *leading* indicator that sUSD3 PPS is about to drop. It uses the sUSD3 backing alone.
+- **Senior Tranche Coverage** (`(Insurance + sUSD3) / weighted at-risk`) is the senior / USD3 holders' risk view. It uses the full first-loss stack. Breaches only after the junior check, so it is the more severe escalation and the CRITICAL alert (below 1.0x) also dispatches the emergency-withdrawal hook.
+
+`weighted at-risk` is a severity-weighted sum across every borrower the Envio indexer reports as Delinquent or Default:
+
+```
+weighted_at_risk = Σ exposure_i × weight(default_bucket_i)
+```
+
+`exposure_i` is the borrower's outstanding balance (`ending_balance`, falling back to `amount_due` if not yet indexed), valued in USDC. The weights are an expected-loss proxy — starting values, tune later against historical cure / charge-off rates:
+
+| `default_bucket` | Status | Weight |
+|------------------|--------|--------|
+| `default` | Default (in default) | 1.0 |
+| `1d` | Delinquent, ≤1 day to default | 0.9 |
+| `3d` | Delinquent, ≤3 days | 0.7 |
+| `7d` | Delinquent, ≤7 days | 0.5 |
+| `14d` | Delinquent, ≤14 days | 0.3 |
+| `delinquent` | Delinquent, >14 days | 0.3 |
+
+When Envio is unreachable (URL unset, request failed, or GraphQL errors), the coverage checks are skipped and only the demoted structural "Junior Buffer Drifting" check runs — we never emit coverage alerts on missing data.
+
+The `largest_borrower_exposure` and `largest_borrower_address` fields are also produced by the aggregator so a future concentration check (one whale defaulting can blow the buffer even if the aggregate looks fine) is cheap to add.
 
 ## Borrower default watch
 
