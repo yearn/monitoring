@@ -76,7 +76,6 @@ VAULTS_V2_BY_CHAIN: dict[Chain, tuple[VaultConfig, ...]] = {
     Chain.BASE: (
         VaultConfig("Yearn OG USDC V2", "0xe7D0DBE3493830e2Ab62619211A2BfF0Fc60dB42", 2),
         VaultConfig("Yearn OG WETH V2", "0x2EfD54529329AD364B8Df988CE3BAb5Ff256ab3E", 2),
-        VaultConfig("OUSD Vault V2", "0x2Ba14b2e1E7D2189D3550b708DFCA01f899f33c1", 2),
     ),
     Chain.KATANA: (
         VaultConfig("Yearn OG USDC", "0xca44cbe1FB03691d43d2d93AA460e2fCB03878fE", 1, KATANA_USDC),
