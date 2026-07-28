@@ -250,13 +250,13 @@ An indexer stall is invisible to the monitors that depend on it: GraphQL keeps a
 
 ### How It Works
 
-1. Queries `chain_metadata` at `ENVIO_GRAPHQL_URL` for every indexed chain's `latest_processed_block`.
-2. Fetches that block's timestamp over JSON-RPC and compares it to wall-clock time.
+1. Queries `chain_metadata` at `ENVIO_GRAPHQL_URL` for each chain's `latest_processed_block`.
+2. Fetches that block's timestamp via `ChainManager` and compares it to wall-clock time.
 3. Alerts when a chain's newest indexed block is older than `--max-lag-minutes` (default `60`).
 
 Step 2 is what makes the check trustworthy. Envio parks `chain_metadata.block_height` at the last processed block once a chain looks caught up, so a stalled indexer keeps reporting itself as zero blocks behind — the same trap called out in the indexer's own [monitoring dashboard](https://envio-monitoring.yearn.dev/).
 
-RPCs resolve from this repo's `PROVIDER_URL_*` variables. The indexer also covers Gnosis and Berachain, which have no `Chain` enum member here, so those fall back to a public endpoint (override with `PROVIDER_URL_GNOSIS` / `PROVIDER_URL_BERACHAIN`). A chain with no reachable RPC is logged and skipped rather than alerted on — a broken RPC is not a stale indexer.
+Only the six chains in the `Chain` enum are checked (Mainnet, Optimism, Base, Arbitrum, Polygon, Katana). The indexer also covers Gnosis and Berachain, which nothing here reads from — those are logged and skipped. A chain whose RPC is unreachable is skipped too rather than alerted on: a broken provider is not a stale indexer.
 
 ### Alerts
 

@@ -9,7 +9,7 @@ from web3 import Web3
 from web3.contract import Contract
 from web3.exceptions import ProviderConnectionError
 from web3.providers.rpc import HTTPProvider
-from web3.types import RPCResponse
+from web3.types import RPCEndpoint, RPCResponse
 
 from utils.logger import get_logger
 
@@ -174,6 +174,16 @@ class Web3Client(RetryProviders):
     def get_contract(self, address: str, abi: List[Dict]) -> Contract:
         """Get contract instance"""
         return self.w3.eth.contract(address=address, abi=abi)
+
+    def make_request(self, method: str, params: List[Any]) -> RPCResponse:
+        """Send a raw JSON-RPC request, bypassing web3's response formatters.
+
+        Use this when web3's typed accessors reject an otherwise valid response.
+        `eth.get_block` on Polygon or pre-Bedrock Optimism, for example, raises
+        on the 97-byte PoA `extraData` field unless the PoA middleware is
+        injected. Provider rotation and retries still apply.
+        """
+        return self.w3.provider.make_request(RPCEndpoint(method), params)
 
     def batch_requests(self):
         return self.w3.batch_requests()

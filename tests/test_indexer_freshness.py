@@ -1,9 +1,11 @@
 """Tests for the Envio indexer freshness monitor."""
 
 import pytest
+import requests
 
 from protocols.yearn import check_indexer_freshness as freshness
 from protocols.yearn.check_indexer_freshness import ChainFreshness, IndexerUnavailableError
+from utils.chains import Chain
 
 NOW = 1_800_000_000
 HOUR = 3600
@@ -18,9 +20,12 @@ class FakeResponse:
 
 
 def _rows() -> list[dict]:
+    """chain_metadata as the indexer returns it: unsorted, including chains we ignore."""
     return [
         {"chain_id": 8453, "latest_processed_block": 49220190, "block_height": 49220390},
+        {"chain_id": 80094, "latest_processed_block": 24107494, "block_height": 24107694},
         {"chain_id": 1, "latest_processed_block": 24150245, "block_height": 25626800},
+        {"chain_id": 100, "latest_processed_block": 47431537, "block_height": 47431737},
     ]
 
 
@@ -40,26 +45,27 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 def test_collect_freshness_computes_lag_and_sorts_by_chain(monkeypatch: pytest.MonkeyPatch) -> None:
-    timestamps = {1: NOW - 5 * HOUR, 8453: NOW - 120}
-    monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain_id, block: timestamps[chain_id])
+    timestamps = {Chain.MAINNET: NOW - 5 * HOUR, Chain.BASE: NOW - 120}
+    monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain, block: timestamps[chain])
 
     result = freshness.collect_freshness(_rows(), NOW)
 
-    assert [c.chain_id for c in result] == [1, 8453]
+    # Gnosis (100) and Berachain (80094) are indexed but unused here, so they drop out.
+    assert [c.chain for c in result] == [Chain.MAINNET, Chain.BASE]
     assert result[0].lag_seconds == 5 * HOUR
-    assert result[0].name == "Ethereum"
+    assert result[0].name == "Mainnet"
     assert result[1].lag_seconds == 120
 
 
 def test_collect_freshness_skips_chains_without_a_processed_block(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain_id, block: NOW)
-    rows = [{"chain_id": 100, "latest_processed_block": 0, "block_height": 0}]
+    monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain, block: NOW)
+    rows = [{"chain_id": 1, "latest_processed_block": 0, "block_height": 0}]
 
     assert freshness.collect_freshness(rows, NOW) == []
 
 
 def test_collect_freshness_marks_lag_unknown_when_rpc_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain_id, block: None)
+    monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain, block: None)
 
     result = freshness.collect_freshness(_rows(), NOW)
 
@@ -69,7 +75,7 @@ def test_collect_freshness_marks_lag_unknown_when_rpc_fails(monkeypatch: pytest.
 
 
 def test_is_stale_uses_threshold() -> None:
-    chain = ChainFreshness(chain_id=1, latest_processed_block=100, lag_seconds=HOUR + 1)
+    chain = ChainFreshness(chain=Chain.MAINNET, latest_processed_block=100, lag_seconds=HOUR + 1)
 
     assert chain.is_stale(HOUR)
     assert not chain.is_stale(2 * HOUR)
@@ -77,13 +83,13 @@ def test_is_stale_uses_threshold() -> None:
 
 def test_build_stale_message_lists_every_lagging_chain() -> None:
     stale = [
-        ChainFreshness(chain_id=1, latest_processed_block=24150245, lag_seconds=205 * 86400),
-        ChainFreshness(chain_id=747474, latest_processed_block=38465232, lag_seconds=2 * HOUR + 900),
+        ChainFreshness(chain=Chain.MAINNET, latest_processed_block=24150245, lag_seconds=205 * 86400),
+        ChainFreshness(chain=Chain.KATANA, latest_processed_block=38465232, lag_seconds=2 * HOUR + 900),
     ]
 
     message = freshness.build_stale_message(stale, HOUR)
 
-    assert "Ethereum (chain 1): 205d behind, last block 24150245" in message
+    assert "Mainnet (chain 1): 205d behind, last block 24150245" in message
     assert "Katana (chain 747474): 2h 15m behind, last block 38465232" in message
     assert "Threshold: 1h" in message
     assert freshness.DASHBOARD_URL in message
@@ -128,7 +134,7 @@ def test_fetch_chain_metadata_raises_when_url_missing(monkeypatch: pytest.Monkey
 
 
 def test_chains_to_alert_respects_cooldown() -> None:
-    stale = [ChainFreshness(chain_id=1, latest_processed_block=1, lag_seconds=2 * HOUR)]
+    stale = [ChainFreshness(chain=Chain.MAINNET, latest_processed_block=1, lag_seconds=2 * HOUR)]
 
     assert freshness.chains_to_alert(stale, NOW, 6 * HOUR) == stale
 
@@ -145,13 +151,13 @@ def test_main_alerts_once_per_cooldown_then_reports_recovery(
     )
     monkeypatch.setattr("sys.argv", ["check_indexer_freshness.py"])
 
-    stale_timestamps = {1: NOW - 5 * HOUR, 8453: NOW - 120}
-    monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain_id, block: stale_timestamps[chain_id])
+    stale_timestamps = {Chain.MAINNET: NOW - 5 * HOUR, Chain.BASE: NOW - 120}
+    monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain, block: stale_timestamps[chain])
     monkeypatch.setattr(freshness.time, "time", lambda: NOW)
 
     freshness.main()
     assert len(sent) == 1
-    assert "Ethereum" in sent[0]
+    assert "Mainnet" in sent[0]
     assert "Base" not in sent[0]
 
     # Second run inside the cooldown window stays quiet.
@@ -159,7 +165,7 @@ def test_main_alerts_once_per_cooldown_then_reports_recovery(
     assert len(sent) == 1
 
     # Once mainnet catches up, the recovery note fires and clears the state.
-    stale_timestamps[1] = NOW - 60
+    stale_timestamps[Chain.MAINNET] = NOW - 60
     freshness.main()
     assert len(sent) == 2
     assert "caught up" in sent[1]
@@ -173,6 +179,34 @@ def test_main_alerts_when_indexer_is_unreachable(
 ) -> None:
     monkeypatch.setattr("sys.argv", ["check_indexer_freshness.py"])
     monkeypatch.setattr(freshness, "request_with_retry", lambda *a, **kw: FakeResponse({"errors": ["down"]}))
+
+    freshness.main()
+
+    assert len(sent) == 1
+    assert "Envio indexer unavailable" in sent[0]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # request_with_retry exhausts its retries on 5xx, then raises HTTPError.
+        requests.HTTPError("502 Server Error: Bad Gateway"),
+        requests.ConnectionError("connection refused"),
+        requests.Timeout("read timeout"),
+        # Hasura down behind a proxy answers 200 with an HTML error page.
+        ValueError("Expecting value: line 1 column 1 (char 0)"),
+    ],
+)
+def test_main_alerts_on_transport_failure(
+    monkeypatch: pytest.MonkeyPatch, envio_url: str, sent: list[str], error: Exception
+) -> None:
+    """Every way the endpoint can fail still produces a Telegram alert."""
+    monkeypatch.setattr("sys.argv", ["check_indexer_freshness.py"])
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(freshness, "request_with_retry", fail)
 
     freshness.main()
 
