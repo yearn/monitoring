@@ -36,7 +36,7 @@ from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_path, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import Chain
-from utils.formatting import format_usd
+from utils.formatting import format_duration, format_usd
 from utils.logger import get_logger
 from utils.telegram import escape_markdown
 from utils.web3_wrapper import ChainManager
@@ -423,22 +423,6 @@ def load_borrower_default_watch_snapshots_from_envio() -> list[BorrowerRepayment
 
 def format_utc_timestamp(timestamp: int) -> str:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-
-def format_duration(seconds: int) -> str:
-    if seconds <= 0:
-        return "now"
-    days = seconds // SECONDS_PER_DAY
-    hours = (seconds % SECONDS_PER_DAY) // 3600
-    minutes = (seconds % 3600) // 60
-    parts: list[str] = []
-    if days:
-        parts.append(f"{days}d")
-    if hours:
-        parts.append(f"{hours}h")
-    if minutes and not days:
-        parts.append(f"{minutes}m")
-    return " ".join(parts) if parts else f"{seconds}s"
 
 
 def _borrower_default_cache_key(snapshot: BorrowerRepaymentSnapshot, bucket: str) -> str:

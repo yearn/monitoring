@@ -23,6 +23,10 @@ profiles:
     # No env override: alert dedupe and morpho rows share the default cache-id.txt
     # under $CACHE_DIR.
     tasks:
+      # Runs first: every Envio-backed monitor below (large flows, timelock,
+      # 3jane borrower watch) goes quiet rather than loud when the indexer
+      # stalls, so the freshness check tells us the silence is not good news.
+      - { name: "yearn-check-indexer-freshness", script: protocols/yearn/check_indexer_freshness.py }
       - { name: "apyusd",                 script: protocols/apyusd/main.py }
       - { name: "3jane",                  script: protocols/3jane/main.py }
       - { name: "morpho-markets",         script: protocols/morpho/markets.py }

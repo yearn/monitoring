@@ -239,3 +239,44 @@ All chains use the same contract address: `0x88ba032be87d5ef1fbe87336b7090767f36
 | Polygon | [polygonscan.com](https://polygonscan.com/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
 | Katana | [katanascan.com](https://katanascan.com/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
 | Optimism | [optimistic.etherscan.io](https://optimistic.etherscan.io/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
+
+=======
+
+## Indexer Freshness
+
+The script `yearn/check_indexer_freshness.py` watches the [Envio indexer](https://github.com/chain-events/yearn-indexing-test) that feeds the large-flows, timelock and 3jane borrower monitors. It runs hourly, first in the [hourly profile](../../automation/jobs.yaml).
+
+An indexer stall is invisible to the monitors that depend on it: GraphQL keeps answering, it just stops returning new rows, so an outage looks exactly like a quiet hour. This check makes the silence loud.
+
+### How It Works
+
+1. Queries `chain_metadata` at `ENVIO_GRAPHQL_URL` for each chain's `latest_processed_block`.
+2. Fetches that block's timestamp via `ChainManager` and compares it to wall-clock time.
+3. Alerts when a chain's newest indexed block is older than `--max-lag-minutes` (default `60`), or when an expected chain reports no sync state at all.
+
+Step 2 is what makes the check trustworthy. Envio parks `chain_metadata.block_height` at the last processed block once a chain looks caught up, so a stalled indexer keeps reporting itself as zero blocks behind — the same trap called out in the indexer's own [monitoring dashboard](https://envio-monitoring.yearn.dev/).
+
+Step 3 covers the inverse trap: an empty result set is not good news. If a chain drops out of the indexer's config, or comes back from a restart with no processed block, it simply stops appearing in `chain_metadata` — and a check that only looks at what it was given would report every remaining chain fresh while that chain's monitors sit blind. `EXPECTED_CHAINS` is therefore the authority on what must be present, and anything absent from it alerts.
+
+`EXPECTED_CHAINS` lists the chains whose indexed events feed monitors here (Mainnet, Optimism, Polygon, Base, Arbitrum, Katana). It is deliberately spelled out rather than derived from the `Chain` enum, so adding an enum member for an unrelated protocol doesn't start alerting that the indexer is missing a chain it was never asked to index — **add a chain here when its events start feeding a monitor.** The indexer also covers Gnosis and Berachain, which nothing here reads from; those are logged and skipped. A chain whose RPC is unreachable is skipped too rather than alerted on: a broken provider is not a stale indexer.
+
+### Alerts
+
+All alerts go to the errors channel (`TELEGRAM_*_ERRORS`) labelled `[yearn]`, alongside the other operational diagnostics:
+
+- **Stale or missing chains** — one message listing every lagging chain with its lag and last indexed block, plus every expected chain the indexer reported no sync state for.
+- **Indexer unavailable** — the GraphQL endpoint is unset, unreachable, returned errors, or reported no chains. Sent on every run for as long as it lasts.
+- **Recovered** — sent once when a previously alerting chain catches up.
+
+A re-sync can run for days, so each chain alerts on the way into trouble and then at most once per `--alert-cooldown-hours` (default `6`) instead of every hourly run. The cooldown is tracked per chain, so one lagging chain never suppresses another's first alert. The last-alert timestamp is cached under `YEARN_INDEXER_STALE_ALERT_<chain_id>`.
+
+### Usage
+
+```bash
+uv run protocols/yearn/check_indexer_freshness.py
+```
+
+Optional flags (each also settable via env):
+
+- `--max-lag-minutes` (default `60`, env `INDEXER_MAX_LAG_MINUTES`)
+- `--alert-cooldown-hours` (default `6`, env `INDEXER_ALERT_COOLDOWN_HOURS`)
