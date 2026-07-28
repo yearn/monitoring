@@ -9,7 +9,9 @@ returning new rows — so an outage is indistinguishable from "nothing happened"
 This check reads `chain_metadata` from the indexer and, for every chain this repo
 monitors, resolves the wall-clock timestamp of `latest_processed_block` from an
 RPC. Any chain whose newest indexed block is older than the lag threshold
-(default 60 minutes) is reported to the errors channel.
+(default 60 minutes) is reported to the errors channel — as is any expected chain
+the indexer reports no sync state for at all, since "nothing was stale" must
+never be mistaken for "everything is fresh".
 
 The RPC round-trip is what makes the check meaningful: envio parks
 `chain_metadata.block_height` at the last processed block once a chain looks
@@ -59,6 +61,25 @@ DEFAULT_ALERT_COOLDOWN_HOURS = 6
 
 # Keyed per chain so one lagging chain can't suppress an alert for another.
 CACHE_KEY_LAST_ALERT_PREFIX = "YEARN_INDEXER_STALE_ALERT_"
+
+# Chains whose indexed events feed monitors here. Every one of them must show up
+# in chain_metadata — a chain that silently drops out of the indexer's config
+# leaves its monitors blind while the endpoint keeps answering, which is exactly
+# the failure this script exists to catch.
+#
+# Kept explicit rather than derived from `Chain` so that adding an enum member
+# for an unrelated protocol doesn't start alerting that the indexer is missing a
+# chain it was never asked to index. Add a chain here when its events start
+# feeding a monitor.
+EXPECTED_CHAINS: tuple[Chain, ...] = (
+    Chain.MAINNET,
+    Chain.OPTIMISM,
+    Chain.POLYGON,
+    Chain.BASE,
+    Chain.ARBITRUM,
+    Chain.KATANA,
+)
+_EXPECTED_BY_CHAIN_ID: dict[int, Chain] = {chain.chain_id: chain for chain in EXPECTED_CHAINS}
 
 CHAIN_METADATA_QUERY = """
 {
@@ -151,31 +172,32 @@ def fetch_block_timestamp(chain: Chain, block_number: int) -> int | None:
 
 
 def collect_freshness(rows: list[dict], now: int) -> list[ChainFreshness]:
-    """Resolve how far behind wall-clock time each monitored chain is.
+    """Resolve how far behind wall-clock time each expected chain is.
 
     The indexer covers chains this repo doesn't read from (Gnosis, Berachain).
-    They have no `Chain` member and nothing here consumes their events, so they
-    are skipped rather than alerted on.
+    Nothing here consumes their events, so they are skipped rather than alerted
+    on. Expected chains absent from `rows` produce no entry — see
+    `missing_chains`.
 
     Args:
         rows: `chain_metadata` rows from the indexer.
         now: Current unix timestamp.
 
     Returns:
-        One ChainFreshness per monitored chain, sorted by chain id.
+        One ChainFreshness per expected chain present in `rows`, sorted by chain id.
     """
     freshness: list[ChainFreshness] = []
     for row in rows:
         chain_id = int(row["chain_id"])
-        try:
-            chain = Chain.from_chain_id(chain_id)
-        except ValueError:
+        chain = _EXPECTED_BY_CHAIN_ID.get(chain_id)
+        if chain is None:
             logger.info("Chain %d is indexed but not monitored here, skipping", chain_id)
             continue
         latest_block = int(row.get("latest_processed_block") or 0)
         if latest_block <= 0:
-            # A chain that has never processed a block is mid-backfill, not stale.
-            logger.warning("%s has no processed block yet, skipping", chain.name)
+            # No processed block means no usable sync state — left out here so
+            # `missing_chains` reports it rather than treating it as fresh.
+            logger.warning("%s has no processed block yet", chain.name)
             continue
         block_timestamp = fetch_block_timestamp(chain, latest_block)
         lag = max(0, now - block_timestamp) if block_timestamp is not None else None
@@ -185,17 +207,32 @@ def collect_freshness(rows: list[dict], now: int) -> list[ChainFreshness]:
     return sorted(freshness, key=lambda f: f.chain.chain_id)
 
 
-def build_stale_message(stale: list[ChainFreshness], max_lag_seconds: int) -> str:
-    """Build the plain-text alert body listing every lagging chain."""
+def missing_chains(freshness: list[ChainFreshness]) -> list[Chain]:
+    """Return expected chains the indexer reported no usable sync state for.
+
+    Covers both a chain absent from `chain_metadata` entirely (dropped from the
+    indexer config, partial restart) and one present with no processed block.
+    Either way its monitors are blind, so "nothing was stale" must not be read
+    as "everything is fresh".
+    """
+    present = {entry.chain for entry in freshness}
+    return [chain for chain in EXPECTED_CHAINS if chain not in present]
+
+
+def build_alert_message(stale: list[ChainFreshness], missing: list[Chain], max_lag_seconds: int) -> str:
+    """Build the plain-text alert body for lagging and missing chains."""
+    affected = len(stale) + len(missing)
     lines = [
-        f"Envio indexer is behind on {len(stale)} chain(s) — events may be missing from monitoring alerts.",
+        f"Envio indexer problem on {affected} chain(s) — events may be missing from monitoring alerts.",
         "",
     ]
-    for chain in stale:
-        lag = format_duration(chain.lag_seconds or 0)
+    for entry in stale:
+        lag = format_duration(entry.lag_seconds or 0)
         lines.append(
-            f"- {chain.name} (chain {chain.chain.chain_id}): {lag} behind, last block {chain.latest_processed_block}"
+            f"- {entry.name} (chain {entry.chain.chain_id}): {lag} behind, last block {entry.latest_processed_block}"
         )
+    for chain in missing:
+        lines.append(f"- {chain.name.capitalize()} (chain {chain.chain_id}): no sync state reported by the indexer")
     lines += [
         "",
         f"Threshold: {format_duration(max_lag_seconds)}",
@@ -214,18 +251,29 @@ def _set_last_alert_timestamp(chain_id: int, timestamp: int) -> None:
     write_last_value_to_file(cache_filename, f"{CACHE_KEY_LAST_ALERT_PREFIX}{chain_id}", timestamp)
 
 
-def chains_to_alert(stale: list[ChainFreshness], now: int, cooldown_seconds: int) -> list[ChainFreshness]:
-    """Filter stale chains down to those outside their re-alert cooldown.
+def _is_due_for_alert(chain: Chain, now: int, cooldown_seconds: int) -> bool:
+    """Return True when this chain has not alerted within the cooldown window."""
+    return now - _last_alert_timestamp(chain.chain_id) >= cooldown_seconds
+
+
+def chains_to_alert(
+    stale: list[ChainFreshness], missing: list[Chain], now: int, cooldown_seconds: int
+) -> tuple[list[ChainFreshness], list[Chain]]:
+    """Filter unhealthy chains down to those outside their re-alert cooldown.
 
     Args:
         stale: Chains currently past the lag threshold.
+        missing: Expected chains with no usable sync state.
         now: Current unix timestamp.
         cooldown_seconds: Minimum gap between two alerts for the same chain.
 
     Returns:
-        The chains that should alert on this run.
+        The stale and missing chains that should alert on this run.
     """
-    return [chain for chain in stale if now - _last_alert_timestamp(chain.chain.chain_id) >= cooldown_seconds]
+    return (
+        [entry for entry in stale if _is_due_for_alert(entry.chain, now, cooldown_seconds)],
+        [chain for chain in missing if _is_due_for_alert(chain, now, cooldown_seconds)],
+    )
 
 
 def report_recovered(fresh: list[ChainFreshness]) -> None:
@@ -240,7 +288,7 @@ def report_recovered(fresh: list[ChainFreshness]) -> None:
 
 
 def main() -> None:
-    """Check indexer freshness for every indexed chain and alert on stale ones."""
+    """Alert on every expected chain the indexer is lagging on or has lost."""
     args = parse_args()
     max_lag_seconds = args.max_lag_minutes * 60
     cooldown_seconds = args.alert_cooldown_hours * 3600
@@ -260,22 +308,31 @@ def main() -> None:
 
     now = int(time.time())
     freshness = collect_freshness(rows, now)
-    stale = [chain for chain in freshness if chain.is_stale(max_lag_seconds)]
+    stale = [entry for entry in freshness if entry.is_stale(max_lag_seconds)]
+    missing = missing_chains(freshness)
+    if missing:
+        logger.error("No sync state for %s", ", ".join(chain.name for chain in missing))
 
-    report_recovered([chain for chain in freshness if chain not in stale and chain.lag_seconds is not None])
+    report_recovered([entry for entry in freshness if entry not in stale and entry.lag_seconds is not None])
 
-    if not stale:
-        logger.info("Indexer is fresh on all %d chain(s)", len(freshness))
+    if not stale and not missing:
+        logger.info("Indexer is fresh on all %d expected chain(s)", len(freshness))
         return
 
-    to_alert = chains_to_alert(stale, now, cooldown_seconds)
-    if not to_alert:
-        logger.info("All %d stale chain(s) already alerted within the cooldown window", len(stale))
+    stale_to_alert, missing_to_alert = chains_to_alert(stale, missing, now, cooldown_seconds)
+    if not stale_to_alert and not missing_to_alert:
+        logger.info("All %d unhealthy chain(s) already alerted within the cooldown window", len(stale) + len(missing))
         return
 
-    send_error_message(build_stale_message(to_alert, max_lag_seconds), PROTOCOL, source="indexer_freshness")
-    for chain in to_alert:
-        _set_last_alert_timestamp(chain.chain.chain_id, now)
+    send_error_message(
+        build_alert_message(stale_to_alert, missing_to_alert, max_lag_seconds),
+        PROTOCOL,
+        source="indexer_freshness",
+    )
+    for entry in stale_to_alert:
+        _set_last_alert_timestamp(entry.chain.chain_id, now)
+    for chain in missing_to_alert:
+        _set_last_alert_timestamp(chain.chain_id, now)
 
 
 def parse_args() -> argparse.Namespace:

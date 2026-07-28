@@ -10,6 +10,22 @@ from utils.chains import Chain
 NOW = 1_800_000_000
 HOUR = 3600
 
+# Last processed block per expected chain, roughly as the live indexer reports them.
+INDEXED_BLOCKS: dict[Chain, int] = {
+    Chain.BASE: 49220190,
+    Chain.MAINNET: 24150245,
+    Chain.KATANA: 38465232,
+    Chain.OPTIMISM: 154815667,
+    Chain.POLYGON: 91016489,
+    Chain.ARBITRUM: 488554295,
+}
+
+# Chains the indexer covers that nothing in this repo reads from.
+UNMONITORED_ROWS = [
+    {"chain_id": 100, "latest_processed_block": 47431537, "block_height": 47431737},
+    {"chain_id": 80094, "latest_processed_block": 24107494, "block_height": 24107694},
+]
+
 
 class FakeResponse:
     def __init__(self, payload: dict) -> None:
@@ -19,14 +35,23 @@ class FakeResponse:
         return self.payload
 
 
-def _rows() -> list[dict]:
-    """chain_metadata as the indexer returns it: unsorted, including chains we ignore."""
-    return [
-        {"chain_id": 8453, "latest_processed_block": 49220190, "block_height": 49220390},
-        {"chain_id": 80094, "latest_processed_block": 24107494, "block_height": 24107694},
-        {"chain_id": 1, "latest_processed_block": 24150245, "block_height": 25626800},
-        {"chain_id": 100, "latest_processed_block": 47431537, "block_height": 47431737},
+def _rows(*, omit: tuple[Chain, ...] = (), zero_block: tuple[Chain, ...] = ()) -> list[dict]:
+    """chain_metadata as the indexer returns it: unsorted, including chains we ignore.
+
+    Args:
+        omit: Expected chains to leave out entirely, as a dropped indexer config would.
+        zero_block: Expected chains present but with no processed block.
+    """
+    rows = [
+        {
+            "chain_id": chain.chain_id,
+            "latest_processed_block": 0 if chain in zero_block else block,
+            "block_height": block + 200,
+        }
+        for chain, block in INDEXED_BLOCKS.items()
+        if chain not in omit
     ]
+    return rows + UNMONITORED_ROWS
 
 
 @pytest.fixture
@@ -45,13 +70,20 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 def test_collect_freshness_computes_lag_and_sorts_by_chain(monkeypatch: pytest.MonkeyPatch) -> None:
-    timestamps = {Chain.MAINNET: NOW - 5 * HOUR, Chain.BASE: NOW - 120}
-    monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain, block: timestamps[chain])
+    timestamps = {Chain.MAINNET: NOW - 5 * HOUR}
+    monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain, block: timestamps.get(chain, NOW - 120))
 
     result = freshness.collect_freshness(_rows(), NOW)
 
     # Gnosis (100) and Berachain (80094) are indexed but unused here, so they drop out.
-    assert [c.chain for c in result] == [Chain.MAINNET, Chain.BASE]
+    assert [entry.chain for entry in result] == [
+        Chain.MAINNET,
+        Chain.OPTIMISM,
+        Chain.POLYGON,
+        Chain.BASE,
+        Chain.ARBITRUM,
+        Chain.KATANA,
+    ]
     assert result[0].lag_seconds == 5 * HOUR
     assert result[0].name == "Mainnet"
     assert result[1].lag_seconds == 120
@@ -59,9 +91,10 @@ def test_collect_freshness_computes_lag_and_sorts_by_chain(monkeypatch: pytest.M
 
 def test_collect_freshness_skips_chains_without_a_processed_block(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain, block: NOW)
-    rows = [{"chain_id": 1, "latest_processed_block": 0, "block_height": 0}]
 
-    assert freshness.collect_freshness(rows, NOW) == []
+    result = freshness.collect_freshness(_rows(zero_block=(Chain.KATANA,)), NOW)
+
+    assert Chain.KATANA not in [entry.chain for entry in result]
 
 
 def test_collect_freshness_marks_lag_unknown_when_rpc_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -69,28 +102,46 @@ def test_collect_freshness_marks_lag_unknown_when_rpc_fails(monkeypatch: pytest.
 
     result = freshness.collect_freshness(_rows(), NOW)
 
-    assert all(chain.lag_seconds is None for chain in result)
+    assert all(entry.lag_seconds is None for entry in result)
     # Unknown lag must never fire an alert — a broken RPC is not a stale indexer.
-    assert not any(chain.is_stale(HOUR) for chain in result)
+    assert not any(entry.is_stale(HOUR) for entry in result)
 
 
 def test_is_stale_uses_threshold() -> None:
-    chain = ChainFreshness(chain=Chain.MAINNET, latest_processed_block=100, lag_seconds=HOUR + 1)
+    entry = ChainFreshness(chain=Chain.MAINNET, latest_processed_block=100, lag_seconds=HOUR + 1)
 
-    assert chain.is_stale(HOUR)
-    assert not chain.is_stale(2 * HOUR)
+    assert entry.is_stale(HOUR)
+    assert not entry.is_stale(2 * HOUR)
 
 
-def test_build_stale_message_lists_every_lagging_chain() -> None:
+def test_missing_chains_covers_absent_and_unsynced_chains(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chain dropped from chain_metadata and one with no processed block both count."""
+    monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain, block: NOW - 60)
+    rows = _rows(omit=(Chain.KATANA,), zero_block=(Chain.POLYGON,))
+
+    missing = freshness.missing_chains(freshness.collect_freshness(rows, NOW))
+
+    assert missing == [Chain.POLYGON, Chain.KATANA]
+
+
+def test_missing_chains_empty_when_every_expected_chain_reports(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain, block: NOW - 60)
+
+    assert freshness.missing_chains(freshness.collect_freshness(_rows(), NOW)) == []
+
+
+def test_build_alert_message_lists_lagging_and_missing_chains() -> None:
     stale = [
         ChainFreshness(chain=Chain.MAINNET, latest_processed_block=24150245, lag_seconds=205 * 86400),
         ChainFreshness(chain=Chain.KATANA, latest_processed_block=38465232, lag_seconds=2 * HOUR + 900),
     ]
 
-    message = freshness.build_stale_message(stale, HOUR)
+    message = freshness.build_alert_message(stale, [Chain.BASE], HOUR)
 
+    assert "problem on 3 chain(s)" in message
     assert "Mainnet (chain 1): 205d behind, last block 24150245" in message
     assert "Katana (chain 747474): 2h 15m behind, last block 38465232" in message
+    assert "Base (chain 8453): no sync state reported by the indexer" in message
     assert "Threshold: 1h" in message
     assert freshness.DASHBOARD_URL in message
 
@@ -135,12 +186,22 @@ def test_fetch_chain_metadata_raises_when_url_missing(monkeypatch: pytest.Monkey
 
 def test_chains_to_alert_respects_cooldown() -> None:
     stale = [ChainFreshness(chain=Chain.MAINNET, latest_processed_block=1, lag_seconds=2 * HOUR)]
+    missing = [Chain.KATANA]
 
-    assert freshness.chains_to_alert(stale, NOW, 6 * HOUR) == stale
+    assert freshness.chains_to_alert(stale, missing, NOW, 6 * HOUR) == (stale, missing)
 
-    freshness._set_last_alert_timestamp(1, NOW)
-    assert freshness.chains_to_alert(stale, NOW + HOUR, 6 * HOUR) == []
-    assert freshness.chains_to_alert(stale, NOW + 6 * HOUR, 6 * HOUR) == stale
+    freshness._set_last_alert_timestamp(Chain.MAINNET.chain_id, NOW)
+    freshness._set_last_alert_timestamp(Chain.KATANA.chain_id, NOW)
+    assert freshness.chains_to_alert(stale, missing, NOW + HOUR, 6 * HOUR) == ([], [])
+    assert freshness.chains_to_alert(stale, missing, NOW + 6 * HOUR, 6 * HOUR) == (stale, missing)
+
+
+def test_chains_to_alert_keeps_chains_independent() -> None:
+    """One chain inside its cooldown must not suppress another's first alert."""
+    stale = [ChainFreshness(chain=Chain.MAINNET, latest_processed_block=1, lag_seconds=2 * HOUR)]
+    freshness._set_last_alert_timestamp(Chain.MAINNET.chain_id, NOW)
+
+    assert freshness.chains_to_alert(stale, [Chain.BASE], NOW, 6 * HOUR) == ([], [Chain.BASE])
 
 
 def test_main_alerts_once_per_cooldown_then_reports_recovery(
@@ -151,8 +212,8 @@ def test_main_alerts_once_per_cooldown_then_reports_recovery(
     )
     monkeypatch.setattr("sys.argv", ["check_indexer_freshness.py"])
 
-    stale_timestamps = {Chain.MAINNET: NOW - 5 * HOUR, Chain.BASE: NOW - 120}
-    monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain, block: stale_timestamps[chain])
+    timestamps = {Chain.MAINNET: NOW - 5 * HOUR}
+    monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain, block: timestamps.get(chain, NOW - 120))
     monkeypatch.setattr(freshness.time, "time", lambda: NOW)
 
     freshness.main()
@@ -165,13 +226,47 @@ def test_main_alerts_once_per_cooldown_then_reports_recovery(
     assert len(sent) == 1
 
     # Once mainnet catches up, the recovery note fires and clears the state.
-    stale_timestamps[Chain.MAINNET] = NOW - 60
+    timestamps[Chain.MAINNET] = NOW - 60
     freshness.main()
     assert len(sent) == 2
     assert "caught up" in sent[1]
 
     freshness.main()
     assert len(sent) == 2
+
+
+def test_main_alerts_when_an_expected_chain_is_absent(
+    monkeypatch: pytest.MonkeyPatch, envio_url: str, sent: list[str]
+) -> None:
+    """Rows present but an expected chain missing must not read as "all fresh"."""
+    rows = _rows(omit=(Chain.KATANA,))
+    monkeypatch.setattr(
+        freshness, "request_with_retry", lambda *a, **kw: FakeResponse({"data": {"chain_metadata": rows}})
+    )
+    monkeypatch.setattr("sys.argv", ["check_indexer_freshness.py"])
+    # Every chain the indexer *does* report is perfectly fresh.
+    monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain, block: NOW - 60)
+    monkeypatch.setattr(freshness.time, "time", lambda: NOW)
+
+    freshness.main()
+
+    assert len(sent) == 1
+    assert "Katana (chain 747474): no sync state reported by the indexer" in sent[0]
+
+
+def test_main_stays_quiet_when_every_expected_chain_is_fresh(
+    monkeypatch: pytest.MonkeyPatch, envio_url: str, sent: list[str]
+) -> None:
+    monkeypatch.setattr(
+        freshness, "request_with_retry", lambda *a, **kw: FakeResponse({"data": {"chain_metadata": _rows()}})
+    )
+    monkeypatch.setattr("sys.argv", ["check_indexer_freshness.py"])
+    monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain, block: NOW - 60)
+    monkeypatch.setattr(freshness.time, "time", lambda: NOW)
+
+    freshness.main()
+
+    assert sent == []
 
 
 def test_main_alerts_when_indexer_is_unreachable(
