@@ -30,6 +30,8 @@ PROTOCOL = "yearn"
 CACHE_KEY_LAST_ALERT_TX = f"{PROTOCOL}_LARGE_FLOW_LAST_TX"
 
 FALLBACK_LARGE_FLOW_RATIO = Decimal("0.1")
+KATANA_CHAIN_ID = 747474
+KATANA_WITHDRAWAL_THRESHOLD_USD = Decimal("50000")
 
 ERC20_ABI = load_abi("common-abi/ERC20.json")
 _total_supply_cache: dict[tuple[int, str], Decimal] = {}
@@ -172,7 +174,7 @@ DEFILLAMA_CHAIN = {
     747474: "katana",
 }
 
-STABLES = {"USDC", "USDT", "DAI", "USDS", "CRVUSD"}
+STABLES = {"USDC", "USDT", "DAI", "USDS", "CRVUSD", "vbUSDC", "vbUSDT"}
 
 _price_cache: dict[tuple[int, str], tuple[float, Decimal]] = {}
 _logger = logging.getLogger("alert_large_flows")
@@ -410,6 +412,25 @@ def send_large_flow_alert(
     return tx_hash
 
 
+def resolve_threshold_usd(event: dict, vault: dict, default_threshold_usd: Decimal) -> Decimal:
+    """Return the USD alert threshold for a flow event.
+
+    Katana withdrawals use a lower fixed threshold; everything else uses the
+    caller-provided default (typically CLI ``--threshold-usd``).
+
+    Args:
+        event: Deposit/withdraw event dict (must include ``type``).
+        vault: Vault config from ``VAULTS``.
+        default_threshold_usd: Default USD threshold.
+
+    Returns:
+        USD threshold to apply for this event.
+    """
+    if vault["chain_id"] == KATANA_CHAIN_ID and event.get("type") == "withdraw":
+        return KATANA_WITHDRAWAL_THRESHOLD_USD
+    return default_threshold_usd
+
+
 def alert_on_large_flows(events: list[dict], threshold_usd: Decimal, use_cache: bool):
     _logger.info("evaluating %s events", len(events))
     prefetch_prices(events)
@@ -429,10 +450,11 @@ def alert_on_large_flows(events: list[dict], threshold_usd: Decimal, use_cache: 
         if not vault:
             _logger.warning("skip unknown vault %s", event["vaultAddress"])
             continue
+        event_threshold = resolve_threshold_usd(event, vault, threshold_usd)
         amount = format_units(event["assets"], vault["decimals"])
         if vault["symbol"] in STABLES:
             value = amount
-            if value >= threshold_usd:
+            if value >= event_threshold:
                 cached_tx_to_write = send_large_flow_alert(event, vault, amount, value)
             continue
 
@@ -444,7 +466,7 @@ def alert_on_large_flows(events: list[dict], threshold_usd: Decimal, use_cache: 
 
         if price is not None:
             value = amount * price
-            if value >= threshold_usd:
+            if value >= event_threshold:
                 cached_tx_to_write = send_large_flow_alert(event, vault, amount, value)
             continue
 
@@ -467,7 +489,7 @@ def alert_on_large_flows(events: list[dict], threshold_usd: Decimal, use_cache: 
 def main():
     parser = argparse.ArgumentParser(description="Alert on large deposit/withdraw events.")
     parser.add_argument("--limit", type=int, default=100)
-    parser.add_argument("--threshold-usd", type=Decimal, default=Decimal("1000000"))  # 1M USD
+    parser.add_argument("--threshold-usd", type=Decimal, default=Decimal("500000"))  # 500k USD
     parser.add_argument("--since-seconds", type=int, default=7200)  # 2 hours is default
     default_chain_ids = ",".join(str(c) for c in sorted({v["chain_id"] for v in VAULTS.values()}))
     parser.add_argument("--chain-ids", type=str, default=default_chain_ids)
