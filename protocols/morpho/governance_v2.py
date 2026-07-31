@@ -330,22 +330,47 @@ def _vault_header(snapshot: V2GovernanceSnapshot) -> str:
     return f"V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) on {snapshot.chain.name}"
 
 
+def _split_body(body: str, budget: int) -> List[str]:
+    """Split one oversized section, preferring boundaries between lines."""
+    if budget <= 0:
+        raise ValueError(f"Message body budget must be positive, got {budget}")
+
+    chunks: List[str] = []
+    remaining = body
+    while len(remaining) > budget:
+        split_at = remaining.rfind("\n", 0, budget + 1)
+        if split_at <= 0:
+            split_at = budget
+        else:
+            split_at += 1
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:]
+    if remaining or not chunks:
+        chunks.append(remaining)
+    return chunks
+
+
 def _split_into_messages(alerts: List[_VaultAlert], budget: int) -> List[List[str]]:
     """Pack section bodies into groups that each fit within ``budget`` chars.
 
-    A section bigger than the budget on its own still gets its own message
-    rather than pushing its neighbours out: Telegram truncates that one section,
-    but no other section is lost.
+    Oversized sections are split too, so every character is handed to Telegram
+    instead of allowing its client-side length guard to truncate the tail.
     """
-    parts: List[List[str]] = [[]]
+    parts: List[List[str]] = []
+    current: List[str] = []
     size = 0
     for alert in alerts:
-        cost = len(alert.body) + len(_SECTION_SEPARATOR)
-        if parts[-1] and size + cost > budget:
-            parts.append([])
-            size = 0
-        parts[-1].append(alert.body)
-        size += cost
+        for body in _split_body(alert.body, budget):
+            separator_size = len(_SECTION_SEPARATOR) if current else 0
+            if current and size + separator_size + len(body) > budget:
+                parts.append(current)
+                current = []
+                size = 0
+                separator_size = 0
+            current.append(body)
+            size += separator_size + len(body)
+    if current:
+        parts.append(current)
     return parts
 
 

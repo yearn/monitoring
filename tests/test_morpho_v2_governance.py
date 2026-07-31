@@ -288,6 +288,40 @@ class TestMorphoV2GovernanceVaultGrouping(unittest.TestCase):
         for pc in pending:
             self.assertIn(pc.tx_hash, combined)
 
+    def test_oversized_pending_section_splits_without_losing_operations(self) -> None:
+        """One batched pending section must not be truncated by Telegram."""
+        pending = [
+            PendingConfig(
+                valid_at=1800000000 + i,
+                function_name="increaseTimelock",
+                data=bytes([i]) * 4,
+                tx_hash="0x" + f"{i:02x}" * 32,
+            )
+            for i in range(30)
+        ]
+        snapshot = _snapshot(pending)
+        diff = governance_v2._VaultDiff()
+        operations: list[tuple[PendingConfig, str]] = []
+        for i, pc in enumerate(pending):
+            label = f"increaseTimelock(setSendAssetsGate → {604800 + i}s)"
+            operations.append((pc, label))
+        governance_v2._alert_pending_new(snapshot, operations, diff)
+
+        self.assertEqual(len(diff.alerts), 1, "the regression requires one oversized section")
+        self.assertGreater(len(diff.alerts[0].body), governance_v2.MAX_MESSAGE_LENGTH)
+
+        sent: list[Any] = []
+        with patch("protocols.morpho.governance_v2.send_alert", side_effect=sent.append):
+            governance_v2._send_vault_alerts(snapshot, diff.alerts)
+
+        self.assertGreater(len(sent), 1)
+        for alert in sent:
+            self.assertLessEqual(len(alert.message), governance_v2.MAX_MESSAGE_LENGTH)
+        combined = "".join(alert.message for alert in sent)
+        self.assertEqual(combined.count("  • increaseTimelock"), len(pending))
+        for pc in pending:
+            self.assertIn(pc.tx_hash, combined)
+
     def test_cache_writes_are_deferred_until_the_send_succeeds(self) -> None:
         """A failed send must leave the cache untouched so the next run retries.
 
