@@ -60,15 +60,10 @@ class TestMorphoV2GovernancePendingLabels(unittest.TestCase):
             patch("protocols.morpho.governance_v2.write_last_value_to_file", side_effect=write_value),
             patch("protocols.morpho.governance_v2.send_alert", side_effect=capture),
         ):
-            # First call: pending config appears, buffered, then flushed as one alert.
-            alerts: list = []
-            governance_v2._diff_pending(_snapshot([pc]), alerts)
-            governance_v2._send_vault_alerts(_snapshot([pc]), alerts)
-            # Second call: the cached pending op is no longer present, so the
-            # resolved-pending branch fires.
-            alerts2: list = []
-            governance_v2._diff_pending(_snapshot([]), alerts2)
-            governance_v2._send_vault_alerts(_snapshot([]), alerts2)
+            # First run: the pending config appears and is alerted as a Submit.
+            governance_v2.diff_and_alert(_snapshot([pc]))
+            # Second run: the cached pending op is gone, so the resolved branch fires.
+            governance_v2.diff_and_alert(_snapshot([]))
 
         function_key = governance_v2.morpho_key(VAULT.lower(), data_hash, governance_v2.PENDING_FUNCTION_TYPE)
         self.assertEqual(state[function_key], "addAdapter")
@@ -85,13 +80,13 @@ class TestMorphoV2GovernancePendingLabels(unittest.TestCase):
     def test_resolved_pending_alert_without_cached_function_keeps_hash_only_message(self):
         data_hash = "3d6d72861e" + "0" * 54
         snapshot = _snapshot([])
-        alerts: list = []
-        governance_v2._alert_pending_resolved(snapshot, data_hash, 1, "", alerts)
+        diff = governance_v2._VaultDiff()
+        governance_v2._alert_pending_resolved(data_hash, 1, "", diff)
         # The buffered body is what the previous test checked, but now the alert
         # is built into a grouped message — flush it and inspect the body.
         sent: list = []
         with patch("protocols.morpho.governance_v2.send_alert", side_effect=sent.append):
-            governance_v2._send_vault_alerts(snapshot, alerts)
+            governance_v2._send_vault_alerts(snapshot, diff.alerts)
         self.assertEqual(len(sent), 1)
         message = sent[0].message
         self.assertIn(f"Pending operation `{data_hash[:10]}…` was executed", message)
@@ -228,6 +223,87 @@ class TestMorphoV2GovernancePendingLabels(unittest.TestCase):
             governance_v2.diff_and_alert(snapshot)
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0].severity, governance_v2.AlertSeverity.LOW)
+
+    def test_oversized_group_is_split_into_numbered_parts_without_dropping_sections(self):
+        """A batch too long for one Telegram message splits instead of truncating.
+
+        The 22-call InfiniFi-style batch renders ~6.3k chars — past Telegram's
+        4096 cap, where ``utils.telegram`` would truncate and silently drop the
+        tail. Every section must survive across the numbered parts.
+        """
+        pending = [
+            PendingConfig(
+                valid_at=1800000000,
+                function_name="increaseTimelock",
+                data=bytes([i]) * 4,
+                tx_hash="0x" + f"{i:02x}" * 32,
+            )
+            for i in range(22)
+        ]
+        snapshot = _snapshot(pending)
+
+        sent: list = []
+        with (
+            patch(
+                "protocols.morpho.governance_v2.get_last_value_for_key_from_file",
+                side_effect=lambda _f, _k: 0,
+            ),
+            patch("protocols.morpho.governance_v2.write_last_value_to_file"),
+            patch("protocols.morpho.governance_v2.send_alert", side_effect=sent.append),
+        ):
+            governance_v2.diff_and_alert(snapshot)
+
+        self.assertGreater(len(sent), 1, "oversized group should split into multiple messages")
+        for index, alert in enumerate(sent, start=1):
+            self.assertLessEqual(len(alert.message), 4096)
+            self.assertIn(f"V2 [{snapshot.name}]", alert.message)
+            self.assertIn(f"({index}/{len(sent)})", alert.message)
+        combined = "".join(a.message for a in sent)
+        self.assertEqual(combined.count("📥 Submitted:"), 22)
+        for pc in pending:
+            self.assertIn(pc.tx_hash, combined)
+
+    def test_cache_writes_are_deferred_until_the_send_succeeds(self):
+        """A failed Telegram send must leave the cache untouched so the next run retries.
+
+        Writing cursors during the diff pass would mark the change as alerted even
+        though nothing was delivered — ``main`` logs the exception and moves on, so
+        the alert would be lost permanently.
+        """
+        pc = PendingConfig(
+            valid_at=1800000000,
+            function_name="addAdapter",
+            data=_build("addAdapter(address)", ["address"], [A1]),
+            tx_hash="0x" + "12" * 32,
+        )
+        snapshot = _snapshot([pc])
+
+        with (
+            patch(
+                "protocols.morpho.governance_v2.get_last_value_for_key_from_file",
+                side_effect=lambda _f, _k: 0,
+            ),
+            patch("protocols.morpho.governance_v2.write_last_value_to_file") as write,
+            patch("protocols.morpho.governance_v2.send_alert", side_effect=RuntimeError("telegram down")),
+        ):
+            with self.assertRaises(RuntimeError):
+                governance_v2.diff_and_alert(snapshot)
+            write.assert_not_called()
+
+        # Same snapshot, working Telegram: cursors are committed this time.
+        sent: list = []
+        with (
+            patch(
+                "protocols.morpho.governance_v2.get_last_value_for_key_from_file",
+                side_effect=lambda _f, _k: 0,
+            ),
+            patch("protocols.morpho.governance_v2.write_last_value_to_file") as write,
+            patch("protocols.morpho.governance_v2.send_alert", side_effect=sent.append),
+        ):
+            governance_v2.diff_and_alert(snapshot)
+        self.assertEqual(len(sent), 1)
+        written_keys = {call.args[1] for call in write.call_args_list}
+        self.assertIn(governance_v2.morpho_key(VAULT.lower(), pc.data_hash, governance_v2.PENDING_TYPE), written_keys)
 
 
 if __name__ == "__main__":
