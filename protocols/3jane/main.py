@@ -20,6 +20,9 @@ drops below it; recovering above the threshold re-arms the alert.
 - Debt cap changes — alerts when ProtocolConfig debt cap is modified
 - Nominal sUSD3 backing floor — alerts on change and when floor > sUSD3 backing
 - Protocol-wide pause — alerts once when ProtocolConfig IS_PAUSED flips to true
+- Accountable Proof of Solvency — collateral ratio banding plus feed freshness
+  and availability. Alerts route to the 3Jane channel but never trigger the
+  emergency dispatch webhook; see the README for why.
 """
 
 import json
@@ -28,11 +31,13 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from web3 import Web3
 
 from utils.abi import load_abi
+from utils.accountable import AccountableFeedConfig, AccountableReport, AccountableStatus, fetch_report
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_path, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import Chain
@@ -43,6 +48,13 @@ from utils.web3_wrapper import ChainManager
 
 PROTOCOL = "3jane"
 logger = get_logger(PROTOCOL)
+
+# Accountable alerts route to the 3Jane Telegram channel but deliberately use a
+# protocol key that is absent from utils.dispatch.DISPATCHABLE_PROTOCOLS, so a
+# CRITICAL here cannot trigger the emergency cap-zeroing webhook. The live
+# collateral margin is only a few basis points, so automated action on this
+# signal needs a burn-in period first. See issue #327.
+ACCOUNTABLE_ALERT_PROTOCOL = "3jane-accountable"
 
 CACHE_FILENAME = cache_path("cache-id.txt")
 
@@ -84,6 +96,11 @@ CACHE_KEY_BORROWER_DEFAULT_WATCH_PREFIX = "3JANE_BORROWER_DEFAULT_WATCH"
 CACHE_KEY_JUNIOR_BUFFER_ALERTED = "3JANE_JUNIOR_BUFFER_ALERTED"
 CACHE_KEY_USD3_OC_ALERTED = "3JANE_USD3_OC_ALERTED"
 CACHE_KEY_WITHDRAW_LIMIT_ALERTED = "3JANE_WITHDRAW_LIMIT_ALERTED"
+CACHE_KEY_ACCOUNTABLE_BAND = "3JANE_ACCOUNTABLE_BAND"
+CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK = "3JANE_ACCOUNTABLE_CRITICAL_STREAK"
+CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK = "3JANE_ACCOUNTABLE_FAILURE_STREAK"
+CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED = "3JANE_ACCOUNTABLE_HEALTH_ALERTED"
+CACHE_KEY_ACCOUNTABLE_STALE_ALERTED = "3JANE_ACCOUNTABLE_STALE_ALERTED"
 
 # --- ProtocolConfig keys (keccak256 of the string label) ---
 CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR = Web3.keccak(text="SUSD3_NOMINAL_BACKING_FLOOR")
@@ -96,6 +113,26 @@ USD3_OC_HIGH_THRESHOLD = 1.11  # Alert when USD3 OC drops below the 111% target
 USD3_OC_CRITICAL_THRESHOLD = 1.06  # Alert when USD3 OC drops below 106%
 INSURANCE_FUND_OUTFLOW_THRESHOLD = 50_000  # USDC
 WITHDRAW_LIMIT_THRESHOLD = 4_000_000  # USDC, alert when USD3 availableWithdrawLimit falls below
+
+# --- Accountable Proof of Solvency ---
+ACCOUNTABLE_FEED = AccountableFeedConfig(
+    dfid="100000026",
+    dashboard_url=os.getenv("THREE_JANE_ACCOUNTABLE_URL", "https://accountable.3jane.xyz/dashboard"),
+    dashboard_type="three-jane",
+)
+ACCOUNTABLE_CRITICAL_RATIO = Decimal("1.00")  # Reserves below liabilities
+ACCOUNTABLE_HIGH_RATIO = Decimal("1.05")
+# The margin sits a few basis points above 1.00, so a single sub-100% reading is
+# more likely a stale document-report refresh than genuine insolvency.
+ACCOUNTABLE_CRITICAL_CONFIRMATIONS = 2
+# Tolerate isolated blips; alert once the feed is persistently unusable.
+ACCOUNTABLE_MAX_CONSECUTIVE_FAILURES = 3
+
+ACCOUNTABLE_BAND_OK = "OK"
+ACCOUNTABLE_BAND_HIGH = "HIGH"
+ACCOUNTABLE_BAND_CRITICAL = "CRITICAL"
+# Ordered worst-last so a transition to a higher index is a deterioration.
+ACCOUNTABLE_BAND_ORDER = (ACCOUNTABLE_BAND_OK, ACCOUNTABLE_BAND_HIGH, ACCOUNTABLE_BAND_CRITICAL)
 
 THREE_JANE_BORROWER_DEFAULT_WATCH_QUERY = """
 query GetThreeJaneBorrowerDefaultWatch($limit: Int!, $offset: Int!) {
@@ -900,9 +937,216 @@ def check_protocol_paused(is_paused: bool) -> None:
         set_cache_value(CACHE_KEY_IS_PAUSED, float(is_paused))
 
 
+def _accountable_alert(severity: AlertSeverity, message: str) -> None:
+    """Send an Accountable alert on the 3Jane channel without emergency dispatch."""
+    send_alert(Alert(severity, message, ACCOUNTABLE_ALERT_PROTOCOL, channel=PROTOCOL))
+
+
+def _get_cache_str(key: str, default: str) -> str:
+    """Read a string cache value, falling back when unset."""
+    raw = get_last_value_for_key_from_file(CACHE_FILENAME, key)
+    return raw if isinstance(raw, str) and raw else default
+
+
+def classify_collateral_band(ratio: Decimal) -> str:
+    """Map a collateral ratio to its alert band.
+
+    Args:
+        ratio: Collateral ratio, where 1.0 means reserves exactly equal liabilities.
+
+    Returns:
+        One of the ``ACCOUNTABLE_BAND_*`` constants.
+    """
+    if ratio < ACCOUNTABLE_CRITICAL_RATIO:
+        return ACCOUNTABLE_BAND_CRITICAL
+    if ratio < ACCOUNTABLE_HIGH_RATIO:
+        return ACCOUNTABLE_BAND_HIGH
+    return ACCOUNTABLE_BAND_OK
+
+
+def resolve_confirmed_band(observed_band: str) -> str:
+    """Apply consecutive-run confirmation before promoting to CRITICAL.
+
+    A first sub-100% reading is reported as HIGH so it is still visible, and only
+    a second consecutive reading escalates to CRITICAL. Any non-critical reading
+    resets the streak.
+
+    Args:
+        observed_band: Band implied by the current ratio alone.
+
+    Returns:
+        The band to act on for this run.
+    """
+    if observed_band != ACCOUNTABLE_BAND_CRITICAL:
+        if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK):
+            set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK, 0)
+        return observed_band
+
+    streak = get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK) + 1
+    set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK, streak)
+    if streak >= ACCOUNTABLE_CRITICAL_CONFIRMATIONS:
+        return ACCOUNTABLE_BAND_CRITICAL
+
+    logger.info(
+        "Accountable collateral below %s but unconfirmed (%d/%d runs); holding at HIGH",
+        ACCOUNTABLE_CRITICAL_RATIO,
+        streak,
+        ACCOUNTABLE_CRITICAL_CONFIRMATIONS,
+    )
+    return ACCOUNTABLE_BAND_HIGH
+
+
+def _format_accountable_report(report: AccountableReport) -> str:
+    """Render the shared report body used by every Accountable alert."""
+    return (
+        f"📊 Collateral ratio: {report.collateralization:.4%}\n"
+        f"💰 Reserves: {format_usd(float(report.total_reserves))} | "
+        f"Liabilities: {format_usd(float(report.total_supply))}\n"
+        f"🧮 Net: {format_usd(float(report.net))} | Verifiability: {report.verifiability}%\n"
+        f"🕒 Report: {report.report_timestamp:%Y-%m-%d %H:%M:%S UTC} "
+        f"({format_duration(report.report_age_seconds)} old)"
+    )
+
+
+def check_accountable_collateral_band(report: AccountableReport) -> None:
+    """Alert on deterioration of the Accountable collateral ratio band.
+
+    Alerts fire on band transitions rather than on every worsening tick, so a
+    ratio hovering just below a threshold cannot alert repeatedly. Improving to
+    a healthier band re-arms the ones above it without alerting.
+
+    Args:
+        report: Validated Proof of Solvency report.
+    """
+    observed_band = classify_collateral_band(report.collateralization)
+    band = resolve_confirmed_band(observed_band)
+    previous_band = _get_cache_str(CACHE_KEY_ACCOUNTABLE_BAND, ACCOUNTABLE_BAND_OK)
+
+    logger.info(
+        "Accountable collateral ratio: %.6f%% (band %s, previous %s)",
+        report.collateralization * 100,
+        band,
+        previous_band,
+    )
+
+    if ACCOUNTABLE_BAND_ORDER.index(band) <= ACCOUNTABLE_BAND_ORDER.index(previous_band):
+        # Unchanged or improving: re-arm the worse bands, stay quiet.
+        if band != previous_band:
+            set_cache_value(CACHE_KEY_ACCOUNTABLE_BAND, band)
+        return
+
+    if band == ACCOUNTABLE_BAND_CRITICAL:
+        severity = AlertSeverity.CRITICAL
+        title = "3Jane Proof of Solvency CRITICAL"
+        detail = "⚠️ Reserves are below liabilities — the protocol is undercollateralized"
+    else:
+        severity = AlertSeverity.HIGH
+        title = "3Jane Proof of Solvency Low"
+        detail = f"⚠️ Collateral ratio below the {ACCOUNTABLE_HIGH_RATIO:.0%} warning threshold"
+
+    message = (
+        f"🚨 *{title}*\n"
+        f"{_format_accountable_report(report)}\n"
+        f"{detail}\n"
+        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.dashboard_url})"
+    )
+    _accountable_alert(severity, message)
+    set_cache_value(CACHE_KEY_ACCOUNTABLE_BAND, band)
+
+
+def check_accountable_staleness(report: AccountableReport, reason: str) -> None:
+    """Alert once when the Accountable feed or one of its sources goes stale.
+
+    A fresh aggregate timestamp does not prove every input is fresh, and the
+    reserves side leans heavily on manually uploaded document reports. Deduped
+    until the feed recovers.
+
+    Args:
+        report: Report the staleness was detected on.
+        reason: Human-readable description of what is stale.
+    """
+    logger.warning("Accountable feed %s is stale: %s", ACCOUNTABLE_FEED.dfid, reason)
+
+    if get_cache_int(CACHE_KEY_ACCOUNTABLE_STALE_ALERTED):
+        return
+
+    message = (
+        f"⚠️ *3Jane Proof of Solvency Stale*\n"
+        f"{_format_accountable_report(report)}\n"
+        f"🕳️ {escape_markdown(reason)}\n"
+        f"⚠️ Collateral ratio may not reflect current positions\n"
+        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.dashboard_url})"
+    )
+    _accountable_alert(AlertSeverity.MEDIUM, message)
+    set_cache_value(CACHE_KEY_ACCOUNTABLE_STALE_ALERTED, 1)
+
+
+def check_accountable_availability(reason: str) -> None:
+    """Track consecutive feed failures and alert once they become persistent.
+
+    Isolated failures are logged only; the alert fires when the feed has been
+    unusable for enough consecutive runs that we are effectively flying blind.
+
+    Args:
+        reason: Why the feed was unusable this run.
+    """
+    streak = get_cache_int(CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK) + 1
+    set_cache_value(CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK, streak)
+    logger.warning("Accountable feed unusable (%d consecutive): %s", streak, reason)
+
+    if streak < ACCOUNTABLE_MAX_CONSECUTIVE_FAILURES or get_cache_int(CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED):
+        return
+
+    message = (
+        f"⚠️ *3Jane Proof of Solvency Unavailable*\n"
+        f"📡 Failed {streak} consecutive runs\n"
+        f"❌ {escape_markdown(reason)}\n"
+        f"⚠️ Collateral ratio is not being monitored\n"
+        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.dashboard_url})"
+    )
+    _accountable_alert(AlertSeverity.MEDIUM, message)
+    set_cache_value(CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED, 1)
+
+
+def check_accountable_solvency() -> None:
+    """Fetch and evaluate the Accountable Proof of Solvency feed.
+
+    Runs in its own failure boundary: any error here is logged and swallowed so
+    the onchain 3Jane checks always complete.
+    """
+    try:
+        result = fetch_report(ACCOUNTABLE_FEED)
+
+        if result.status is AccountableStatus.UNAVAILABLE or result.report is None:
+            check_accountable_availability(result.reason or "unknown error")
+            return
+
+        # Reachable and parseable: clear any outstanding availability alert.
+        if get_cache_int(CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK):
+            set_cache_value(CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK, 0)
+        if get_cache_int(CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED):
+            set_cache_value(CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED, 0)
+
+        report = result.report
+        if result.status is AccountableStatus.STALE:
+            check_accountable_staleness(report, result.reason)
+        elif get_cache_int(CACHE_KEY_ACCOUNTABLE_STALE_ALERTED):
+            set_cache_value(CACHE_KEY_ACCOUNTABLE_STALE_ALERTED, 0)
+
+        # The ratio is still evaluated on a stale report: an undercollateralized
+        # reading matters even when the inputs behind it have aged.
+        check_accountable_collateral_band(report)
+    except Exception as e:
+        logger.error("Error during Accountable Proof of Solvency check: %s", e)
+
+
 def main() -> None:
     """Run all 3Jane monitoring checks."""
     logger.info("Starting 3Jane monitoring...")
+
+    # Runs before the onchain reads and inside its own failure boundary, so the
+    # solvency feed is checked even when RPC access is degraded.
+    check_accountable_solvency()
 
     client = ChainManager.get_client(Chain.MAINNET)
     usd3_vault = client.eth.contract(address=USD3_ADDRESS, abi=ABI_VAULT)

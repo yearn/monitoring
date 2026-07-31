@@ -15,6 +15,7 @@
 - **Nominal sUSD3 Backing Floor:** `ProtocolConfig.config(keccak256("SUSD3_NOMINAL_BACKING_FLOOR"))` vs cached prior. Alerts on any change (governance lever). Separate alert-once when the floor exceeds sUSD3's USD3 holdings valued in USDC — sUSD3 redemptions can be blocked while floor > backing.
 - **Protocol Pause:** `ProtocolConfig.config(keccak256("IS_PAUSED"))`. Alert-once on transition to true. Distinct from per-vault `isShutdown()` — pauses the underlying credit market.
 - **Borrower Default Watch:** optional Envio-backed borrower default risk feed. The Envio indexer maintains `ThreeJaneBorrowerMarket` rows from MorphoCredit events, and the monitor computes the current delinquent/default status at runtime. Alerts are **MEDIUM only** and deduped per borrower/cycle/default milestone.
+- **Proof of Solvency:** [Accountable](https://accountable.3jane.xyz/) collateral ratio (reserves / liabilities). Alerts **CRITICAL below 100%** and **HIGH below 105%**, plus freshness and availability alerts. See [Proof of Solvency](#proof-of-solvency) below.
 
 ## Key Contracts
 
@@ -43,6 +44,10 @@
 | Nominal floor breach | Floor > sUSD3 backing valued in USDC (alert-once) | MEDIUM |
 | Protocol paused | `IS_PAUSED` transitions to true (alert-once) | CRITICAL |
 | Borrower delinquent/default watch | New milestone: delinquent, ≤14d, ≤7d, ≤3d, ≤1d, default | MEDIUM |
+| Accountable collateral ratio | < 100% for 2 consecutive runs (band transition) | CRITICAL |
+| Accountable collateral ratio | < 105% (band transition) | HIGH |
+| Accountable feed stale | Report or a required source outruns its cadence + grace (alert-once) | MEDIUM |
+| Accountable feed unavailable | 3 consecutive unusable runs (alert-once) | MEDIUM |
 | Monitoring run failure | Uncaught exception in `main()` | LOW |
 
 ## Borrower default watch
@@ -79,6 +84,36 @@ The monitor expects Envio to expose a `ThreeJaneBorrowerMarket` entity with at l
 The indexer should populate/update that entity from `SetCreditLine`, `Borrow`, `Repay`, `PaymentCycleCreated`, `RepaymentObligationPosted`, `RepaymentTracked`, `DefaultStarted`, `DefaultCleared`, and `AccountSettled` events on `MorphoCredit`.
 
 The current countdown and alert bucket are intentionally computed in this monitoring script, not in Envio, because they depend on wall-clock time. Grace and delinquency windows default to 7 days and 23 days respectively in the indexer, and can be overridden there with `THREE_JANE_GRACE_PERIOD_SECONDS` and `THREE_JANE_DELINQUENCY_PERIOD_SECONDS`.
+
+## Proof of Solvency
+
+[Accountable](https://docs.accountable.capital/accountable-documentation/proof-of-solvency) publishes a TEE-attested Proof of Solvency dashboard for 3Jane (feed id `100000026`). The full report is served as public JSON from `https://accountable.3jane.xyz/dashboard`; override with `THREE_JANE_ACCOUNTABLE_URL` if the endpoint moves. No API key is required.
+
+The client lives in [`utils/accountable.py`](../../utils/accountable.py) and is keyed by data feed id (DFID), so other Accountable feeds can be added without a rewrite. The request is URL/type-based and neither sends nor echoes the DFID, so feed identity is bound explicitly in config.
+
+### Ratio is recomputed, not read
+
+The API rounds `collateralization` to six decimals. Near the alert boundary that is a missed-insolvency path: a true ratio of `0.9999996` would present as `1.0` and pass a `< 1.00` test. The monitor therefore computes the ratio from `total_reserves / total_supply` at full precision and uses the reported field only as a consistency cross-check (tolerance ≥1e-6, since the server's own rounding sets the floor).
+
+`net` and `collateralization` are defined against *liabilities*, which equal `total_supply` only for a USD-pegged feed. The client asserts `total_supply.fx == 1` rather than assuming it, so a non-pegged feed fails loudly instead of silently comparing against the wrong denominator.
+
+### Freshness is per source, not global
+
+A fresh aggregate timestamp does not prove every input is fresh, and this matters more than usual here: `reserves_split` is essentially all "Morpho Credit", of which the bulk is off-chain loan receivables priced by manually uploaded document reports. Those routinely run past their declared cadence.
+
+Staleness budgets are therefore keyed by source `type` — `Document Report` sources get a 7-day grace on top of their declared frequency, everything else gets 2 hours. Sources with an unrecognised cadence are skipped rather than flagged, so a schema addition on Accountable's side cannot spuriously page us.
+
+### Alert banding
+
+Alerts fire on **band transitions** (`OK → HIGH → CRITICAL`), not on every worsening tick — the live margin sits a few basis points above 100%, so a drop-based dedupe would alert constantly. Recovering to a healthier band re-arms the ones above it without alerting.
+
+CRITICAL additionally requires **two consecutive** sub-100% runs. A single reading below 100% is reported as HIGH, so it is still visible but does not escalate on what is more likely a stale document-report refresh than genuine insolvency.
+
+### No emergency dispatch
+
+Accountable alerts are sent with protocol key `3jane-accountable` and channel `3jane`. They reach the normal 3Jane Telegram channel at full severity, but the protocol key is deliberately **absent** from `utils.dispatch.DISPATCHABLE_PROTOCOLS`, so a CRITICAL here cannot trigger the emergency cap-zeroing webhook.
+
+This is intentional for v1: the live collateral margin is only a few basis points, and the feed's noise profile needs a burn-in period before it should be allowed to drive automated action. Revisit once there is enough operating history — see issue #327.
 
 ## Alert dispatch
 
