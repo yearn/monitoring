@@ -98,6 +98,7 @@ CACHE_KEY_USD3_OC_ALERTED = "3JANE_USD3_OC_ALERTED"
 CACHE_KEY_WITHDRAW_LIMIT_ALERTED = "3JANE_WITHDRAW_LIMIT_ALERTED"
 CACHE_KEY_ACCOUNTABLE_BAND = "3JANE_ACCOUNTABLE_BAND"
 CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK = "3JANE_ACCOUNTABLE_CRITICAL_STREAK"
+CACHE_KEY_ACCOUNTABLE_CRITICAL_LAST_TS = "3JANE_ACCOUNTABLE_CRITICAL_LAST_TS"
 CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK = "3JANE_ACCOUNTABLE_FAILURE_STREAK"
 CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED = "3JANE_ACCOUNTABLE_HEALTH_ALERTED"
 CACHE_KEY_ACCOUNTABLE_STALE_ALERTED = "3JANE_ACCOUNTABLE_STALE_ALERTED"
@@ -119,6 +120,12 @@ ACCOUNTABLE_FEED = AccountableFeedConfig(
     dfid="100000026",
     dashboard_url=os.getenv("THREE_JANE_ACCOUNTABLE_URL", "https://accountable.3jane.xyz/dashboard"),
     dashboard_type="three-jane",
+    required_sources=(
+        "LendSwift - Warehouse Senior Note",
+        "USD3 Minted Liabilities",
+        "Slope - Forward Flows",
+        "USD3 On-Chain Reserves",
+    ),
 )
 ACCOUNTABLE_CRITICAL_RATIO = Decimal("1.00")  # Reserves below liabilities
 ACCOUNTABLE_HIGH_RATIO = Decimal("1.05")
@@ -964,26 +971,49 @@ def classify_collateral_band(ratio: Decimal) -> str:
     return ACCOUNTABLE_BAND_OK
 
 
-def resolve_confirmed_band(observed_band: str) -> str:
+def _reset_accountable_critical_confirmation() -> None:
+    """Clear partial CRITICAL confirmation after a gap or non-critical report."""
+    if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK):
+        set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK, 0)
+    if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_LAST_TS):
+        set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_LAST_TS, 0)
+
+
+def resolve_confirmed_band(observed_band: str, report_ts_ms: int) -> str:
     """Apply consecutive-run confirmation before promoting to CRITICAL.
 
     A first sub-100% reading is reported as HIGH so it is still visible, and only
-    a second consecutive reading escalates to CRITICAL. Any non-critical reading
-    resets the streak.
+    a second consecutive, newer report escalates to CRITICAL. Re-polling a frozen
+    report cannot confirm itself. Any non-critical or unavailable reading resets
+    the streak.
 
     Args:
         observed_band: Band implied by the current ratio alone.
+        report_ts_ms: Aggregate report timestamp used to distinguish observations.
 
     Returns:
         The band to act on for this run.
     """
     if observed_band != ACCOUNTABLE_BAND_CRITICAL:
-        if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK):
-            set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK, 0)
+        _reset_accountable_critical_confirmation()
         return observed_band
 
-    streak = get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK) + 1
-    set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK, streak)
+    streak = get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK)
+    last_ts_ms = get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_LAST_TS)
+    if report_ts_ms > last_ts_ms:
+        streak += 1
+        set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK, streak)
+        set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_LAST_TS, report_ts_ms)
+    else:
+        logger.info(
+            "Accountable collateral remains below %s on unchanged/out-of-order report %d (last %d); "
+            "confirmation stays at %d/%d",
+            ACCOUNTABLE_CRITICAL_RATIO,
+            report_ts_ms,
+            last_ts_ms,
+            streak,
+            ACCOUNTABLE_CRITICAL_CONFIRMATIONS,
+        )
     if streak >= ACCOUNTABLE_CRITICAL_CONFIRMATIONS:
         return ACCOUNTABLE_BAND_CRITICAL
 
@@ -1019,7 +1049,7 @@ def check_accountable_collateral_band(report: AccountableReport) -> None:
         report: Validated Proof of Solvency report.
     """
     observed_band = classify_collateral_band(report.collateralization)
-    band = resolve_confirmed_band(observed_band)
+    band = resolve_confirmed_band(observed_band, report.ts_ms)
     previous_band = _get_cache_str(CACHE_KEY_ACCOUNTABLE_BAND, ACCOUNTABLE_BAND_OK)
 
     logger.info(
@@ -1090,6 +1120,9 @@ def check_accountable_availability(reason: str) -> None:
     Args:
         reason: Why the feed was unusable this run.
     """
+    # An unusable run breaks the sequence of confirmed collateral observations.
+    _reset_accountable_critical_confirmation()
+
     streak = get_cache_int(CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK) + 1
     set_cache_value(CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK, streak)
     logger.warning("Accountable feed unusable (%d consecutive): %s", streak, reason)

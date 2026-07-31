@@ -28,6 +28,12 @@ CONFIG = AccountableFeedConfig(
     dfid="100000026",
     dashboard_url="https://accountable.3jane.xyz/dashboard",
     dashboard_type="three-jane",
+    required_sources=(
+        "LendSwift - Warehouse Senior Note",
+        "USD3 Minted Liabilities",
+        "Slope - Forward Flows",
+        "USD3 On-Chain Reserves",
+    ),
 )
 
 
@@ -169,6 +175,19 @@ def test_rejects_non_usd_pegged_feed() -> None:
         parse_report(payload, CONFIG, FIXTURE_NOW_MS)
 
 
+def test_rejects_non_usd_liabilities_when_fx_is_omitted() -> None:
+    """Independent net/ratio identities must enforce the USD denominator."""
+    payload = load_payload()
+    reserves = Decimal(str(payload["data"]["reserves"]["total_reserves"]["value"]))
+    supply = Decimal(str(payload["data"]["reserves"]["total_supply"]["value"]))
+    liabilities = supply * Decimal("0.92")
+    payload["data"]["net"] = float(reserves - liabilities)
+    payload["data"]["collateralization"] = float(round(reserves / liabilities, 6))
+
+    with pytest.raises(AccountableError, match="fx is missing"):
+        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+
+
 def test_rejects_future_timestamp() -> None:
     payload = load_payload()
     payload["data"]["ts"] = str(FIXTURE_NOW_MS + 86_400_000)
@@ -241,6 +260,23 @@ def test_unparseable_source_frequency_is_skipped_not_flagged_stale() -> None:
     assert result.status is AccountableStatus.OK
     assert result.report is not None
     assert all(source.name != "Mystery Source" for source in result.report.sources)
+
+
+def test_missing_required_source_is_rejected() -> None:
+    payload = load_payload()
+    del payload["data"]["dataSources"]["Slope - Forward Flows"]
+
+    with pytest.raises(AccountableError, match="required dataSources are missing.*Slope"):
+        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+
+
+@pytest.mark.parametrize("field", ["frequency", "lastUpdated", "type"])
+def test_malformed_required_source_is_rejected(field: str) -> None:
+    payload = load_payload()
+    del payload["data"]["dataSources"]["USD3 On-Chain Reserves"][field]
+
+    with pytest.raises(AccountableError, match="USD3 On-Chain Reserves"):
+        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
 
 
 # --- fetch_report network behaviour ---

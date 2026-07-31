@@ -95,19 +95,19 @@ The client lives in [`utils/accountable.py`](../../utils/accountable.py) and is 
 
 The API rounds `collateralization` to six decimals. Near the alert boundary that is a missed-insolvency path: a true ratio of `0.9999996` would present as `1.0` and pass a `< 1.00` test. The monitor therefore computes the ratio from `total_reserves / total_supply` at full precision and uses the reported field only as a consistency cross-check (tolerance ≥1e-6, since the server's own rounding sets the floor).
 
-`net` and `collateralization` are defined against *liabilities*, which equal `total_supply` only for a USD-pegged feed. The client asserts `total_supply.fx == 1` rather than assuming it, so a non-pegged feed fails loudly instead of silently comparing against the wrong denominator.
+`net` and `collateralization` are defined against *liabilities*, which equal `total_supply` only for a USD-pegged feed. The client asserts `total_supply.fx == 1` when the field is present. The live response currently omits it, so that path independently derives liabilities from `total_reserves - net` and requires them to match raw supply; a non-pegged feed still fails loudly instead of silently comparing against the wrong denominator.
 
 ### Freshness is per source, not global
 
 A fresh aggregate timestamp does not prove every input is fresh, and this matters more than usual here: `reserves_split` is essentially all "Morpho Credit", of which the bulk is off-chain loan receivables priced by manually uploaded document reports. Those routinely run past their declared cadence.
 
-Staleness budgets are therefore keyed by source `type` — `Document Report` sources get a 7-day grace on top of their declared frequency, everything else gets 2 hours. Sources with an unrecognised cadence are skipped rather than flagged, so a schema addition on Accountable's side cannot spuriously page us.
+Staleness budgets are therefore keyed by source `type` — `Document Report` sources get a 7-day grace on top of their declared frequency, everything else gets 2 hours. The four known 3Jane sources are required and a missing or malformed freshness record makes the feed unavailable. Unknown additional sources with an unrecognised cadence are skipped rather than flagged, so a schema addition on Accountable's side cannot spuriously page us.
 
 ### Alert banding
 
 Alerts fire on **band transitions** (`OK → HIGH → CRITICAL`), not on every worsening tick — the live margin sits a few basis points above 100%, so a drop-based dedupe would alert constantly. Recovering to a healthier band re-arms the ones above it without alerting.
 
-CRITICAL additionally requires **two consecutive** sub-100% runs. A single reading below 100% is reported as HIGH, so it is still visible but does not escalate on what is more likely a stale document-report refresh than genuine insolvency.
+CRITICAL additionally requires **two consecutive, newer reports** below 100%. Re-polling the same frozen report cannot confirm it, and an unavailable run resets partial confirmation. A single reading below 100% is reported as HIGH, so it is still visible but does not escalate on what is more likely a stale document-report refresh than genuine insolvency.
 
 ### No emergency dispatch
 

@@ -506,7 +506,12 @@ def test_parse_envio_borrower_default_watch_rows_default_started_forces_default(
 # --- Accountable Proof of Solvency ---
 
 
-def make_accountable_report(module: ModuleType, ratio: str, age_seconds: int = 300):
+def make_accountable_report(
+    module: ModuleType,
+    ratio: str,
+    age_seconds: int = 300,
+    ts_ms: int = 1_785_490_814_726,
+):
     """Build a report whose totals produce the requested collateral ratio."""
     from decimal import Decimal
 
@@ -514,7 +519,6 @@ def make_accountable_report(module: ModuleType, ratio: str, age_seconds: int = 3
 
     supply = Decimal("75000000")
     reserves = supply * Decimal(ratio)
-    ts_ms = 1_785_490_814_726
     return AccountableReport(
         dfid="100000026",
         collateralization=reserves / supply,
@@ -569,16 +573,31 @@ def test_accountable_critical_requires_two_consecutive_runs(monkeypatch: pytest.
     alerts: list = []
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
-    report = make_accountable_report(module, "0.98")
+    first_report = make_accountable_report(module, "0.98")
+    second_report = make_accountable_report(module, "0.98", ts_ms=first_report.ts_ms + 1)
 
-    module.check_accountable_collateral_band(report)
+    module.check_accountable_collateral_band(first_report)
     assert len(alerts) == 1
     assert alerts[0].severity == module.AlertSeverity.HIGH
 
-    module.check_accountable_collateral_band(report)
+    module.check_accountable_collateral_band(second_report)
     assert len(alerts) == 2
     assert alerts[1].severity == module.AlertSeverity.CRITICAL
     assert "undercollateralized" in alerts[1].message
+
+
+def test_accountable_frozen_report_does_not_confirm_critical(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    cache = stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+    report = make_accountable_report(module, "0.98")
+
+    module.check_accountable_collateral_band(report)
+    module.check_accountable_collateral_band(report)
+
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.HIGH]
+    assert cache[module.CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK] == "1"
 
 
 def test_accountable_critical_streak_resets_on_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -631,10 +650,11 @@ def test_accountable_alerts_never_trigger_emergency_dispatch(monkeypatch: pytest
     alerts: list = []
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
-    report = make_accountable_report(module, "0.98")
+    first_report = make_accountable_report(module, "0.98")
+    second_report = make_accountable_report(module, "0.98", ts_ms=first_report.ts_ms + 1)
 
-    module.check_accountable_collateral_band(report)
-    module.check_accountable_collateral_band(report)
+    module.check_accountable_collateral_band(first_report)
+    module.check_accountable_collateral_band(second_report)
 
     assert alerts[-1].severity == module.AlertSeverity.CRITICAL
     assert alerts[-1].protocol == module.ACCOUNTABLE_ALERT_PROTOCOL
@@ -642,6 +662,24 @@ def test_accountable_alerts_never_trigger_emergency_dispatch(monkeypatch: pytest
     # Still routed to the normal 3Jane Telegram channel.
     assert alerts[-1].channel == module.PROTOCOL
     assert module.PROTOCOL in DISPATCHABLE_PROTOCOLS
+
+
+def test_accountable_unavailable_run_breaks_critical_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    cache = stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+    first_ts = 1_785_490_814_726
+
+    module.check_accountable_collateral_band(make_accountable_report(module, "0.98", ts_ms=first_ts))
+    module.check_accountable_availability("connection refused")
+    module.check_accountable_collateral_band(make_accountable_report(module, "0.98", ts_ms=first_ts + 1))
+
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.HIGH]
+    assert cache[module.CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK] == "1"
+
+    module.check_accountable_collateral_band(make_accountable_report(module, "0.98", ts_ms=first_ts + 2))
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.HIGH, module.AlertSeverity.CRITICAL]
 
 
 def test_accountable_staleness_alerts_once(monkeypatch: pytest.MonkeyPatch) -> None:

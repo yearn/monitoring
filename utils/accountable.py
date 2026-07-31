@@ -115,12 +115,14 @@ class AccountableFeedConfig:
         dfid: Accountable data feed id, e.g. ``"100000026"``.
         dashboard_url: Public JSON endpoint for the report.
         dashboard_type: Dashboard type the endpoint serves, e.g. ``"three-jane"``.
+        required_sources: Source names that must carry usable freshness metadata.
         max_report_age_seconds: Aggregate report age beyond which it is stale.
     """
 
     dfid: str
     dashboard_url: str
     dashboard_type: str
+    required_sources: tuple[str, ...] = ()
     max_report_age_seconds: int = 6 * SECONDS_PER_HOUR
 
 
@@ -268,31 +270,55 @@ def parse_frequency_seconds(frequency: Any) -> int | None:
     return quantity * _FREQUENCY_UNIT_SECONDS[unit]
 
 
-def _parse_data_sources(payload: Any, now_ms: int) -> tuple[DataSourceSnapshot, ...]:
+def _parse_data_sources(
+    payload: Any,
+    now_ms: int,
+    required_sources: tuple[str, ...] = (),
+) -> tuple[DataSourceSnapshot, ...]:
     """Build source snapshots with per-source-type staleness budgets.
 
-    Sources with an unrecognised cadence or missing timestamp are skipped rather
-    than treated as stale, so an Accountable schema addition cannot spuriously
-    page us.
+    Unknown sources with an unrecognised cadence or missing timestamp are
+    skipped, so an Accountable schema addition cannot spuriously page us. A
+    configured required source must be present and fully parseable; otherwise
+    freshness can no longer be established and the report is rejected.
     """
     if not isinstance(payload, dict):
+        if required_sources:
+            raise AccountableError("dataSources is missing or not an object")
         return ()
+
+    required = set(required_sources)
+    missing = sorted(required.difference(payload))
+    if missing:
+        raise AccountableError(f"required dataSources are missing: {', '.join(missing)}")
 
     snapshots: list[DataSourceSnapshot] = []
     for name, entry in payload.items():
         if not isinstance(entry, dict):
+            if name in required:
+                raise AccountableError(f"dataSources.{name} is not an object")
             continue
         cadence_seconds = parse_frequency_seconds(entry.get("frequency"))
         if cadence_seconds is None:
+            if name in required:
+                raise AccountableError(f"dataSources.{name}.frequency is not recognised: {entry.get('frequency')!r}")
             logger.debug("Accountable source %s has unparseable frequency %r", name, entry.get("frequency"))
             continue
         try:
             last_updated_ms = _coerce_int(entry.get("lastUpdated"), f"dataSources.{name}.lastUpdated")
         except AccountableError:
+            if name in required:
+                raise
             logger.debug("Accountable source %s has no usable lastUpdated", name)
             continue
 
-        source_type = str(entry.get("type") or "")
+        source_type_value = entry.get("type")
+        if not isinstance(source_type_value, str) or not source_type_value.strip():
+            if name in required:
+                raise AccountableError(f"dataSources.{name}.type is missing or not a string")
+            source_type = ""
+        else:
+            source_type = source_type_value
         grace = SOURCE_TYPE_GRACE_SECONDS.get(source_type, DEFAULT_SOURCE_GRACE_SECONDS)
         snapshots.append(
             DataSourceSnapshot(
@@ -333,6 +359,38 @@ def _validate_consistency(
         raise AccountableError(f"net {net} disagrees with total_reserves - total_supply {expected_net}")
 
 
+def _validate_usd_supply(
+    supply_entry: dict[str, Any],
+    net: Decimal,
+    total_reserves: Decimal,
+    total_supply: Decimal,
+) -> None:
+    """Establish that raw supply is the USD liability denominator.
+
+    Accountable documents ``total_supply.fx`` as 1 for USD-pegged feeds, but the
+    live 3Jane response currently omits the field. When present, require it to be
+    exactly 1. When absent, derive liabilities independently from ``reserves -
+    net`` and require those liabilities to match raw supply within the same
+    rounding tolerance used by the net consistency check.
+    """
+    if "fx" in supply_entry:
+        fx = _coerce_decimal(supply_entry["fx"], "total_supply.fx")
+        if fx != 1:
+            raise AccountableError(f"total_supply.fx is {fx}, expected 1 (non-USD-pegged feed is unsupported)")
+        return
+
+    net_tolerance = max(
+        NET_CONSISTENCY_ABSOLUTE_TOLERANCE,
+        NET_CONSISTENCY_RELATIVE_TOLERANCE * abs(total_reserves),
+    )
+    implied_liabilities = total_reserves - net
+    if abs(implied_liabilities - total_supply) > net_tolerance:
+        raise AccountableError(
+            "total_supply.fx is missing and total_supply does not match "
+            f"USD liabilities implied by reserves - net ({implied_liabilities})"
+        )
+
+
 def parse_report(payload: Any, config: AccountableFeedConfig, now_ms: int) -> AccountableReport:
     """Validate a raw dashboard payload into an :class:`AccountableReport`.
 
@@ -356,18 +414,14 @@ def parse_report(payload: Any, config: AccountableFeedConfig, now_ms: int) -> Ac
     if total_reserves < MIN_PLAUSIBLE_TOTAL or total_supply < MIN_PLAUSIBLE_TOTAL:
         raise AccountableError(f"implausible totals: reserves={total_reserves}, supply={total_supply}")
 
-    # The docs define collateralization and net against liabilities, which equal
-    # total_supply only for a USD-pegged feed (total_supply.fx == 1). Assert it
-    # rather than assume, so a non-pegged feed fails loudly instead of silently
-    # comparing against the wrong denominator.
     supply_entry = _require_mapping(reserves.get("total_supply"), "total_supply")
-    if "fx" in supply_entry:
-        fx = _coerce_decimal(supply_entry["fx"], "total_supply.fx")
-        if fx != 1:
-            raise AccountableError(f"total_supply.fx is {fx}, expected 1 (non-USD-pegged feed is unsupported)")
-
     reported_collateralization = _coerce_decimal(data.get("collateralization"), "collateralization")
     net = _coerce_decimal(data.get("net"), "net")
+
+    # The docs define collateralization and net against liabilities, which equal
+    # raw total_supply only for a USD-pegged feed. Validate the explicit fx when
+    # available, or establish the equivalent invariant from reserves - net.
+    _validate_usd_supply(supply_entry, net, total_reserves, total_supply)
 
     collateralization = total_reserves / total_supply
     if not MIN_PLAUSIBLE_RATIO <= collateralization <= MAX_PLAUSIBLE_RATIO:
@@ -390,7 +444,7 @@ def parse_report(payload: Any, config: AccountableFeedConfig, now_ms: int) -> Ac
         verifiability=_coerce_decimal(reserves.get("verifiability"), "reserves.verifiability"),
         ts_ms=ts_ms,
         report_age_seconds=max(0, age_seconds),
-        sources=_parse_data_sources(data.get("dataSources"), now_ms),
+        sources=_parse_data_sources(data.get("dataSources"), now_ms, config.required_sources),
     )
 
 
