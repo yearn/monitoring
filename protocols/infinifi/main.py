@@ -1,3 +1,4 @@
+import time
 from decimal import Decimal
 
 import requests
@@ -20,6 +21,7 @@ IUSD_ADDRESS = Web3.to_checksum_address("0x48f9e38f3070AD8945DFEae3FA70987722E3D
 IUSD_DECIMALS = 18
 
 LIQUID_RESERVES_THRESHOLD = 8_000_000
+LIQUID_RESERVES_STALE_AFTER_SECONDS = 12 * 60 * 60  # re-arm crossing alert if cache is older than 12h
 BACKING_PER_IUSD_MIN = 0.999
 MINT_THRESHOLD_PERCENT = Decimal(Config.get_env("IUSD_LARGE_MINT_THRESHOLD_PERCENT", "0.05"))
 REDEMPTION_TO_LIQUID_RATIO_MAX = 0.8
@@ -216,7 +218,23 @@ def main():
         # Alert 1: Low Liquid Reserves
         if liquid_reserves > 0:
             cache_key_reserves = f"{PROTOCOL}_liquid_reserves"
+            cache_key_reserves_ts = f"{PROTOCOL}_liquid_reserves_ts"
             last_reserves = float(get_last_value_for_key_from_file(cache_filename, cache_key_reserves))
+            last_reserves_ts_raw = get_last_value_for_key_from_file(cache_filename, cache_key_reserves_ts)
+            try:
+                last_reserves_ts = int(last_reserves_ts_raw)
+            except (TypeError, ValueError):
+                last_reserves_ts = 0
+
+            # If the cached value is older than LIQUID_RESERVES_STALE_AFTER_SECONDS, treat the
+            # previous reading as "above threshold" so the crossing alert can re-arm after a
+            # long outage instead of being stuck in the "already alerted" state.
+            if last_reserves_ts > 0 and (time.time() - last_reserves_ts) > LIQUID_RESERVES_STALE_AFTER_SECONDS:
+                logger.info(
+                    "Liquid reserves cache is stale (last update > %sh ago); re-arming crossing detection",
+                    LIQUID_RESERVES_STALE_AFTER_SECONDS // 3600,
+                )
+                last_reserves = LIQUID_RESERVES_THRESHOLD
 
             if (
                 last_reserves != 0
@@ -234,6 +252,7 @@ def main():
                 send_alert(Alert(AlertSeverity.HIGH, msg, PROTOCOL))
 
             write_last_value_to_file(cache_filename, cache_key_reserves, liquid_reserves)
+            write_last_value_to_file(cache_filename, cache_key_reserves_ts, int(time.time()))
 
         # Alert 2 and Alert 3 intentionally disabled:
         # reserveRatio and illiquidTargetRatio have been persistently violated since inception,
