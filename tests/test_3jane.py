@@ -22,6 +22,13 @@ def stub_cache(monkeypatch: pytest.MonkeyPatch, module: ModuleType) -> dict[str,
     cache: dict[str, str] = {}
     monkeypatch.setattr(module, "get_last_value_for_key_from_file", lambda _filename, key: cache.get(key, 0))
     monkeypatch.setattr(module, "set_cache_value", lambda key, value: cache.__setitem__(key, str(value)))
+    monkeypatch.setattr(module, "get_fresh_cache_value", lambda key: float(cache.get(key, 0)))
+    monkeypatch.setattr(module, "set_fresh_cache_value", lambda key, value: cache.__setitem__(key, str(value)))
+    monkeypatch.setattr(
+        module,
+        "get_fresh_last_value_for_key_from_file",
+        lambda _filename, key, _stale_after: cache.get(key, 0),
+    )
     return cache
 
 

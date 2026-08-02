@@ -29,3 +29,6 @@ Large mint monitoring is integrated into [liquidity.py](./liquidity.py).
 It intentionally does **not** scan events. Instead, it compares cached `totalSupply` values and alerts when the increase is above:
 
 - `CUSD_LARGE_MINT_THRESHOLD_PERCENT` (default: `0.05`, i.e. `5%` of previous `totalSupply`)
+
+The daily supply baseline expires after 36 hours and initializes from the next valid observation, preventing multiple
+missed daily runs from being treated as one large mint interval.

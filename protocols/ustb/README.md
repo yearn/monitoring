@@ -29,6 +29,9 @@ Monitors the [Superstate Short Duration US Government Securities Fund (USTB)](ht
 
 - **Large supply change**: HIGH alert if USTB total supply changes by more than **+/-10%** compared to the previous hourly run.
 
+The supply baseline expires after 3 hours and initializes from the next valid observation. NAV monotonicity history
+does not expire because a cumulative NAV decrease remains actionable after an outage.
+
 ### Oracle Staleness
 
 - **Stale oracle**: HIGH alert if the latest checkpoint `effectiveAt` timestamp is more than **4 days** (345,600s) old. The SuperstateOracle reverts at 5 days (432,000s), so this provides a 1-day buffer.

@@ -45,6 +45,13 @@
 | Borrower delinquent/default watch | New milestone: delinquent, ≤14d, ≤7d, ≤3d, ≤1d, default | MEDIUM |
 | Monitoring run failure | Uncaught exception in `main()` | LOW |
 
+## Cache Freshness
+
+TVL delta baselines expire after 3 hours and initialize from the next valid observation. Current-state and threshold
+dedupe for junior buffer, USD3 OC, withdraw liquidity, vault shutdown, nominal-floor breach, and protocol pause is
+re-armed after the same monitoring gap. PPS, insurance-fund, governance-value, and borrower-event history does not
+expire.
+
 ## Borrower default watch
 
 Set `ENVIO_GRAPHQL_URL` to the 3Jane Envio GraphQL endpoint to enable proactive borrower monitoring. Without this env var, the borrower default watch is skipped and all other 3Jane checks continue normally.

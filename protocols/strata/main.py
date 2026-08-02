@@ -1,7 +1,14 @@
 from web3 import Web3
 
 from utils.abi import load_abi
-from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
+from utils.cache import (
+    DAILY_CACHE_STALE_AFTER_SECONDS,
+    cache_filename,
+    get_fresh_last_value_for_key_from_file,
+    get_last_value_for_key_from_file,
+    write_last_value_to_file,
+    write_last_value_with_timestamp_to_file,
+)
 from utils.chains import Chain
 from utils.logger import get_logger
 from utils.telegram import send_error_message, send_telegram_message
@@ -60,16 +67,30 @@ def _set_cache_float(key: str, value: float) -> None:
     write_last_value_to_file(cache_filename, key, value)
 
 
+def _fresh_cache_float(key: str) -> float | None:
+    value = get_fresh_last_value_for_key_from_file(cache_filename, key, DAILY_CACHE_STALE_AFTER_SECONDS)
+    if value == 0:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _set_fresh_cache_float(key: str, value: float) -> None:
+    write_last_value_with_timestamp_to_file(cache_filename, key, value)
+
+
 def _breach_once(cache_key: str, condition: bool, message: str, messages: list[str]) -> None:
-    raw_state = get_last_value_for_key_from_file(cache_filename, cache_key)
+    raw_state = get_fresh_last_value_for_key_from_file(cache_filename, cache_key, DAILY_CACHE_STALE_AFTER_SECONDS)
     state = int(float(raw_state)) if raw_state != 0 else 0
 
     if condition:
         if state == 0:
             messages.append(message)
-        write_last_value_to_file(cache_filename, cache_key, 1)
-    elif state == 1:
-        write_last_value_to_file(cache_filename, cache_key, 0)
+        write_last_value_with_timestamp_to_file(cache_filename, cache_key, 1)
+    else:
+        write_last_value_with_timestamp_to_file(cache_filename, cache_key, 0)
 
 
 def _check_susde_vault(messages: list[str], client, susde_vault, cooldown_contract) -> None:
@@ -111,7 +132,7 @@ def _check_susde_vault(messages: list[str], client, susde_vault, cooldown_contra
 
 def _check_daily_tvl(messages: list[str], total_deposits: float) -> None:
     tvl_cache_key = f"{PROTOCOL}_total_deposits"
-    previous_total_deposits = _cache_float(tvl_cache_key)
+    previous_total_deposits = _fresh_cache_float(tvl_cache_key)
     if previous_total_deposits is not None and previous_total_deposits > 0:
         tvl_change = (total_deposits - previous_total_deposits) / previous_total_deposits
         if abs(tvl_change) >= TVL_CHANGE_ALERT_RATIO:
@@ -119,12 +140,12 @@ def _check_daily_tvl(messages: list[str], total_deposits: float) -> None:
                 "⚠️ Strata total TVL changed significantly.\n"
                 f"previous: ${previous_total_deposits:,.2f} current: ${total_deposits:,.2f} ({tvl_change:.2%})"
             )
-    _set_cache_float(tvl_cache_key, total_deposits)
+    _set_fresh_cache_float(tvl_cache_key, total_deposits)
 
 
 def _check_jr_drain(messages: list[str], jr_assets: float) -> None:
     jr_assets_cache_key = f"{PROTOCOL}_jr_assets"
-    previous_jr_assets = _cache_float(jr_assets_cache_key)
+    previous_jr_assets = _fresh_cache_float(jr_assets_cache_key)
     if previous_jr_assets is not None and previous_jr_assets > 0:
         jr_change = (jr_assets - previous_jr_assets) / previous_jr_assets
         if jr_change <= -JR_DRAIN_ALERT_RATIO:
@@ -132,7 +153,7 @@ def _check_jr_drain(messages: list[str], jr_assets: float) -> None:
                 "⚠️ jrUSDe totalAssets dropped quickly (junior side draining).\n"
                 f"previous: ${previous_jr_assets:,.2f} current: ${jr_assets:,.2f} ({jr_change:.2%})"
             )
-    _set_cache_float(jr_assets_cache_key, jr_assets)
+    _set_fresh_cache_float(jr_assets_cache_key, jr_assets)
 
 
 def main() -> None:
@@ -201,7 +222,7 @@ def main() -> None:
         _set_cache_float(sr_rate_cache_key, sr_rate)
 
         strategy_ratio_cache_key = f"{PROTOCOL}_strategy_ratio"
-        previous_strategy_ratio = _cache_float(strategy_ratio_cache_key)
+        previous_strategy_ratio = _fresh_cache_float(strategy_ratio_cache_key)
         if previous_strategy_ratio is not None and previous_strategy_ratio > 0:
             strategy_ratio_drop = (previous_strategy_ratio - strategy_ratio) / previous_strategy_ratio
             if strategy_ratio_drop >= STRATEGY_RATIO_DROP_ALERT:
@@ -210,7 +231,7 @@ def main() -> None:
                     f"previous ratio: {previous_strategy_ratio:.2%} current ratio: {strategy_ratio:.2%} "
                     f"({strategy_ratio_drop:.2%} drop)"
                 )
-        _set_cache_float(strategy_ratio_cache_key, strategy_ratio)
+        _set_fresh_cache_float(strategy_ratio_cache_key, strategy_ratio)
         _check_daily_tvl(messages, total_deposits)
         _check_jr_drain(messages, jr_assets)
         _check_susde_vault(messages, client, susde_vault, susde_cooldown)

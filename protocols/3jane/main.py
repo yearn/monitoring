@@ -34,7 +34,14 @@ from web3 import Web3
 
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
-from utils.cache import cache_path, get_last_value_for_key_from_file, write_last_value_to_file
+from utils.cache import (
+    HOURLY_CACHE_STALE_AFTER_SECONDS,
+    cache_path,
+    get_fresh_last_value_for_key_from_file,
+    get_last_value_for_key_from_file,
+    write_last_value_to_file,
+    write_last_value_with_timestamp_to_file,
+)
 from utils.chains import Chain
 from utils.formatting import format_duration, format_usd
 from utils.logger import get_logger
@@ -168,9 +175,23 @@ def set_cache_value(key: str, value: int | float) -> None:
     write_last_value_to_file(CACHE_FILENAME, key, value)
 
 
+def get_fresh_cache_value(key: str) -> float:
+    """Read an hourly cache value, returning zero when its observation is stale."""
+    val = get_fresh_last_value_for_key_from_file(CACHE_FILENAME, key, HOURLY_CACHE_STALE_AFTER_SECONDS)
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def set_fresh_cache_value(key: str, value: int | float) -> None:
+    """Write an hourly cache value and its observation timestamp."""
+    write_last_value_with_timestamp_to_file(CACHE_FILENAME, key, value)
+
+
 def _get_alerted_value(cache_key: str) -> float:
     """Read the last alerted value for a threshold alert (-1 = none outstanding)."""
-    raw_cached = get_last_value_for_key_from_file(CACHE_FILENAME, cache_key)
+    raw_cached = get_fresh_last_value_for_key_from_file(CACHE_FILENAME, cache_key, HOURLY_CACHE_STALE_AFTER_SECONDS)
     try:
         return float(raw_cached) if isinstance(raw_cached, str) else -1.0
     except ValueError:
@@ -199,18 +220,20 @@ def should_alert_value_drop(cache_key: str, value: float, threshold: float) -> b
         return False
 
     cached = _get_alerted_value(cache_key)
-    return not 0 <= cached <= value
+    should_alert = not 0 <= cached <= value
+    if not should_alert:
+        set_fresh_cache_value(cache_key, cached)
+    return should_alert
 
 
 def mark_alerted_value(cache_key: str, value: float) -> None:
     """Record the value a threshold alert fired for; call after send_alert() returns."""
-    set_cache_value(cache_key, value)
+    set_fresh_cache_value(cache_key, value)
 
 
 def clear_alerted_value(cache_key: str) -> None:
     """Clear an outstanding threshold alert so the next breach alerts again."""
-    if _get_alerted_value(cache_key) >= 0:
-        set_cache_value(cache_key, -1)
+    set_fresh_cache_value(cache_key, -1)
 
 
 def _as_bool(value: Any) -> bool:
@@ -544,7 +567,7 @@ def check_tvl(usd3_tvl: float, susd3_tvl: float) -> None:
         susd3_tvl: Current sUSD3 totalAssets in USD3 terms.
     """
     # --- USD3 TVL ---
-    previous_usd3_tvl = get_cache_value(CACHE_KEY_USD3_TVL)
+    previous_usd3_tvl = get_fresh_cache_value(CACHE_KEY_USD3_TVL)
     logger.info("USD3 TVL: %s (previous: %s)", format_usd(usd3_tvl), format_usd(previous_usd3_tvl))
 
     if previous_usd3_tvl > 0:
@@ -559,11 +582,10 @@ def check_tvl(usd3_tvl: float, susd3_tvl: float) -> None:
             )
             send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
 
-    if usd3_tvl != previous_usd3_tvl:
-        set_cache_value(CACHE_KEY_USD3_TVL, usd3_tvl)
+    set_fresh_cache_value(CACHE_KEY_USD3_TVL, usd3_tvl)
 
     # --- sUSD3 TVL ---
-    previous_susd3_tvl = get_cache_value(CACHE_KEY_SUSD3_TVL)
+    previous_susd3_tvl = get_fresh_cache_value(CACHE_KEY_SUSD3_TVL)
     logger.info("sUSD3 TVL: %s (previous: %s)", format_usd(susd3_tvl), format_usd(previous_susd3_tvl))
 
     if previous_susd3_tvl > 0:
@@ -579,8 +601,7 @@ def check_tvl(usd3_tvl: float, susd3_tvl: float) -> None:
             )
             send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
 
-    if susd3_tvl != previous_susd3_tvl:
-        set_cache_value(CACHE_KEY_SUSD3_TVL, susd3_tvl)
+    set_fresh_cache_value(CACHE_KEY_SUSD3_TVL, susd3_tvl)
 
 
 def check_junior_buffer(susd3_backing: float, deployed_credit: float) -> None:
@@ -765,7 +786,7 @@ def check_vault_shutdown(client, usd3_vault, susd3_vault) -> None:  # type: igno
     logger.info("Vault shutdown — USD3: %s, sUSD3: %s", usd3_shutdown, susd3_shutdown)
 
     # Alert once on USD3 shutdown
-    previous_usd3_shutdown = get_cache_value(CACHE_KEY_SHUTDOWN_USD3)
+    previous_usd3_shutdown = get_fresh_cache_value(CACHE_KEY_SHUTDOWN_USD3)
     if usd3_shutdown and previous_usd3_shutdown == 0:
         message = (
             f"🚨 *3Jane USD3 Vault SHUTDOWN*\n"
@@ -773,11 +794,10 @@ def check_vault_shutdown(client, usd3_vault, susd3_vault) -> None:  # type: igno
             f"🔗 [USD3](https://etherscan.io/address/{USD3_ADDRESS})"
         )
         send_alert(Alert(AlertSeverity.CRITICAL, message, PROTOCOL))
-    if float(usd3_shutdown) != previous_usd3_shutdown:
-        set_cache_value(CACHE_KEY_SHUTDOWN_USD3, float(usd3_shutdown))
+    set_fresh_cache_value(CACHE_KEY_SHUTDOWN_USD3, float(usd3_shutdown))
 
     # Alert once on sUSD3 shutdown
-    previous_susd3_shutdown = get_cache_value(CACHE_KEY_SHUTDOWN_SUSD3)
+    previous_susd3_shutdown = get_fresh_cache_value(CACHE_KEY_SHUTDOWN_SUSD3)
     if susd3_shutdown and previous_susd3_shutdown == 0:
         message = (
             f"🚨 *3Jane sUSD3 Vault SHUTDOWN*\n"
@@ -785,8 +805,7 @@ def check_vault_shutdown(client, usd3_vault, susd3_vault) -> None:  # type: igno
             f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
         )
         send_alert(Alert(AlertSeverity.CRITICAL, message, PROTOCOL))
-    if float(susd3_shutdown) != previous_susd3_shutdown:
-        set_cache_value(CACHE_KEY_SHUTDOWN_SUSD3, float(susd3_shutdown))
+    set_fresh_cache_value(CACHE_KEY_SHUTDOWN_SUSD3, float(susd3_shutdown))
 
 
 def check_debt_cap(client) -> None:  # type: ignore[no-untyped-def]
@@ -862,7 +881,7 @@ def check_nominal_backing_floor(nominal_floor: float, susd3_backing: float) -> N
 
     # --- Alert-once on breach transition (floor > backing) ---
     breach = nominal_floor > susd3_backing and nominal_floor > 0
-    previous_breach = get_cache_value(CACHE_KEY_FLOOR_BREACH)
+    previous_breach = get_fresh_cache_value(CACHE_KEY_FLOOR_BREACH)
     if breach and previous_breach == 0:
         shortfall = nominal_floor - susd3_backing
         message = (
@@ -873,8 +892,7 @@ def check_nominal_backing_floor(nominal_floor: float, susd3_backing: float) -> N
             f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
         )
         send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
-    if float(breach) != previous_breach:
-        set_cache_value(CACHE_KEY_FLOOR_BREACH, float(breach))
+    set_fresh_cache_value(CACHE_KEY_FLOOR_BREACH, float(breach))
 
 
 def check_protocol_paused(is_paused: bool) -> None:
@@ -888,7 +906,7 @@ def check_protocol_paused(is_paused: bool) -> None:
     """
     logger.info("Protocol IS_PAUSED: %s", is_paused)
 
-    previous_paused = get_cache_value(CACHE_KEY_IS_PAUSED)
+    previous_paused = get_fresh_cache_value(CACHE_KEY_IS_PAUSED)
     if is_paused and previous_paused == 0:
         message = (
             f"🚨 *3Jane Protocol PAUSED*\n"
@@ -896,8 +914,7 @@ def check_protocol_paused(is_paused: bool) -> None:
             f"🔗 [ProtocolConfig](https://etherscan.io/address/{PROTOCOL_CONFIG_ADDRESS})"
         )
         send_alert(Alert(AlertSeverity.CRITICAL, message, PROTOCOL))
-    if float(is_paused) != previous_paused:
-        set_cache_value(CACHE_KEY_IS_PAUSED, float(is_paused))
+    set_fresh_cache_value(CACHE_KEY_IS_PAUSED, float(is_paused))
 
 
 def main() -> None:

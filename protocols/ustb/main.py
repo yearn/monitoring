@@ -14,7 +14,14 @@ Run hourly via GitHub Actions.
 
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
-from utils.cache import cache_path, get_last_value_for_key_from_file, write_last_value_to_file
+from utils.cache import (
+    HOURLY_CACHE_STALE_AFTER_SECONDS,
+    cache_path,
+    get_fresh_last_value_for_key_from_file,
+    get_last_value_for_key_from_file,
+    write_last_value_to_file,
+    write_last_value_with_timestamp_to_file,
+)
 from utils.chainlink import FeedReading, read_feeds, scale_price
 from utils.chains import Chain
 from utils.formatting import format_usd
@@ -201,11 +208,13 @@ def _check_supply_change(total_supply_raw: int, nav_price: float) -> None:
     """Alert if total supply changed by more than 10% since the previous hourly run."""
     total_supply = _to_tokens(total_supply_raw)
 
-    prev_supply_str = str(get_last_value_for_key_from_file(CACHE_FILE, CACHE_KEY_SUPPLY))
+    prev_supply_str = str(
+        get_fresh_last_value_for_key_from_file(CACHE_FILE, CACHE_KEY_SUPPLY, HOURLY_CACHE_STALE_AFTER_SECONDS)
+    )
 
     if prev_supply_str == "0":
         logger.info("No cached supply found, initialising cache")
-        write_last_value_to_file(CACHE_FILE, CACHE_KEY_SUPPLY, total_supply_raw)
+        write_last_value_with_timestamp_to_file(CACHE_FILE, CACHE_KEY_SUPPLY, total_supply_raw)
         return
 
     prev_supply_raw = int(prev_supply_str)
@@ -226,7 +235,7 @@ def _check_supply_change(total_supply_raw: int, nav_price: float) -> None:
                 )
             )
 
-    write_last_value_to_file(CACHE_FILE, CACHE_KEY_SUPPLY, total_supply_raw)
+    write_last_value_with_timestamp_to_file(CACHE_FILE, CACHE_KEY_SUPPLY, total_supply_raw)
 
 
 def _check_oracle_staleness(current_timestamp: int, effective_at: int) -> None:

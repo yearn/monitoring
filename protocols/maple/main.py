@@ -16,7 +16,15 @@ Monitors:
 from protocols.maple.collateral import check_collateral_risk
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
-from utils.cache import cache_path, get_last_value_for_key_from_file, write_last_value_to_file
+from utils.cache import (
+    HOURLY_CACHE_STALE_AFTER_SECONDS,
+    cache_key_is_stale,
+    cache_path,
+    get_fresh_last_value_for_key_from_file,
+    get_last_value_for_key_from_file,
+    write_last_value_to_file,
+    write_last_value_with_timestamp_to_file,
+)
 from utils.chains import Chain
 from utils.formatting import format_usd
 from utils.logger import get_logger
@@ -84,6 +92,20 @@ def set_cache_value(key: str, value: float) -> None:
     write_last_value_to_file(CACHE_FILENAME, key, value)
 
 
+def get_fresh_cache_value(key: str) -> float:
+    """Read an hourly baseline, returning zero when it is stale."""
+    val = get_fresh_last_value_for_key_from_file(CACHE_FILENAME, key, HOURLY_CACHE_STALE_AFTER_SECONDS)
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def set_fresh_cache_value(key: str, value: float) -> None:
+    """Write an hourly baseline and its observation timestamp."""
+    write_last_value_with_timestamp_to_file(CACHE_FILENAME, key, value)
+
+
 def check_pps(client, pool) -> float:
     """Check Price Per Share and alert on decrease."""
     pps = client.execute(pool.functions.convertToAssets(ONE_SHARE).call)
@@ -113,7 +135,7 @@ def check_tvl(client, pool) -> float:
     total_assets = client.execute(pool.functions.totalAssets().call)
     tvl_usd = total_assets / ONE_SHARE
 
-    previous_tvl = get_cache_value(CACHE_KEY_TVL)
+    previous_tvl = get_fresh_cache_value(CACHE_KEY_TVL)
     logger.info("syrupUSDC TVL: %s (previous: %s)", format_usd(tvl_usd), format_usd(previous_tvl))
 
     if previous_tvl > 0:
@@ -128,8 +150,7 @@ def check_tvl(client, pool) -> float:
             )
             send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
-    if tvl_usd != previous_tvl:
-        set_cache_value(CACHE_KEY_TVL, tvl_usd)
+    set_fresh_cache_value(CACHE_KEY_TVL, tvl_usd)
     return tvl_usd
 
 
@@ -290,14 +311,21 @@ def check_delegate_cover(client) -> None:
     cover_usd = cover_balance / ONE_SHARE
 
     previous_cover = get_cache_value(CACHE_KEY_DELEGATE_COVER)
+    cover_cache_is_stale = cache_key_is_stale(
+        CACHE_FILENAME, CACHE_KEY_DELEGATE_COVER, HOURLY_CACHE_STALE_AFTER_SECONDS
+    )
     logger.info("Pool Delegate Cover: %s (previous: %s)", format_usd(cover_usd), format_usd(previous_cover))
 
     if cover_usd == 0:
-        # Only alert once when cover is first detected as zero (previous > 0 or first run)
-        if previous_cover > 0:
+        if previous_cover > 0 or cover_cache_is_stale:
+            previous_line = (
+                f"📊 Cover balance dropped from {format_usd(previous_cover)} to $0\n"
+                if previous_cover > 0
+                else "📊 Cover balance is $0 after a stale or missing observation baseline\n"
+            )
             message = (
                 f"🚨 *Maple syrupUSDC Pool Delegate Cover Empty*\n"
-                f"📊 Cover balance dropped from {format_usd(previous_cover)} to $0\n"
+                f"{previous_line}"
                 f"⚠️ No delegate skin-in-the-game — reduced accountability for loan defaults\n"
                 f"🔗 [PoolDelegateCover](https://etherscan.io/address/{POOL_DELEGATE_COVER})"
             )
@@ -311,8 +339,7 @@ def check_delegate_cover(client) -> None:
         )
         send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
 
-    if cover_usd != previous_cover:
-        set_cache_value(CACHE_KEY_DELEGATE_COVER, cover_usd)
+    set_fresh_cache_value(CACHE_KEY_DELEGATE_COVER, cover_usd)
 
 
 def main() -> None:
