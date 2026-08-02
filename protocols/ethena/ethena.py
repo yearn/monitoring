@@ -213,7 +213,13 @@ def ethena_backing_check() -> None:
     # Cross-check the API supply figure against on-chain totalSupply() ground truth.
     onchain_supply = get_usde_onchain_supply()
     if onchain_supply is None or onchain_supply == 0:
-        return  # get_usde_onchain_supply already logged the failure
+        # Surface the failure operationally — otherwise the consistency monitor
+        # silently stops running when the Mainnet RPC is down or totalSupply() reverts.
+        send_error_message(
+            "⚠️ ETHENA: Failed to read on-chain USDe totalSupply(); supply consistency check skipped",
+            PROTOCOL,
+        )
+        return
     supply_diff = abs(supply - onchain_supply) / onchain_supply
     logger.info(
         "[%s] on-chain USDe supply: %s | API supply: %s | diff: %s",
