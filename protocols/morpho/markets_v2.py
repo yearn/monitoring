@@ -1,6 +1,6 @@
 """Morpho VaultV2 markets / allocation / risk monitor.
 
-Iterates the explicit ``VAULTS_V2_BY_CHAIN`` list (Yearn-curated V2 vaults), then
+Iterates the explicit ``VAULTS_V2_BY_CHAIN`` list (the V2 vaults we monitor), then
 for each vault reads its adapters on-chain and:
 
 * For ``MorphoVaultV1Adapter`` (V2 wraps a v1 MetaMorpho vault) — sanity-checks
@@ -76,7 +76,7 @@ MIN_VAULT_ADAPTER_ALLOCATION_RATIO = 0.01
 
 @dataclass
 class V2Vault:
-    """Yearn-curated V2 vault declared in ``VAULTS_V2_BY_CHAIN``."""
+    """Monitored V2 vault declared in ``VAULTS_V2_BY_CHAIN``."""
 
     name: str
     address: str

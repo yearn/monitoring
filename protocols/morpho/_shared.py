@@ -13,12 +13,14 @@ MORPHO_URL = "https://app.morpho.org"
 logger = get_logger("morpho.shared")
 
 
-# Yearn-curated Morpho V2 vaults — sourced from
+# Morpho V2 vaults we monitor. Mostly Yearn-curated — sourced from
 # https://app.morpho.org/curator/yearn?v2=true (filtered via GraphQL by
-# Yearn's curator addresses). Imported by both ``markets_v2.py`` and
-# ``governance_v2.py``. To add a new vault, append a
-# ``[name, address, risk_level]`` row to the appropriate chain. Risk levels
-# follow the same 1–5 scheme as v1 ``markets.py:VAULTS_BY_CHAIN``.
+# Yearn's curator addresses) — plus a few third-party vaults (Gauntlet,
+# Steakhouse) the team tracks because of Yearn's exposure to them.
+# Imported by both ``markets_v2.py`` and ``governance_v2.py``, so adding a row
+# here enrols the vault in market checks *and* governance diffs. To add a new
+# vault, append a ``[name, address, risk_level]`` row to the appropriate chain.
+# Risk levels follow the same 1–5 scheme as v1 ``markets.py:VAULTS_BY_CHAIN``.
 VAULTS_V2_BY_CHAIN: Dict[Chain, List[List[Any]]] = {
     Chain.MAINNET: [
         # name, address, risk level
@@ -44,6 +46,11 @@ VAULTS_V2_BY_CHAIN: Dict[Chain, List[List[Any]]] = {
         # ["Yearn OG ETH", "0x5920A6FC553af799542EDA628AdfCc9eA52e141C", 1],
         ["Yearn KAT", "0x9b1aE9548E4B46cEB6650f6CEc702bAf5CF2b8CC", 1],
         ["Yearn Degen USDC", "0xA2d38c8A3D810EBcF4C2075821c5eC8F976bb692", 3],
+        # Synced with /srv/monitoring config (KATANA V2 vaults the team already
+        # tracks in prod). Curated by Gauntlet and Steakhouse, not Yearn.
+        ["Gauntlet USDT", "0xaC596AD9771a8d0D4DF108ae0406e6f913aEdceb", 1],
+        ["Steakhouse High Yield USDC", "0xbeeff2d5d126d4809195EeA02b605423917bb6c6", 2],
+        ["Steakhouse Prime USDC", "0xbeef042bAD4472c3F7Eb9A73070703788b5362D7", 1],
     ],
 }
 
