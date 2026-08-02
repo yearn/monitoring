@@ -83,7 +83,8 @@ _FREQUENCY_UNIT_SECONDS: dict[str, int] = {
     "W": 7 * SECONDS_PER_DAY,
     "WEEK": 7 * SECONDS_PER_DAY,
     "WEEKS": 7 * SECONDS_PER_DAY,
-    "M": 30 * SECONDS_PER_DAY,
+    # Deliberately no bare "M": it reads as either minutes or months, and
+    # guessing months would silently hand a source a 30x freshness budget.
     "MONTH": 30 * SECONDS_PER_DAY,
     "MONTHS": 30 * SECONDS_PER_DAY,
 }
@@ -150,6 +151,10 @@ class AccountableReport:
     ``collateralization`` is recomputed from ``total_reserves / total_supply``
     at full precision. ``reported_collateralization`` is the (rounded) value the
     API returned, retained for cross-checking and display.
+
+    ``source_problems`` describes required sources whose freshness could not be
+    established. The ratio is still trustworthy in that case, so the report is
+    returned as ``STALE`` rather than withheld.
     """
 
     dfid: str
@@ -162,6 +167,7 @@ class AccountableReport:
     ts_ms: int
     report_age_seconds: int
     sources: tuple[DataSourceSnapshot, ...]
+    source_problems: tuple[str, ...] = ()
 
     @property
     def stale_sources(self) -> tuple[DataSourceSnapshot, ...]:
@@ -274,48 +280,70 @@ def _parse_data_sources(
     payload: Any,
     now_ms: int,
     required_sources: tuple[str, ...] = (),
-) -> tuple[DataSourceSnapshot, ...]:
+) -> tuple[tuple[DataSourceSnapshot, ...], tuple[str, ...]]:
     """Build source snapshots with per-source-type staleness budgets.
 
     Unknown sources with an unrecognised cadence or missing timestamp are
     skipped, so an Accountable schema addition cannot spuriously page us. A
-    configured required source must be present and fully parseable; otherwise
-    freshness can no longer be established and the report is rejected.
+    configured required source that is missing or unparseable is recorded as a
+    problem rather than raised: freshness can no longer be established, but the
+    collateral ratio itself is unaffected and must still be evaluated. A source
+    rename upstream degrades the feed to ``STALE``, it does not blind the
+    sub-100% check.
+
+    Returns:
+        The parsed snapshots, and descriptions of any required-source problems.
     """
     if not isinstance(payload, dict):
         if required_sources:
-            raise AccountableError("dataSources is missing or not an object")
-        return ()
+            return (), ("dataSources is missing or not an object",)
+        return (), ()
 
     required = set(required_sources)
+    problems: list[str] = []
     missing = sorted(required.difference(payload))
     if missing:
-        raise AccountableError(f"required dataSources are missing: {', '.join(missing)}")
+        problems.append(f"required dataSources are missing: {', '.join(missing)}")
 
     snapshots: list[DataSourceSnapshot] = []
     for name, entry in payload.items():
+        is_required = name in required
         if not isinstance(entry, dict):
-            if name in required:
-                raise AccountableError(f"dataSources.{name} is not an object")
+            if is_required:
+                problems.append(f"dataSources.{name} is not an object")
             continue
         cadence_seconds = parse_frequency_seconds(entry.get("frequency"))
         if cadence_seconds is None:
-            if name in required:
-                raise AccountableError(f"dataSources.{name}.frequency is not recognised: {entry.get('frequency')!r}")
-            logger.debug("Accountable source %s has unparseable frequency %r", name, entry.get("frequency"))
+            if is_required:
+                problems.append(f"dataSources.{name}.frequency is not recognised: {entry.get('frequency')!r}")
+            else:
+                logger.debug("Accountable source %s has unparseable frequency %r", name, entry.get("frequency"))
             continue
         try:
             last_updated_ms = _coerce_int(entry.get("lastUpdated"), f"dataSources.{name}.lastUpdated")
-        except AccountableError:
-            if name in required:
-                raise
-            logger.debug("Accountable source %s has no usable lastUpdated", name)
+        except AccountableError as exc:
+            if is_required:
+                problems.append(str(exc))
+            else:
+                logger.debug("Accountable source %s has no usable lastUpdated", name)
+            continue
+
+        age_seconds = (now_ms - last_updated_ms) // MS_PER_SECOND
+        if age_seconds < -MAX_FUTURE_SKEW_SECONDS:
+            # Clamping a future timestamp to age 0 would make a source with a
+            # broken clock look permanently fresh, which is the one thing the
+            # freshness check exists to catch.
+            if is_required:
+                problems.append(f"dataSources.{name}.lastUpdated is {-age_seconds}s in the future")
+            else:
+                logger.debug("Accountable source %s has a future lastUpdated", name)
             continue
 
         source_type_value = entry.get("type")
         if not isinstance(source_type_value, str) or not source_type_value.strip():
-            if name in required:
-                raise AccountableError(f"dataSources.{name}.type is missing or not a string")
+            if is_required:
+                problems.append(f"dataSources.{name}.type is missing or not a string")
+                continue
             source_type = ""
         else:
             source_type = source_type_value
@@ -326,11 +354,11 @@ def _parse_data_sources(
                 source_type=source_type,
                 frequency=str(entry.get("frequency") or ""),
                 last_updated_ms=last_updated_ms,
-                age_seconds=max(0, (now_ms - last_updated_ms) // MS_PER_SECOND),
+                age_seconds=max(0, age_seconds),
                 max_age_seconds=cadence_seconds + grace,
             )
         )
-    return tuple(snapshots)
+    return tuple(snapshots), tuple(problems)
 
 
 def _validate_consistency(
@@ -359,36 +387,24 @@ def _validate_consistency(
         raise AccountableError(f"net {net} disagrees with total_reserves - total_supply {expected_net}")
 
 
-def _validate_usd_supply(
-    supply_entry: dict[str, Any],
-    net: Decimal,
-    total_reserves: Decimal,
-    total_supply: Decimal,
-) -> None:
+def _validate_usd_supply(supply_entry: dict[str, Any]) -> None:
     """Establish that raw supply is the USD liability denominator.
 
     Accountable documents ``total_supply.fx`` as 1 for USD-pegged feeds, but the
     live 3Jane response currently omits the field. When present, require it to be
-    exactly 1. When absent, derive liabilities independently from ``reserves -
-    net`` and require those liabilities to match raw supply within the same
-    rounding tolerance used by the net consistency check.
-    """
-    if "fx" in supply_entry:
-        fx = _coerce_decimal(supply_entry["fx"], "total_supply.fx")
-        if fx != 1:
-            raise AccountableError(f"total_supply.fx is {fx}, expected 1 (non-USD-pegged feed is unsupported)")
-        return
+    exactly 1.
 
-    net_tolerance = max(
-        NET_CONSISTENCY_ABSOLUTE_TOLERANCE,
-        NET_CONSISTENCY_RELATIVE_TOLERANCE * abs(total_reserves),
-    )
-    implied_liabilities = total_reserves - net
-    if abs(implied_liabilities - total_supply) > net_tolerance:
-        raise AccountableError(
-            "total_supply.fx is missing and total_supply does not match "
-            f"USD liabilities implied by reserves - net ({implied_liabilities})"
-        )
+    When absent, the invariant is already enforced by the net cross-check in
+    :func:`_validate_consistency`: the server computes ``net`` against
+    liabilities, so ``net ≈ total_reserves - total_supply`` holds only when
+    liabilities equal raw supply, i.e. when fx is 1. A non-pegged feed fails
+    there instead, on the same tolerance.
+    """
+    if "fx" not in supply_entry:
+        return
+    fx = _coerce_decimal(supply_entry["fx"], "total_supply.fx")
+    if fx != 1:
+        raise AccountableError(f"total_supply.fx is {fx}, expected 1 (non-USD-pegged feed is unsupported)")
 
 
 def parse_report(payload: Any, config: AccountableFeedConfig, now_ms: int) -> AccountableReport:
@@ -420,8 +436,9 @@ def parse_report(payload: Any, config: AccountableFeedConfig, now_ms: int) -> Ac
 
     # The docs define collateralization and net against liabilities, which equal
     # raw total_supply only for a USD-pegged feed. Validate the explicit fx when
-    # available, or establish the equivalent invariant from reserves - net.
-    _validate_usd_supply(supply_entry, net, total_reserves, total_supply)
+    # available; the net cross-check below enforces the same invariant when it
+    # is absent, as it is on the live 3Jane response.
+    _validate_usd_supply(supply_entry)
 
     collateralization = total_reserves / total_supply
     if not MIN_PLAUSIBLE_RATIO <= collateralization <= MAX_PLAUSIBLE_RATIO:
@@ -434,6 +451,8 @@ def parse_report(payload: Any, config: AccountableFeedConfig, now_ms: int) -> Ac
     if age_seconds < -MAX_FUTURE_SKEW_SECONDS:
         raise AccountableError(f"report timestamp is {-age_seconds}s in the future")
 
+    sources, source_problems = _parse_data_sources(data.get("dataSources"), now_ms, config.required_sources)
+
     return AccountableReport(
         dfid=config.dfid,
         collateralization=collateralization,
@@ -444,21 +463,30 @@ def parse_report(payload: Any, config: AccountableFeedConfig, now_ms: int) -> Ac
         verifiability=_coerce_decimal(reserves.get("verifiability"), "reserves.verifiability"),
         ts_ms=ts_ms,
         report_age_seconds=max(0, age_seconds),
-        sources=_parse_data_sources(data.get("dataSources"), now_ms, config.required_sources),
+        sources=sources,
+        source_problems=source_problems,
     )
 
 
 def evaluate_report(report: AccountableReport, config: AccountableFeedConfig) -> AccountableFetchResult:
     """Classify a parsed report as OK or STALE.
 
-    Staleness covers both the aggregate report age and any individual source
-    that has outrun its own cadence plus grace.
+    Staleness covers the aggregate report age, any individual source that has
+    outrun its own cadence plus grace, and any required source whose freshness
+    could not be established at all.
     """
     if report.report_age_seconds > config.max_report_age_seconds:
         return AccountableFetchResult(
             AccountableStatus.STALE,
             report,
             f"report is {report.report_age_seconds // SECONDS_PER_HOUR}h old",
+        )
+
+    if report.source_problems:
+        return AccountableFetchResult(
+            AccountableStatus.STALE,
+            report,
+            f"unusable source freshness metadata: {'; '.join(report.source_problems)}",
         )
 
     stale = report.stale_sources
@@ -486,12 +514,23 @@ def fetch_report(config: AccountableFeedConfig, now_ms: int | None = None) -> Ac
     if now_ms is None:
         now_ms = int(datetime.now(tz=timezone.utc).timestamp() * MS_PER_SECOND)
 
+    # The URL is overridable by env, and the feed is authenticated by TLS alone
+    # in v1 (no signature verification yet), so plaintext is not acceptable.
+    if not config.dashboard_url.lower().startswith("https://"):
+        logger.error("Accountable feed %s has a non-HTTPS URL: %s", config.dfid, config.dashboard_url)
+        return AccountableFetchResult(AccountableStatus.UNAVAILABLE, None, "dashboard URL is not HTTPS")
+
     try:
         response = request_with_retry("get", config.dashboard_url, headers={"Accept": "application/json"})
-        payload = response.json()
     except requests.RequestException as exc:
         logger.warning("Accountable feed %s unreachable: %s", config.dfid, exc)
         return AccountableFetchResult(AccountableStatus.UNAVAILABLE, None, f"request failed: {exc}")
+
+    # Kept out of the block above: requests raises JSONDecodeError, which is
+    # itself a RequestException, so a shared handler would report a decode
+    # failure as a network failure.
+    try:
+        payload = response.json()
     except ValueError as exc:
         logger.warning("Accountable feed %s returned non-JSON: %s", config.dfid, exc)
         return AccountableFetchResult(AccountableStatus.UNAVAILABLE, None, f"invalid JSON: {exc}")

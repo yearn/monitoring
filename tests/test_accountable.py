@@ -2,6 +2,7 @@
 
 import copy
 import json
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -176,15 +177,18 @@ def test_rejects_non_usd_pegged_feed() -> None:
 
 
 def test_rejects_non_usd_liabilities_when_fx_is_omitted() -> None:
-    """Independent net/ratio identities must enforce the USD denominator."""
+    """With fx absent, the net identity is what enforces the USD denominator."""
     payload = load_payload()
     reserves = Decimal(str(payload["data"]["reserves"]["total_reserves"]["value"]))
     supply = Decimal(str(payload["data"]["reserves"]["total_supply"]["value"]))
     liabilities = supply * Decimal("0.92")
     payload["data"]["net"] = float(reserves - liabilities)
     payload["data"]["collateralization"] = float(round(reserves / liabilities, 6))
+    assert "fx" not in payload["data"]["reserves"]["total_supply"]
 
-    with pytest.raises(AccountableError, match="fx is missing"):
+    # Both consistency identities are computed against raw supply, so a feed
+    # denominated in anything else fails on the ratio cross-check first.
+    with pytest.raises(AccountableError, match="disagrees"):
         parse_report(payload, CONFIG, FIXTURE_NOW_MS)
 
 
@@ -211,6 +215,9 @@ def test_rejects_future_timestamp() -> None:
         ("", None),
         ("sometimes", None),
         (None, None),
+        # Ambiguous between minutes and months; guessing months would grant a
+        # 30x freshness budget, so it is rejected instead.
+        ("15 M", None),
     ],
 )
 def test_parse_frequency_seconds(text: Any, expected: int | None) -> None:
@@ -262,21 +269,53 @@ def test_unparseable_source_frequency_is_skipped_not_flagged_stale() -> None:
     assert all(source.name != "Mystery Source" for source in result.report.sources)
 
 
-def test_missing_required_source_is_rejected() -> None:
+def test_missing_required_source_is_stale_not_unavailable() -> None:
+    """A source rename must not blind the sub-100% check — the ratio is unaffected."""
     payload = load_payload()
     del payload["data"]["dataSources"]["Slope - Forward Flows"]
 
-    with pytest.raises(AccountableError, match="required dataSources are missing.*Slope"):
-        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS), CONFIG)
+
+    assert result.status is AccountableStatus.STALE
+    assert "Slope - Forward Flows" in result.reason
+    assert result.report is not None
+    assert result.report.collateralization > 1
 
 
 @pytest.mark.parametrize("field", ["frequency", "lastUpdated", "type"])
-def test_malformed_required_source_is_rejected(field: str) -> None:
+def test_malformed_required_source_is_stale_not_unavailable(field: str) -> None:
     payload = load_payload()
     del payload["data"]["dataSources"]["USD3 On-Chain Reserves"][field]
 
-    with pytest.raises(AccountableError, match="USD3 On-Chain Reserves"):
-        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS), CONFIG)
+
+    assert result.status is AccountableStatus.STALE
+    assert "USD3 On-Chain Reserves" in result.reason
+    assert result.report is not None
+    # The unusable source is dropped rather than counted as fresh.
+    assert all(source.name != "USD3 On-Chain Reserves" for source in result.report.sources)
+
+
+def test_future_source_timestamp_is_not_treated_as_fresh() -> None:
+    """Clamping a future lastUpdated to age 0 would defeat the freshness check."""
+    payload = load_payload()
+    payload["data"]["dataSources"]["USD3 On-Chain Reserves"]["lastUpdated"] = str(FIXTURE_NOW_MS + 86_400_000)
+
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS), CONFIG)
+
+    assert result.status is AccountableStatus.STALE
+    assert "future" in result.reason
+    assert result.report is not None
+    assert all(source.name != "USD3 On-Chain Reserves" for source in result.report.sources)
+
+
+def test_small_future_source_skew_is_tolerated() -> None:
+    payload = load_payload()
+    payload["data"]["dataSources"]["USD3 On-Chain Reserves"]["lastUpdated"] = str(FIXTURE_NOW_MS + 60_000)
+
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS), CONFIG)
+
+    assert result.status is AccountableStatus.OK
 
 
 # --- fetch_report network behaviour ---
@@ -306,16 +345,33 @@ def test_fetch_report_returns_unavailable_on_network_error(monkeypatch: pytest.M
 
 
 def test_fetch_report_returns_unavailable_on_invalid_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    """requests raises JSONDecodeError, which is itself a RequestException."""
+    decode_error = requests.exceptions.JSONDecodeError("not json", "<html>", 0)
     monkeypatch.setattr(
         accountable,
         "request_with_retry",
-        lambda *_a, **_k: _FakeResponse(ValueError("not json")),
+        lambda *_a, **_k: _FakeResponse(decode_error),
     )
 
     result = fetch_report(CONFIG, FIXTURE_NOW_MS)
 
     assert result.status is AccountableStatus.UNAVAILABLE
     assert "invalid JSON" in result.reason
+
+
+def test_fetch_report_rejects_non_https_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v1 authenticates the feed with TLS alone, so plaintext must not be fetched."""
+
+    def unexpected(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("request must not be attempted")
+
+    monkeypatch.setattr(accountable, "request_with_retry", unexpected)
+    config = replace(CONFIG, dashboard_url="http://accountable.3jane.xyz/dashboard")
+
+    result = fetch_report(config, FIXTURE_NOW_MS)
+
+    assert result.status is AccountableStatus.UNAVAILABLE
+    assert "HTTPS" in result.reason
 
 
 def test_fetch_report_returns_unavailable_on_schema_violation(monkeypatch: pytest.MonkeyPatch) -> None:

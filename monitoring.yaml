@@ -46,9 +46,9 @@ protocols:
       - name: "Borrower Default Watch"
         description: "Envio-backed MorphoCredit borrower watch; MEDIUM alerts when unpaid obligations become delinquent after grace or reach default"
       - name: "Proof of Solvency"
-        description: "Accountable collateral ratio <100% (CRITICAL) or <100.01% (HIGH), deduped by band transition"
+        description: "Accountable collateral ratio <100% (CRITICAL, after 2 consecutive runs) or <105% (HIGH)"
       - name: "Proof of Solvency Freshness"
-        description: "MEDIUM when the Accountable report or a required data source outruns its cadence, or the feed is unusable for 3 consecutive runs"
+        description: "MEDIUM when the Accountable report or a required data source outruns its cadence, its freshness cannot be established, or the feed is unusable for 3 consecutive runs"
       - name: "Timelock"
         description: "CallScheduled events from 24h and 7-day TimelockControllers via Envio"
 
