@@ -18,6 +18,8 @@ Uses Ethena's own transparency API (`app.ethena.fi`). This API was previously bl
 2. **Collateral**: `GET /api/positions/current/collateral?latest=true` (`totalBackingAssetsInUsd`)
 3. **Reserve fund**: `GET /api/solvency/reserve-fund` — latest point of the `queryIndex[0].yields` time series.
 
+The API supply figure (the ratio's denominator) is additionally cross-checked against on-chain `totalSupply()` of the [USDe token](https://etherscan.io/address/0x4c9EDD5852cd905f086C759E8383e09bff1E68B3). A **MEDIUM** alert fires if the off-chain API and on-chain ground truth diverge by more than 0.5% (`SUPPLY_DIFF_TRIGGER`), catching a misreporting API.
+
 > **On the `latest=true` collateral figure:** it returns Ethena's *net backing* number, which tracks supply ~1:1 (ratio ≈ 1.00, ≈ 1.015 with reserve). The same endpoint *without* `latest=true` returns a detailed per-exchange breakdown whose total is *gross collateral*, ~2.7% higher — but that breakdown is a stale snapshot (items lag several hours). We use the fresh net figure plus the reserve fund as the buffer.
 
 > **Removed:** a second independent check against LlamaRisk's transparency API (`api.llamarisk.com/protocols/ethena/...`) previously ran alongside this one. LlamaRisk decommissioned that endpoint (now HTTP 404; the host only serves `aave-v4` routes), so the check was removed.

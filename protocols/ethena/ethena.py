@@ -2,9 +2,11 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.logger import get_logger
 from utils.telegram import send_error_message
+from utils.web3_wrapper import Chain, ChainManager
 
 PROTOCOL = "ethena"
 logger = get_logger(PROTOCOL)
@@ -14,8 +16,12 @@ SUPPLY_URL = "https://app.ethena.fi/api/solvency/token-supply?symbol=USDe"
 COLLATERAL_URL = "https://app.ethena.fi/api/positions/current/collateral?latest=true"
 RESERVE_FUND_URL = "https://app.ethena.fi/api/solvency/reserve-fund"
 
+USDE_ADDRESS = "0x4c9EDD5852cd905f086C759E8383e09bff1E68B3"
+ABI_ERC20 = load_abi("common-abi/ERC20.json")
+
 # Alert thresholds
 COLLATERAL_RATIO_TRIGGER = 1.005  # must be overcollateralized by at least 0.5%
+SUPPLY_DIFF_TRIGGER = 0.005  # 0.5% — API vs on-chain supply divergence tolerance
 
 REQUEST_TIMEOUT = 15  # seconds
 
@@ -125,6 +131,23 @@ def get_reserve_fund() -> float | None:
     return float(latest["value"])
 
 
+def get_usde_onchain_supply() -> float | None:
+    """Return on-chain USDe ``totalSupply()`` in token units (raw / 1e18).
+
+    Ground-truth supply read directly from the ERC-20, used to cross-check
+    Ethena's off-chain transparency-API supply figure. Returns None on failure
+    (the caller keeps the API-based check working rather than aborting).
+    """
+    try:
+        client = ChainManager.get_client(Chain.MAINNET)
+        usde = client.eth.contract(address=USDE_ADDRESS, abi=ABI_ERC20)
+        raw_supply = usde.functions.totalSupply().call()
+        return float(raw_supply) / 1e18
+    except Exception as e:
+        logger.error("Failed to read on-chain USDe totalSupply: %s", e)
+        return None
+
+
 def ethena_backing_check() -> None:
     """Check that USDe remains fully backed using Ethena's transparency API.
 
@@ -141,7 +164,9 @@ def ethena_backing_check() -> None:
     solvency ratio and lets us apply COLLATERAL_RATIO_TRIGGER without false-positiving.
 
     Alerts CRITICAL when total backing no longer covers supply (ratio < 1) and HIGH when
-    the buffer thins below COLLATERAL_RATIO_TRIGGER.
+    the buffer thins below COLLATERAL_RATIO_TRIGGER. The API supply figure is additionally
+    cross-checked against on-chain totalSupply() (MEDIUM alert on >0.5% divergence) so a
+    misreporting API is caught by the ERC-20 ground truth.
     """
     supply = get_usde_supply()
     collateral = get_total_collateral_usd()
@@ -184,6 +209,29 @@ def ethena_backing_check() -> None:
         f"{supply:,.2f}",
         f"{backing_ratio:.4f}",
     )
+
+    # Cross-check the API supply figure against on-chain totalSupply() ground truth.
+    onchain_supply = get_usde_onchain_supply()
+    if onchain_supply is None or onchain_supply == 0:
+        return  # get_usde_onchain_supply already logged the failure
+    supply_diff = abs(supply - onchain_supply) / onchain_supply
+    logger.info(
+        "[%s] on-chain USDe supply: %s | API supply: %s | diff: %s",
+        ETHENA_SOURCE,
+        f"{onchain_supply:,.2f}",
+        f"{supply:,.2f}",
+        f"{supply_diff:.4%}",
+    )
+    if supply_diff > SUPPLY_DIFF_TRIGGER:
+        send_alert(
+            Alert(
+                AlertSeverity.MEDIUM,
+                f"⚠️ [{ETHENA_SOURCE}] USDe supply differs from on-chain totalSupply()\n"
+                f"API supply: {supply:,.2f}\nOn-chain supply: {onchain_supply:,.2f}\n"
+                f"Diff: {supply_diff:.4%} (> {SUPPLY_DIFF_TRIGGER:.2%})",
+                PROTOCOL,
+            )
+        )
 
 
 if __name__ == "__main__":

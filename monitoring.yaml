@@ -123,6 +123,8 @@ protocols:
     monitors:
       - name: "USDe Backing Ratio"
         description: "(collateral + reserve fund) / supply < 1.0 (CRITICAL) or < 1.005 (HIGH) via Ethena transparency API"
+      - name: "On-Chain Supply Consistency"
+        description: "Ethena API USDe supply vs on-chain totalSupply() differs by > 0.5%"
       - name: "Data Freshness"
         description: "Supply or reserve fund data older than 3 hours"
 
