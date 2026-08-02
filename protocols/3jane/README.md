@@ -15,7 +15,7 @@
 - **Nominal sUSD3 Backing Floor:** `ProtocolConfig.config(keccak256("SUSD3_NOMINAL_BACKING_FLOOR"))` vs cached prior. Alerts on any change (governance lever). Separate alert-once when the floor exceeds sUSD3's USD3 holdings valued in USDC — sUSD3 redemptions can be blocked while floor > backing.
 - **Protocol Pause:** `ProtocolConfig.config(keccak256("IS_PAUSED"))`. Alert-once on transition to true. Distinct from per-vault `isShutdown()` — pauses the underlying credit market.
 - **Borrower Default Watch:** optional Envio-backed borrower default risk feed. The Envio indexer maintains `ThreeJaneBorrowerMarket` rows from MorphoCredit events, and the monitor computes the current delinquent/default status at runtime. Alerts are **MEDIUM only** and deduped per borrower/cycle/default milestone.
-- **Proof of Solvency:** [Accountable](https://accountable.3jane.xyz/) collateral ratio (reserves / liabilities). Alerts **CRITICAL below 100%** and **HIGH below 105%**, plus freshness and availability alerts. See [Proof of Solvency](#proof-of-solvency) below.
+- **Proof of Solvency:** [Accountable](https://accountable.3jane.xyz/) collateral ratio (reserves / liabilities). Alerts **CRITICAL below 100%** and **HIGH below 100.01%**, plus freshness and availability alerts. See [Proof of Solvency](#proof-of-solvency) below.
 
 ## Key Contracts
 
@@ -44,8 +44,8 @@
 | Nominal floor breach | Floor > sUSD3 backing valued in USDC (alert-once) | MEDIUM |
 | Protocol paused | `IS_PAUSED` transitions to true (alert-once) | CRITICAL |
 | Borrower delinquent/default watch | New milestone: delinquent, ≤14d, ≤7d, ≤3d, ≤1d, default | MEDIUM |
-| Accountable collateral ratio | < 100% for 2 consecutive runs (band transition) | CRITICAL |
-| Accountable collateral ratio | < 105% (band transition) | HIGH |
+| Accountable collateral ratio | < 100% (band transition) | CRITICAL |
+| Accountable collateral ratio | < 100.01% (band transition) | HIGH |
 | Accountable feed stale | Report or a required source outruns its cadence + grace (alert-once) | MEDIUM |
 | Accountable feed unavailable | 3 consecutive unusable runs (alert-once) | MEDIUM |
 | Monitoring run failure | Uncaught exception in `main()` | LOW |
@@ -107,7 +107,7 @@ Staleness budgets are therefore keyed by source `type` — `Document Report` sou
 
 Alerts fire on **band transitions** (`OK → HIGH → CRITICAL`), not on every worsening tick — the live margin sits a few basis points above 100%, so a drop-based dedupe would alert constantly. Recovering to a healthier band re-arms the ones above it without alerting.
 
-CRITICAL additionally requires **two consecutive, newer reports** below 100%. Re-polling the same frozen report cannot confirm it, and an unavailable run resets partial confirmation. A single reading below 100% is reported as HIGH, so it is still visible but does not escalate on what is more likely a stale document-report refresh than genuine insolvency.
+The bands are immediate: below **100.01%** is HIGH and below **100%** is CRITICAL. Repeated readings within the same band stay quiet; recovery to a healthier band silently re-arms the worse band.
 
 ### No emergency dispatch
 
