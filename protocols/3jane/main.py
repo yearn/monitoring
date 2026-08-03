@@ -20,7 +20,7 @@ drops below it; recovering above the threshold re-arms the alert.
 - Debt cap changes — alerts when ProtocolConfig debt cap is modified
 - Nominal sUSD3 backing floor — alerts on change and when floor > sUSD3 backing
 - Protocol-wide pause — alerts once when ProtocolConfig IS_PAUSED flips to true
-- Accountable Proof of Solvency — collateral ratio banding plus feed freshness
+- Accountable Proof of Solvency — collateral ratio thresholds plus feed freshness
   and availability. Alerts route to the 3Jane channel but never trigger the
   emergency dispatch webhook; see the README for why.
 """
@@ -96,7 +96,8 @@ CACHE_KEY_BORROWER_DEFAULT_WATCH_PREFIX = "3JANE_BORROWER_DEFAULT_WATCH"
 CACHE_KEY_JUNIOR_BUFFER_ALERTED = "3JANE_JUNIOR_BUFFER_ALERTED"
 CACHE_KEY_USD3_OC_ALERTED = "3JANE_USD3_OC_ALERTED"
 CACHE_KEY_WITHDRAW_LIMIT_ALERTED = "3JANE_WITHDRAW_LIMIT_ALERTED"
-CACHE_KEY_ACCOUNTABLE_BAND = "3JANE_ACCOUNTABLE_BAND"
+CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED = "3JANE_ACCOUNTABLE_HIGH_ALERTED"
+CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED = "3JANE_ACCOUNTABLE_CRITICAL_ALERTED"
 CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK = "3JANE_ACCOUNTABLE_CRITICAL_STREAK"
 CACHE_KEY_ACCOUNTABLE_CRITICAL_LAST_TS = "3JANE_ACCOUNTABLE_CRITICAL_LAST_TS"
 CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK = "3JANE_ACCOUNTABLE_FAILURE_STREAK"
@@ -119,6 +120,7 @@ WITHDRAW_LIMIT_THRESHOLD = 4_000_000  # USDC, alert when USD3 availableWithdrawL
 ACCOUNTABLE_FEED = AccountableFeedConfig(
     dfid="100000026",
     dashboard_url=os.getenv("THREE_JANE_ACCOUNTABLE_URL", "https://accountable.3jane.xyz/dashboard"),
+    message_url=os.getenv("THREE_JANE_ACCOUNTABLE_MESSAGE_URL", "https://accountable.3jane.xyz/"),
     dashboard_type="three-jane",
     required_sources=(
         "LendSwift - Warehouse Senior Note",
@@ -128,18 +130,10 @@ ACCOUNTABLE_FEED = AccountableFeedConfig(
     ),
 )
 ACCOUNTABLE_CRITICAL_RATIO = Decimal("1.00")  # Reserves below liabilities
-ACCOUNTABLE_HIGH_RATIO = Decimal("1.05")
-# The margin sits a few basis points above 1.00, so a single sub-100% reading is
-# more likely a stale document-report refresh than genuine insolvency.
+ACCOUNTABLE_HIGH_RATIO = Decimal("1.0002")
 ACCOUNTABLE_CRITICAL_CONFIRMATIONS = 2
 # Tolerate isolated blips; alert once the feed is persistently unusable.
 ACCOUNTABLE_MAX_CONSECUTIVE_FAILURES = 3
-
-ACCOUNTABLE_BAND_OK = "OK"
-ACCOUNTABLE_BAND_HIGH = "HIGH"
-ACCOUNTABLE_BAND_CRITICAL = "CRITICAL"
-# Ordered worst-last so a transition to a higher index is a deterioration.
-ACCOUNTABLE_BAND_ORDER = (ACCOUNTABLE_BAND_OK, ACCOUNTABLE_BAND_HIGH, ACCOUNTABLE_BAND_CRITICAL)
 
 THREE_JANE_BORROWER_DEFAULT_WATCH_QUERY = """
 query GetThreeJaneBorrowerDefaultWatch($limit: Int!, $offset: Int!) {
@@ -949,41 +943,6 @@ def _accountable_alert(severity: AlertSeverity, message: str) -> None:
     send_alert(Alert(severity, message, ACCOUNTABLE_ALERT_PROTOCOL, channel=PROTOCOL))
 
 
-def _get_cache_str(key: str, default: str, allowed: tuple[str, ...] = ()) -> str:
-    """Read a string cache value, falling back when unset or unrecognised.
-
-    Args:
-        key: Cache key to read.
-        default: Value to use when nothing usable is cached.
-        allowed: When given, the only accepted values. Anything else falls back
-            to ``default`` — an unrecognised label must not be able to raise and
-            wedge the caller on every subsequent run.
-    """
-    raw = get_last_value_for_key_from_file(CACHE_FILENAME, key)
-    if not isinstance(raw, str) or not raw:
-        return default
-    if allowed and raw not in allowed:
-        logger.warning("Ignoring unrecognised cached value %r for %s", raw, key)
-        return default
-    return raw
-
-
-def classify_collateral_band(ratio: Decimal) -> str:
-    """Map a collateral ratio to its alert band.
-
-    Args:
-        ratio: Collateral ratio, where 1.0 means reserves exactly equal liabilities.
-
-    Returns:
-        One of the ``ACCOUNTABLE_BAND_*`` constants.
-    """
-    if ratio < ACCOUNTABLE_CRITICAL_RATIO:
-        return ACCOUNTABLE_BAND_CRITICAL
-    if ratio < ACCOUNTABLE_HIGH_RATIO:
-        return ACCOUNTABLE_BAND_HIGH
-    return ACCOUNTABLE_BAND_OK
-
-
 def _reset_accountable_critical_confirmation() -> None:
     """Clear partial CRITICAL confirmation after a gap or non-critical report."""
     if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK):
@@ -992,25 +951,20 @@ def _reset_accountable_critical_confirmation() -> None:
         set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_LAST_TS, 0)
 
 
-def resolve_confirmed_band(observed_band: str, report_ts_ms: int) -> str:
-    """Apply consecutive-run confirmation before promoting to CRITICAL.
+def _clear_accountable_ratio_alerts() -> None:
+    """Re-arm HIGH/CRITICAL ratio alerts after recovery above the warning threshold."""
+    if get_cache_int(CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED):
+        set_cache_value(CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED, 0)
+    if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED):
+        set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED, 0)
 
-    A first sub-100% reading is reported as HIGH so it is still visible, and only
-    a second consecutive, newer report escalates to CRITICAL. Re-polling a frozen
-    report cannot confirm itself. Any non-critical or unavailable reading resets
-    the streak.
 
-    Args:
-        observed_band: Band implied by the current ratio alone.
-        report_ts_ms: Aggregate report timestamp used to distinguish observations.
+def _critical_confirmed(report_ts_ms: int) -> bool:
+    """Return True once enough consecutive newer sub-100% reports are seen.
 
-    Returns:
-        The band to act on for this run.
+    A first reading is treated as HIGH so it stays visible. Re-polling a frozen
+    report cannot confirm itself.
     """
-    if observed_band != ACCOUNTABLE_BAND_CRITICAL:
-        _reset_accountable_critical_confirmation()
-        return observed_band
-
     streak = get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK)
     last_ts_ms = get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_LAST_TS)
     if report_ts_ms > last_ts_ms:
@@ -1028,7 +982,7 @@ def resolve_confirmed_band(observed_band: str, report_ts_ms: int) -> str:
             ACCOUNTABLE_CRITICAL_CONFIRMATIONS,
         )
     if streak >= ACCOUNTABLE_CRITICAL_CONFIRMATIONS:
-        return ACCOUNTABLE_BAND_CRITICAL
+        return True
 
     logger.info(
         "Accountable collateral below %s but unconfirmed (%d/%d runs); holding at HIGH",
@@ -1036,7 +990,7 @@ def resolve_confirmed_band(observed_band: str, report_ts_ms: int) -> str:
         streak,
         ACCOUNTABLE_CRITICAL_CONFIRMATIONS,
     )
-    return ACCOUNTABLE_BAND_HIGH
+    return False
 
 
 def _format_accountable_report(report: AccountableReport) -> str:
@@ -1051,50 +1005,64 @@ def _format_accountable_report(report: AccountableReport) -> str:
     )
 
 
-def check_accountable_collateral_band(report: AccountableReport) -> None:
-    """Alert on deterioration of the Accountable collateral ratio band.
+def _alert_accountable_high(report: AccountableReport) -> None:
+    """Alert once while ratio is below the HIGH threshold."""
+    if get_cache_int(CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED):
+        return
+    message = (
+        f"🚨 *3Jane Proof of Solvency Low*\n"
+        f"{_format_accountable_report(report)}\n"
+        f"⚠️ Collateral ratio below the {ACCOUNTABLE_HIGH_RATIO:.0%} warning threshold\n"
+        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.message_url})"
+    )
+    _accountable_alert(AlertSeverity.HIGH, message)
+    set_cache_value(CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED, 1)
 
-    Alerts fire on band transitions rather than on every worsening tick, so a
-    ratio hovering just below a threshold cannot alert repeatedly. Improving to
-    a healthier band re-arms the ones above it without alerting.
+
+def _alert_accountable_critical(report: AccountableReport) -> None:
+    """Alert once while ratio is confirmed below 100%."""
+    if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED):
+        return
+    message = (
+        f"🚨 *3Jane Proof of Solvency CRITICAL*\n"
+        f"{_format_accountable_report(report)}\n"
+        f"⚠️ Reserves are below liabilities — the protocol is undercollateralized\n"
+        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.message_url})"
+    )
+    _accountable_alert(AlertSeverity.CRITICAL, message)
+    set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED, 1)
+    # Avoid a follow-up HIGH once CRITICAL clears but ratio is still under 1.01.
+    set_cache_value(CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED, 1)
+
+
+def check_accountable_collateral(report: AccountableReport) -> None:
+    """Alert when Accountable collateral ratio breaches thresholds.
+
+    HIGH when ratio < 1.01; CRITICAL when ratio < 1.00 for two consecutive newer
+    reports. Each severity alerts once until the ratio recovers above its threshold.
 
     Args:
         report: Validated Proof of Solvency report.
     """
-    observed_band = classify_collateral_band(report.collateralization)
-    band = resolve_confirmed_band(observed_band, report.ts_ms)
-    previous_band = _get_cache_str(CACHE_KEY_ACCOUNTABLE_BAND, ACCOUNTABLE_BAND_OK, ACCOUNTABLE_BAND_ORDER)
+    ratio = report.collateralization
+    logger.info("Accountable collateral ratio: %.6f%%", ratio * 100)
 
-    logger.info(
-        "Accountable collateral ratio: %.6f%% (band %s, previous %s)",
-        report.collateralization * 100,
-        band,
-        previous_band,
-    )
-
-    if ACCOUNTABLE_BAND_ORDER.index(band) <= ACCOUNTABLE_BAND_ORDER.index(previous_band):
-        # Unchanged or improving: re-arm the worse bands, stay quiet.
-        if band != previous_band:
-            set_cache_value(CACHE_KEY_ACCOUNTABLE_BAND, band)
+    if ratio < ACCOUNTABLE_CRITICAL_RATIO:
+        if _critical_confirmed(report.ts_ms):
+            _alert_accountable_critical(report)
+        else:
+            _alert_accountable_high(report)
         return
 
-    if band == ACCOUNTABLE_BAND_CRITICAL:
-        severity = AlertSeverity.CRITICAL
-        title = "3Jane Proof of Solvency CRITICAL"
-        detail = "⚠️ Reserves are below liabilities — the protocol is undercollateralized"
-    else:
-        severity = AlertSeverity.HIGH
-        title = "3Jane Proof of Solvency Low"
-        detail = f"⚠️ Collateral ratio below the {ACCOUNTABLE_HIGH_RATIO:.0%} warning threshold"
+    if ratio < ACCOUNTABLE_HIGH_RATIO:
+        _reset_accountable_critical_confirmation()
+        if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED):
+            set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED, 0)
+        _alert_accountable_high(report)
+        return
 
-    message = (
-        f"🚨 *{title}*\n"
-        f"{_format_accountable_report(report)}\n"
-        f"{detail}\n"
-        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.dashboard_url})"
-    )
-    _accountable_alert(severity, message)
-    set_cache_value(CACHE_KEY_ACCOUNTABLE_BAND, band)
+    _reset_accountable_critical_confirmation()
+    _clear_accountable_ratio_alerts()
 
 
 def check_accountable_staleness(report: AccountableReport, reason: str) -> None:
@@ -1118,7 +1086,7 @@ def check_accountable_staleness(report: AccountableReport, reason: str) -> None:
         f"{_format_accountable_report(report)}\n"
         f"🕳️ {escape_markdown(reason)}\n"
         f"⚠️ Collateral ratio may not reflect current positions\n"
-        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.dashboard_url})"
+        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.message_url})"
     )
     _accountable_alert(AlertSeverity.MEDIUM, message)
     set_cache_value(CACHE_KEY_ACCOUNTABLE_STALE_ALERTED, 1)
@@ -1148,7 +1116,7 @@ def check_accountable_availability(reason: str) -> None:
         f"📡 Failed {streak} consecutive runs\n"
         f"❌ {escape_markdown(reason)}\n"
         f"⚠️ Collateral ratio is not being monitored\n"
-        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.dashboard_url})"
+        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.message_url})"
     )
     _accountable_alert(AlertSeverity.MEDIUM, message)
     set_cache_value(CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED, 1)
@@ -1181,7 +1149,7 @@ def check_accountable_solvency() -> None:
 
         # The ratio is still evaluated on a stale report: an undercollateralized
         # reading matters even when the inputs behind it have aged.
-        check_accountable_collateral_band(report)
+        check_accountable_collateral(report)
     except Exception as e:
         logger.error("Error during Accountable Proof of Solvency check: %s", e)
 

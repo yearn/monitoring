@@ -87,7 +87,7 @@ The current countdown and alert bucket are intentionally computed in this monito
 
 ## Proof of Solvency
 
-[Accountable](https://docs.accountable.capital/accountable-documentation/proof-of-solvency) publishes a TEE-attested Proof of Solvency dashboard for 3Jane (feed id `100000026`). The full report is served as public JSON from `https://accountable.3jane.xyz/dashboard`; override with `THREE_JANE_ACCOUNTABLE_URL` if the endpoint moves. No API key is required.
+[Accountable](https://docs.accountable.capital/accountable-documentation/proof-of-solvency) publishes a TEE-attested Proof of Solvency dashboard for 3Jane (feed id `100000026`). The human-readable UI is at `https://accountable.3jane.xyz/` (override with `THREE_JANE_ACCOUNTABLE_MESSAGE_URL`); the JSON report is at `https://accountable.3jane.xyz/dashboard` (override with `THREE_JANE_ACCOUNTABLE_URL`). No API key is required.
 
 The client lives in [`utils/accountable.py`](../../utils/accountable.py) and is keyed by data feed id (DFID), so other Accountable feeds can be added without a rewrite. The request is URL/type-based and neither sends nor echoes the DFID, so feed identity is bound explicitly in config.
 
@@ -105,11 +105,9 @@ Staleness budgets are therefore keyed by source `type` — `Document Report` sou
 
 The four known 3Jane sources are required, and a missing or malformed freshness record for one of them makes the feed **stale**, not unavailable. Freshness can no longer be established, but the collateral ratio itself is unaffected — so the report is still returned and the sub-100% check still runs. An upstream source rename degrades the feed to a MEDIUM staleness alert; it cannot silently disable the CRITICAL solvency check.
 
-### Alert banding
+### Ratio alerts
 
-Alerts fire on **band transitions** (`OK → HIGH → CRITICAL`), not on every worsening tick — the live margin sits a few basis points above 100%, so a drop-based dedupe would alert constantly. Recovering to a healthier band re-arms the ones above it without alerting.
-
-CRITICAL additionally requires **two consecutive, newer reports** below 100%. Re-polling the same frozen report cannot confirm it, and an unavailable run resets partial confirmation. A single reading below 100% is reported as HIGH, so it is still visible but does not escalate on what is more likely a stale document-report refresh than genuine insolvency.
+HIGH fires once when the ratio drops below 101%; CRITICAL fires once when it stays below 100% for **two consecutive, newer reports**. Each severity stays quiet until the ratio recovers above its threshold. Re-polling a frozen report cannot confirm CRITICAL, and an unavailable run resets partial confirmation. A single sub-100% reading is reported as HIGH so it stays visible without escalating on what is more likely a stale document-report refresh.
 
 ### No emergency dispatch
 

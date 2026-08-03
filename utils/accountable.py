@@ -115,13 +115,15 @@ class AccountableFeedConfig:
     Args:
         dfid: Accountable data feed id, e.g. ``"100000026"``.
         dashboard_url: Public JSON endpoint for the report.
-        dashboard_type: Dashboard type the endpoint serves, e.g. ``"three-jane"``.
+        message_url: Public URL for the dashboard, used in alerts.
+        dashboard_type: Dashboard type the endpoint serves
         required_sources: Source names that must carry usable freshness metadata.
         max_report_age_seconds: Aggregate report age beyond which it is stale.
     """
 
     dfid: str
     dashboard_url: str
+    message_url: str
     dashboard_type: str
     required_sources: tuple[str, ...] = ()
     max_report_age_seconds: int = 6 * SECONDS_PER_HOUR

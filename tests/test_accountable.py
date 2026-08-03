@@ -28,6 +28,7 @@ FIXTURE_NOW_MS = 1785491000000
 CONFIG = AccountableFeedConfig(
     dfid="100000026",
     dashboard_url="https://accountable.3jane.xyz/dashboard",
+    message_url="https://accountable.3jane.xyz/",
     dashboard_type="three-jane",
     required_sources=(
         "LendSwift - Warehouse Senior Note",

@@ -533,38 +533,28 @@ def make_accountable_report(
     )
 
 
-def test_classify_collateral_band_boundaries() -> None:
-    module = load_3jane_module()
-    from decimal import Decimal
-
-    assert module.classify_collateral_band(Decimal("0.999999")) == module.ACCOUNTABLE_BAND_CRITICAL
-    assert module.classify_collateral_band(Decimal("1.0")) == module.ACCOUNTABLE_BAND_HIGH
-    assert module.classify_collateral_band(Decimal("1.0002")) == module.ACCOUNTABLE_BAND_HIGH
-    assert module.classify_collateral_band(Decimal("1.05")) == module.ACCOUNTABLE_BAND_OK
-
-
 def test_accountable_healthy_ratio_does_not_alert(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
-    module.check_accountable_collateral_band(make_accountable_report(module, "1.20"))
+    module.check_accountable_collateral(make_accountable_report(module, "1.20"))
 
     assert alerts == []
 
 
-def test_accountable_warning_band_alerts_high(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_accountable_high_threshold_alerts(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
-    module.check_accountable_collateral_band(make_accountable_report(module, "1.02"))
+    module.check_accountable_collateral(make_accountable_report(module, "1.0001"))
 
     assert len(alerts) == 1
     assert alerts[0].severity == module.AlertSeverity.HIGH
-    assert "102.0000%" in alerts[0].message
+    assert "100.0100%" in alerts[0].message
 
 
 def test_accountable_critical_requires_two_consecutive_runs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -576,11 +566,11 @@ def test_accountable_critical_requires_two_consecutive_runs(monkeypatch: pytest.
     first_report = make_accountable_report(module, "0.98")
     second_report = make_accountable_report(module, "0.98", ts_ms=first_report.ts_ms + 1)
 
-    module.check_accountable_collateral_band(first_report)
+    module.check_accountable_collateral(first_report)
     assert len(alerts) == 1
     assert alerts[0].severity == module.AlertSeverity.HIGH
 
-    module.check_accountable_collateral_band(second_report)
+    module.check_accountable_collateral(second_report)
     assert len(alerts) == 2
     assert alerts[1].severity == module.AlertSeverity.CRITICAL
     assert "undercollateralized" in alerts[1].message
@@ -593,8 +583,8 @@ def test_accountable_frozen_report_does_not_confirm_critical(monkeypatch: pytest
     monkeypatch.setattr(module, "send_alert", alerts.append)
     report = make_accountable_report(module, "0.98")
 
-    module.check_accountable_collateral_band(report)
-    module.check_accountable_collateral_band(report)
+    module.check_accountable_collateral(report)
+    module.check_accountable_collateral(report)
 
     assert [alert.severity for alert in alerts] == [module.AlertSeverity.HIGH]
     assert cache[module.CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK] == "1"
@@ -606,37 +596,37 @@ def test_accountable_critical_streak_resets_on_recovery(monkeypatch: pytest.Monk
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
-    module.check_accountable_collateral_band(make_accountable_report(module, "0.98"))
-    module.check_accountable_collateral_band(make_accountable_report(module, "1.20"))
-    module.check_accountable_collateral_band(make_accountable_report(module, "0.98"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.98"))
+    module.check_accountable_collateral(make_accountable_report(module, "1.20"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.98"))
 
     # The recovery reset the streak, so the second breach is unconfirmed again
     # and never escalates — two non-consecutive dips must not reach CRITICAL.
     assert [alert.severity for alert in alerts] == [module.AlertSeverity.HIGH, module.AlertSeverity.HIGH]
 
 
-def test_accountable_does_not_realert_within_same_band(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_accountable_does_not_realert_while_below_high(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
-    module.check_accountable_collateral_band(make_accountable_report(module, "1.03"))
-    module.check_accountable_collateral_band(make_accountable_report(module, "1.02"))
-    module.check_accountable_collateral_band(make_accountable_report(module, "1.01"))
+    module.check_accountable_collateral(make_accountable_report(module, "1.0001"))
+    module.check_accountable_collateral(make_accountable_report(module, "1.00015"))
+    module.check_accountable_collateral(make_accountable_report(module, "1.00005"))
 
     assert len(alerts) == 1
 
 
-def test_accountable_recovery_rearms_band(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_accountable_recovery_rearms_alert(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
-    module.check_accountable_collateral_band(make_accountable_report(module, "1.02"))
-    module.check_accountable_collateral_band(make_accountable_report(module, "1.20"))
-    module.check_accountable_collateral_band(make_accountable_report(module, "1.02"))
+    module.check_accountable_collateral(make_accountable_report(module, "1.0001"))
+    module.check_accountable_collateral(make_accountable_report(module, "1.20"))
+    module.check_accountable_collateral(make_accountable_report(module, "1.0001"))
 
     assert len(alerts) == 2
     assert all(alert.severity == module.AlertSeverity.HIGH for alert in alerts)
@@ -653,8 +643,8 @@ def test_accountable_alerts_never_trigger_emergency_dispatch(monkeypatch: pytest
     first_report = make_accountable_report(module, "0.98")
     second_report = make_accountable_report(module, "0.98", ts_ms=first_report.ts_ms + 1)
 
-    module.check_accountable_collateral_band(first_report)
-    module.check_accountable_collateral_band(second_report)
+    module.check_accountable_collateral(first_report)
+    module.check_accountable_collateral(second_report)
 
     assert alerts[-1].severity == module.AlertSeverity.CRITICAL
     assert alerts[-1].protocol == module.ACCOUNTABLE_ALERT_PROTOCOL
@@ -671,14 +661,14 @@ def test_accountable_unavailable_run_breaks_critical_confirmation(monkeypatch: p
     monkeypatch.setattr(module, "send_alert", alerts.append)
     first_ts = 1_785_490_814_726
 
-    module.check_accountable_collateral_band(make_accountable_report(module, "0.98", ts_ms=first_ts))
+    module.check_accountable_collateral(make_accountable_report(module, "0.98", ts_ms=first_ts))
     module.check_accountable_availability("connection refused")
-    module.check_accountable_collateral_band(make_accountable_report(module, "0.98", ts_ms=first_ts + 1))
+    module.check_accountable_collateral(make_accountable_report(module, "0.98", ts_ms=first_ts + 1))
 
     assert [alert.severity for alert in alerts] == [module.AlertSeverity.HIGH]
     assert cache[module.CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK] == "1"
 
-    module.check_accountable_collateral_band(make_accountable_report(module, "0.98", ts_ms=first_ts + 2))
+    module.check_accountable_collateral(make_accountable_report(module, "0.98", ts_ms=first_ts + 2))
     assert [alert.severity for alert in alerts] == [module.AlertSeverity.HIGH, module.AlertSeverity.CRITICAL]
 
 
@@ -781,18 +771,3 @@ def test_accountable_failure_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(module, "fetch_report", boom)
 
     module.check_accountable_solvency()  # must not raise
-
-
-def test_accountable_unrecognised_cached_band_falls_back_to_ok(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A stale or renamed band label must not wedge the check on every later run."""
-    module = load_3jane_module()
-    alerts: list = []
-    cache = stub_cache(monkeypatch, module)
-    monkeypatch.setattr(module, "send_alert", alerts.append)
-    cache[module.CACHE_KEY_ACCOUNTABLE_BAND] = "WARNING"
-
-    module.check_accountable_collateral_band(make_accountable_report(module, "1.02"))
-
-    assert len(alerts) == 1
-    assert alerts[0].severity == module.AlertSeverity.HIGH
-    assert cache[module.CACHE_KEY_ACCOUNTABLE_BAND] == module.ACCOUNTABLE_BAND_HIGH
