@@ -1,4 +1,4 @@
-"""Monitor CAP Stabledrop availability and stcUSD accounting invariants."""
+"""Monitor stcUSD accounting invariants."""
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -14,11 +14,9 @@ from utils.web3_wrapper import ChainManager
 PROTOCOL = "cap"
 CUSD = "0xcCcc62962d17b8914c62D74FfB843d73B2a3cccC"
 STCUSD = "0x88887bE419578051FF9F4eb6C858A951921D8888"
-STABLEDROP = "0x1D7D4485B4737FAb29180A7C143E72Cb4666357c"
 CUSD_DECIMALS = 18
 ONE_STCUSD = 10**18
 
-CACHE_KEY_STABLEDROP_PAUSED = "CAP_STABLEDROP_PAUSED"
 CACHE_KEY_STCUSD_BACKING_DEFICIT = "CAP_STCUSD_BACKING_DEFICIT"
 CACHE_KEY_STCUSD_ASSETS_PER_SHARE = "CAP_STCUSD_ASSETS_PER_SHARE"
 
@@ -51,27 +49,6 @@ def _format_cusd(raw_value: int) -> str:
     """Format an 18-decimal cUSD amount for alert messages."""
     value = Decimal(raw_value) / Decimal(10**CUSD_DECIMALS)
     return f"{value:,.6f}"
-
-
-def check_stabledrop_paused(is_paused: bool) -> None:
-    """Alert once when the CAP Stabledrop enters the paused state.
-
-    Args:
-        is_paused: Current value returned by the Stabledrop's ``paused()`` call.
-    """
-    previous_paused = _cache_flag(CACHE_KEY_STABLEDROP_PAUSED)
-    logger.info("CAP Stabledrop paused: %s", is_paused)
-
-    if is_paused and not previous_paused:
-        message = (
-            "*CAP Stabledrop PAUSED*\n"
-            "Claims are disabled while the contract remains paused.\n"
-            f"🔗 [Stabledrop](https://etherscan.io/address/{STABLEDROP})"
-        )
-        send_alert(Alert(AlertSeverity.CRITICAL, message, PROTOCOL))
-
-    if is_paused != previous_paused:
-        write_last_value_to_file(cache_filename, CACHE_KEY_STABLEDROP_PAUSED, int(is_paused))
 
 
 def check_stcusd_backing(state: StcUsdState) -> None:
@@ -139,45 +116,37 @@ def check_stcusd_assets_per_share(current_assets_per_share: int) -> None:
         )
 
 
-def load_status(client: Any) -> tuple[bool, StcUsdState]:
-    """Load CAP status values in one Mainnet RPC batch.
+def load_status(client: Any) -> StcUsdState:
+    """Load stcUSD status values in one Mainnet RPC batch.
 
     Args:
         client: Mainnet Web3 client supporting batch requests.
 
     Returns:
-        Stabledrop pause state and current stcUSD accounting state.
+        Current stcUSD accounting state.
     """
-    stabledrop = client.eth.contract(address=STABLEDROP, abi=load_abi("protocols/cap/abi/Stabledrop.json"))
     cusd = client.eth.contract(address=CUSD, abi=load_abi("protocols/cap/abi/CToken.json"))
     stcusd = client.eth.contract(address=STCUSD, abi=load_abi("protocols/cap/abi/StakedCap.json"))
 
     with client.batch_requests() as batch:
-        batch.add(stabledrop.functions.paused())
         batch.add(cusd.functions.balanceOf(STCUSD))
         batch.add(stcusd.functions.totalAssets())
         batch.add(stcusd.functions.lockedProfit())
         batch.add(stcusd.functions.convertToAssets(ONE_STCUSD))
         responses = batch.execute()
 
-    is_paused = responses[0]
-    if not isinstance(is_paused, bool):
-        raise RuntimeError("CAP status RPC returned an invalid value for Stabledrop paused()")
-
-    state = StcUsdState(
-        cusd_balance=_to_int(responses[1], "stcUSD cUSD balance"),
-        total_assets=_to_int(responses[2], "stcUSD totalAssets"),
-        locked_profit=_to_int(responses[3], "stcUSD lockedProfit"),
-        assets_per_share=_to_int(responses[4], "stcUSD convertToAssets"),
+    return StcUsdState(
+        cusd_balance=_to_int(responses[0], "stcUSD cUSD balance"),
+        total_assets=_to_int(responses[1], "stcUSD totalAssets"),
+        locked_profit=_to_int(responses[2], "stcUSD lockedProfit"),
+        assets_per_share=_to_int(responses[3], "stcUSD convertToAssets"),
     )
-    return is_paused, state
 
 
 def main() -> None:
     """Fetch and check CAP status on Mainnet."""
     client = ChainManager.get_client(Chain.MAINNET)
-    is_paused, stcusd_state = load_status(client)
-    check_stabledrop_paused(is_paused)
+    stcusd_state = load_status(client)
     check_stcusd_backing(stcusd_state)
     check_stcusd_assets_per_share(stcusd_state.assets_per_share)
 

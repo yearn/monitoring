@@ -8,13 +8,9 @@ For more info about CAP protocol check [the docs](https://docs.cap.app/).
 
 [Internal timelock monitoring](../timelock/README.md) alerts on transactions queued to the [Mainnet Timelock](https://etherscan.io/address/0xD8236031d8279d82E615aF2BFab5FC0127A329ab#code).
 
-## Stabledrop Monitoring
-
-The hourly [status.py](./status.py) monitor calls `paused()` on the cUSD [Stabledrop contract](https://etherscan.io/address/0x1D7D4485B4737FAb29180A7C143E72Cb4666357c). It sends a critical alert when the state becomes paused. The alert is sent once per paused period; observing an unpaused state re-arms the next pause alert.
-
 ## stcUSD Monitoring
 
-The hourly [status.py](./status.py) monitor also checks the [stcUSD contract](https://etherscan.io/address/0x88887bE419578051FF9F4eb6C858A951921D8888):
+The hourly [status.py](./status.py) monitor checks the [stcUSD contract](https://etherscan.io/address/0x88887bE419578051FF9F4eb6C858A951921D8888):
 
 1. The contract's cUSD balance must cover `totalAssets() + lockedProfit()`. A deficit sends one critical alert; recovery re-arms the monitor.
 2. `convertToAssets(1e18)` must not decrease between runs. Any decrease sends a critical alert.

@@ -83,8 +83,6 @@ protocols:
       - protocols/cap/status.py
       - protocols/cap/liquidity.py
     monitors:
-      - name: "Stabledrop Pause"
-        description: "Critical alert when the CAP cUSD Stabledrop paused() state becomes true"
       - name: "stcUSD Backing"
         description: "cUSD balance covers stcUSD totalAssets plus lockedProfit"
       - name: "stcUSD Assets Per Share"

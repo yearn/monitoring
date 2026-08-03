@@ -23,7 +23,7 @@ def stub_cache(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     return cache
 
 
-def make_status_client(responses: Sequence[int | bool | None]) -> tuple[SimpleNamespace, list[object]]:
+def make_status_client(responses: Sequence[int | None]) -> tuple[SimpleNamespace, list[object]]:
     """Build a batch-capable fake client and capture its submitted calls."""
     added_calls: list[object] = []
 
@@ -37,11 +37,10 @@ def make_status_client(responses: Sequence[int | bool | None]) -> tuple[SimpleNa
         def add(self, call: object) -> None:
             added_calls.append(call)
 
-        def execute(self) -> list[int | bool | None]:
+        def execute(self) -> list[int | None]:
             return list(responses)
 
     functions = SimpleNamespace(
-        paused=lambda: "paused",
         balanceOf=lambda _owner: "balanceOf",
         totalAssets=lambda: "totalAssets",
         lockedProfit=lambda: "lockedProfit",
@@ -53,33 +52,6 @@ def make_status_client(responses: Sequence[int | bool | None]) -> tuple[SimpleNa
         batch_requests=Batch,
     )
     return client, added_calls
-
-
-def test_paused_stabledrop_sends_one_critical_alert(monkeypatch: pytest.MonkeyPatch) -> None:
-    alerts: list[Alert] = []
-    cache = stub_cache(monkeypatch)
-    monkeypatch.setattr(status, "send_alert", alerts.append)
-
-    status.check_stabledrop_paused(True)
-    status.check_stabledrop_paused(True)
-
-    assert len(alerts) == 1
-    assert alerts[0].severity == status.AlertSeverity.CRITICAL
-    assert status.STABLEDROP in alerts[0].message
-    assert cache[status.CACHE_KEY_STABLEDROP_PAUSED] == "1"
-
-
-def test_stabledrop_unpause_rearms_next_alert(monkeypatch: pytest.MonkeyPatch) -> None:
-    alerts: list[Alert] = []
-    cache = stub_cache(monkeypatch)
-    monkeypatch.setattr(status, "send_alert", alerts.append)
-
-    status.check_stabledrop_paused(True)
-    status.check_stabledrop_paused(False)
-    status.check_stabledrop_paused(True)
-
-    assert len(alerts) == 2
-    assert cache[status.CACHE_KEY_STABLEDROP_PAUSED] == "1"
 
 
 def test_stcusd_backing_deficit_sends_one_critical_alert(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -142,25 +114,17 @@ def test_stcusd_assets_per_share_increase_does_not_alert(monkeypatch: pytest.Mon
 
 
 def test_load_status_batches_all_calls() -> None:
-    responses = [True, 120, 100, 10, 1_050_000_000_000_000_000]
+    responses = [120, 100, 10, 1_050_000_000_000_000_000]
     client, added_calls = make_status_client(responses)
 
-    is_paused, stcusd_state = status.load_status(client)
+    stcusd_state = status.load_status(client)
 
-    assert added_calls == ["paused", "balanceOf", "totalAssets", "lockedProfit", "convertToAssets"]
-    assert is_paused is True
+    assert added_calls == ["balanceOf", "totalAssets", "lockedProfit", "convertToAssets"]
     assert stcusd_state == status.StcUsdState(120, 100, 10, 1_050_000_000_000_000_000)
 
 
-def test_load_status_rejects_invalid_paused_response() -> None:
-    client, _added_calls = make_status_client([1, 120, 100, 10, 1_050_000_000_000_000_000])
-
-    with pytest.raises(RuntimeError, match=r"invalid value for Stabledrop paused\(\)"):
-        status.load_status(client)
-
-
 def test_load_status_rejects_missing_numeric_response() -> None:
-    client, _added_calls = make_status_client([False, 120, None, 10, 1_050_000_000_000_000_000])
+    client, _added_calls = make_status_client([120, None, 10, 1_050_000_000_000_000_000])
 
     with pytest.raises(RuntimeError, match="stcUSD totalAssets"):
         status.load_status(client)
@@ -171,8 +135,7 @@ def test_main_checks_all_status_values(monkeypatch: pytest.MonkeyPatch) -> None:
     observed: list[object] = []
 
     monkeypatch.setattr(status.ChainManager, "get_client", lambda _chain: object())
-    monkeypatch.setattr(status, "load_status", lambda _client: (True, state))
-    monkeypatch.setattr(status, "check_stabledrop_paused", lambda value: observed.append(("paused", value)))
+    monkeypatch.setattr(status, "load_status", lambda _client: state)
     monkeypatch.setattr(status, "check_stcusd_backing", lambda value: observed.append(("backing", value)))
     monkeypatch.setattr(
         status,
@@ -183,7 +146,6 @@ def test_main_checks_all_status_values(monkeypatch: pytest.MonkeyPatch) -> None:
     status.main()
 
     assert observed == [
-        ("paused", True),
         ("backing", state),
         ("assets_per_share", state.assets_per_share),
     ]
