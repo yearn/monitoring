@@ -5,7 +5,14 @@ from web3 import Web3
 
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
-from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
+from utils.cache import (
+    HOURLY_CACHE_STALE_AFTER_SECONDS,
+    cache_filename,
+    cache_key_is_stale,
+    get_fresh_last_value_for_key_from_file,
+    get_last_value_for_key_from_file,
+    write_last_value_with_timestamp_to_file,
+)
 from utils.chains import Chain
 from utils.config import Config
 from utils.logger import get_logger
@@ -74,16 +81,16 @@ def to_float(value, default=0.0):
 
 
 def send_breach_alert_once(cache_key, alert_message, severity=AlertSeverity.HIGH):
-    last_state = int(get_last_value_for_key_from_file(cache_filename, cache_key))
+    last_state = int(
+        get_fresh_last_value_for_key_from_file(cache_filename, cache_key, HOURLY_CACHE_STALE_AFTER_SECONDS)
+    )
     if last_state == 0:
         send_alert(Alert(severity, alert_message, PROTOCOL))
-        write_last_value_to_file(cache_filename, cache_key, 1)
+    write_last_value_with_timestamp_to_file(cache_filename, cache_key, 1)
 
 
 def clear_breach_state(cache_key):
-    last_state = int(get_last_value_for_key_from_file(cache_filename, cache_key))
-    if last_state == 1:
-        write_last_value_to_file(cache_filename, cache_key, 0)
+    write_last_value_with_timestamp_to_file(cache_filename, cache_key, 0)
 
 
 def _format_iusd_units(raw_value: int) -> Decimal:
@@ -185,7 +192,11 @@ def main():
 
         # Alert 0: Large iUSD mint by supply delta (no event scanning)
         cache_key_large_mints = f"{PROTOCOL}_large_mints_last_supply"
-        last_supply_cached = int(get_last_value_for_key_from_file(cache_filename, cache_key_large_mints))
+        last_supply_cached = int(
+            get_fresh_last_value_for_key_from_file(
+                cache_filename, cache_key_large_mints, HOURLY_CACHE_STALE_AFTER_SECONDS
+            )
+        )
         if last_supply_cached > 0:
             delta_raw = iusd_supply_raw - last_supply_cached
             threshold_raw = int(last_supply_cached * MINT_THRESHOLD_PERCENT)
@@ -211,12 +222,22 @@ def main():
                         PROTOCOL,
                     )
                 )
-        write_last_value_to_file(cache_filename, cache_key_large_mints, iusd_supply_raw)
+        write_last_value_with_timestamp_to_file(cache_filename, cache_key_large_mints, iusd_supply_raw)
 
         # Alert 1: Low Liquid Reserves
         if liquid_reserves > 0:
             cache_key_reserves = f"{PROTOCOL}_liquid_reserves"
             last_reserves = float(get_last_value_for_key_from_file(cache_filename, cache_key_reserves))
+
+            if last_reserves > 0 and cache_key_is_stale(
+                cache_filename, cache_key_reserves, HOURLY_CACHE_STALE_AFTER_SECONDS
+            ):
+                logger.info(
+                    "Liquid reserves cache timestamp is missing, invalid, or older than %sh; "
+                    "re-arming crossing detection",
+                    HOURLY_CACHE_STALE_AFTER_SECONDS // 3600,
+                )
+                last_reserves = LIQUID_RESERVES_THRESHOLD
 
             if (
                 last_reserves != 0
@@ -233,7 +254,7 @@ def main():
                 )
                 send_alert(Alert(AlertSeverity.HIGH, msg, PROTOCOL))
 
-            write_last_value_to_file(cache_filename, cache_key_reserves, liquid_reserves)
+            write_last_value_with_timestamp_to_file(cache_filename, cache_key_reserves, liquid_reserves)
 
         # Alert 2 and Alert 3 intentionally disabled:
         # reserveRatio and illiquidTargetRatio have been persistently violated since inception,
@@ -306,7 +327,14 @@ def main():
                 farm_label = farm.get("label", farm.get("name", farm_address))
                 cache_key_farm_ratio = f"{PROTOCOL}_farm_ratio_{farm_address.lower()}"
 
-                last_ratio = to_float(get_last_value_for_key_from_file(cache_filename, cache_key_farm_ratio))
+                last_ratio_raw = get_last_value_for_key_from_file(cache_filename, cache_key_farm_ratio)
+                last_ratio = to_float(last_ratio_raw)
+                if last_ratio > 0 and cache_key_is_stale(
+                    cache_filename, cache_key_farm_ratio, HOURLY_CACHE_STALE_AFTER_SECONDS
+                ):
+                    write_last_value_with_timestamp_to_file(cache_filename, cache_key_farm_ratio, farm_ratio)
+                    continue
+
                 if last_ratio > 0:
                     ratio_change_pct = abs(farm_ratio - last_ratio) / last_ratio
                     # skip farm if ratio change is less than 1% of TVL
@@ -322,7 +350,6 @@ def main():
                                 "change_pct": ratio_change_pct,
                             }
                         )
-                        write_last_value_to_file(cache_filename, cache_key_farm_ratio, farm_ratio)
                 else:
                     # Farm had no previous ratio (or previously zero). Alert if now materially active.
                     if farm_ratio > FARM_RATIO_ACTIVATION_ALERT_THRESHOLD:
@@ -332,7 +359,7 @@ def main():
                                 "new_ratio": farm_ratio,
                             }
                         )
-                        write_last_value_to_file(cache_filename, cache_key_farm_ratio, farm_ratio)
+                write_last_value_with_timestamp_to_file(cache_filename, cache_key_farm_ratio, farm_ratio)
 
             if moved_farms:
                 moved_farms.sort(key=lambda x: x["change_pct"], reverse=True)

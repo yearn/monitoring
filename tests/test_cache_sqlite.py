@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from utils import cache, paths, store
+
+NOW = 2_000_000_000
 
 
 def _use_cache_dir(monkeypatch, tmp_path) -> None:
@@ -74,3 +80,41 @@ def test_dual_write_legacy(monkeypatch, tmp_path):
 
     assert store.state_get("cache-id.txt", "aave") == "7"
     assert filename.read_text() == "aave:7\n"
+
+
+def test_timestamped_cache_value_is_fresh_through_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _use_cache_dir(monkeypatch, tmp_path)
+    filename = str(tmp_path / "cache-id.txt")
+    max_age = 10
+    cache.write_last_value_with_timestamp_to_file(filename, "reserves", 42, NOW - max_age)
+
+    assert cache.get_fresh_last_value_for_key_from_file(filename, "reserves", max_age, NOW) == "42"
+
+
+def test_timestamped_cache_value_is_absent_when_stale(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _use_cache_dir(monkeypatch, tmp_path)
+    filename = str(tmp_path / "cache-id.txt")
+    cache.write_last_value_with_timestamp_to_file(filename, "reserves", 42, NOW - 11)
+
+    assert cache.get_fresh_last_value_for_key_from_file(filename, "reserves", 10, NOW) == 0
+
+
+def test_existing_cache_with_missing_or_invalid_timestamp_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _use_cache_dir(monkeypatch, tmp_path)
+    filename = str(tmp_path / "cache-id.txt")
+    cache.write_last_value_to_file(filename, "reserves", 42)
+
+    assert cache.cache_key_is_stale(filename, "reserves", 10, NOW)
+
+    for timestamp in (0, -1, "bad", float("nan"), float("inf"), NOW + 1):
+        cache.write_last_value_to_file(filename, cache.cache_timestamp_key("reserves"), timestamp)
+        assert cache.cache_key_is_stale(filename, "reserves", 10, NOW)

@@ -4,7 +4,14 @@ from web3 import Web3
 
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
-from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
+from utils.cache import (
+    HOURLY_CACHE_STALE_AFTER_SECONDS,
+    cache_filename,
+    get_fresh_last_value_for_key_from_file,
+    get_last_value_for_key_from_file,
+    write_last_value_to_file,
+    write_last_value_with_timestamp_to_file,
+)
 from utils.chains import Chain
 from utils.config import Config
 from utils.logger import get_logger
@@ -37,16 +44,16 @@ USDAI_PROXY_READ_ABI = [
 
 
 def send_breach_alert_once(cache_key, alert_message, severity=AlertSeverity.HIGH):
-    last_state = int(get_last_value_for_key_from_file(cache_filename, cache_key))
+    last_state = int(
+        get_fresh_last_value_for_key_from_file(cache_filename, cache_key, HOURLY_CACHE_STALE_AFTER_SECONDS)
+    )
     if last_state == 0:
         send_alert(Alert(severity, alert_message, PROTOCOL))
-        write_last_value_to_file(cache_filename, cache_key, 1)
+    write_last_value_with_timestamp_to_file(cache_filename, cache_key, 1)
 
 
 def clear_breach_state(cache_key):
-    last_state = int(get_last_value_for_key_from_file(cache_filename, cache_key))
-    if last_state == 1:
-        write_last_value_to_file(cache_filename, cache_key, 0)
+    write_last_value_with_timestamp_to_file(cache_filename, cache_key, 0)
 
 
 def get_loan_details(client, owner_addr):

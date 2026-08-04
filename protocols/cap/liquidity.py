@@ -2,7 +2,12 @@ from decimal import Decimal
 
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
-from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
+from utils.cache import (
+    DAILY_CACHE_STALE_AFTER_SECONDS,
+    cache_filename,
+    get_fresh_last_value_for_key_from_file,
+    write_last_value_with_timestamp_to_file,
+)
 from utils.chains import Chain
 from utils.config import Config
 from utils.logger import get_logger
@@ -77,7 +82,9 @@ def main():
 
     # --- cUSD Large Mint Monitoring (No Event Scanning) ---
     current_supply_raw = int(ctoken.functions.totalSupply().call())
-    last_supply_cached = _to_int(get_last_value_for_key_from_file(cache_filename, CACHE_KEY_LAST_SUPPLY))
+    last_supply_cached = _to_int(
+        get_fresh_last_value_for_key_from_file(cache_filename, CACHE_KEY_LAST_SUPPLY, DAILY_CACHE_STALE_AFTER_SECONDS)
+    )
     if last_supply_cached > 0:
         delta_raw = current_supply_raw - last_supply_cached
         threshold_raw = int(last_supply_cached * MINT_THRESHOLD_PERCENT)
@@ -99,7 +106,7 @@ def main():
             )
             send_alert(Alert(AlertSeverity.LOW, msg, PROTOCOL))
 
-    write_last_value_to_file(cache_filename, CACHE_KEY_LAST_SUPPLY, current_supply_raw)
+    write_last_value_with_timestamp_to_file(cache_filename, CACHE_KEY_LAST_SUPPLY, current_supply_raw)
 
 
 if __name__ == "__main__":

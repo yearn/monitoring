@@ -28,6 +28,11 @@ It compares cached `totalSupply` deltas and alerts when the increase is above:
 
 - `IUSD_LARGE_MINT_THRESHOLD_PERCENT` (default: `0.05`, i.e. `5%` of previous `totalSupply`)
 
+## Cache Freshness
+
+Hourly delta baselines expire after 3 hours and initialize from the next valid observation. Breach-dedupe state and
+liquid-reserve crossing detection are re-armed after the same monitoring gap. PPS-style loss baselines are not affected.
+
 ### Emergency dispatch
 
 HIGH and CRITICAL alerts automatically trigger a signed webhook to

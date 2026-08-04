@@ -45,6 +45,12 @@ It runs cached `totalSupply` delta checks and alerts when the increase is above:
 
 The monitoring runner runs this monitor hourly (see `automation/jobs.yaml`).
 
+## Cache Freshness
+
+The large-mint baseline expires after 3 hours and initializes from the next valid observation. Backing-invariant
+dedupe is re-armed after the same monitoring gap. Loan-principal history remains persistent so activity during an
+outage is still reported.
+
 ## Price Monitoring Scope
 
 `usdai/main.py` does not monitor PYUSD/USD price.
