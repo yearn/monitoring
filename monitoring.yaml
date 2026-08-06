@@ -462,7 +462,7 @@ protocols:
       - protocols/yearn/check_indexer_freshness.py
     monitors:
       - name: "Indexer Freshness"
-        description: "Envio indexer lag per chain; alerts the errors channel when a chain's newest indexed block is older than 60 minutes or the GraphQL endpoint is down"
+        description: "Envio indexer lag per chain; alerts the Envio channel when a chain's newest indexed block is older than 60 minutes or the GraphQL endpoint is down"
       - name: "Large Flows"
         description: "Deposit/withdrawal flows >=$500k USD (Katana withdrawals >=$50k; or 10% of vault totalSupply fallback for unpriced tokens)"
       - name: "Timelock Delay"

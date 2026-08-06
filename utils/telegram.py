@@ -21,6 +21,14 @@ MAX_MESSAGE_LENGTH = 4096
 # optional TELEGRAM_BOT_TOKEN_ERRORS (falls back to the DEFAULT bot).
 ERROR_CHANNEL = "errors"
 
+# Channel key for Envio indexer problems (staleness, unreachable GraphQL endpoint,
+# GraphQL errors). The indexer is a shared dependency of several monitors, and its
+# outages are actioned by whoever runs the indexer rather than by protocol owners,
+# so they get their own chat instead of being mixed into the general errors feed.
+# Destination is a standalone chat, TELEGRAM_CHAT_ID_ENVIO, served by the DEFAULT
+# bot — no topic thread and no dedicated bot token.
+ENVIO_CHANNEL = "envio"
+
 # Matches `bot<digits>:<token>` in Telegram API URLs. Used to scrub the bot
 # token out of exception messages — `requests.HTTPError.__str__()` includes
 # the full URL, so without this the token leaks into any log or alert that
@@ -307,9 +315,22 @@ def _update_alert_delivery_safe(
         logger.debug("Failed to update alert delivery", exc_info=True)
 
 
-def _error_channel_configured() -> bool:
-    """Return True if a dedicated errors destination (topic or chat id) is set."""
-    return bool(os.getenv("TELEGRAM_TOPIC_ID_ERRORS") or os.getenv("TELEGRAM_CHAT_ID_ERRORS"))
+def _channel_configured(channel: str) -> bool:
+    """Return True if a dedicated destination (topic or chat id) is set for a channel."""
+    return bool(os.getenv(f"TELEGRAM_TOPIC_ID_{channel.upper()}") or os.getenv(f"TELEGRAM_CHAT_ID_{channel.upper()}"))
+
+
+def _send_labelled(message: str, protocol: str, channel: str, disable_notification: bool, source: str) -> None:
+    """Send a `[protocol]`-labelled plain-text message to a shared channel."""
+    send_telegram_message(
+        f"[{protocol}] {escape_markdown(message)}",
+        channel,
+        disable_notification,
+        plain_text=True,
+        source=source,
+        origin_protocol=protocol,
+        channel=channel,
+    )
 
 
 def send_error_message(
@@ -336,16 +357,8 @@ def send_error_message(
             and as the fallback channel when no errors destination is configured.
         disable_notification: If True (default), send silently.
     """
-    if _error_channel_configured():
-        send_telegram_message(
-            f"[{protocol}] {escape_markdown(message)}",
-            ERROR_CHANNEL,
-            disable_notification,
-            plain_text=True,
-            source=source,
-            origin_protocol=protocol,
-            channel=ERROR_CHANNEL,
-        )
+    if _channel_configured(ERROR_CHANNEL):
+        _send_labelled(message, protocol, ERROR_CHANNEL, disable_notification, source)
     else:
         send_telegram_message(
             escape_markdown(message),
@@ -356,6 +369,37 @@ def send_error_message(
             origin_protocol=protocol,
             channel=protocol,
         )
+
+
+def send_envio_error_message(
+    message: str,
+    protocol: str,
+    disable_notification: bool = True,
+    *,
+    source: str = "envio_error",
+) -> None:
+    """Route an Envio indexer problem to the dedicated envio channel.
+
+    Indexer staleness, an unreachable GraphQL endpoint and GraphQL errors are all
+    the same operational problem for whoever runs the indexer, so they land in one
+    chat instead of being spread across the per-protocol groups and the general
+    errors feed. The originating ``protocol`` is prefixed as a ``[label]`` so the
+    merged feed shows which monitor hit the problem.
+
+    Falls back to :func:`send_error_message` (and from there to the protocol's own
+    channel) when ``TELEGRAM_CHAT_ID_ENVIO`` is unset, so visibility is never lost.
+
+    Args:
+        message: The error/diagnostic text.
+        protocol: Originating protocol, used as the ``[label]`` prefix and for the
+            fallback routing.
+        disable_notification: If True (default), send silently.
+        source: Alert source tag recorded with the alert.
+    """
+    if os.getenv(f"TELEGRAM_CHAT_ID_{ENVIO_CHANNEL.upper()}"):
+        _send_labelled(message, protocol, ENVIO_CHANNEL, disable_notification, source)
+    else:
+        send_error_message(message, protocol, disable_notification, source=source)
 
 
 def get_github_run_url() -> str:

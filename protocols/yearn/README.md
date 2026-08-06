@@ -262,7 +262,7 @@ Step 3 covers the inverse trap: an empty result set is not good news. If a chain
 
 ### Alerts
 
-All alerts go to the errors channel (`TELEGRAM_*_ERRORS`) labelled `[yearn]`, alongside the other operational diagnostics:
+This monitor only ever reports Envio indexer problems, so all of its alerts go to the Envio chat (`TELEGRAM_CHAT_ID_ENVIO`) labelled `[yearn]`, alongside the other indexer failures (large flows, timelock). Every other yearn monitor's operational error still goes to the errors channel. If `TELEGRAM_CHAT_ID_ENVIO` is unset these fall back to the errors channel, and from there to the protocol's own chat.
 
 - **Stale or missing chains** — one message listing every lagging chain with its lag and last indexed block, plus every expected chain the indexer reported no sync state for.
 - **Indexer unavailable** — the GraphQL endpoint is unset, unreachable, returned errors, or reported no chains. Sent on every run for as long as it lasts.
