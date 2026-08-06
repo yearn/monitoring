@@ -29,6 +29,13 @@ ERROR_CHANNEL = "errors"
 # bot — no topic thread and no dedicated bot token.
 ENVIO_CHANNEL = "envio"
 
+# Channel key for internal curation alerts — risk findings that are acted on by
+# the curation team rather than announced in a protocol's public group. Destination
+# is a standalone chat, TELEGRAM_CHAT_ID_CURATION, served by the DEFAULT bot — no
+# topic thread and no dedicated bot token. Route with `resolve_channel` so an unset
+# chat id falls back to the protocol's own group instead of dropping the alert.
+CURATION_CHANNEL = "curation"
+
 # Matches `bot<digits>:<token>` in Telegram API URLs. Used to scrub the bot
 # token out of exception messages — `requests.HTTPError.__str__()` includes
 # the full URL, so without this the token leaks into any log or alert that
@@ -318,6 +325,21 @@ def _update_alert_delivery_safe(
 def _channel_configured(channel: str) -> bool:
     """Return True if a dedicated destination (topic or chat id) is set for a channel."""
     return bool(os.getenv(f"TELEGRAM_TOPIC_ID_{channel.upper()}") or os.getenv(f"TELEGRAM_CHAT_ID_{channel.upper()}"))
+
+
+def resolve_channel(channel: str, fallback: str) -> str:
+    """Return `channel` when its chat id is configured, else `fallback`.
+
+    Shared chats (curation, envio) are configured per deployment. Sending to one
+    whose `TELEGRAM_CHAT_ID_<CHANNEL>` is unset would drop the message with only a
+    log line, so callers route through here and keep landing in their own group
+    until the chat is configured.
+
+    Args:
+        channel: Preferred channel key, e.g. ``CURATION_CHANNEL``.
+        fallback: Channel to use when the preferred one has no chat id.
+    """
+    return channel if os.getenv(f"TELEGRAM_CHAT_ID_{channel.upper()}") else fallback
 
 
 def _send_labelled(message: str, protocol: str, channel: str, disable_notification: bool, source: str) -> None:

@@ -71,6 +71,8 @@ For vaults that are used as collateral in Yearn v3 strategies (YV collateral vau
 5. Sums collateral at risk per underlying asset group
 6. Sends alerts only if combined withdrawable liquidity is below total collateral at risk plus buffer
 
+**Routing:** unwind liquidity alerts go to the internal curation chat (`TELEGRAM_CHAT_ID_CURATION`), not the public morpho group — the fix is a curation decision (rebalance the vaults, adjust market caps). If that chat id is unset they fall back to the morpho group. Every other morpho alert is unaffected.
+
 This approach alerts on liquidation coverage risk instead of low liquidity as a percentage of all assets, which avoids noise when a vault group is highly utilized but still has enough liquidity to unwind risky positions.
 
 ### Vault Risk Level
