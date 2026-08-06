@@ -285,7 +285,7 @@ protocols:
       - name: "Vault Risk Levels"
         description: "Weighted total risk score vs vault threshold"
       - name: "Low Liquidity"
-        description: "V1/V2 vault liquidity <1%; combined v1/v2 YV-collateral unwind liquidity vs collateral at risk"
+        description: "V1/V2 vault liquidity <1%; combined v1/v2 YV-collateral unwind liquidity vs collateral at risk (unwind alerts go to the internal curation chat)"
       - name: "V1 Governance"
         description: "Pending supply caps, market removals, timelock changes, guardian changes"
       - name: "V2 Governance"
