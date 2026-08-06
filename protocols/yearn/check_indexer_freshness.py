@@ -9,7 +9,7 @@ returning new rows — so an outage is indistinguishable from "nothing happened"
 This check reads `chain_metadata` from the indexer and, for every chain this repo
 monitors, resolves the wall-clock timestamp of `latest_processed_block` from an
 RPC. Any chain whose newest indexed block is older than the lag threshold
-(default 60 minutes) is reported to the errors channel — as is any expected chain
+(default 60 minutes) is reported to the envio channel — as is any expected chain
 the indexer reports no sync state for at all, since "nothing was stale" must
 never be mistaken for "everything is fresh".
 
@@ -36,7 +36,7 @@ from utils.chains import Chain
 from utils.formatting import format_duration
 from utils.http_client import request_with_retry
 from utils.logger import get_logger
-from utils.telegram import send_error_message
+from utils.telegram import send_envio_error_message
 from utils.web3_wrapper import ChainManager
 
 load_dotenv()
@@ -54,7 +54,7 @@ DASHBOARD_URL = "https://envio-monitoring.yearn.dev/"
 DEFAULT_MAX_LAG_MINUTES = 60
 
 # Staleness persists for as long as the indexer takes to catch up (a re-sync can
-# run for days), so re-alerting every hourly run would bury the errors channel.
+# run for days), so re-alerting every hourly run would bury the envio channel.
 # Each chain alerts on the way into staleness, then at most once per cooldown
 # window, then once more when it recovers.
 DEFAULT_ALERT_COOLDOWN_HOURS = 6
@@ -282,7 +282,7 @@ def report_recovered(fresh: list[ChainFreshness]) -> None:
     if not recovered:
         return
     names = ", ".join(f"{chain.name} ({format_duration(chain.lag_seconds or 0)} behind)" for chain in recovered)
-    send_error_message(f"Envio indexer caught up: {names}", PROTOCOL, source="indexer_freshness")
+    send_envio_error_message(f"Envio indexer caught up: {names}", PROTOCOL, source="indexer_freshness")
     for chain in recovered:
         _set_last_alert_timestamp(chain.chain.chain_id, 0)
 
@@ -299,7 +299,7 @@ def main() -> None:
         # The endpoint being down is itself the outage we are watching for, so it
         # alerts on every run rather than riding the per-chain cooldown.
         logger.error("Indexer unavailable: %s", exc)
-        send_error_message(
+        send_envio_error_message(
             f"Envio indexer unavailable: {exc}\nDashboard: {DASHBOARD_URL}",
             PROTOCOL,
             source="indexer_freshness",
@@ -324,7 +324,7 @@ def main() -> None:
         logger.info("All %d unhealthy chain(s) already alerted within the cooldown window", len(stale) + len(missing))
         return
 
-    send_error_message(
+    send_envio_error_message(
         build_alert_message(stale_to_alert, missing_to_alert, max_lag_seconds),
         PROTOCOL,
         source="indexer_freshness",

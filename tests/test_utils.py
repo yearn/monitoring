@@ -14,7 +14,7 @@ import requests
 
 from utils.alert import Alert, AlertSeverity, register_alert_hook, send_alert
 from utils.config import Config, ProtocolConfig
-from utils.telegram import TelegramError, send_error_message, send_telegram_message
+from utils.telegram import TelegramError, send_envio_error_message, send_error_message, send_telegram_message
 from utils.web3_wrapper import (
     MAX_BACKOFF_SECONDS,
     ProviderConnectionError,
@@ -383,6 +383,86 @@ class TestSendErrorMessage(unittest.TestCase):
         self.assertEqual(json_body["text"], "GraphQL boom")  # no [label] prefix on fallback
         self.assertTrue(json_body["disable_notification"])
         self.assertNotIn("parse_mode", json_body)  # plain text
+
+
+class TestSendEnvioErrorMessage(unittest.TestCase):
+    """Tests for utils.telegram.send_envio_error_message (dedicated envio channel)."""
+
+    @staticmethod
+    def _ok_response(mock_post):
+        mock_response = unittest.mock.Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_post.return_value = mock_response
+
+    @patch("utils.telegram.requests.post")
+    def test_routes_to_envio_chat_with_label_silent_plain(self, mock_post):
+        """With an envio chat configured, the message goes there labelled, silent, plain."""
+        self._ok_response(mock_post)
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TEST_CHAT_ID": "",
+                "TELEGRAM_CHAT_ID_ENVIO": "envio_chat_id",
+                # The errors channel must not win — envio problems have their own chat.
+                "TELEGRAM_CHAT_ID_ERRORS": "errors_chat_id",
+                "TELEGRAM_BOT_TOKEN_DEFAULT": "default_token",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_envio_error_message("Indexer stale on Mainnet", "yearn")
+
+        url = mock_post.call_args[0][0]
+        json_body = mock_post.call_args[1]["json"]
+        self.assertIn("default_token", url)
+        self.assertEqual(json_body["chat_id"], "envio_chat_id")
+        self.assertNotIn("message_thread_id", json_body)  # standalone chat, no topic
+        self.assertEqual(json_body["text"], "[yearn] Indexer stale on Mainnet")
+        self.assertTrue(json_body["disable_notification"])
+        self.assertNotIn("parse_mode", json_body)  # plain text
+
+    @patch("utils.telegram.requests.post")
+    def test_labels_originating_protocol(self, mock_post):
+        """Every monitor's envio problems land in one chat, labelled by origin."""
+        self._ok_response(mock_post)
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TEST_CHAT_ID": "",
+                "TELEGRAM_CHAT_ID_ENVIO": "envio_chat_id",
+                "TELEGRAM_BOT_TOKEN_DEFAULT": "default_token",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_envio_error_message("GraphQL boom", "timelock")
+
+        json_body = mock_post.call_args[1]["json"]
+        self.assertEqual(json_body["chat_id"], "envio_chat_id")
+        self.assertEqual(json_body["text"], "[timelock] GraphQL boom")
+
+    @patch("utils.telegram.requests.post")
+    def test_falls_back_to_errors_channel_when_unconfigured(self, mock_post):
+        """With TELEGRAM_CHAT_ID_ENVIO unset, the alert routes to the errors channel."""
+        self._ok_response(mock_post)
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TEST_CHAT_ID": "",
+                "TELEGRAM_CHAT_ID_ENVIO": "",
+                "TELEGRAM_TOPIC_ID_ERRORS": "",
+                "TELEGRAM_CHAT_ID_ERRORS": "errors_chat_id",
+                "TELEGRAM_BOT_TOKEN_DEFAULT": "default_token",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_envio_error_message("GraphQL boom", "yearn")
+
+        json_body = mock_post.call_args[1]["json"]
+        self.assertEqual(json_body["chat_id"], "errors_chat_id")
+        self.assertEqual(json_body["text"], "[yearn] GraphQL boom")
 
 
 class TestAlert(unittest.TestCase):
