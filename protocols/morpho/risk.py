@@ -42,6 +42,7 @@ MARKETS_RISK_1 = {
         "0x5dffffc7d75dc5abfa8dbe6fad9cbdadf6680cbe1428bafe661497520c84a94c",  # cbBTC/WETH -> lltv 91.5%, oracle: Chainlink BTC/USD and Chainlink ETH/USD
         "0xa7813c754ddd6a24e1a1a29ff3ea877803ac63d09efc2f121b1cf3f0bf3af2f6",  # WETH/cbBTC -> lltv 91.5%, oracle: Chainlink ETH/USD and Chainlink BTC/USD
         "0x3b3769cfca57be2eaed03fcc5299c25691b77781a1e124e7a8d520eb9a7eabb5",  # USDC/WETH -> lltv 86.5%, oracle: Chainlink USDC/USD and Chainlink ETH/USD
+        "0x1c21c59df9db44bf6f645d854ee710a8ca17b479451447e9f56758aee10a2fad",  # cbETH/USDC -> lltv 86%, oracle: Chainlink cbETH/ETH and Chainlink ETH/USD and Chainlink USDC/USD.
     ],
     Chain.KATANA: [
         "0xcd2dc555dced7422a3144a4126286675449019366f83e9717be7c2deb3daae3e",  # vbWBTC/vbUSDC -> lltv 86%, oracle: Chainlink WBTC/BTC, Chainlink BTC/USD and Chainlink USDC/USD
@@ -127,6 +128,7 @@ MARKETS_RISK_2 = {
         "0x9125d0fa03c3137166df68bcc72283477830de2a4a5536512374c573ad4583c3",  # cbLTC/USDC -> lltv 62.5%, oracle: Chainlink LTC/USD
         "0x30767836635facec1282e6ef4a5981406ed4e72727b3a63a3a72c74e8279a8d7",  # LBTC/cbBTC -> lltv 94.5%, oracle: RedStone Price Feed for LBTC_FUNDAMENTAL: https://app.redstone.finance/app/feeds/base/lbtc_fundamental/
         "0x0b2df036bb06b49d893a8f5578cb5a31619f46d7a79cbf11783838204cfdf9e3",  # YFI/USDC -> lltv 77%, oracle: Chainlink YFI/USD and Chainlink USDC/USD.
+        "0x0ca10126f6c94cbd9cf0a48cc9516ae5e3dec5aa68303e6d988ee37c5149bf0d",  # cbETH/USDC -> lltv 77%, oracle: MorphoChainlinkOracleV2 Chainlink cbETH/USD; no quote feed (USDC = $1).
     ],
     Chain.KATANA: [
         "0xfe6cb1b88d8830a884f2459962f4b96ae6e38416af086b8ae49f5d0f7f9fc0cd",  # POL/vbUSDC -> lltv 77%, oracle: Chainlink POL/USD and Chainlink USDC/USD
