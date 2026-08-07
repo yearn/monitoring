@@ -28,6 +28,10 @@ logger = get_logger("morpho.v2_decoders")
 
 WAD = 10**18
 
+# V2 caps are uint128, so type(uint128).max means "no cap". Rendering it through
+# the decimals formatter produces a meaningless 340-undecillion figure.
+UNCAPPED = 2**128 - 1
+
 # Timelocked selectors on VaultV2 (per VaultV2.sol). All require curator submit.
 _VAULT_V2_SIGS: list[str] = [
     "setIsAllocator(address,bool)",
@@ -199,10 +203,20 @@ def _format_cap_value(
     """
     if is_relative:
         return _format_wad_pct(new_cap)
+    if new_cap >= UNCAPPED:
+        return "unlimited"
     return _format_cap_amount(new_cap, decimals, symbol)
 
 
-def _format_cap_change(id_data: bytes, new_cap: int, chain: Chain | None = None, *, is_relative: bool = False) -> str:
+def _format_cap_change(
+    id_data: bytes,
+    new_cap: int,
+    chain: Chain | None = None,
+    *,
+    is_relative: bool = False,
+    asset_decimals: int | None = None,
+    asset_symbol: str | None = None,
+) -> str:
     market_params_type = "(address,address,address,address,uint256)"
     if chain is not None:
         try:
@@ -224,8 +238,16 @@ def _format_cap_change(id_data: bytes, new_cap: int, chain: Chain | None = None,
                     return f"market [{metadata['name']}]({get_market_url(market_id, chain)}) → cap {cap}"
 
     # Fallback path (collateralToken / adapter id, or missing market metadata).
-    # Absolute caps here have no resolvable denomination, so show the raw value.
-    cap = _format_wad_pct(new_cap) if is_relative else f"{new_cap}"
+    # Every V2 cap — whatever the id it is keyed by — limits the vault's own
+    # allocation, so it is denominated in the vault's asset rather than in the
+    # collateral token the id names. Without that asset we can only show the raw
+    # integer, which reads as a nonsense number for a 6-decimal vault.
+    cap = _format_cap_value(
+        new_cap,
+        is_relative=is_relative,
+        decimals=asset_decimals,
+        symbol=asset_symbol,
+    )
     return f"{decode_id_data(id_data, chain)} → cap {cap}"
 
 
@@ -239,7 +261,14 @@ def _encode_market_params(loan: str, collateral: str, oracle: str, irm: str, llt
     )
 
 
-def _format_args(sig: str, args: tuple[Any, ...], chain: Chain | None = None) -> str:  # noqa: PLR0911,PLR0912
+def _format_args(  # noqa: PLR0911,PLR0912
+    sig: str,
+    args: tuple[Any, ...],
+    chain: Chain | None = None,
+    *,
+    asset_decimals: int | None = None,
+    asset_symbol: str | None = None,
+) -> str:
     """Render a decoded argument tuple per signature."""
     name = _function_name(sig)
 
@@ -264,7 +293,14 @@ def _format_args(sig: str, args: tuple[Any, ...], chain: Chain | None = None) ->
         return _format_address(addr)
     if name in ("increaseAbsoluteCap", "increaseRelativeCap"):
         id_data, new_cap = args
-        return _format_cap_change(id_data, new_cap, chain, is_relative=(name == "increaseRelativeCap"))
+        return _format_cap_change(
+            id_data,
+            new_cap,
+            chain,
+            is_relative=(name == "increaseRelativeCap"),
+            asset_decimals=asset_decimals,
+            asset_symbol=asset_symbol,
+        )
     if name in ("increaseTimelock", "decreaseTimelock"):
         sel_bytes, duration = args
         return f"{_resolve_inner_selector(sel_bytes)} → {duration}s"
@@ -295,8 +331,18 @@ def _arg_types(sig: str) -> list[str]:
     return [t.strip() for t in inner.split(",")]
 
 
-def decode_submit(data: bytes, chain: Chain | None = None) -> str:
+def decode_submit(
+    data: bytes,
+    chain: Chain | None = None,
+    *,
+    asset_decimals: int | None = None,
+    asset_symbol: str | None = None,
+) -> str:
     """Render a Submit/Accept/Revoke ``data`` payload as a function call string.
+
+    ``asset_decimals`` / ``asset_symbol`` describe the submitting vault's own
+    asset. They denominate absolute caps whose id is not a market (e.g. a
+    ``collateralToken`` id), which otherwise render as a raw integer.
 
     Falls back to a Sourcify 4byte lookup for unknown selectors so we never
     crash on novel selectors.
@@ -320,7 +366,8 @@ def decode_submit(data: bytes, chain: Chain | None = None) -> str:
         logger.warning("Failed to ABI-decode %s payload: %s", sig, e)
         return f"{_function_name(sig)}(<undecoded args 0x{data[4:].hex()}>)"
 
-    return f"{_function_name(sig)}({_format_args(sig, args, chain)})"
+    formatted = _format_args(sig, args, chain, asset_decimals=asset_decimals, asset_symbol=asset_symbol)
+    return f"{_function_name(sig)}({formatted})"
 
 
 def submit_data_key(data: bytes) -> str:

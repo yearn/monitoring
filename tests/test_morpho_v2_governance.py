@@ -10,6 +10,7 @@ from protocols.morpho._shared import MorphoV2MonitoringError
 from protocols.morpho.governance_v2 import PendingConfig, V2GovernanceSnapshot
 from protocols.morpho.v2_decoders import submit_data_key
 from utils.chains import Chain
+from utils.telegram import MAX_MESSAGE_LENGTH
 
 A1 = "0x" + "11" * 20
 VAULT = "0x" + "aa" * 20
@@ -56,7 +57,7 @@ class TestMorphoV2GovernancePendingLabels(unittest.TestCase):
         with (
             patch("protocols.morpho.governance_v2.get_last_value_for_key_from_file", side_effect=read_value),
             patch("protocols.morpho.governance_v2.write_last_value_to_file", side_effect=write_value),
-            patch("protocols.morpho.governance_v2.send_alert", side_effect=sent.append),
+            patch("protocols.morpho._alerts.send_alert", side_effect=sent.append),
         ):
             # First run: the pending config appears and is alerted as a Submit.
             governance_v2.diff_and_alert(_snapshot([pc]))
@@ -77,12 +78,12 @@ class TestMorphoV2GovernancePendingLabels(unittest.TestCase):
     def test_resolved_pending_alert_without_cached_function_keeps_hash_only_message(self) -> None:
         data_hash = "3d6d72861e" + "0" * 54
         snapshot = _snapshot([])
-        diff = governance_v2._VaultDiff()
+        diff = governance_v2.VaultDiff()
         governance_v2._alert_pending_resolved(data_hash, 1, "", diff)
 
         sent: list[Any] = []
-        with patch("protocols.morpho.governance_v2.send_alert", side_effect=sent.append):
-            governance_v2._send_vault_alerts(snapshot, diff.alerts)
+        with patch("protocols.morpho._alerts.send_alert", side_effect=sent.append):
+            governance_v2.send_vault_alerts(governance_v2._vault_header(snapshot), diff.alerts, governance_v2.PROTOCOL)
 
         self.assertEqual(len(sent), 1)
         message = sent[0].message
@@ -111,7 +112,7 @@ class TestMorphoV2GovernancePendingGrouping(unittest.TestCase):
         with (
             patch("protocols.morpho.governance_v2.get_last_value_for_key_from_file", side_effect=read_value),
             patch("protocols.morpho.governance_v2.write_last_value_to_file", side_effect=write_value),
-            patch("protocols.morpho.governance_v2.send_alert") as send,
+            patch("protocols.morpho._alerts.send_alert") as send,
         ):
             governance_v2.diff_and_alert(_snapshot(pcs))
 
@@ -137,7 +138,7 @@ class TestMorphoV2GovernancePendingGrouping(unittest.TestCase):
                 "protocols.morpho.governance_v2.write_last_value_to_file",
                 side_effect=lambda _f, key, value: state.__setitem__(key, str(value)),
             ),
-            patch("protocols.morpho.governance_v2.send_alert") as send,
+            patch("protocols.morpho._alerts.send_alert") as send,
         ):
             pc = PendingConfig(
                 valid_at=100,
@@ -164,7 +165,7 @@ class TestMorphoV2GovernanceVaultGrouping(unittest.TestCase):
                 side_effect=lambda _f, key: state.get(key, 0),
             ),
             patch("protocols.morpho.governance_v2.write_last_value_to_file"),
-            patch("protocols.morpho.governance_v2.send_alert", side_effect=sent.append),
+            patch("protocols.morpho._alerts.send_alert", side_effect=sent.append),
         ):
             governance_v2.diff_and_alert(snapshot)
         return sent
@@ -269,14 +270,14 @@ class TestMorphoV2GovernanceVaultGrouping(unittest.TestCase):
         ]
         # One section per op: distinct validAt/tx keeps them from collapsing, and
         # a separate diff category per op is not needed to exceed the cap.
-        diff = governance_v2._VaultDiff()
+        diff = governance_v2.VaultDiff()
         snapshot = _snapshot(pending)
         for pc in pending:
             governance_v2._alert_pending_new(snapshot, [(pc, "increaseTimelock(setSendAssetsGate → 604800s)")], diff)
 
         sent: list[Any] = []
-        with patch("protocols.morpho.governance_v2.send_alert", side_effect=sent.append):
-            governance_v2._send_vault_alerts(snapshot, diff.alerts)
+        with patch("protocols.morpho._alerts.send_alert", side_effect=sent.append):
+            governance_v2.send_vault_alerts(governance_v2._vault_header(snapshot), diff.alerts, governance_v2.PROTOCOL)
 
         self.assertGreater(len(sent), 1, "oversized group should split into multiple messages")
         for index, alert in enumerate(sent, start=1):
@@ -300,7 +301,7 @@ class TestMorphoV2GovernanceVaultGrouping(unittest.TestCase):
             for i in range(30)
         ]
         snapshot = _snapshot(pending)
-        diff = governance_v2._VaultDiff()
+        diff = governance_v2.VaultDiff()
         operations: list[tuple[PendingConfig, str]] = []
         for i, pc in enumerate(pending):
             label = f"increaseTimelock(setSendAssetsGate → {604800 + i}s)"
@@ -308,15 +309,15 @@ class TestMorphoV2GovernanceVaultGrouping(unittest.TestCase):
         governance_v2._alert_pending_new(snapshot, operations, diff)
 
         self.assertEqual(len(diff.alerts), 1, "the regression requires one oversized section")
-        self.assertGreater(len(diff.alerts[0].body), governance_v2.MAX_MESSAGE_LENGTH)
+        self.assertGreater(len(diff.alerts[0].body), MAX_MESSAGE_LENGTH)
 
         sent: list[Any] = []
-        with patch("protocols.morpho.governance_v2.send_alert", side_effect=sent.append):
-            governance_v2._send_vault_alerts(snapshot, diff.alerts)
+        with patch("protocols.morpho._alerts.send_alert", side_effect=sent.append):
+            governance_v2.send_vault_alerts(governance_v2._vault_header(snapshot), diff.alerts, governance_v2.PROTOCOL)
 
         self.assertGreater(len(sent), 1)
         for alert in sent:
-            self.assertLessEqual(len(alert.message), governance_v2.MAX_MESSAGE_LENGTH)
+            self.assertLessEqual(len(alert.message), MAX_MESSAGE_LENGTH)
         combined = "".join(alert.message for alert in sent)
         self.assertEqual(combined.count("  • increaseTimelock"), len(pending))
         for pc in pending:
@@ -343,7 +344,7 @@ class TestMorphoV2GovernanceVaultGrouping(unittest.TestCase):
                 side_effect=lambda _f, _key: 0,
             ),
             patch("protocols.morpho.governance_v2.write_last_value_to_file") as write,
-            patch("protocols.morpho.governance_v2.send_alert", side_effect=RuntimeError("telegram down")),
+            patch("protocols.morpho._alerts.send_alert", side_effect=RuntimeError("telegram down")),
         ):
             with self.assertRaises(RuntimeError):
                 governance_v2.diff_and_alert(snapshot)
@@ -357,7 +358,7 @@ class TestMorphoV2GovernanceVaultGrouping(unittest.TestCase):
                 side_effect=lambda _f, _key: 0,
             ),
             patch("protocols.morpho.governance_v2.write_last_value_to_file") as write,
-            patch("protocols.morpho.governance_v2.send_alert", side_effect=sent.append),
+            patch("protocols.morpho._alerts.send_alert", side_effect=sent.append),
         ):
             governance_v2.diff_and_alert(snapshot)
 
