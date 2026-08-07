@@ -192,7 +192,9 @@ class TestDecodeIdData(unittest.TestCase):
         decoded = decode_submit(data)
         self.assertIn("increaseAbsoluteCap", decoded)
         self.assertIn("lltv 91.00%", decoded)
-        self.assertIn(f"cap {1_000_000 * 10**6}", decoded)
+        # No chain, so no market metadata and no vault asset: the raw amount is
+        # all we can show, grouped for readability.
+        self.assertIn(f"cap {1_000_000 * 10**6:,}", decoded)
 
     def test_increase_absolute_cap_with_market_params_and_chain_links_market(self):
         market_params = (A1, A2, A3, A4, 91 * 10**16)

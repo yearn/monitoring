@@ -27,6 +27,7 @@ from typing import Any, Dict, List
 
 from web3 import Web3
 
+from protocols.morpho._alerts import VaultDiff, send_vault_alerts
 from protocols.morpho._shared import (
     PROTOCOL,
     MorphoV2MonitoringError,
@@ -36,7 +37,7 @@ from protocols.morpho._shared import (
 )
 from protocols.morpho.config import VAULTS_V2_BY_CHAIN, get_vault_query_config
 from protocols.morpho.v2_decoders import decode_submit, submit_data_key
-from utils.alert import Alert, AlertSeverity, send_alert
+from utils.alert import AlertSeverity
 from utils.cache import (
     get_last_value_for_key_from_file,
     morpho_filename,
@@ -45,7 +46,6 @@ from utils.cache import (
 )
 from utils.chains import Chain
 from utils.logger import get_logger
-from utils.telegram import MAX_MESSAGE_LENGTH
 
 logger = get_logger("morpho.governance_v2")
 
@@ -70,6 +70,7 @@ query GovernanceV2($addresses: [String!]!, $chainIds: [Int!]!) {
       address
       name
       chain { id }
+      asset { symbol decimals }
       owner { address }
       curator { address }
       sentinels { sentinel { address } }
@@ -117,6 +118,9 @@ class V2GovernanceSnapshot:
     allocators: List[str]
     adapters: List[str]
     pending_configs: List[PendingConfig] = field(default_factory=list)
+    # The vault's own asset — denominates absolute caps in decoded operations.
+    asset_symbol: str = ""
+    asset_decimals: int | None = None
 
 
 # ----------------------------------------------------------------------------
@@ -128,6 +132,12 @@ def _hex_to_bytes(value: str) -> bytes:
     if value.startswith("0x"):
         value = value[2:]
     return bytes.fromhex(value)
+
+
+def _asset_decimals(item: Dict[str, Any]) -> int | None:
+    """Return the vault asset's decimals, or None when the API omits them."""
+    raw = (item.get("asset") or {}).get("decimals")
+    return int(raw) if raw is not None else None
 
 
 def _checksum_or_empty(value: str) -> str:
@@ -191,6 +201,8 @@ def fetch_governance_snapshots() -> Dict[Chain, List[V2GovernanceSnapshot]]:
                 allocators=sorted(allocators),
                 adapters=sorted(adapters),
                 pending_configs=pending,
+                asset_symbol=(item.get("asset") or {}).get("symbol") or "",
+                asset_decimals=_asset_decimals(item),
             )
         )
 
@@ -255,7 +267,12 @@ def _explorer_link(chain: Chain, tx_hash: str) -> str:
 
 
 def _operation_label(snapshot: V2GovernanceSnapshot, pc: PendingConfig) -> str:
-    decoded = decode_submit(pc.data, snapshot.chain)
+    decoded = decode_submit(
+        pc.data,
+        snapshot.chain,
+        asset_decimals=snapshot.asset_decimals,
+        asset_symbol=snapshot.asset_symbol or None,
+    )
     if decoded:
         return str(decoded)
     return pc.function_name or f"`{pc.data_hash[:10]}…`"
@@ -271,58 +288,6 @@ def _operation_function_name(pc: PendingConfig, operation_label: str) -> str:
 
 def _pending_function_key(snapshot: V2GovernanceSnapshot, data_hash: str) -> str:
     return str(morpho_key(snapshot.address.lower(), data_hash, PENDING_FUNCTION_TYPE))
-
-
-@dataclass
-class _VaultAlert:
-    """One section of a vault's grouped Telegram message."""
-
-    severity: AlertSeverity
-    body: str
-
-
-@dataclass
-class _VaultDiff:
-    """Buffered output of one vault's diff pass: alert sections and cache writes.
-
-    Each diff category (``_diff_pending``, ``_diff_single_role``, ``_diff_set``)
-    appends here instead of sending immediately, so a vault with new pending
-    configs, an owner change, and an adapter swap arrives as one message rather
-    than one per category.
-
-    Cache writes are buffered too and committed only after the send succeeds
-    (see ``diff_and_alert``). Writing them during the diff pass would mark a
-    change as alerted even when Telegram failed, and ``main`` turns that into a
-    logged failure — the alert itself would never be retried.
-    """
-
-    alerts: List[_VaultAlert] = field(default_factory=list)
-    writes: List[tuple[str, Any]] = field(default_factory=list)
-
-    def alert(self, severity: AlertSeverity, body: str) -> None:
-        """Buffer one section of the vault's grouped message."""
-        self.alerts.append(_VaultAlert(severity, body))
-
-    def write(self, key: str, value: Any) -> None:
-        """Buffer a cache write to apply once the alert is delivered."""
-        self.writes.append((key, value))
-
-    def commit(self) -> None:
-        """Persist every buffered cache write."""
-        for key, value in self.writes:
-            _write(key, value)
-
-
-# Ascending severity — a grouped alert is sent at the highest of its sections.
-_SEVERITY_ORDER = (AlertSeverity.LOW, AlertSeverity.MEDIUM, AlertSeverity.HIGH, AlertSeverity.CRITICAL)
-
-_SECTION_SEPARATOR = "\n\n---\n\n"
-
-# Telegram truncates past MAX_MESSAGE_LENGTH (and drops Markdown with it), so a
-# large batch would silently lose its tail. We split into "(i/N)" parts instead.
-# The slack covers the emoji ``send_alert`` prepends, the part suffix, and the
-# blank line after the header.
-_MESSAGE_OVERHEAD = 64
 
 
 def _vault_header(snapshot: V2GovernanceSnapshot) -> str:
@@ -350,53 +315,10 @@ def _split_body(body: str, budget: int) -> List[str]:
     return chunks
 
 
-def _split_into_messages(alerts: List[_VaultAlert], budget: int) -> List[List[str]]:
-    """Pack section bodies into groups that each fit within ``budget`` chars.
-
-    Oversized sections are split too, so every character is handed to Telegram
-    instead of allowing its client-side length guard to truncate the tail.
-    """
-    parts: List[List[str]] = []
-    current: List[str] = []
-    size = 0
-    for alert in alerts:
-        for body in _split_body(alert.body, budget):
-            separator_size = len(_SECTION_SEPARATOR) if current else 0
-            if current and size + separator_size + len(body) > budget:
-                parts.append(current)
-                current = []
-                size = 0
-                separator_size = 0
-            current.append(body)
-            size += separator_size + len(body)
-    if current:
-        parts.append(current)
-    return parts
-
-
-def _send_vault_alerts(snapshot: V2GovernanceSnapshot, alerts: List[_VaultAlert]) -> None:
-    """Send the buffered sections as one Telegram message, or "(i/N)" parts if long.
-
-    No-op when ``alerts`` is empty so callers don't have to guard. Every part
-    carries the same header and the highest severity of the whole group, so a
-    LOW section bundled with an owner change still pings the channel.
-    """
-    if not alerts:
-        return
-    severity = max((a.severity for a in alerts), key=_SEVERITY_ORDER.index)
-    header = _vault_header(snapshot)
-    parts = _split_into_messages(alerts, MAX_MESSAGE_LENGTH - _MESSAGE_OVERHEAD - len(header))
-    total = len(parts)
-    for index, bodies in enumerate(parts, start=1):
-        suffix = f" ({index}/{total})" if total > 1 else ""
-        message = f"{header}{suffix}\n\n" + _SECTION_SEPARATOR.join(bodies)
-        send_alert(Alert(severity, message, PROTOCOL))
-
-
 def _alert_pending_new(
     snapshot: V2GovernanceSnapshot,
     pending: List[tuple[PendingConfig, str]],
-    diff: _VaultDiff,
+    diff: VaultDiff,
 ) -> None:
     """Buffer a section for newly-submitted timelocked operation(s) on one vault.
 
@@ -440,7 +362,7 @@ def _alert_pending_resolved(
     data_hash: str,
     last_valid_at: int,
     function_name: str,
-    diff: _VaultDiff,
+    diff: VaultDiff,
 ) -> None:
     """Buffer a section for a pending operation that left ``pendingConfigs``.
 
@@ -458,12 +380,12 @@ def _alert_pending_resolved(
     )
 
 
-def _alert_role_change(role: str, before: str, after: str, diff: _VaultDiff) -> None:
+def _alert_role_change(role: str, before: str, after: str, diff: VaultDiff) -> None:
     icon = "👑" if role == "owner" else "🎩"
     diff.alert(AlertSeverity.HIGH, f"🚨 {icon} {role.capitalize()} changed: `{before}` → `{after}`")
 
 
-def _alert_set_diff(set_name: str, added: set[str], removed: set[str], diff: _VaultDiff) -> None:
+def _alert_set_diff(set_name: str, added: set[str], removed: set[str], diff: VaultDiff) -> None:
     icon = {"sentinels": "🛡️", "allocators": "🎯", "adapters": "🧩"}.get(set_name, "ℹ️")
     lines: list[str] = []
     for addr in sorted(added):
@@ -478,7 +400,7 @@ def _alert_set_diff(set_name: str, added: set[str], removed: set[str], diff: _Va
 # ----------------------------------------------------------------------------
 
 
-def _diff_pending(snapshot: V2GovernanceSnapshot, diff: _VaultDiff) -> None:
+def _diff_pending(snapshot: V2GovernanceSnapshot, diff: VaultDiff) -> None:
     addr = snapshot.address.lower()
 
     current_keys: set[str] = set()
@@ -486,14 +408,14 @@ def _diff_pending(snapshot: V2GovernanceSnapshot, diff: _VaultDiff) -> None:
     for pc in snapshot.pending_configs:
         current_keys.add(pc.data_hash)
         operation_label = _operation_label(snapshot, pc)
-        diff.write(_pending_function_key(snapshot, pc.data_hash), _operation_function_name(pc, operation_label))
+        diff.defer(_write, _pending_function_key(snapshot, pc.data_hash), _operation_function_name(pc, operation_label))
         cache_key = morpho_key(addr, pc.data_hash, PENDING_TYPE)
         last = _read_int(cache_key)
         # Already alerted at this validAt, or marked executed.
         if last == pc.valid_at or last == EXECUTED:
             continue
         new_pending.append((pc, operation_label))
-        diff.write(cache_key, pc.valid_at)
+        diff.defer(_write, cache_key, pc.valid_at)
 
     # Group all newly-submitted operations for this vault into one section.
     _alert_pending_new(snapshot, new_pending, diff)
@@ -513,21 +435,21 @@ def _diff_pending(snapshot: V2GovernanceSnapshot, diff: _VaultDiff) -> None:
             # Already marked executed/revoked.
             continue
         _alert_pending_resolved(data_hash, last, _read_str(_pending_function_key(snapshot, data_hash)), diff)
-        diff.write(cache_key, EXECUTED if last <= int(datetime.now().timestamp()) else REVOKED)
+        diff.defer(_write, cache_key, EXECUTED if last <= int(datetime.now().timestamp()) else REVOKED)
 
-    diff.write(index_key, ",".join(sorted(current_keys)))
+    diff.defer(_write, index_key, ",".join(sorted(current_keys)))
 
 
-def _diff_single_role(snapshot: V2GovernanceSnapshot, role: str, current: str, diff: _VaultDiff) -> None:
+def _diff_single_role(snapshot: V2GovernanceSnapshot, role: str, current: str, diff: VaultDiff) -> None:
     cache_key = morpho_key(snapshot.address.lower(), role, ROLE_TYPE)
     last = _read_str(cache_key)
     cur_lc = current.lower()
     if last and last != cur_lc:
         _alert_role_change(role, last, current, diff)
-    diff.write(cache_key, cur_lc)
+    diff.defer(_write, cache_key, cur_lc)
 
 
-def _diff_set(snapshot: V2GovernanceSnapshot, set_name: str, current: List[str], diff: _VaultDiff) -> None:
+def _diff_set(snapshot: V2GovernanceSnapshot, set_name: str, current: List[str], diff: VaultDiff) -> None:
     cache_key = morpho_key(snapshot.address.lower(), set_name, SET_TYPE)
     last_str = _read_str(cache_key)
     last_set = {a for a in last_str.split(",") if a} if last_str else set()
@@ -539,7 +461,7 @@ def _diff_set(snapshot: V2GovernanceSnapshot, set_name: str, current: List[str],
         added_cs: set[str] = {str(Web3.to_checksum_address(a)) for a in added}
         removed_cs: set[str] = {str(Web3.to_checksum_address(a)) for a in removed}
         _alert_set_diff(set_name, added_cs, removed_cs, diff)
-    diff.write(cache_key, ",".join(sorted(current_set)))
+    diff.defer(_write, cache_key, ",".join(sorted(current_set)))
 
 
 def diff_and_alert(snapshot: V2GovernanceSnapshot) -> None:
@@ -556,14 +478,14 @@ def diff_and_alert(snapshot: V2GovernanceSnapshot) -> None:
     fails) therefore repeats the whole group next run — duplicates beat a
     governance change nobody ever sees.
     """
-    diff = _VaultDiff()
+    diff = VaultDiff()
     _diff_pending(snapshot, diff)
     _diff_single_role(snapshot, "owner", snapshot.owner, diff)
     _diff_single_role(snapshot, "curator", snapshot.curator, diff)
     _diff_set(snapshot, "sentinels", snapshot.sentinels, diff)
     _diff_set(snapshot, "allocators", snapshot.allocators, diff)
     _diff_set(snapshot, "adapters", snapshot.adapters, diff)
-    _send_vault_alerts(snapshot, diff.alerts)
+    send_vault_alerts(_vault_header(snapshot), diff.alerts, PROTOCOL)
     diff.commit()
 
 

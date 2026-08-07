@@ -140,7 +140,11 @@ Morpho's [Vault V2](https://github.com/morpho-org/vault-v2) replaces the v1 sing
 
 - [`governance_v2.py`](./governance_v2.py) — daily, pulls a per-vault governance **snapshot** from Morpho's GraphQL API (`vaultV2s.pendingConfigs` + `owner` / `curator` / `sentinels` / `allocators` / `adapters`) and diffs it against the persisted cache. Mirrors v1's pull-based approach (`pendingTimelock` / `pendingGuardian` / `pendingCap`) so RPC usage stays bounded. Alerts on: new pending timelocked operations, executed or revoked operations, owner / curator changes, sentinel / allocator / adapter set changes.
 - [`markets_v2.py`](./markets_v2.py) — hourly, GraphQL-only (no RPC): one `vaultV2s` query loads TVL, liquidity, and `MorphoMarketV1` adapter positions for every configured vault, then one `markets` query per chain loads state/bad debt. Applies the shared [risk.py](./risk.py) policy using each position's `supplyAssetsUsd`, and checks withdrawable `liquidityUsd` against the shared 1% threshold. V2 vaults used by YV-collateral strategies skip the individual liquidity threshold because `markets.py` performs the combined collateral-at-risk coverage check. Non-`MorphoMarketV1` adapters fail the run (configured vaults are market-adapter only).
-- [`v2_decoders.py`](./v2_decoders.py) — selector→signature map and decoders for every v2 timelocked function (and the three `idData` tag prefixes used by `increaseAbsoluteCap`/`increaseRelativeCap`).
+- [`v2_decoders.py`](./v2_decoders.py) — selector→signature map and decoders for every v2 timelocked function (and the three `idData` tag prefixes used by `increaseAbsoluteCap`/`increaseRelativeCap`). Absolute caps are denominated in the *vault's* asset whatever id they are keyed by, so the decoder takes the vault's asset decimals/symbol; `type(uint128).max` renders as `unlimited`.
+
+### Grouped alerts
+
+Both governance monitors buffer their findings per vault in [`_alerts.py`](./_alerts.py) and send them as **one Telegram message per vault** — one header naming the vault and chain, one severity (the highest of the group), sections separated by `---`. A vault with several simultaneous changes no longer produces a burst of near-identical messages. Groups too long for a single message split into numbered `(i/N)` parts rather than being truncated, and the cache cursors that record "we alerted on this" are committed only after the send succeeds, so a Telegram failure is retried on the next run instead of being lost.
 
 ### Vault list
 

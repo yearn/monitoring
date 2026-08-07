@@ -4,6 +4,7 @@ from typing import Any
 
 from web3 import Web3
 
+from protocols.morpho._alerts import VaultDiff, send_vault_alerts
 from protocols.morpho._shared import (
     PROTOCOL,
     MorphoMonitoringError,
@@ -14,7 +15,7 @@ from protocols.morpho._shared import (
 )
 from protocols.morpho.config import VAULTS_V1_BY_CHAIN
 from utils.abi import load_abi
-from utils.alert import Alert, AlertSeverity, send_alert
+from utils.alert import AlertSeverity
 from utils.cache import (
     get_last_executed_morpho_from_file,
     write_last_executed_morpho_to_file,
@@ -171,8 +172,13 @@ def _load_market_governance_states(
     return states
 
 
-def _check_pending_cap(name: str, state: MarketGovernanceState, chain: Chain) -> None:
-    """Alert once for a new pending V1 market cap."""
+def _vault_header(name: str, vault_address: str, chain: Chain) -> str:
+    """One-line header for the vault's grouped alert."""
+    return f"[{name}]({get_vault_url(vault_address, chain)}) on {chain.name}"
+
+
+def _check_pending_cap(name: str, state: MarketGovernanceState, chain: Chain, diff: VaultDiff) -> None:
+    """Buffer a section for a new pending V1 market cap."""
     if state.pending_cap_timestamp <= 0:
         return
     last_timestamp = get_last_executed_morpho_from_file(
@@ -185,25 +191,22 @@ def _check_pending_cap(name: str, state: MarketGovernanceState, chain: Chain) ->
         return
 
     market_url = get_market_url(state.market_id, chain)
-    vault_url = get_vault_url(state.vault_address, chain)
     market_name, decimals = fetch_market_info(state.market_id, chain)
     pending_cap = format_cap(state.pending_cap, decimals)
     queued_for = datetime.fromtimestamp(state.pending_cap_timestamp).strftime("%Y-%m-%d %H:%M:%S")
     if state.current_cap == 0:
-        message = (
-            f"Adding new market [{market_name}]({market_url}) with cap {pending_cap} "
-            f"to vault [{name}]({vault_url}) on {chain.name}. Queued for {queued_for}"
-        )
+        body = f"➕ Adding new market [{market_name}]({market_url}) with cap {pending_cap}.\nQueued for {queued_for}"
     else:
         difference = ((state.pending_cap - state.current_cap) / state.current_cap) * 100
         current_cap = format_cap(state.current_cap, decimals)
-        message = (
-            f"Updating cap to new cap {pending_cap}, current cap {current_cap}, difference: {difference:.2f}%. \n"
-            f"For vault [{name}]({vault_url}) for market: [{market_name}]({market_url}) on {chain.name}. "
+        body = (
+            f"📊 Updating cap for market [{market_name}]({market_url}): "
+            f"{current_cap} → {pending_cap}, difference: {difference:.2f}%.\n"
             f"Queued for {queued_for}"
         )
-    send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
-    write_last_executed_morpho_to_file(
+    diff.alert(AlertSeverity.MEDIUM, body)
+    diff.defer(
+        write_last_executed_morpho_to_file,
         state.vault_address,
         state.market_id,
         PENDING_CAP_TYPE,
@@ -211,8 +214,8 @@ def _check_pending_cap(name: str, state: MarketGovernanceState, chain: Chain) ->
     )
 
 
-def _check_market_removal(name: str, state: MarketGovernanceState, chain: Chain) -> None:
-    """Alert once for a newly queued V1 market removal."""
+def _check_market_removal(state: MarketGovernanceState, chain: Chain, diff: VaultDiff) -> None:
+    """Buffer a section for a newly queued V1 market removal."""
     if state.removable_at <= 0:
         return
     last_timestamp = get_last_executed_morpho_from_file(
@@ -221,16 +224,22 @@ def _check_market_removal(name: str, state: MarketGovernanceState, chain: Chain)
         REMOVABLE_AT_TYPE,
     )
     if state.removable_at <= last_timestamp:
-        logger.info("Skipping previously alerted market removal for %s market %s", name, state.market_id)
+        logger.info(
+            "Skipping previously alerted market removal for vault %s market %s",
+            state.vault_address,
+            state.market_id,
+        )
         return
 
     market_url = get_market_url(state.market_id, chain)
-    vault_url = get_vault_url(state.vault_address, chain)
     market_name, _ = fetch_market_info(state.market_id, chain)
     removable_at = datetime.fromtimestamp(state.removable_at).strftime("%Y-%m-%d %H:%M:%S")
-    message = f"Vault [{name}]({vault_url}) queued to remove market: [{market_name}]({market_url}) at {removable_at}"
-    send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
-    write_last_executed_morpho_to_file(
+    diff.alert(
+        AlertSeverity.MEDIUM,
+        f"➖ Queued to remove market [{market_name}]({market_url}) at {removable_at}",
+    )
+    diff.defer(
+        write_last_executed_morpho_to_file,
         state.vault_address,
         state.market_id,
         REMOVABLE_AT_TYPE,
@@ -238,40 +247,32 @@ def _check_market_removal(name: str, state: MarketGovernanceState, chain: Chain)
     )
 
 
-def check_market_governance_state(name: str, state: MarketGovernanceState, chain: Chain) -> None:
+def check_market_governance_state(name: str, state: MarketGovernanceState, chain: Chain, diff: VaultDiff) -> None:
     """Check pending cap and removal changes for one V1 market."""
-    _check_pending_cap(name, state, chain)
-    _check_market_removal(name, state, chain)
+    _check_pending_cap(name, state, chain, diff)
+    _check_market_removal(state, chain, diff)
 
 
-def check_markets_pending_cap(name: str, morpho_contract: Any, chain: Chain, client: Any) -> None:
+def check_markets_pending_cap(name: str, morpho_contract: Any, chain: Chain, client: Any, diff: VaultDiff) -> None:
     """Check V1 market cap and removal governance for one vault."""
     market_ids = _load_vault_market_ids(morpho_contract, chain, client)
     for state in _load_market_governance_states(morpho_contract, market_ids, client):
-        check_market_governance_state(name, state, chain)
+        check_market_governance_state(name, state, chain, diff)
 
 
 def check_pending_role_change(
-    name: str,
     morpho_contract: Any,
     role_type: str,
     timestamp: int,
-    chain: Chain,
+    diff: VaultDiff,
 ) -> None:
     market_id = ""  # use empty string for all markets because the value is used per vault
     if timestamp > get_last_executed_morpho_from_file(morpho_contract.address, market_id, role_type):
-        vault_url = get_vault_url(morpho_contract.address, chain)
-        send_alert(
-            Alert(
-                AlertSeverity.HIGH,
-                f"{role_type.capitalize()} is changing for vault [{name}]({vault_url})",
-                PROTOCOL,
-            )
-        )
-        write_last_executed_morpho_to_file(morpho_contract.address, market_id, role_type, timestamp)
+        diff.alert(AlertSeverity.HIGH, f"🚨 {role_type.capitalize()} is changing")
+        diff.defer(write_last_executed_morpho_to_file, morpho_contract.address, market_id, role_type, timestamp)
 
 
-def check_timelock_and_guardian(name: str, morpho_contract: Any, chain: Chain, client: Any) -> None:
+def check_timelock_and_guardian(morpho_contract: Any, client: Any, diff: VaultDiff) -> None:
     with morpho_contract.w3.batch_requests() as batch:
         batch.add(morpho_contract.functions.pendingTimelock())
         batch.add(morpho_contract.functions.pendingGuardian())
@@ -282,8 +283,8 @@ def check_timelock_and_guardian(name: str, morpho_contract: Any, chain: Chain, c
         timelock = responses[0][1]  # [1] to get the timestamp
         guardian = responses[1][1]  # [1] to get the timestamp
 
-    check_pending_role_change(name, morpho_contract, "timelock", timelock, chain)
-    check_pending_role_change(name, morpho_contract, "guardian", guardian, chain)
+    check_pending_role_change(morpho_contract, "timelock", timelock, diff)
+    check_pending_role_change(morpho_contract, "guardian", guardian, diff)
 
 
 def get_data_for_chain(chain: Chain) -> None:
@@ -295,8 +296,13 @@ def get_data_for_chain(chain: Chain) -> None:
 
     for vault in vaults:
         morpho_contract = client.eth.contract(address=vault.address, abi=ABI_MORPHO)
-        check_markets_pending_cap(vault.name, morpho_contract, chain, client)
-        check_timelock_and_guardian(vault.name, morpho_contract, chain, client)
+        # Buffer every finding for this vault, then send them as one message and
+        # only then record them as alerted.
+        diff = VaultDiff()
+        check_markets_pending_cap(vault.name, morpho_contract, chain, client, diff)
+        check_timelock_and_guardian(morpho_contract, client, diff)
+        send_vault_alerts(_vault_header(vault.name, vault.address, chain), diff.alerts, PROTOCOL)
+        diff.commit()
 
 
 def main() -> None:
