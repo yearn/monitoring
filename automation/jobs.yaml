@@ -47,7 +47,7 @@ profiles:
       - { name: "yearn-alert-large-flows", script: protocols/yearn/alert_large_flows.py }
       # Cache: tks-trigger-cache.json under $CACHE_DIR (check_stuck_triggers.DEFAULT_CACHE_FILE).
       - { name: "yearn-check-stuck-triggers", script: protocols/yearn/check_stuck_triggers.py, enabled: false }
-      - { name: "maple",                  script: protocols/maple/main.py }
+      - { name: "maple",                  script: protocols/maple/main.py, enabled: false }
       - { name: "timelock-alerts",        script: protocols/timelock/timelock_alerts.py }
       # proposals scripts must run AFTER timelock-alerts (cache dedupe ordering).
       - { name: "aave-proposals",         script: protocols/aave/proposals.py }
