@@ -39,7 +39,9 @@ Generates human-readable explanations for queued governance transactions (timelo
                        ┌─────────────────────┐
                        │  Telegram Alert      │
                        │  🤖 AI Summary: ... │
-                       └─────────────────────┘
+                       │  [Full details] ────┼──▶ Wavey Gist report
+                       └─────────────────────┘      (metadata + summary +
+                                                     call flow + analysis)
 ```
 
 ## Pipeline Steps
@@ -158,6 +160,7 @@ The prompt is split into a **system** prompt (static instructions) and a **user*
 
 - Starts with a verb, no "This transaction…" preamble
 - Trailing risk tag in caps (LOW / MEDIUM / HIGH / CRITICAL)
+- Summary is plain text (it goes to Telegram); the detail is markdown and must render **every address as a block-explorer hyperlink**, copied verbatim from the prompt's `--- Address Links ---` section so the model never assembles an explorer URL or picks the wrong chain's explorer
 - Refuses to assume parameter units from function name alone
 - Trusts source-context natspec over prior assumptions
 - Quotes concrete before→after deltas when state reads are available
@@ -185,6 +188,10 @@ Upgrade the pool implementation to add an emergency pause.
 --- Decoded Calldata ---
 Call 1: upgradeTo(address)
   address: 0xNewImpl
+
+--- Address Links (use these exact markdown links in the detailed report) ---
+- [`0xProxy`](https://etherscan.io/address/0xProxy) (PoolAddressesProvider)
+- [`0xNewImpl`](https://etherscan.io/address/0xNewImpl)
 
 --- Shared Across Batch ---           (optional, for batch txs with uniform args)
   arg[0] (address) is identical across all 4 calls: '0x...'
@@ -227,7 +234,7 @@ The full prompt is logged at INFO level for debugging.
 
 ### 7. Two-Stage Generation: Summary, then Detail Derived From It
 
-`_generate_explanation()` produces the `Explanation` dataclass (`summary` → Telegram, `detail` → Wavey Gist) in two stages so the two artifacts the team sees can never disagree on the headline number or risk verdict:
+`_generate_explanation()` produces the `Explanation` dataclass (`summary` → Telegram, `detail` → wrapped into `report` → Wavey Gist) in two stages so the two artifacts the team sees can never disagree on the headline number or risk verdict:
 
 1. **Summary (authoritative).** `_generate_summary()` produces just the `summary` + `risk_tag`.
 2. **Detail (derived).** `_expand_detail()` then writes the full report *from* the confirmed summary (`DETAIL_EXPANSION_TASK`), required to stay consistent with its magnitudes and risk level.
@@ -272,7 +279,55 @@ Upgrades AAVE pool impl 0xOld → 0xNew. Verify audited. MEDIUM.
 [Full details](https://gist.wavey.info/abc123)
 ```
 
-The "Full details" link points to a Wavey Gist upload with the detailed analysis.
+The "Full details" link points to a Wavey Gist upload of the **full report**
+(`Explanation.report`, built by `utils/llm/report.py`). The gist is titled
+`<contract> - <DD/MM/YYYY HH:MM> - <RISK>` (UTC, e.g.
+`Infinifi Shorttimelock - 11/08/2026 10:00 - LOW`) so a list of reports is
+scannable; it falls back to the protocol name, then `AI Transaction Analysis`.
+When no report was built (e.g. an explanation generated without report context),
+the bare detail is published under the fallback title instead.
+
+### 10. Gist Report (`utils/llm/report.py`)
+
+The gist is the artifact a reviewer actually opens, so it carries more than the LLM's prose:
+
+```markdown
+- **Protocol:** INFINIFI
+- **Contract:** Infinifi Shorttimelock — [`0x4B17…7c32`](https://etherscan.io/address/0x4B17…)
+- **Chain:** Mainnet (chain id 1)
+- **Risk:** MEDIUM
+
+## Summary
+Registers a new type-2 farm in FarmRegistry. …
+
+## Call Flow
+**From:** [`0x4B17…7c32`](https://etherscan.io/address/0x4B17…)
+
+1. **`addFarms(uint256,address[])`** on [`0xF5f2…6119`](https://etherscan.io/address/0xF5f2…) (FarmRegistry)
+   - `uint256 _type`: `2`
+   - `address[] _farms`:
+     - [`0x79e1…971f`](https://etherscan.io/address/0x79e1…)
+
+## Analysis
+<the LLM detail>
+```
+
+**Call Flow is built in Python, not asked of the LLM** — it comes straight from the
+decoded calldata (`CallEntry` per call: target, signature, ABI parameter names, ETH
+value, nested `bytes` payloads unwrapped up to `MAX_BYTES_RECURSION_DEPTH`), so it
+can't be hallucinated, re-ordered, or summarized away. Every address is rendered
+full-length (never truncated) as a link to the chain's explorer from
+`EXPLORER_URLS`, annotated with its contract label / token symbol when known;
+chains with no configured explorer degrade to plain code spans.
+
+`format_address_links_block()` reuses the same renderer to give the LLM the exact
+markdown link for each address in the transaction — that's what makes the
+"always hyperlink addresses" rule reliable in the generated analysis.
+
+The header's **Contract** line links to `ReportContext.label_address`, which
+defaults to the executing timelock/Safe (`from_address`). Safe multisend batches
+label the *utility* contract instead, so `_explain_safe_tx()` passes the outer
+target as `label_address` in that path.
 
 ## Configuration
 
@@ -317,6 +372,7 @@ utils/llm/
 ├── base.py                  # Abstract LLMProvider base class + LLMError
 ├── factory.py               # Provider factory with env-based config + singleton
 ├── openai_compat.py         # OpenAI-compatible provider (Venice, OpenAI, etc.)
+├── report.py                # Gist report: metadata header + deterministic call flow + analysis
 └── README.md                # This file
 
 utils/source_context.py      # Etherscan v2 source fetch + natspec extractor + proxy follow

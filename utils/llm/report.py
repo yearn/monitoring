@@ -1,0 +1,260 @@
+"""Render the full transaction report published to Wavey Gist.
+
+The Telegram alert only carries the short AI summary; the linked gist is the
+full artifact a reviewer opens. It pairs the LLM's analysis with a
+deterministic, code-built **call flow** — the exact function each call hits,
+its arguments, and every address rendered as a block-explorer hyperlink.
+
+The call flow is built here rather than asked of the LLM on purpose: it is
+ground truth straight from the decoded calldata, so it can't be hallucinated,
+mis-ordered, or summarized away.
+"""
+
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+from eth_utils import to_checksum_address
+
+from utils.calldata.decoder import MAX_BYTES_RECURSION_DEPTH, DecodedCall, try_decode_inner_calldata
+from utils.chains import EXPLORER_URLS, Chain
+
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+# The report already opens the section with "## Analysis", so a detail that
+# starts with its own "Detailed Analysis" heading would double up.
+_REDUNDANT_ANALYSIS_HEADING_RE = re.compile(
+    r"^\s*(?:#{1,6}\s*)?\**\s*(?:detailed|full|in-depth)?\s*analysis\s*\**\s*:?\s*\n+",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class CallEntry:
+    """One decoded call in the transaction, with the context needed to render it."""
+
+    target: str
+    call: DecodedCall
+    value: int = 0
+    param_names: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class ReportContext:
+    """Everything the gist report needs beyond the LLM's summary and detail."""
+
+    entries: list[CallEntry] = field(default_factory=list)
+    chain_id: int = 0
+    labels: dict[str, str] = field(default_factory=dict)
+    protocol: str = ""
+    label: str = ""
+    from_address: str = ""
+    # Address the ``label`` names — usually the executing timelock/Safe, but a
+    # Safe multisend batch labels the utility contract instead. Linked from the
+    # report's Contract header line.
+    label_address: str = ""
+
+
+def checksum_or_none(addr: object) -> str | None:
+    """Return the checksummed address, or None if ``addr`` isn't a hex address."""
+    if not isinstance(addr, str) or not addr.startswith("0x"):
+        return None
+    try:
+        return to_checksum_address(addr)
+    except ValueError:
+        return None
+
+
+def explorer_address_url(chain_id: int, address: str) -> str:
+    """Block-explorer address URL, or "" when the chain has no configured explorer."""
+    explorer = EXPLORER_URLS.get(chain_id)
+    checksum = checksum_or_none(address)
+    if not explorer or checksum is None:
+        return ""
+    return f"{explorer}/address/{checksum}"
+
+
+def address_link(address: str, chain_id: int, labels: dict[str, str] | None = None) -> str:
+    """Render an address as a markdown explorer link, suffixed with its label.
+
+    Full addresses are always shown (never truncated) so the reader can copy
+    and verify them. Falls back to plain text on chains with no explorer, and
+    returns the input unchanged when it isn't a parseable address.
+    """
+    checksum = checksum_or_none(address)
+    if checksum is None:
+        return str(address)
+    label = (labels or {}).get(checksum)
+    url = explorer_address_url(chain_id, checksum)
+    rendered = f"[`{checksum}`]({url})" if url else f"`{checksum}`"
+    return f"{rendered} ({label})" if label else rendered
+
+
+def format_address_links_block(addresses: list[str], chain_id: int, labels: dict[str, str] | None = None) -> str:
+    """Prompt section listing the exact markdown link to use for each address.
+
+    Handing the LLM ready-made links is what makes the "always hyperlink
+    addresses" rule reliable — it copies a line instead of assembling an
+    explorer URL from memory (and picking the wrong chain's explorer).
+    Returns "" when there is nothing to link.
+    """
+    lines: list[str] = []
+    for addr in addresses:
+        rendered = address_link(addr, chain_id, labels)
+        if rendered.startswith("["):  # only useful when an explorer link was produced
+            lines.append(f"- {rendered}")
+    return "\n".join(lines)
+
+
+def _format_param_value(type_str: str, value: object, chain_id: int, labels: dict[str, str]) -> str:
+    """Render a single scalar parameter value for the markdown call flow."""
+    if type_str == "address" and isinstance(value, str):
+        return address_link(value, chain_id, labels)
+    if isinstance(value, bytes):
+        return f"`0x{value.hex()}`"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"`{value:,}`"
+    return f"`{value}`"
+
+
+def _param_label(type_str: str, name: str | None) -> str:
+    """Render a Solidity-style ``type name`` declaration, falling back to bare type."""
+    return f"`{type_str} {name}`" if name else f"`{type_str}`"
+
+
+def _format_params(
+    call: DecodedCall,
+    chain_id: int,
+    labels: dict[str, str],
+    param_names: list[str] | None,
+    indent: str,
+    depth: int = 0,
+) -> list[str]:
+    """Render a call's parameters as an indented markdown bullet list."""
+    lines: list[str] = []
+    for i, (type_str, value) in enumerate(call.params):
+        name = param_names[i] if param_names is not None and i < len(param_names) else None
+        label = _param_label(type_str, name)
+        if type_str.startswith("address[") and isinstance(value, (list, tuple)):
+            if not value:
+                lines.append(f"{indent}- {label}: _(empty)_")
+                continue
+            lines.append(f"{indent}- {label}:")
+            lines.extend(f"{indent}  - {address_link(v, chain_id, labels)}" for v in value)
+        elif type_str == "bytes" and depth < MAX_BYTES_RECURSION_DEPTH:
+            inner = try_decode_inner_calldata(value)
+            if inner is None:
+                lines.append(f"{indent}- {label}: {_format_param_value(type_str, value, chain_id, labels)}")
+                continue
+            lines.append(f"{indent}- {label}: ↳ `{inner.signature}`")
+            lines.extend(_format_params(inner, chain_id, labels, None, indent + "  ", depth + 1))
+        else:
+            lines.append(f"{indent}- {label}: {_format_param_value(type_str, value, chain_id, labels)}")
+    return lines
+
+
+def format_call_flow(ctx: ReportContext) -> str:
+    """Render the decoded calls as a numbered markdown flow with explorer links.
+
+    Returns "" when there is nothing to render.
+    """
+    if not ctx.entries:
+        return ""
+
+    lines: list[str] = []
+    sender = checksum_or_none(ctx.from_address)
+    if sender and sender != ZERO_ADDRESS:
+        lines.append(f"**From:** {address_link(sender, ctx.chain_id, ctx.labels)}")
+        lines.append("")
+
+    for i, entry in enumerate(ctx.entries, start=1):
+        target = address_link(entry.target, ctx.chain_id, ctx.labels) if entry.target else "_unknown target_"
+        lines.append(f"{i}. **`{entry.call.signature}`** on {target}")
+        if entry.value > 0:
+            lines.append(f"   - **ETH value:** `{entry.value / 1e18:.6f}` ETH")
+        param_lines = _format_params(entry.call, ctx.chain_id, ctx.labels, entry.param_names, indent="   ")
+        lines.extend(param_lines or ["   - _no inputs_"])
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+def _chain_name(chain_id: int) -> str:
+    try:
+        return Chain.from_chain_id(chain_id).network_name.capitalize()
+    except ValueError:
+        return f"Chain {chain_id}"
+
+
+def _format_metadata(ctx: ReportContext, risk_tag: str) -> str:
+    """Header bullet list: protocol, contract label, chain, risk."""
+    lines: list[str] = []
+    if ctx.protocol:
+        lines.append(f"- **Protocol:** {ctx.protocol}")
+    if ctx.label:
+        # Link the label to the contract it names, so the header itself is
+        # clickable rather than a bare name the reader has to go look up.
+        linked = address_link(ctx.label_address, ctx.chain_id) if ctx.label_address else ""
+        lines.append(
+            f"- **Contract:** {ctx.label} — {linked}" if linked.startswith("[") else f"- **Contract:** {ctx.label}"
+        )
+    if ctx.chain_id:
+        lines.append(f"- **Chain:** {_chain_name(ctx.chain_id)} (chain id {ctx.chain_id})")
+    if risk_tag:
+        lines.append(f"- **Risk:** {risk_tag}")
+    return "\n".join(lines)
+
+
+def build_title(ctx: ReportContext, risk_tag: str = "", now: datetime | None = None, fallback: str = "") -> str:
+    """Gist title: ``<contract> - <DD/MM/YYYY HH:MM> - <RISK>``.
+
+    Naming the contract and the time makes a list of gists scannable — the
+    previous constant title left every report looking identical. The timestamp
+    is UTC (the runners' clock); ``now`` is injectable for tests.
+
+    Args:
+        ctx: Report context; its ``label`` (else ``protocol``) names the report.
+        risk_tag: LOW / MEDIUM / HIGH / CRITICAL, appended when known.
+        now: Timestamp to render. Defaults to the current UTC time.
+        fallback: Name to use when the context has neither label nor protocol.
+
+    Returns:
+        The title string; never empty as long as ``fallback`` is set.
+    """
+    stamp = (now or datetime.now(timezone.utc)).strftime("%d/%m/%Y %H:%M")
+    parts = [ctx.label or ctx.protocol or fallback, stamp]
+    if risk_tag:
+        parts.append(risk_tag)
+    return " - ".join(part for part in parts if part)
+
+
+def build_report(summary: str, detail: str, ctx: ReportContext, risk_tag: str = "") -> str:
+    """Assemble the full markdown gist body.
+
+    Sections: metadata header, the Telegram-visible summary (so the gist is
+    self-contained), the deterministic call flow, and the LLM's analysis.
+
+    Args:
+        summary: The authoritative TLDR, risk tag already stripped by the caller.
+        detail: The LLM's detailed analysis.
+        ctx: Decoded calls, labels, and alert metadata.
+        risk_tag: LOW / MEDIUM / HIGH / CRITICAL, when known.
+
+    Returns:
+        Markdown body, or "" when there is nothing worth publishing.
+    """
+    if not detail and not summary:
+        return ""
+
+    sections: list[str] = []
+    metadata = _format_metadata(ctx, risk_tag)
+    if metadata:
+        sections.append(metadata)
+    if summary:
+        sections.append(f"## Summary\n\n{summary}")
+    call_flow = format_call_flow(ctx)
+    if call_flow:
+        sections.append(f"## Call Flow\n\n{call_flow}")
+    if detail:
+        sections.append(f"## Analysis\n\n{_REDUNDANT_ANALYSIS_HEADING_RE.sub('', detail)}")
+    return "\n\n".join(sections)

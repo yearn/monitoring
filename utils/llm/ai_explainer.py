@@ -12,11 +12,12 @@ from functools import lru_cache
 
 from eth_utils import function_signature_to_4byte_selector, to_checksum_address
 
-from utils.calldata.decoder import DecodedCall, decode_calldata, is_selector_resolvable_offline
+from utils.calldata.decoder import MAX_BYTES_RECURSION_DEPTH, DecodedCall, decode_calldata, try_decode_inner_calldata
 from utils.erc20_metadata import fetch_erc20_metadata
 from utils.impl_diff import diff_implementations, format_impl_diff
 from utils.llm import get_llm_provider
 from utils.llm.base import LLMError, LLMProvider
+from utils.llm.report import CallEntry, ReportContext, build_report, build_title, format_address_links_block
 from utils.logger import get_logger
 from utils.on_chain_state import StateRead, format_state_reads, read_before_state
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
@@ -44,18 +45,31 @@ Be as concise as the change allows — use more sentences only when extra detail
 Start with a verb describing the effect. Do NOT open with "This transaction", "The proposal",
 or similar — the reader already knows what kind of tx this is.
 End with a risk tag in caps: LOW / MEDIUM / HIGH / CRITICAL.
+Plain text only — the TLDR goes to a chat client, so no markdown links, no URLs, and
+prefer contract names over raw addresses.
 
 Good example: "Lowers swap fee 30→25 bps on USDC/USDT pool. Marginal LP revenue cut. LOW."
 Bad (too terse, drops impact): "Adds farm. LOW."
 Bad (preamble + run-on): "This governance transaction adjusts the swap fee parameter on the USDC/USDT pool from 30 basis points to 25 basis points, which slightly reduces revenue for liquidity providers. Risk is LOW."
 
-DETAIL: thorough analysis covering:
+DETAIL: thorough analysis rendered as markdown (it is published as a web page), covering:
 - What each call does and why
 - Parameter values and their significance (use Current State section if present to compute deltas)
 - Asset/token flow changes
 - State changes and their impact
 - Risk assessment with explicit reasoning
 - Any concerns or notable observations
+
+Address hyperlink rule (applies to DETAIL only):
+- EVERY address you mention must be a markdown link to the block explorer, never a
+  bare or truncated address. Write [`0xFullChecksumAddress`](explorer-url) — full
+  address as the link text.
+- An Address Links section is provided with the exact markdown for each address in
+  this transaction. Copy those lines verbatim; never assemble an explorer URL yourself
+  and never guess which explorer a chain uses.
+- If an address is not in that section, write the full address in backticks unlinked.
+- The report already contains a code-generated Call Flow listing every call and
+  argument, so do not re-list the raw calldata — explain what it means.
 
 Critical rules for parameter interpretation:
 - Do NOT assume the semantic meaning of a parameter from its function name. DeFi protocols
@@ -121,6 +135,8 @@ _RISK_TAGS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 # (not a period) may precede the tag, so the preceding sentence's period is
 # preserved: "…vault. LOW." → "…vault."
 _TRAILING_RISK_TAG_RE = re.compile(r"\s*\b(?:" + "|".join(_RISK_TAGS) + r")\b[\s.]*$", re.IGNORECASE)
+# Same match, but capturing, so the report header and gist title can name the risk.
+_TRAILING_RISK_TAG_CAPTURE_RE = re.compile(r"\b(" + "|".join(_RISK_TAGS) + r")\b[\s.]*$", re.IGNORECASE)
 DETAIL_REPORT_TITLE = "AI Transaction Analysis"
 
 # JSON Schema for stage 1 (summary + risk_tag only). risk_tag is enum-constrained so
@@ -143,12 +159,17 @@ You have already produced this confirmed TLDR for the transaction:
 
 {summary}
 
-Write ONLY the thorough DETAIL analysis now. Cover what each call does and why,
-parameter values and significance, asset/token flow, state changes, and an explicit
+Write ONLY the thorough DETAIL analysis now, as markdown. Cover what each call does and
+why, parameter values and significance, asset/token flow, state changes, and an explicit
 risk rationale. It MUST stay fully consistent with the TLDR above — same magnitudes,
 same risk level. Do not contradict its numbers or verdict and do not restate it
-verbatim; expand on the reasoning. Output the detail text directly, with no "TLDR:"
-or "DETAIL:" header and no trailing risk tag."""
+verbatim; expand on the reasoning.
+
+Render every address as a markdown explorer link, copying the exact line from the
+Address Links section (full address as the link text) — never a bare or shortened
+address. Use `###` for any sub-headings; `#` and `##` are reserved for the report's
+own structure. Output the detail text directly, with no "TLDR:" or "DETAIL:" header
+and no trailing risk tag."""
 
 # Self-critique runs on the summary alone (stage 1), before the detail is expanded —
 # the summary is authoritative, so it's the artifact worth refining. Detail-specific
@@ -195,10 +216,20 @@ MAX_REFINE_ROUNDS = 3
 
 @dataclass(frozen=True)
 class Explanation:
-    """AI-generated transaction explanation with short and detailed versions."""
+    """AI-generated transaction explanation with short and detailed versions.
+
+    ``report`` is the full markdown page published to Wavey Gist — the detail
+    wrapped in metadata, the summary, and the code-built call flow. It's empty
+    when the explanation was produced without report context (or generation
+    failed), in which case the bare ``detail`` is published instead.
+    ``title`` names that page (contract, timestamp, risk); it falls back to
+    ``DETAIL_REPORT_TITLE`` when unset.
+    """
 
     summary: str
     detail: str
+    report: str = ""
+    title: str = ""
 
 
 def _collect_state_reads(
@@ -459,7 +490,7 @@ def _extract_address_args(decoded: DecodedCall, _depth: int = 0) -> list[str]:
     """All address-typed argument values (scalars and arrays) for one decoded call.
 
     Recurses into ``bytes`` parameters that hold nested calldata, capped at
-    ``_MAX_BYTES_RECURSION_DEPTH``, so labels are also collected for inner
+    ``MAX_BYTES_RECURSION_DEPTH``, so labels are also collected for inner
     calls (e.g. addresses passed to an ``upgradeToAndCall`` initializer).
     """
     out: list[str] = []
@@ -468,10 +499,47 @@ def _extract_address_args(decoded: DecodedCall, _depth: int = 0) -> list[str]:
             out.append(value)
         elif type_str.startswith("address[") and isinstance(value, (list, tuple)):
             out.extend(v for v in value if isinstance(v, str))
-        elif type_str == "bytes" and _depth < _MAX_BYTES_RECURSION_DEPTH:
-            inner = _try_decode_inner_bytes(value)
+        elif type_str == "bytes" and _depth < MAX_BYTES_RECURSION_DEPTH:
+            inner = try_decode_inner_calldata(value)
             if inner:
                 out.extend(_extract_address_args(inner, _depth + 1))
+    return out
+
+
+def collect_unique_addresses(targets_and_calls: list[tuple[str, DecodedCall]]) -> list[str]:
+    """Every distinct non-zero address in the transaction, checksummed, in first-seen order.
+
+    Covers each call's own target plus every address-typed argument (including
+    those nested inside `bytes` payloads). Shared by the label lookup and the
+    prompt's Address Links section so both cover exactly the same set.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def _consider(raw: str) -> None:
+        if not isinstance(raw, str):
+            return
+        addr_lower = raw.lower()
+        if addr_lower in seen:
+            return
+        seen.add(addr_lower)
+        if len(addr_lower) != 42:
+            return
+        try:
+            if int(addr_lower, 16) == 0:
+                return
+        except ValueError:
+            return
+        checksum = _checksum_or_none(raw)
+        if checksum is None:
+            return
+        out.append(checksum)
+
+    for target, decoded in targets_and_calls:
+        if target:
+            _consider(target)
+        for raw in _extract_address_args(decoded):
+            _consider(raw)
     return out
 
 
@@ -487,26 +555,7 @@ def _collect_address_labels(
     run concurrently so a batch alert with N distinct addresses doesn't
     pay N × ~3s serially. Best-effort: any lookup failure is silently dropped.
     """
-    seen: set[str] = set()
-    candidates: list[str] = []  # checksum addresses to look up
-
-    def _consider(raw: str) -> None:
-        addr_lower = raw.lower()
-        if addr_lower in seen:
-            return
-        seen.add(addr_lower)
-        if len(addr_lower) != 42 or int(addr_lower, 16) == 0:
-            return
-        checksum = _checksum_or_none(raw)
-        if checksum is None:
-            return
-        candidates.append(checksum)
-
-    for target, decoded in targets_and_calls:
-        if target:
-            _consider(target)
-        for raw in _extract_address_args(decoded):
-            _consider(raw)
+    candidates = collect_unique_addresses(targets_and_calls)
 
     def fetch(checksum: str) -> tuple[str, str] | None:
         try:
@@ -530,50 +579,6 @@ def _collect_address_labels(
 
     results = _parallel_map(fetch, candidates)
     return {checksum: label for entry in results if entry for checksum, label in [entry]}
-
-
-_MAX_BYTES_RECURSION_DEPTH = 2
-
-
-def _looks_like_calldata(byte_len: int) -> bool:
-    """True if a `bytes` blob's length matches the calldata shape (selector + ABI words).
-
-    Real calldata is either a bare 4-byte selector (e.g. `pause()`) or
-    selector + N 32-byte words. Anything else — packed Safe `signatures`
-    blobs, EIP-712 hashes, Universal-Router-style packed paths — fails
-    this check and is left as opaque hex.
-    """
-    return byte_len == 4 or (byte_len >= 36 and (byte_len - 4) % 32 == 0)
-
-
-def _try_decode_inner_bytes(value: object) -> DecodedCall | None:
-    """If ``value`` looks like calldata for an offline-known function, decode it.
-
-    Gated on (1) length matching the calldata shape and (2) the selector
-    being resolvable without a network call. Without these guards we'd
-    spam the Sourcify 4byte API on every `signatures`/hash/packed-bytes
-    parameter, paying a 30s timeout each miss to maybe get a false positive.
-    """
-    if isinstance(value, bytes):
-        raw_len = len(value)
-        if not _looks_like_calldata(raw_len):
-            return None
-        hex_str = "0x" + value.hex()
-    elif isinstance(value, str):
-        hex_str = value if value.startswith("0x") else "0x" + value
-        # Each hex char is 4 bits, so byte_len = (len(hex_str) - 2) // 2.
-        if len(hex_str) < 10 or not _looks_like_calldata((len(hex_str) - 2) // 2):
-            return None
-    else:
-        return None
-
-    if not is_selector_resolvable_offline(hex_str[:10]):
-        return None
-
-    try:
-        return decode_calldata(hex_str)
-    except (ValueError, TypeError):
-        return None
 
 
 def _collect_risk_anchors(decoded_calls: list[DecodedCall]) -> str:
@@ -675,8 +680,8 @@ def _format_decoded_calls(
                 else:
                     lines.append(f"{_indent}  {label}:")
                     lines.extend(f"{_indent}    - {_annotate_address(v, labels)}" for v in value)
-            elif type_str == "bytes" and _depth < _MAX_BYTES_RECURSION_DEPTH:
-                inner = _try_decode_inner_bytes(value)
+            elif type_str == "bytes" and _depth < MAX_BYTES_RECURSION_DEPTH:
+                inner = try_decode_inner_calldata(value)
                 if inner:
                     lines.append(f"{_indent}  {label}: ↳")
                     lines.append(_format_decoded_calls([inner], labels, _depth=_depth + 1, _indent=nested_indent))
@@ -833,6 +838,7 @@ def _build_prompt(
     param_names_per_call: list[list[str] | None] | None = None,
     safety_notes: list[str] | None = None,
     description: str = "",
+    address_links: str = "",
 ) -> str:
     """Build the user prompt for the LLM (per-transaction context only).
 
@@ -862,6 +868,13 @@ def _build_prompt(
     parts.append(
         f"\n--- Decoded Calldata ---\n{_format_decoded_calls(decoded_calls, address_labels, param_names_per_call)}"
     )
+
+    if address_links:
+        parts.append(
+            "\n--- Address Links (use these exact markdown links in the detailed report) ---\n"
+            "Copy a line verbatim whenever you mention the address; never write a bare, "
+            "shortened, or self-assembled address link.\n" + address_links
+        )
 
     constants_note = _format_batch_param_constants(decoded_calls)
     if constants_note:
@@ -906,8 +919,15 @@ def _marker_pattern(keyword: str) -> "re.Pattern[str]":
     """Compile (and cache) the section-marker regex for ``keyword``.
 
     Handles variations: 'KEYWORD:', '## KEYWORD', '**KEYWORD**', '**KEYWORD:**', etc.
+
+    The keyword must not be followed by another word character: a detail that
+    opens with a heading like ``## Detailed Analysis`` used to match on
+    "Detail" and get sliced down to "ed Analysis".
     """
-    return re.compile(rf"(?:^|\n)\s*(?:#{{1,4}}\s+)?(?:\*{{2}})?{keyword}(?:\*{{2}})?[:\s]*", re.IGNORECASE)
+    return re.compile(
+        rf"(?:^|\n)\s*(?:#{{1,4}}\s+)?(?:\*{{2}})?{keyword}(?![A-Za-z0-9_])(?:\*{{2}})?[:\s]*",
+        re.IGNORECASE,
+    )
 
 
 def _find_marker(text: str, keyword: str) -> tuple[int, int]:
@@ -957,6 +977,18 @@ def _parse_explanation(raw: str) -> Explanation:
 def _strip_trailing_risk_tag(text: str) -> str:
     """Remove a trailing risk tag (with surrounding space/punctuation) from text."""
     return _TRAILING_RISK_TAG_RE.sub("", text).rstrip()
+
+
+def _split_risk_tag(summary: str) -> tuple[str, str]:
+    """Split a summary into (prose without the trailing tag, uppercase tag).
+
+    The tag is returned separately so the report can show it as a header field
+    instead of a word dangling off the last sentence. Tag is "" when absent.
+    """
+    match = _TRAILING_RISK_TAG_CAPTURE_RE.search(summary)
+    if not match:
+        return summary.strip(), ""
+    return _strip_trailing_risk_tag(summary), match.group(1).upper()
 
 
 def _explanation_from_json(data: dict) -> Explanation:
@@ -1066,7 +1098,12 @@ def _expand_detail(provider: LLMProvider, prompt: str, summary: str) -> str:
     return parsed.detail or raw.strip()
 
 
-def _generate_explanation(provider: LLMProvider, prompt: str, refine: bool = False) -> Explanation:
+def _generate_explanation(
+    provider: LLMProvider,
+    prompt: str,
+    refine: bool = False,
+    report_ctx: ReportContext | None = None,
+) -> Explanation:
     """Two-stage generation: authoritative summary first, then a detail expanded from it.
 
     The Telegram-visible summary is the single source of truth; the linked full report
@@ -1074,6 +1111,9 @@ def _generate_explanation(provider: LLMProvider, prompt: str, refine: bool = Fal
     artifacts can never diverge — the failure mode that showed ~50.8k in the summary
     while the report had the correct figure. ``refine`` adds a summary self-critique
     pass before expansion (~1 extra call).
+
+    When ``report_ctx`` is given, the detail is wrapped into the full gist page
+    (metadata header, summary, deterministic call flow, analysis).
     """
     summary_draft = _generate_summary(provider, prompt)
     if not summary_draft.summary:
@@ -1089,7 +1129,14 @@ def _generate_explanation(provider: LLMProvider, prompt: str, refine: bool = Fal
     detail = summary_draft.detail
     if not detail and provider.supports_structured_output:
         detail = _expand_detail(provider, prompt, summary_draft.summary)
-    return Explanation(summary=summary_draft.summary, detail=detail)
+
+    report = ""
+    title = ""
+    if detail and report_ctx is not None:
+        prose, risk_tag = _split_risk_tag(summary_draft.summary)
+        report = build_report(prose, detail, report_ctx, risk_tag)
+        title = build_title(report_ctx, risk_tag, fallback=DETAIL_REPORT_TITLE)
+    return Explanation(summary=summary_draft.summary, detail=detail, report=report, title=title)
 
 
 def explain_transaction(
@@ -1104,6 +1151,7 @@ def explain_transaction(
     context_note: str = "",
     refine: bool = True,
     description: str = "",
+    label_address: str = "",
 ) -> Explanation | None:
     """Generate an AI explanation for a governance transaction.
 
@@ -1130,6 +1178,10 @@ def explain_transaction(
         description: Optional proposer-supplied description of intent. When set,
             the LLM compares stated intent against the decoded actions and flags
             any divergence.
+        label_address: Address that ``label`` names, linked from the report's
+            Contract header. Defaults to ``from_address`` — pass it explicitly
+            when the label describes something else (e.g. a Safe multisend
+            utility rather than the Safe itself).
 
     Returns:
         Explanation with summary and detail, or None on failure.
@@ -1172,6 +1224,8 @@ def explain_transaction(
         else:
             logger.info("Simulation unavailable, proceeding with decoded calldata only")
 
+    address_links = format_address_links_block(collect_unique_addresses([(target, decoded)]), chain_id, address_labels)
+
     prompt = _build_prompt(
         target=target,
         value=value,
@@ -1188,12 +1242,23 @@ def explain_transaction(
         param_names_per_call=param_names,
         safety_notes=safety_notes,
         description=description,
+        address_links=address_links,
     )
     logger.info("Full AI context for %s:\n%s", target, prompt)
 
+    report_ctx = ReportContext(
+        entries=[CallEntry(target=target, call=decoded, value=value, param_names=param_names[0])],
+        chain_id=chain_id,
+        labels=address_labels,
+        protocol=protocol,
+        label=label,
+        from_address=from_address,
+        label_address=label_address or from_address,
+    )
+
     try:
         provider = get_llm_provider()
-        explanation = _generate_explanation(provider, prompt, refine=refine)
+        explanation = _generate_explanation(provider, prompt, refine=refine, report_ctx=report_ctx)
         logger.info("AI summary using %s:\n%s", provider.model_name, explanation.summary)
         if explanation.detail:
             logger.info("AI detail:\n%s", explanation.detail)
@@ -1213,6 +1278,7 @@ def explain_batch_transaction(
     context_note: str = "",
     refine: bool = True,
     description: str = "",
+    label_address: str = "",
 ) -> Explanation | None:
     """Generate an AI explanation for a batch/multicall governance transaction.
 
@@ -1233,6 +1299,10 @@ def explain_batch_transaction(
         description: Optional proposer-supplied description of intent. When set,
             the LLM compares stated intent against the decoded actions and flags
             any divergence.
+        label_address: Address that ``label`` names, linked from the report's
+            Contract header. Defaults to ``from_address`` — pass it explicitly
+            when the label describes something else (e.g. a Safe multisend
+            utility rather than the Safe itself).
 
     Returns:
         Explanation with summary and detail, or None on failure.
@@ -1292,6 +1362,7 @@ def explain_batch_transaction(
 
     targets = ", ".join(c.get("target", "?") for c in calls)
     total_value = sum(int(c.get("value", "0")) for c in calls)
+    address_links = format_address_links_block(collect_unique_addresses(decoded_with_target), chain_id, address_labels)
 
     prompt = _build_prompt(
         target=targets,
@@ -1309,12 +1380,26 @@ def explain_batch_transaction(
         param_names_per_call=param_names,
         safety_notes=safety_notes,
         description=description,
+        address_links=address_links,
     )
     logger.info("Full AI context for batch (%s calls):\n%s", len(calls), prompt)
 
+    report_ctx = ReportContext(
+        entries=[
+            CallEntry(target=tgt, call=call, value=val, param_names=names)
+            for (tgt, call, val), names in zip(targets_calls_values, param_names)
+        ],
+        chain_id=chain_id,
+        labels=address_labels,
+        protocol=protocol,
+        label=label,
+        from_address=from_address,
+        label_address=label_address or from_address,
+    )
+
     try:
         provider = get_llm_provider()
-        explanation = _generate_explanation(provider, prompt, refine=refine)
+        explanation = _generate_explanation(provider, prompt, refine=refine, report_ctx=report_ctx)
         logger.info("Batch AI summary using %s:\n%s", provider.model_name, explanation.summary)
         if explanation.detail:
             logger.info("Batch AI detail:\n%s", explanation.detail)
@@ -1327,12 +1412,16 @@ def explain_batch_transaction(
 def format_explanation_line(explanation: Explanation) -> str:
     """Format the AI explanation for inclusion in a Telegram alert message.
 
-    Uses the short summary for the Telegram message. The detailed analysis
-    is uploaded to Wavey Gist for easy access.
+    Uses the short summary for the Telegram message. The full report — metadata,
+    summary, call flow, and analysis — is uploaded to Wavey Gist and linked. The
+    bare detail is published instead when no report was built (explanations
+    generated without report context).
     """
     line = f"\n🤖 *AI Summary:*\n{escape_markdown(explanation.summary)}"
     if explanation.detail:
-        detail_url = upload_to_gist(explanation.detail, title=DETAIL_REPORT_TITLE)
+        detail_url = upload_to_gist(
+            explanation.report or explanation.detail, title=explanation.title or DETAIL_REPORT_TITLE
+        )
         if detail_url:
             line += f"\n[Full details]({detail_url})"
         else:

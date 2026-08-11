@@ -14,6 +14,7 @@ from utils.llm.ai_explainer import (
     _explanation_from_json,
     _format_decimal,
     _parse_explanation,
+    collect_unique_addresses,
     explain_transaction,
     format_explanation_line,
 )
@@ -247,6 +248,14 @@ class TestStructuredOutput(unittest.TestCase):
 class TestParseExplanation(unittest.TestCase):
     """Tests for _parse_explanation."""
 
+    def test_heading_containing_keyword_is_not_a_marker(self) -> None:
+        """'## Detailed Analysis' must not match the DETAIL marker and get sliced."""
+        raw = "## Detailed Analysis\n\nThe call registers a farm."
+        result = _parse_explanation(raw)
+        self.assertEqual(result.detail, "")
+        self.assertIn("Detailed Analysis", result.summary)
+        self.assertIn("registers a farm", result.summary)
+
     def test_both_sections(self) -> None:
         raw = "TLDR: Short summary here.\n\nDETAIL:\nDetailed analysis here."
         result = _parse_explanation(raw)
@@ -279,8 +288,63 @@ class TestParseExplanation(unittest.TestCase):
         self.assertIn("Risk: HIGH", result.detail)
 
 
+class TestAddressLinksSection(unittest.TestCase):
+    """The prompt hands the LLM ready-made explorer links to copy."""
+
+    def test_links_block_included(self) -> None:
+        calls = [DecodedCall(function_name="pause", signature="pause()")]
+        links = "- [`0xAbc`](https://etherscan.io/address/0xAbc)"
+        result = _build_prompt(target="0xTarget", value=0, decoded_calls=calls, simulation=None, address_links=links)
+        self.assertIn("--- Address Links", result)
+        self.assertIn(links, result)
+
+    def test_section_omitted_when_no_links(self) -> None:
+        calls = [DecodedCall(function_name="pause", signature="pause()")]
+        result = _build_prompt(target="0xTarget", value=0, decoded_calls=calls, simulation=None)
+        self.assertNotIn("--- Address Links", result)
+
+    def test_hyperlink_rule_in_system_prompt(self) -> None:
+        self.assertIn("markdown link to the block explorer", SYSTEM_INSTRUCTIONS)
+
+
+class TestCollectUniqueAddresses(unittest.TestCase):
+    """Targets and address args are gathered once, deduped, checksummed."""
+
+    def test_target_and_args_deduped(self) -> None:
+        farm = "0x79e1b8e45932a7c802ea3dab3844e5dea68d971f"
+        registry = "0xF5f2718708f471e43968271956CC01aaA8c46119"
+        call = DecodedCall(
+            function_name="addFarms",
+            signature="addFarms(uint256,address[])",
+            params=[("uint256", 2), ("address[]", (farm, farm))],
+        )
+        result = collect_unique_addresses([(registry, call)])
+        self.assertEqual(result, [registry, "0x79e1B8e45932A7C802eA3dAb3844e5DEa68d971f"])
+
+    def test_zero_and_malformed_addresses_dropped(self) -> None:
+        call = DecodedCall(
+            function_name="transfer",
+            signature="transfer(address,uint256)",
+            params=[("address", "0x" + "00" * 20), ("uint256", 1)],
+        )
+        self.assertEqual(collect_unique_addresses([("0xnothex", call)]), [])
+
+
 class TestFormatExplanationLine(unittest.TestCase):
     """Tests for format_explanation_line."""
+
+    @patch("utils.llm.ai_explainer.upload_to_gist", return_value="https://gist.wavey.info/abc123")
+    def test_report_published_when_present(self, mock_gist: MagicMock) -> None:
+        """The full report (metadata + call flow + analysis) is what gets uploaded."""
+        explanation = Explanation(
+            summary="Pauses the vault. HIGH",
+            detail="Full detail here.",
+            report="## Call Flow\n\n1. pause()",
+            title="Yearn Timelock - 11/08/2026 10:00 - HIGH",
+        )
+        result = format_explanation_line(explanation)
+        mock_gist.assert_called_once_with(explanation.report, title=explanation.title)
+        self.assertIn("https://gist.wavey.info/abc123", result)
 
     @patch("utils.llm.ai_explainer.upload_to_gist", return_value="https://gist.wavey.info/abc123")
     def test_format_with_detail(self, mock_gist: MagicMock) -> None:
@@ -648,7 +712,7 @@ class TestNestedBytesDecoding(unittest.TestCase):
             signature="initialize(bytes)",
             params=[("bytes", garbage)],
         )
-        with patch("utils.llm.ai_explainer.decode_calldata", return_value=None):
+        with patch("utils.calldata.decoder.decode_calldata", return_value=None):
             result = _format_decoded_calls([outer])
         self.assertIn(f"bytes: {garbage}", result)
 
@@ -666,7 +730,7 @@ class TestNestedBytesDecoding(unittest.TestCase):
             signature="exec(bytes)",
             params=[("bytes", unknown)],
         )
-        with patch("utils.llm.ai_explainer.decode_calldata") as mock_decode:
+        with patch("utils.calldata.decoder.decode_calldata") as mock_decode:
             result = _format_decoded_calls([outer])
             mock_decode.assert_not_called()
         self.assertIn(f"bytes: {unknown}", result)
@@ -681,15 +745,16 @@ class TestNestedBytesDecoding(unittest.TestCase):
             signature="execTx(bytes)",
             params=[("bytes", sigs_blob)],
         )
-        with patch("utils.llm.ai_explainer.decode_calldata") as mock_decode:
+        with patch("utils.calldata.decoder.decode_calldata") as mock_decode:
             result = _format_decoded_calls([outer])
             mock_decode.assert_not_called()
         self.assertIn(sigs_blob, result)
 
     def test_recursion_depth_capped(self) -> None:
-        from utils.llm.ai_explainer import _MAX_BYTES_RECURSION_DEPTH, _format_decoded_calls
+        from utils.calldata.decoder import MAX_BYTES_RECURSION_DEPTH
+        from utils.llm.ai_explainer import _format_decoded_calls
 
-        # Mock _try_decode_inner_bytes so it always returns a self-referential
+        # Mock try_decode_inner_calldata so it always returns a self-referential
         # call, bypassing the selector/alignment guard. Without the depth cap
         # this would recurse forever.
         self_referential = DecodedCall(
@@ -697,9 +762,9 @@ class TestNestedBytesDecoding(unittest.TestCase):
             signature="wrap(bytes)",
             params=[("bytes", "0xfeedfacefeedfacefeedfacefeedfacefeedface")],
         )
-        with patch("utils.llm.ai_explainer._try_decode_inner_bytes", return_value=self_referential):
+        with patch("utils.llm.ai_explainer.try_decode_inner_calldata", return_value=self_referential):
             result = _format_decoded_calls([self_referential])
-        self.assertEqual(result.count("↳"), _MAX_BYTES_RECURSION_DEPTH)
+        self.assertEqual(result.count("↳"), MAX_BYTES_RECURSION_DEPTH)
 
 
 class TestAddressLabels(unittest.TestCase):
