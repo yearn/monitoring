@@ -242,6 +242,7 @@ protocols:
     display_name: "Maple Finance"
     description: "Maple syrupUSDC pool monitoring"
     cadence: "Hourly"
+    disabled: true
     tasks:
       - protocols/maple/main.py
     monitors:
