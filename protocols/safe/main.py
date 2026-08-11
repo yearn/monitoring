@@ -231,6 +231,9 @@ def _explain_safe_tx(
             skip_simulation=True,
             context_note=context_note,
             refine=True,
+            # A utility label names the multisend contract, not the Safe, so the
+            # report's Contract link must point at the target in that case.
+            label_address=target if utility_label else safe_address,
         )
 
     # Non-multisend DELEGATECALLs (rare): skip sim but still try to explain.
