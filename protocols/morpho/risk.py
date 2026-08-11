@@ -24,7 +24,7 @@ MARKETS_RISK_1 = {
         "0x4fe72543c5c95cd6b5f3cb516cd235ba882e2e705fe3424db6f99dfe5811d0d3",  # cbBTC/USDT -> lltv 86%, oracle: MetaOracleDeviationTimelock — primary MorphoChainlinkOracleV2 Chainlink BTC/USD, backup MorphoChainlinkOracleV2 Chainlink cbBTC/USD; quote feeds unset (USDT=$1).
         "0x39d6cc9211d023cc16708a2378d821d394d8cfaa3640e3a4d4638d292e10035d",  # cbBTC/WBTC -> lltv 94.5%, oracle: chainlink cbBTC/USD and chainlink WBTC/USD.
         "0xab04bdfbeef6de62e3020d44710d6461eccfb901b9659f866844805fca115f2f",  # cbBTC/WBTC -> lltv 94.5%, oracle: MetaOracleDeviationTimelock — primary fixed 1:1 cbBTC/WBTC (price 1e36); backup MorphoChainlinkOracleV2 Chainlink cbBTC/USD and Chainlink BTC/USD.
-        "0x34377fc4f617c51818e92c79df31ff270c6a91bc94ad32e367fdf59b9f4ac5dd",  # weETH/USDC -> lltv 77%, oracle: Chainlink weETH/ETH exchange rate and Chainlink ETH/USD; Morpho dummy quote feed (USDC = $1).
+        "0x34377fc4f617c51818e92c79df31ff270c6a91bc94ad32e367fdf59b9f4ac5dd",  # weETH/USDC -> lltv 77%, oracle: weETH/ETH exchange-rate adapter (weETH.getRate()) + Chainlink ETH/USD; Morpho dummy quote feed (USDC = $1).
         "0xf6a056627a51e511ec7f48332421432ea6971fc148d8f3c451e14ea108026549",  # LBTC/WBTC -> lltv 94.5%, oracle: readstone exchange rate LBTC/BTC and chainlink WBTC/BTC
     ],
     Chain.BASE: [
@@ -107,6 +107,7 @@ MARKETS_RISK_2 = {
         "0x85d59152eeeab7ca024804895b358868d8dd1e134171be400d7792d5604a212c",  # weETH/PYUSD -> lltv 86%, oracle: chainlink weETH/ETH and chainlink ETH/USD and Chainlink PYUSD/USD.
         "0x90ef0c5a0dc7c4de4ad4585002d44e9d411d212d2f6258e94948beecf8b4c0d5",  # sUSDe/PYUSD -> lltv 91.5%, oracle: sUSDe ERC4626 vault, chainlink USDe/USD and Chainlink PYUSD/USD.
         "0xcb12dcbc7c6c4f20ca1537a3cc1a41ec27501f85a3e322a710d9a16a88a28c0e",  # PT-sUSDE-7MAY2026/PYUSD -> lltv 91.5%, oracle: Pendle oracle PT to USDe, chainlink USDe/USD and Chainlink PYUSD/USD.
+        "0x22fe4c688161863c73571a2b8db65cc11a4a6bceee4f0dea4aa83e4b784f1bd9",  # PT-sUSDS-26NOV2026/USDC -> lltv 91.5%, oracle: MetaOracleDeviationTimelock (Steakhouse) — primary MorphoChainlinkOracleV2 Ojo PT Feed (Pendle Chainlink-compatible); backup MorphoChainlinkOracleV2 Ojo PT Feed + Chainlink USDS/USD + Morpho dummy quote (USDC = $1).
         "0xd8a8e6667f58aa9229e8979bd619742b1660ee856c200a93e407dbccb7222323",  # cbBTC/PYUSD -> lltv 86%, oracle: chainlink cbBTC/USD and Chainlink PYUSD/USD.
         "0x6d2fba32b8649d92432d036c16aa80779034b7469b63abc259b17678857f31c2",  # wstETH/USDC -> lltv 86%, oracle: MorphoChainlinkOracleV2 —  Api3 wstETH/USD + Api3 USDC/USD.
         "0xba3ba077d9c838696b76e29a394ae9f0d1517a372e30fd9a0fc19c516fb4c5a7",  # cbBTC/USDC -> lltv 86%, oracle: MorphoChainlinkOracleV2, Api3 cbBTC/USD + Api3 USDC/USD.
