@@ -321,6 +321,20 @@ class TestCollectUniqueAddresses(unittest.TestCase):
         result = collect_unique_addresses([(registry, call)])
         self.assertEqual(result, [registry, "0x79e1B8e45932A7C802eA3dAb3844e5DEa68d971f"])
 
+    def test_addresses_inside_tuple_args_collected(self) -> None:
+        """Struct args (e.g. MarketParams) must contribute their addresses."""
+        farm = "0x79e1b8e45932a7c802ea3dab3844e5dea68d971f"
+        registry = "0xF5f2718708f471e43968271956CC01aaA8c46119"
+        call = DecodedCall(
+            function_name="createMarket",
+            signature="createMarket((address,uint256))",
+            params=[("(address,uint256)", (farm, 5))],
+        )
+        self.assertEqual(
+            collect_unique_addresses([(registry, call)]),
+            [registry, "0x79e1B8e45932A7C802eA3dAb3844e5DEa68d971f"],
+        )
+
     def test_zero_and_malformed_addresses_dropped(self) -> None:
         call = DecodedCall(
             function_name="transfer",

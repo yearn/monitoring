@@ -177,14 +177,16 @@ def _parse_param_types(signature: str) -> list[str]:
         return []
 
     inner = signature[start + 1 : end].strip()
-    return _split_top_level(inner) if inner else []
+    return split_top_level_types(inner) if inner else []
 
 
-def _split_top_level(types: str) -> list[str]:
+def split_top_level_types(types: str) -> list[str]:
     """Split a comma-separated type list on top-level commas only.
 
     Commas inside ``(...)`` tuples or ``[...]`` array sizes are preserved so a
-    type like ``(address,uint256)[]`` stays intact.
+    type like ``(address,uint256)[]`` stays intact. Public so consumers that
+    walk decoded values (e.g. the gist report renderer) can decompose a tuple
+    type into its component types.
     """
     parts: list[str] = []
     depth = 0

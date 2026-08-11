@@ -9,11 +9,14 @@ from utils.llm.report import (
     CallEntry,
     ReportContext,
     address_link,
+    array_element_type,
     build_report,
     build_title,
     explorer_address_url,
     format_address_links_block,
     format_call_flow,
+    iter_address_values,
+    tuple_component_types,
 )
 
 REGISTRY = "0xF5f2718708f471e43968271956CC01aaA8c46119"
@@ -144,6 +147,56 @@ class TestFormatCallFlow(unittest.TestCase):
 
     def test_empty_without_entries(self) -> None:
         self.assertEqual(format_call_flow(_add_farms_ctx(entries=[])), "")
+
+
+class TestCompositeParams(unittest.TestCase):
+    """Addresses nested in tuple/struct args must still render as explorer links."""
+
+    def _flow(self, signature: str, params: list) -> str:
+        call = DecodedCall(function_name=signature.split("(")[0], signature=signature, params=params)
+        return format_call_flow(_add_farms_ctx(entries=[CallEntry(target=REGISTRY, call=call)]))
+
+    def test_type_decomposition(self) -> None:
+        self.assertEqual(array_element_type("uint256[3]"), "uint256")
+        self.assertEqual(array_element_type("(address,uint256)[]"), "(address,uint256)")
+        self.assertIsNone(array_element_type("address"))
+        self.assertEqual(tuple_component_types("(address,uint256)"), ["address", "uint256"])
+        self.assertEqual(tuple_component_types("(address,(address,uint256))"), ["address", "(address,uint256)"])
+        self.assertIsNone(tuple_component_types("address[]"))
+
+    def test_tuple_addresses_linked(self) -> None:
+        flow = self._flow("configure((address,uint256))", [("(address,uint256)", (FARM, 5))])
+        self.assertIn(f"     - `address`: [`{FARM_CKS}`](https://etherscan.io/address/{FARM_CKS})", flow)
+        self.assertIn("     - `uint256`: `5`", flow)
+        self.assertNotIn(FARM, flow)  # no raw lowercase tuple dump
+
+    def test_array_of_tuples_indexed(self) -> None:
+        flow = self._flow("setCaps((address,uint256)[])", [("(address,uint256)[]", ((FARM, 5), (REGISTRY, 9)))])
+        self.assertIn("     - `[0]`:", flow)
+        self.assertIn("     - `[1]`:", flow)
+        self.assertIn(f"https://etherscan.io/address/{FARM_CKS}", flow)
+        self.assertIn(f"https://etherscan.io/address/{REGISTRY}", flow)
+
+    def test_nested_tuple_addresses_linked(self) -> None:
+        flow = self._flow("init((address,(address,uint256)))", [("(address,(address,uint256))", (REGISTRY, (FARM, 1)))])
+        self.assertIn(f"https://etherscan.io/address/{FARM_CKS}", flow)
+
+    def test_scalar_array_rendering_unchanged(self) -> None:
+        """Plain address[] keeps its compact, index-free bullets."""
+        flow = self._flow("addFarms(address[])", [("address[]", (FARM,))])
+        self.assertIn(f"     - [`{FARM_CKS}`](https://etherscan.io/address/{FARM_CKS})", flow)
+        self.assertNotIn("`[0]`", flow)
+
+    def test_arity_mismatch_falls_back_to_scalar(self) -> None:
+        """A value that doesn't match its tuple type is printed, not crashed on."""
+        flow = self._flow("configure((address,uint256))", [("(address,uint256)", (FARM,))])
+        self.assertIn("`(address,uint256)`:", flow)
+
+    def test_iter_address_values_walks_composites(self) -> None:
+        self.assertEqual(list(iter_address_values("(address,uint256)", (FARM, 5))), [FARM])
+        self.assertEqual(list(iter_address_values("(address,uint256)[]", ((FARM, 5), (REGISTRY, 9)))), [FARM, REGISTRY])
+        self.assertEqual(list(iter_address_values("uint256", 5)), [])
+        self.assertEqual(list(iter_address_values("address", FARM)), [FARM])
 
 
 class TestBuildTitle(unittest.TestCase):

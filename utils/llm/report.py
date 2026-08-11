@@ -11,12 +11,18 @@ mis-ordered, or summarized away.
 """
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from eth_utils import to_checksum_address
 
-from utils.calldata.decoder import MAX_BYTES_RECURSION_DEPTH, DecodedCall, try_decode_inner_calldata
+from utils.calldata.decoder import (
+    MAX_BYTES_RECURSION_DEPTH,
+    DecodedCall,
+    split_top_level_types,
+    try_decode_inner_calldata,
+)
 from utils.chains import EXPLORER_URLS, Chain
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
@@ -122,6 +128,95 @@ def _param_label(type_str: str, name: str | None) -> str:
     return f"`{type_str} {name}`" if name else f"`{type_str}`"
 
 
+def array_element_type(type_str: str) -> str | None:
+    """``T[]`` / ``T[3]`` → ``T``; None when the type isn't an array."""
+    if not type_str.endswith("]"):
+        return None
+    open_idx = type_str.rfind("[")
+    return type_str[:open_idx] if open_idx > 0 else None
+
+
+def tuple_component_types(type_str: str) -> list[str] | None:
+    """``(address,uint256)`` → ``["address", "uint256"]``; None when not a tuple."""
+    if not (type_str.startswith("(") and type_str.endswith(")")):
+        return None
+    inner = type_str[1:-1].strip()
+    return split_top_level_types(inner) if inner else []
+
+
+def _is_composite(type_str: str) -> bool:
+    """True for array and tuple types, which render as nested bullets."""
+    return array_element_type(type_str) is not None or tuple_component_types(type_str) is not None
+
+
+def iter_address_values(type_str: str, value: object) -> Iterator[str]:
+    """Yield every ``address`` leaf inside a decoded parameter value.
+
+    Walks arrays and tuples (and their nesting) so a struct argument like
+    ``(address,address,uint256)`` contributes its addresses to label lookup
+    and to the prompt's Address Links section — without this they'd only ever
+    be stringified into the report as raw, unlinked text.
+    """
+    element = array_element_type(type_str)
+    if element is not None and isinstance(value, (list, tuple)):
+        for item in value:
+            yield from iter_address_values(element, item)
+        return
+    components = tuple_component_types(type_str)
+    if components is not None and isinstance(value, (list, tuple)) and len(components) == len(value):
+        for component, item in zip(components, value):
+            yield from iter_address_values(component, item)
+        return
+    if type_str == "address" and isinstance(value, str):
+        yield value
+
+
+def _render_param(
+    label: str,
+    type_str: str,
+    value: object,
+    chain_id: int,
+    labels: dict[str, str],
+    indent: str,
+    depth: int = 0,
+) -> list[str]:
+    """Render one parameter, expanding arrays and tuples into nested bullets.
+
+    Composites recurse so addresses nested in a struct or an array of structs
+    still come out as explorer links rather than a stringified Python tuple.
+    Recursion terminates on the type string, which is finite.
+    """
+    element = array_element_type(type_str)
+    if element is not None and isinstance(value, (list, tuple)):
+        if not value:
+            return [f"{indent}- {label}: _(empty)_"]
+        lines = [f"{indent}- {label}:"]
+        for i, item in enumerate(value):
+            if _is_composite(element):
+                lines.extend(_render_param(f"`[{i}]`", element, item, chain_id, labels, indent + "  ", depth))
+            else:
+                lines.append(f"{indent}  - {_format_param_value(element, item, chain_id, labels)}")
+        return lines
+
+    components = tuple_component_types(type_str)
+    if components is not None and isinstance(value, (list, tuple)) and len(components) == len(value):
+        if not components:
+            return [f"{indent}- {label}: _(empty)_"]
+        lines = [f"{indent}- {label}:"]
+        for component, item in zip(components, value):
+            lines.extend(_render_param(f"`{component}`", component, item, chain_id, labels, indent + "  ", depth))
+        return lines
+
+    if type_str == "bytes" and depth < MAX_BYTES_RECURSION_DEPTH:
+        inner = try_decode_inner_calldata(value)
+        if inner is not None:
+            lines = [f"{indent}- {label}: ↳ `{inner.signature}`"]
+            lines.extend(_format_params(inner, chain_id, labels, None, indent + "  ", depth + 1))
+            return lines
+
+    return [f"{indent}- {label}: {_format_param_value(type_str, value, chain_id, labels)}"]
+
+
 def _format_params(
     call: DecodedCall,
     chain_id: int,
@@ -134,22 +229,7 @@ def _format_params(
     lines: list[str] = []
     for i, (type_str, value) in enumerate(call.params):
         name = param_names[i] if param_names is not None and i < len(param_names) else None
-        label = _param_label(type_str, name)
-        if type_str.startswith("address[") and isinstance(value, (list, tuple)):
-            if not value:
-                lines.append(f"{indent}- {label}: _(empty)_")
-                continue
-            lines.append(f"{indent}- {label}:")
-            lines.extend(f"{indent}  - {address_link(v, chain_id, labels)}" for v in value)
-        elif type_str == "bytes" and depth < MAX_BYTES_RECURSION_DEPTH:
-            inner = try_decode_inner_calldata(value)
-            if inner is None:
-                lines.append(f"{indent}- {label}: {_format_param_value(type_str, value, chain_id, labels)}")
-                continue
-            lines.append(f"{indent}- {label}: ↳ `{inner.signature}`")
-            lines.extend(_format_params(inner, chain_id, labels, None, indent + "  ", depth + 1))
-        else:
-            lines.append(f"{indent}- {label}: {_format_param_value(type_str, value, chain_id, labels)}")
+        lines.extend(_render_param(_param_label(type_str, name), type_str, value, chain_id, labels, indent, depth))
     return lines
 
 

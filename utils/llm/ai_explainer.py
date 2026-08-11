@@ -17,7 +17,14 @@ from utils.erc20_metadata import fetch_erc20_metadata
 from utils.impl_diff import diff_implementations, format_impl_diff
 from utils.llm import get_llm_provider
 from utils.llm.base import LLMError, LLMProvider
-from utils.llm.report import CallEntry, ReportContext, build_report, build_title, format_address_links_block
+from utils.llm.report import (
+    CallEntry,
+    ReportContext,
+    build_report,
+    build_title,
+    format_address_links_block,
+    iter_address_values,
+)
 from utils.logger import get_logger
 from utils.on_chain_state import StateRead, format_state_reads, read_before_state
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
@@ -487,7 +494,11 @@ def _annotate_address(addr: str, labels: dict[str, str]) -> str:
 
 
 def _extract_address_args(decoded: DecodedCall, _depth: int = 0) -> list[str]:
-    """All address-typed argument values (scalars and arrays) for one decoded call.
+    """All address-typed argument values for one decoded call.
+
+    Covers scalars, arrays, and addresses nested inside tuple/struct arguments
+    (``iter_address_values`` walks the type), so a ``MarketParams``-style struct
+    still yields its addresses for label lookup and the Address Links section.
 
     Recurses into ``bytes`` parameters that hold nested calldata, capped at
     ``MAX_BYTES_RECURSION_DEPTH``, so labels are also collected for inner
@@ -495,11 +506,8 @@ def _extract_address_args(decoded: DecodedCall, _depth: int = 0) -> list[str]:
     """
     out: list[str] = []
     for type_str, value in decoded.params:
-        if type_str == "address" and isinstance(value, str):
-            out.append(value)
-        elif type_str.startswith("address[") and isinstance(value, (list, tuple)):
-            out.extend(v for v in value if isinstance(v, str))
-        elif type_str == "bytes" and _depth < MAX_BYTES_RECURSION_DEPTH:
+        out.extend(iter_address_values(type_str, value))
+        if type_str == "bytes" and _depth < MAX_BYTES_RECURSION_DEPTH:
             inner = try_decode_inner_calldata(value)
             if inner:
                 out.extend(_extract_address_args(inner, _depth + 1))

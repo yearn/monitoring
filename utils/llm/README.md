@@ -315,7 +315,11 @@ Registers a new type-2 farm in FarmRegistry. …
 **Call Flow is built in Python, not asked of the LLM** — it comes straight from the
 decoded calldata (`CallEntry` per call: target, signature, ABI parameter names, ETH
 value, nested `bytes` payloads unwrapped up to `MAX_BYTES_RECURSION_DEPTH`), so it
-can't be hallucinated, re-ordered, or summarized away. Every address is rendered
+can't be hallucinated, re-ordered, or summarized away. Arrays and tuple/struct
+arguments are decomposed recursively (`array_element_type` / `tuple_component_types`),
+so an address inside a `MarketParams`-style struct is still rendered as a link and
+still reaches label lookup and the Address Links section — `iter_address_values()`
+walks the same type structure for collection. Every address is rendered
 full-length (never truncated) as a link to the chain's explorer from
 `EXPLORER_URLS`, annotated with its contract label / token symbol when known;
 chains with no configured explorer degrade to plain code spans.
