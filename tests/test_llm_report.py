@@ -18,6 +18,7 @@ from utils.llm.report import (
     iter_address_values,
     tuple_component_types,
 )
+from utils.related_tokens import RelatedToken
 
 REGISTRY = "0xF5f2718708f471e43968271956CC01aaA8c46119"
 FARM = "0x79e1b8e45932a7c802ea3dab3844e5dea68d971f"
@@ -197,6 +198,44 @@ class TestCompositeParams(unittest.TestCase):
         self.assertEqual(list(iter_address_values("(address,uint256)[]", ((FARM, 5), (REGISTRY, 9)))), [FARM, REGISTRY])
         self.assertEqual(list(iter_address_values("uint256", 5)), [])
         self.assertEqual(list(iter_address_values("address", FARM)), [FARM])
+
+
+class TestAmountAnnotation(unittest.TestCase):
+    """Raw amounts get a human-readable hint when the target's token is known."""
+
+    JANE = RelatedToken(getter="jane", address="0x333333330522F64EE8d0b3039c460b41670e3404", symbol="JANE", decimals=18)
+
+    def _flow(self, params: list, token: RelatedToken | None) -> str:
+        call = DecodedCall(
+            function_name="setEpochEmissions",
+            signature="setEpochEmissions(uint256,uint256)",
+            params=params,
+        )
+        entry = CallEntry(target=REGISTRY, call=call, param_names=["_epoch", "emissions"], amount_token=token)
+        return format_call_flow(_add_farms_ctx(entries=[entry]))
+
+    def test_large_uint_annotated(self) -> None:
+        flow = self._flow([("uint256", 43), ("uint256", 5369214230155537376952673)], self.JANE)
+        self.assertIn("`5,369,214,230,155,537,376,952,673` (≈ 5,369,214.230155537376952673 JANE)", flow)
+
+    def test_small_uint_not_annotated(self) -> None:
+        """An epoch number must not be rendered as 0.000000000000000043 JANE."""
+        flow = self._flow([("uint256", 43), ("uint256", 5369214230155537376952673)], self.JANE)
+        self.assertIn("- `uint256 _epoch`: `43`\n", flow)
+
+    def test_no_annotation_without_token(self) -> None:
+        flow = self._flow([("uint256", 43), ("uint256", 5369214230155537376952673)], None)
+        self.assertNotIn("≈", flow)
+
+    def test_threshold_is_one_thousandth_of_a_token(self) -> None:
+        usdc = RelatedToken(getter="self", address=REGISTRY, symbol="USDC", decimals=6)
+        self.assertIn("(≈ 0.001 USDC)", self._flow([("uint256", 1000)], usdc))
+        self.assertNotIn("≈", self._flow([("uint256", 999)], usdc))
+
+    def test_non_uint_types_untouched(self) -> None:
+        call = DecodedCall(function_name="setRoot", signature="setRoot(bytes32)", params=[("bytes32", b"\\x01" * 32)])
+        entry = CallEntry(target=REGISTRY, call=call, amount_token=self.JANE)
+        self.assertNotIn("≈", format_call_flow(_add_farms_ctx(entries=[entry])))
 
 
 class TestBuildTitle(unittest.TestCase):

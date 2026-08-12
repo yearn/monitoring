@@ -14,6 +14,7 @@ from eth_utils import function_signature_to_4byte_selector, to_checksum_address
 
 from utils.calldata.decoder import MAX_BYTES_RECURSION_DEPTH, DecodedCall, decode_calldata, try_decode_inner_calldata
 from utils.erc20_metadata import fetch_erc20_metadata
+from utils.formatting import format_decimal_amount, normalize_token_amount
 from utils.impl_diff import diff_implementations, format_impl_diff
 from utils.llm import get_llm_provider
 from utils.llm.base import LLMError, LLMProvider
@@ -28,6 +29,7 @@ from utils.llm.report import (
 from utils.logger import get_logger
 from utils.on_chain_state import StateRead, format_state_reads, read_before_state
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
+from utils.related_tokens import RelatedToken, format_related_tokens_block, resolve_related_tokens
 from utils.risk_anchors import format_anchors_block
 from utils.risk_anchors import lookup as lookup_risk_anchor
 from utils.source_context import (
@@ -93,8 +95,14 @@ Critical rules for parameter interpretation:
   and are AUTHORITATIVE. Use those numbers (and the per-token "Total moved") verbatim
   for any magnitude you report — do NOT re-derive amounts from raw calldata units or
   do your own decimal division, and make sure the TLDR and DETAIL agree with it.
-- If a unit is ambiguous and no source context resolves it, say so explicitly rather than
-  guessing. Quote the raw value plus its 1e18-normalized form.
+- When a Related Tokens section resolves EXACTLY ONE token for the target, its decimals are a
+  verified on-chain fact: normalize the amount, state it with the token symbol
+  ("5,369,214.23 JANE"), and do NOT hedge about decimals. Mention the getter it came from
+  only in DETAIL, not the TLDR.
+- If a unit is ambiguous and nothing above resolves it — no Related Tokens entry for the
+  target, or several candidate tokens with different decimals — say so explicitly rather than
+  guessing. Quote the raw value plus its 1e18-normalized form, and name the candidates when
+  there are several.
 - Never assign HIGH/CRITICAL risk on the basis of a guessed unit interpretation.
 - When a Risk Anchors section is provided, treat it as a typical floor/ceiling, not a
   verdict. Adjust up or down based on the specific parameters (e.g. grantRole of a
@@ -736,6 +744,39 @@ def _format_simulation_context(sim: SimulationResult) -> str:
     return "\n".join(parts)
 
 
+def _collect_related_tokens(
+    targets_and_calls: list[tuple[str, DecodedCall]],
+    chain_id: int,
+) -> list[tuple[str, list[RelatedToken]]]:
+    """Resolve each target's own ERC20s, in input order, deduped by target.
+
+    Covers the amount params that ``_collect_token_flows`` can't: a call like
+    ``setEpochEmissions(uint256,uint256)`` has no address argument, so the only
+    way to learn the denomination is to ask the target contract. Targets that
+    resolve nothing are omitted. Lookups fan out in parallel; each is
+    best-effort and cached per (chain, target).
+    """
+    unique: list[str] = []
+    seen: set[str] = set()
+    for target, _decoded in targets_and_calls:
+        key = (target or "").lower()
+        if target and key not in seen:
+            seen.add(key)
+            unique.append(target)
+
+    results = _parallel_map(lambda t: resolve_related_tokens(chain_id, t), unique)
+    return [(target, tokens) for target, tokens in zip(unique, results) if tokens]
+
+
+def _sole_token_by_target(per_target: list[tuple[str, list[RelatedToken]]]) -> dict[str, RelatedToken]:
+    """`{target_lower: token}` for targets with exactly one token.
+
+    Only an unambiguous single token is safe to annotate amounts with — two
+    tokens with different decimals would make any normalization a coin flip.
+    """
+    return {target.lower(): tokens[0] for target, tokens in per_target if len(tokens) == 1}
+
+
 # Standard ERC20 movement functions: signature -> (label, recipient_param_index,
 # amount_param_index, is_flow). `recipient_param_index` is None when there is no
 # single recipient. `is_flow` marks calls that actually move a balance (summed into
@@ -747,20 +788,6 @@ _TOKEN_MOVE_SIGS: dict[str, tuple[str, int | None, int, bool]] = {
     "burn(address,uint256)": ("burn", 0, 1, True),
     "approve(address,uint256)": ("approve", 0, 1, False),
 }
-
-
-def _format_decimal(value: Decimal) -> str:
-    """Render a normalized token amount: trim trailing zeros, group the integer part.
-
-    Uses ``Decimal`` end-to-end so a 6-decimal amount like ``50_780000`` formats as
-    ``50.78`` exactly, with no float rounding error.
-    """
-    s = format(value, "f")
-    if "." in s:
-        s = s.rstrip("0").rstrip(".")
-    int_part, _, frac = s.partition(".")
-    int_fmt = f"{int(int_part):,}"
-    return f"{int_fmt}.{frac}" if frac else int_fmt
 
 
 def _collect_token_flows(
@@ -807,8 +834,8 @@ def _collect_token_flows(
             symbol_by_token[token_key] = meta.symbol
             token_order.append(token_key)
 
-        normalized = Decimal(amount) / (Decimal(10) ** meta.decimals)
-        human = f"{_format_decimal(normalized)} {meta.symbol}"
+        normalized = normalize_token_amount(amount, meta.decimals)
+        human = f"{format_decimal_amount(normalized)} {meta.symbol}"
         if recipient_idx is not None and recipient_idx < len(decoded.params):
             recipient = _annotate_address(decoded.params[recipient_idx][1], labels)
             lines_by_token[token_key].append(f"  {_kind} {human} -> {recipient}")
@@ -826,7 +853,7 @@ def _collect_token_flows(
         out.extend(lines_by_token[token_key])
         total = total_by_token[token_key]
         if total > 0 and len(lines_by_token[token_key]) > 1:
-            out.append(f"  Total moved: {_format_decimal(total)} {symbol_by_token[token_key]}")
+            out.append(f"  Total moved: {format_decimal_amount(total)} {symbol_by_token[token_key]}")
     return "\n".join(out)
 
 
@@ -838,6 +865,7 @@ def _build_prompt(
     protocol: str = "",
     label: str = "",
     token_flows: str = "",
+    related_tokens: str = "",
     proxy_upgrade_info: str = "",
     source_contexts: list[SourceContext] | None = None,
     context_note: str = "",
@@ -893,6 +921,13 @@ def _build_prompt(
             "\n--- Token Flows (computed — authoritative amounts) ---\n"
             "These amounts are already decimal-normalized. Use them verbatim; do NOT "
             "re-derive magnitudes from the raw calldata values.\n" + token_flows
+        )
+
+    if related_tokens:
+        parts.append(
+            "\n--- Related Tokens (resolved on-chain from the target) ---\n"
+            "Each line is a token getter read live from the target contract, so its decimals "
+            "are a VERIFIED fact, not an assumption.\n" + related_tokens
         )
 
     if source_contexts:
@@ -1210,6 +1245,7 @@ def explain_transaction(
     param_names = _collect_param_names([(target, decoded)], chain_id)
     safety_notes = _collect_safety_checks([(target, decoded, value)], chain_id)
     token_flows = _collect_token_flows([(target, decoded)], chain_id, address_labels)
+    related_tokens = _collect_related_tokens([(target, decoded)], chain_id)
 
     simulation: SimulationResult | None = None
     if not skip_simulation:
@@ -1251,11 +1287,20 @@ def explain_transaction(
         safety_notes=safety_notes,
         description=description,
         address_links=address_links,
+        related_tokens=format_related_tokens_block(related_tokens, address_labels),
     )
     logger.info("Full AI context for %s:\n%s", target, prompt)
 
     report_ctx = ReportContext(
-        entries=[CallEntry(target=target, call=decoded, value=value, param_names=param_names[0])],
+        entries=[
+            CallEntry(
+                target=target,
+                call=decoded,
+                value=value,
+                param_names=param_names[0],
+                amount_token=_sole_token_by_target(related_tokens).get(target.lower()),
+            )
+        ],
         chain_id=chain_id,
         labels=address_labels,
         protocol=protocol,
@@ -1367,6 +1412,7 @@ def explain_batch_transaction(
     param_names = _collect_param_names(decoded_with_target, chain_id)
     safety_notes = _collect_safety_checks(targets_calls_values, chain_id)
     token_flows = _collect_token_flows(decoded_with_target, chain_id, address_labels)
+    related_tokens = _collect_related_tokens(decoded_with_target, chain_id)
 
     targets = ", ".join(c.get("target", "?") for c in calls)
     total_value = sum(int(c.get("value", "0")) for c in calls)
@@ -1389,12 +1435,20 @@ def explain_batch_transaction(
         safety_notes=safety_notes,
         description=description,
         address_links=address_links,
+        related_tokens=format_related_tokens_block(related_tokens, address_labels),
     )
     logger.info("Full AI context for batch (%s calls):\n%s", len(calls), prompt)
 
+    sole_tokens = _sole_token_by_target(related_tokens)
     report_ctx = ReportContext(
         entries=[
-            CallEntry(target=tgt, call=call, value=val, param_names=names)
+            CallEntry(
+                target=tgt,
+                call=call,
+                value=val,
+                param_names=names,
+                amount_token=sole_tokens.get(tgt.lower()),
+            )
             for (tgt, call, val), names in zip(targets_calls_values, param_names)
         ],
         chain_id=chain_id,

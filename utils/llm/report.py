@@ -24,6 +24,8 @@ from utils.calldata.decoder import (
     try_decode_inner_calldata,
 )
 from utils.chains import EXPLORER_URLS, Chain
+from utils.formatting import format_decimal_amount, normalize_token_amount
+from utils.related_tokens import RelatedToken
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
@@ -43,6 +45,9 @@ class CallEntry:
     call: DecodedCall
     value: int = 0
     param_names: list[str] | None = None
+    # The single ERC20 this call's target is denominated in, when exactly one
+    # resolved. Used to annotate raw amounts with a human-readable figure.
+    amount_token: RelatedToken | None = None
 
 
 @dataclass(frozen=True)
@@ -112,14 +117,35 @@ def format_address_links_block(addresses: list[str], chain_id: int, labels: dict
     return "\n".join(lines)
 
 
-def _format_param_value(type_str: str, value: object, chain_id: int, labels: dict[str, str]) -> str:
+def _amount_hint(type_str: str, value: object, token: RelatedToken | None) -> str:
+    """Human-readable suffix for a raw token amount, or "" when it doesn't apply.
+
+    Only annotates unsigned integers large enough to plausibly be an amount
+    (≥0.001 of the token). Without that floor every small integer picks up a
+    nonsense hint — an epoch number like ``43`` would render as
+    ``0.000000000000000043 JANE``.
+    """
+    if token is None or not type_str.startswith("uint"):
+        return ""
+    if not isinstance(value, int) or isinstance(value, bool) or value < 10 ** max(token.decimals - 3, 0):
+        return ""
+    return f" (≈ {format_decimal_amount(normalize_token_amount(value, token.decimals))} {token.symbol})"
+
+
+def _format_param_value(
+    type_str: str,
+    value: object,
+    chain_id: int,
+    labels: dict[str, str],
+    token: RelatedToken | None = None,
+) -> str:
     """Render a single scalar parameter value for the markdown call flow."""
     if type_str == "address" and isinstance(value, str):
         return address_link(value, chain_id, labels)
     if isinstance(value, bytes):
         return f"`0x{value.hex()}`"
     if isinstance(value, int) and not isinstance(value, bool):
-        return f"`{value:,}`"
+        return f"`{value:,}`{_amount_hint(type_str, value, token)}"
     return f"`{value}`"
 
 
@@ -179,12 +205,14 @@ def _render_param(
     labels: dict[str, str],
     indent: str,
     depth: int = 0,
+    token: "RelatedToken | None" = None,
 ) -> list[str]:
     """Render one parameter, expanding arrays and tuples into nested bullets.
 
     Composites recurse so addresses nested in a struct or an array of structs
     still come out as explorer links rather than a stringified Python tuple.
-    Recursion terminates on the type string, which is finite.
+    Recursion terminates on the type string, which is finite. ``token`` carries
+    the call target's sole ERC20, used to annotate raw amounts.
     """
     element = array_element_type(type_str)
     if element is not None and isinstance(value, (list, tuple)):
@@ -193,9 +221,9 @@ def _render_param(
         lines = [f"{indent}- {label}:"]
         for i, item in enumerate(value):
             if _is_composite(element):
-                lines.extend(_render_param(f"`[{i}]`", element, item, chain_id, labels, indent + "  ", depth))
+                lines.extend(_render_param(f"`[{i}]`", element, item, chain_id, labels, indent + "  ", depth, token))
             else:
-                lines.append(f"{indent}  - {_format_param_value(element, item, chain_id, labels)}")
+                lines.append(f"{indent}  - {_format_param_value(element, item, chain_id, labels, token)}")
         return lines
 
     components = tuple_component_types(type_str)
@@ -204,7 +232,9 @@ def _render_param(
             return [f"{indent}- {label}: _(empty)_"]
         lines = [f"{indent}- {label}:"]
         for component, item in zip(components, value):
-            lines.extend(_render_param(f"`{component}`", component, item, chain_id, labels, indent + "  ", depth))
+            lines.extend(
+                _render_param(f"`{component}`", component, item, chain_id, labels, indent + "  ", depth, token)
+            )
         return lines
 
     if type_str == "bytes" and depth < MAX_BYTES_RECURSION_DEPTH:
@@ -214,7 +244,7 @@ def _render_param(
             lines.extend(_format_params(inner, chain_id, labels, None, indent + "  ", depth + 1))
             return lines
 
-    return [f"{indent}- {label}: {_format_param_value(type_str, value, chain_id, labels)}"]
+    return [f"{indent}- {label}: {_format_param_value(type_str, value, chain_id, labels, token)}"]
 
 
 def _format_params(
@@ -224,12 +254,15 @@ def _format_params(
     param_names: list[str] | None,
     indent: str,
     depth: int = 0,
+    token: "RelatedToken | None" = None,
 ) -> list[str]:
     """Render a call's parameters as an indented markdown bullet list."""
     lines: list[str] = []
     for i, (type_str, value) in enumerate(call.params):
         name = param_names[i] if param_names is not None and i < len(param_names) else None
-        lines.extend(_render_param(_param_label(type_str, name), type_str, value, chain_id, labels, indent, depth))
+        lines.extend(
+            _render_param(_param_label(type_str, name), type_str, value, chain_id, labels, indent, depth, token)
+        )
     return lines
 
 
@@ -252,7 +285,9 @@ def format_call_flow(ctx: ReportContext) -> str:
         lines.append(f"{i}. **`{entry.call.signature}`** on {target}")
         if entry.value > 0:
             lines.append(f"   - **ETH value:** `{entry.value / 1e18:.6f}` ETH")
-        param_lines = _format_params(entry.call, ctx.chain_id, ctx.labels, entry.param_names, indent="   ")
+        param_lines = _format_params(
+            entry.call, ctx.chain_id, ctx.labels, entry.param_names, indent="   ", token=entry.amount_token
+        )
         lines.extend(param_lines or ["   - _no inputs_"])
         lines.append("")
 

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from utils.calldata.decoder import DecodedCall
 from utils.erc20_metadata import ERC20Metadata
+from utils.formatting import format_decimal_amount, normalize_token_amount
 from utils.llm.ai_explainer import (
     SYSTEM_INSTRUCTIONS,
     Explanation,
@@ -12,12 +13,13 @@ from utils.llm.ai_explainer import (
     _collect_safety_checks,
     _collect_token_flows,
     _explanation_from_json,
-    _format_decimal,
     _parse_explanation,
+    _sole_token_by_target,
     collect_unique_addresses,
     explain_transaction,
     format_explanation_line,
 )
+from utils.related_tokens import RelatedToken
 from utils.source_context import SourceContext
 from utils.tenderly.simulation import SimulationResult
 
@@ -305,6 +307,31 @@ class TestAddressLinksSection(unittest.TestCase):
 
     def test_hyperlink_rule_in_system_prompt(self) -> None:
         self.assertIn("markdown link to the block explorer", SYSTEM_INSTRUCTIONS)
+
+
+class TestRelatedTokensSection(unittest.TestCase):
+    """The prompt tells the LLM which token a target's amounts are denominated in."""
+
+    def test_section_included(self) -> None:
+        calls = [DecodedCall(function_name="setEpochEmissions", signature="setEpochEmissions(uint256,uint256)")]
+        block = "0xT (RewardsDistributor):\n  jane() -> 0xJ (JANE, 18 decimals)"
+        result = _build_prompt(target="0xT", value=0, decoded_calls=calls, simulation=None, related_tokens=block)
+        self.assertIn("--- Related Tokens", result)
+        self.assertIn("jane() -> 0xJ (JANE, 18 decimals)", result)
+
+    def test_section_omitted_when_nothing_resolved(self) -> None:
+        calls = [DecodedCall(function_name="pause", signature="pause()")]
+        result = _build_prompt(target="0xT", value=0, decoded_calls=calls, simulation=None)
+        self.assertNotIn("--- Related Tokens", result)
+
+    def test_single_token_rule_in_system_prompt(self) -> None:
+        self.assertIn("EXACTLY ONE token", SYSTEM_INSTRUCTIONS)
+
+    def test_sole_token_map_skips_ambiguous_targets(self) -> None:
+        one = RelatedToken(getter="jane", address="0xJ", symbol="JANE", decimals=18)
+        two = RelatedToken(getter="usdc", address="0xU", symbol="USDC", decimals=6)
+        mapping = _sole_token_by_target([("0xAaA", [one]), ("0xBbB", [one, two]), ("0xCcC", [])])
+        self.assertEqual(mapping, {"0xaaa": one})
 
 
 class TestCollectUniqueAddresses(unittest.TestCase):
@@ -1017,9 +1044,24 @@ class TestTokenFlows(unittest.TestCase):
         from decimal import Decimal
 
         # 50_780000 raw / 1e6 == exactly 50.78, not 50.78000001 or 50.8k.
-        self.assertEqual(_format_decimal(Decimal(50_780000) / Decimal(10**6)), "50.78")
-        self.assertEqual(_format_decimal(Decimal(1_000_000_000000) / Decimal(10**6)), "1,000,000")
-        self.assertEqual(_format_decimal(Decimal(0)), "0")
+        self.assertEqual(format_decimal_amount(Decimal(50_780000) / Decimal(10**6)), "50.78")
+        self.assertEqual(format_decimal_amount(Decimal(1_000_000_000000) / Decimal(10**6)), "1,000,000")
+        self.assertEqual(format_decimal_amount(Decimal(0)), "0")
+
+    def test_normalize_is_immune_to_global_decimal_precision(self) -> None:
+        """utils/defillama.py sets getcontext().prec = 18 process-wide on import.
+
+        Division would silently truncate a 25-digit raw amount under that
+        context; exponent construction must not.
+        """
+        from decimal import getcontext, localcontext
+
+        with localcontext() as ctx:
+            ctx.prec = 18
+            amount = normalize_token_amount(5369214230155537376952673, 18)
+        self.assertEqual(format_decimal_amount(amount), "5,369,214.230155537376952673")
+        self.assertEqual(format_decimal_amount(normalize_token_amount(-50_780000, 6)), "-50.78")
+        self.assertGreater(getcontext().prec, 0)  # context left untouched
 
     @patch("utils.llm.ai_explainer.fetch_erc20_metadata")
     def test_transfer_amounts_normalized_with_total(self, mock_meta: MagicMock) -> None:

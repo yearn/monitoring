@@ -154,6 +154,24 @@ The system prompt instructs the LLM to treat each item as verified and reflect i
 
 This matters most on Safe multisig alerts, which run with `skip_simulation=True` (DELEGATECALL batches our plain-CALL simulator can't model) and so have no Tenderly asset-change rows with pre-normalized amounts.
 
+Normalization goes through `normalize_token_amount()` (`utils/formatting.py`), which builds the `Decimal` by shifting the exponent instead of dividing. Division is evaluated at `decimal.getcontext().prec`, and several modules set that **globally** at import time (`utils/defillama.py` uses 18) — enough to silently truncate a 25-digit 18-decimal amount depending on which modules the process happened to import.
+
+### 5d. Related Tokens (`utils/related_tokens.py`)
+
+Token Flows only covers calls that *move* a token. A governance call like `setEpochEmissions(uint256 epoch, uint256 emissions)` carries an amount with no address argument at all, so the LLM had no decimals and — correctly, per the anti-guessing rule — hedged: *"raw units, equal to X at 1e18 normalization; token decimals are unconfirmed."*
+
+`resolve_related_tokens()` closes that gap generically. It reads the target's verified ABI (already disk-cached by `source_context`, so no extra HTTP via `fetch_abi_entries()`), picks out every zero-arg `view` getter returning an `address`, batch-calls them, and keeps the results that `fetch_erc20_metadata` confirms are ERC20:
+
+```
+--- Related Tokens (resolved on-chain from the target) ---
+0xaC6985…64e8 (RewardsDistributor):
+  jane() -> 0x33333333…3404 (JANE, 18 decimals)
+```
+
+Filtering on "is it actually an ERC20" is what makes this need no configuration — `owner()` drops out on its own, no name blocklist. The target being itself a token is reported as `getter="self"`. Capped at `MAX_GETTER_CALLS` (8) per target, memoized per `(chain_id, target)`, and best-effort: any failure yields `[]` and the alert proceeds unchanged.
+
+The system prompt treats **exactly one** resolved token as verified decimals — state the amount and symbol, no hedge. Zero or several tokens keeps the hedge, since normalizing would be a guess. The Call Flow also annotates raw `uint*` values with `(≈ 5,369,214.23 JANE)`, but only above `10 ** (decimals - 3)` so an epoch number like `43` isn't rendered as `0.000000000000000043 JANE`.
+
 ### 6. LLM Prompt & Completion (`utils/llm/ai_explainer.py`)
 
 The prompt is split into a **system** prompt (static instructions) and a **user** prompt (per-tx context). `complete(prompt, system_prompt=...)` passes the system block via the provider's native system role, which improves instruction-following and lets the Anthropic provider mark it `cache_control: ephemeral` — repeated alerts within the cache window pay for the (large) instruction prompt only once. The static block (`SYSTEM_INSTRUCTIONS`) enforces brevity:
@@ -161,7 +179,7 @@ The prompt is split into a **system** prompt (static instructions) and a **user*
 - Starts with a verb, no "This transaction…" preamble
 - Trailing risk tag in caps (LOW / MEDIUM / HIGH / CRITICAL)
 - Summary is plain text (it goes to Telegram); the detail is markdown and must render **every address as a block-explorer hyperlink**, copied verbatim from the prompt's `--- Address Links ---` section so the model never assembles an explorer URL or picks the wrong chain's explorer
-- Refuses to assume parameter units from function name alone
+- Refuses to assume parameter units from function name alone; uses the Related Tokens section's decimals when exactly one token resolves, and hedges only when zero or several do
 - Trusts source-context natspec over prior assumptions
 - Quotes concrete before→after deltas when state reads are available
 - Flags any divergence between a proposal's **stated intent** and the decoded actions
@@ -379,6 +397,7 @@ utils/llm/
 ├── report.py                # Gist report: metadata header + deterministic call flow + analysis
 └── README.md                # This file
 
+utils/related_tokens.py      # Token discovery from a contract's own zero-arg address getters
 utils/source_context.py      # Etherscan v2 source fetch + natspec extractor + proxy follow
 utils/on_chain_state.py      # Before-state reader (auto-generated getters, mappings, diamond storage)
 utils/proxy.py               # EIP-1967 impl slot read + proxy-upgrade detection (3 selectors)

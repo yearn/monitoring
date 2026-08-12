@@ -1,5 +1,34 @@
 """Common formatting helpers for monitoring scripts."""
 
+from decimal import Decimal
+
+
+def format_decimal_amount(value: Decimal) -> str:
+    """Render a normalized token amount: trim trailing zeros, group the integer part.
+
+    Uses ``Decimal`` end-to-end so a 6-decimal amount like ``50_780000`` formats as
+    ``50.78`` exactly, with no float rounding error.
+    """
+    s = format(value, "f")
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    int_part, _, frac = s.partition(".")
+    int_fmt = f"{int(int_part):,}"
+    return f"{int_fmt}.{frac}" if frac else int_fmt
+
+
+def normalize_token_amount(raw: int, decimals: int) -> Decimal:
+    """Exact raw → human token amount, independent of the global Decimal context.
+
+    Built by shifting the exponent rather than dividing: division is evaluated
+    at ``decimal.getcontext().prec``, and several modules set that globally at
+    import time (``utils/defillama.py`` uses 18), which silently truncated
+    large 18-decimal amounts depending on which modules happened to be
+    imported. Exponent construction is exact and context-free.
+    """
+    digits = Decimal(abs(raw)).as_tuple().digits
+    return Decimal((1 if raw < 0 else 0, digits, -decimals))
+
 
 def format_with_suffix(number: float) -> str:
     """Format number with K, M, B suffixes for readability."""
