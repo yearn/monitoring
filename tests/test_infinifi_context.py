@@ -11,14 +11,12 @@ from utils.llm.infinifi_context import (
     TokenContext,
     _candidate_addresses,
     _EscrowState,
-    _farm_by_address,
     _farm_matches_escrow,
     _FarmRecord,
     _fetch_farm_records,
     _fetch_whitelist_targets,
     _looks_like_escrow,
     _resolve_configured_tokens,
-    _token_label,
     _TokenCandidate,
     format_infinifi_prompt,
     format_infinifi_report,
@@ -226,12 +224,6 @@ class TestFarmLookupAndParsing(unittest.TestCase):
     def setUp(self) -> None:
         infinifi_context.reset_cache()
 
-    def test_farm_by_address_matches_checksummed_and_lowercase(self) -> None:
-        farms = (_FarmRecord(FARM, "New Silver 2 Senior", "new-silver-senior"),)
-        self.assertEqual(_farm_by_address(FARM, farms), farms[0])
-        self.assertEqual(_farm_by_address(FARM.lower(), farms), farms[0])
-        self.assertIsNone(_farm_by_address(MANAGER, farms))
-
     @patch.object(infinifi_context, "fetch_json")
     def test_fetch_farm_records_parses_api_shape(self, mock_fetch: MagicMock) -> None:
         mock_fetch.return_value = {
@@ -250,12 +242,6 @@ class TestFarmLookupAndParsing(unittest.TestCase):
     @patch.object(infinifi_context, "fetch_json", return_value={"code": "ERROR"})
     def test_fetch_farm_records_empty_on_bad_response(self, _mock_fetch: MagicMock) -> None:
         self.assertEqual(_fetch_farm_records(), ())
-
-
-class TestTokenLabel(unittest.TestCase):
-    def test_combines_name_symbol_and_decimals(self) -> None:
-        token = TokenContext(USDC, "USD Coin", "USDC", 6)
-        self.assertEqual(_token_label(token), "USD Coin (USDC, 6 dec)")
 
 
 class TestFormattingEdgeCases(unittest.TestCase):

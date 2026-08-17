@@ -310,7 +310,7 @@ def _resolve_configured_tokens(chain_id: int, escrow: _EscrowState) -> tuple[Tok
         if token is not None:
             tokens.append(token)
         else:
-            logger.debug("Infinifi whitelist target %s is not an ERC20; skipping", address)
+            logger.debug("ERC20 metadata unavailable or incompatible for Infinifi whitelist target %s", address)
     return tuple(tokens)
 
 
@@ -333,13 +333,16 @@ def resolve_infinifi_context(
             accounting_asset = _read_token(chain_id, _TokenCandidate(escrow.asset_address, ""))
             if accounting_asset is None:
                 logger.info(
-                    "Infinifi escrow %s: accounting asset %s is not an ERC20", escrow.address, escrow.asset_address
+                    "Infinifi escrow %s: ERC20 metadata unavailable or incompatible for accounting asset %s",
+                    escrow.address,
+                    escrow.asset_address,
                 )
                 continue
             if farms is None:
                 farms = _fetch_farm_records()
                 if not farms:
                     logger.info("Infinifi farm records unavailable; skipping escrow %s", escrow.address)
+                    continue
             farm = _farm_by_address(escrow.farm_address, farms)
             if farm is None:
                 logger.info(
