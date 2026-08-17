@@ -18,6 +18,11 @@ from utils.formatting import format_decimal_amount, normalize_token_amount
 from utils.impl_diff import diff_implementations, format_impl_diff
 from utils.llm import get_llm_provider
 from utils.llm.base import LLMError, LLMProvider
+from utils.llm.infinifi_context import (
+    format_infinifi_prompt,
+    format_infinifi_report,
+    resolve_infinifi_context,
+)
 from utils.llm.report import (
     CallEntry,
     ReportContext,
@@ -103,6 +108,10 @@ Critical rules for parameter interpretation:
   target, or several candidate tokens with different decimals — say so explicitly rather than
   guessing. Quote the raw value plus its 1e18-normalized form, and name the candidates when
   there are several.
+- When a Protocol Context section is provided, treat its farm identity, accounting asset,
+  normalized totalAssets, and configured token targets as verified deterministic facts. Distinguish
+  the accounting asset from non-accounting ERC20 targets configured in an escrow whitelist;
+  whitelisting proves permission to interact, but not how a token is valued or used downstream.
 - Never assign HIGH/CRITICAL risk on the basis of a guessed unit interpretation.
 - When a Risk Anchors section is provided, treat it as a typical floor/ceiling, not a
   verdict. Adjust up or down based on the specific parameters (e.g. grantRole of a
@@ -866,6 +875,7 @@ def _build_prompt(
     label: str = "",
     token_flows: str = "",
     related_tokens: str = "",
+    protocol_context: str = "",
     proxy_upgrade_info: str = "",
     source_contexts: list[SourceContext] | None = None,
     context_note: str = "",
@@ -928,6 +938,13 @@ def _build_prompt(
             "\n--- Related Tokens (resolved on-chain from the target) ---\n"
             "Each line is a token getter read live from the target contract, so its decimals "
             "are a VERIFIED fact, not an assumption.\n" + related_tokens
+        )
+
+    if protocol_context:
+        parts.append(
+            "\n--- Protocol Context (computed from protocol API and live on-chain reads) ---\n"
+            "These farm, asset, whitelist, and decimal facts are VERIFIED. Distinguish the accounting "
+            "asset from non-accounting ERC20 targets configured in the escrow whitelist.\n" + protocol_context
         )
 
     if source_contexts:
@@ -1156,7 +1173,8 @@ def _generate_explanation(
     pass before expansion (~1 extra call).
 
     When ``report_ctx`` is given, the detail is wrapped into the full gist page
-    (metadata header, summary, deterministic call flow, analysis).
+    (metadata header, summary, deterministic call flow, optional protocol
+    context, analysis).
     """
     summary_draft = _generate_summary(provider, prompt)
     if not summary_draft.summary:
@@ -1246,6 +1264,10 @@ def explain_transaction(
     safety_notes = _collect_safety_checks([(target, decoded, value)], chain_id)
     token_flows = _collect_token_flows([(target, decoded)], chain_id, address_labels)
     related_tokens = _collect_related_tokens([(target, decoded)], chain_id)
+    infinifi_contexts = resolve_infinifi_context(protocol, chain_id, [(target, decoded)])
+    for context in infinifi_contexts:
+        for address, context_label in context.labels.items():
+            address_labels.setdefault(address, context_label)
 
     simulation: SimulationResult | None = None
     if not skip_simulation:
@@ -1268,7 +1290,9 @@ def explain_transaction(
         else:
             logger.info("Simulation unavailable, proceeding with decoded calldata only")
 
-    address_links = format_address_links_block(collect_unique_addresses([(target, decoded)]), chain_id, address_labels)
+    context_addresses = [address for context in infinifi_contexts for address in context.addresses]
+    addresses = list(dict.fromkeys([*collect_unique_addresses([(target, decoded)]), *context_addresses]))
+    address_links = format_address_links_block(addresses, chain_id, address_labels)
 
     prompt = _build_prompt(
         target=target,
@@ -1288,6 +1312,7 @@ def explain_transaction(
         description=description,
         address_links=address_links,
         related_tokens=format_related_tokens_block(related_tokens, address_labels),
+        protocol_context=format_infinifi_prompt(infinifi_contexts),
     )
     logger.info("Full AI context for %s:\n%s", target, prompt)
 
@@ -1307,6 +1332,7 @@ def explain_transaction(
         label=label,
         from_address=from_address,
         label_address=label_address or from_address,
+        protocol_context=format_infinifi_report(infinifi_contexts, chain_id, address_labels),
     )
 
     try:
@@ -1413,10 +1439,16 @@ def explain_batch_transaction(
     safety_notes = _collect_safety_checks(targets_calls_values, chain_id)
     token_flows = _collect_token_flows(decoded_with_target, chain_id, address_labels)
     related_tokens = _collect_related_tokens(decoded_with_target, chain_id)
+    infinifi_contexts = resolve_infinifi_context(protocol, chain_id, decoded_with_target)
+    for context in infinifi_contexts:
+        for address, context_label in context.labels.items():
+            address_labels.setdefault(address, context_label)
 
     targets = ", ".join(c.get("target", "?") for c in calls)
     total_value = sum(int(c.get("value", "0")) for c in calls)
-    address_links = format_address_links_block(collect_unique_addresses(decoded_with_target), chain_id, address_labels)
+    context_addresses = [address for context in infinifi_contexts for address in context.addresses]
+    addresses = list(dict.fromkeys([*collect_unique_addresses(decoded_with_target), *context_addresses]))
+    address_links = format_address_links_block(addresses, chain_id, address_labels)
 
     prompt = _build_prompt(
         target=targets,
@@ -1436,6 +1468,7 @@ def explain_batch_transaction(
         description=description,
         address_links=address_links,
         related_tokens=format_related_tokens_block(related_tokens, address_labels),
+        protocol_context=format_infinifi_prompt(infinifi_contexts),
     )
     logger.info("Full AI context for batch (%s calls):\n%s", len(calls), prompt)
 
@@ -1457,6 +1490,7 @@ def explain_batch_transaction(
         label=label,
         from_address=from_address,
         label_address=label_address or from_address,
+        protocol_context=format_infinifi_report(infinifi_contexts, chain_id, address_labels),
     )
 
     try:
@@ -1475,9 +1509,9 @@ def format_explanation_line(explanation: Explanation) -> str:
     """Format the AI explanation for inclusion in a Telegram alert message.
 
     Uses the short summary for the Telegram message. The full report — metadata,
-    summary, call flow, and analysis — is uploaded to Wavey Gist and linked. The
-    bare detail is published instead when no report was built (explanations
-    generated without report context).
+    summary, call flow, optional protocol context, and analysis — is uploaded
+    to Wavey Gist and linked. The bare detail is published instead when no report
+    was built (explanations generated without report context).
     """
     line = f"\n🤖 *AI Summary:*\n{escape_markdown(explanation.summary)}"
     if explanation.detail:

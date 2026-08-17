@@ -172,6 +172,19 @@ Filtering on "is it actually an ERC20" is what makes this need no configuration 
 
 The system prompt treats **exactly one** resolved token as verified decimals — state the amount and symbol, no hedge. Zero or several tokens keeps the hedge, since normalizing would be a guess. The Call Flow also annotates raw `uint*` values with `(≈ 5,369,214.23 JANE)`, but only above `10 ** (decimals - 3)` so an epoch number like `43` isn't rendered as `0.000000000000000043 JANE`.
 
+### 5e. Infinifi Escrow Context (`utils/llm/infinifi_context.py`)
+
+Infinifi RWA rate-manager calls target `RWAEscrowRateManager` and pass the affected escrow as an address argument. The generic Related Tokens resolver only inspects the direct call target, so it cannot identify the farm or tokens behind that escrow.
+
+For Infinifi mainnet alerts, the adapter:
+
+1. Identifies candidate `RWAEscrow` contracts by their verified ABI (`assetToken()`, `owner()`, and `totalAssets()`).
+2. Matches the owner address to the public Infinifi farm API and verifies that the farm's on-chain `escrow()` getter returns the candidate.
+3. Reads the accounting asset and current total assets on-chain.
+4. Reconstructs the escrow's current whitelist from `WhitelistUpdated` events and identifies non-accounting targets that verify as ERC20 tokens. Token names, symbols, and decimals are read on-chain.
+
+The result is added to the LLM prompt as verified protocol context and rendered independently in the Wavey Gist under `## Protocol Context`. The report distinguishes the escrow's accounting asset from non-accounting ERC20 targets it is allowed to interact with; whitelist membership does not establish how a token is valued downstream. Failures are best-effort and never block the governance alert.
+
 ### 6. LLM Prompt & Completion (`utils/llm/ai_explainer.py`)
 
 The prompt is split into a **system** prompt (static instructions) and a **user** prompt (per-tx context). `complete(prompt, system_prompt=...)` passes the system block via the provider's native system role, which improves instruction-following and lets the Anthropic provider mark it `cache_control: ephemeral` — repeated alerts within the cache window pay for the (large) instruction prompt only once. The static block (`SYSTEM_INSTRUCTIONS`) enforces brevity:

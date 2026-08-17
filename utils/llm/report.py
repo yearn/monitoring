@@ -64,6 +64,10 @@ class ReportContext:
     # Safe multisend batch labels the utility contract instead. Linked from the
     # report's Contract header line.
     label_address: str = ""
+    # Deterministic protocol-specific facts that belong in the full gist but
+    # are not part of the raw calldata flow (for example an Infinifi farm and
+    # the non-accounting ERC20 targets configured in its escrow).
+    protocol_context: str = ""
 
 
 def checksum_or_none(addr: object) -> str | None:
@@ -347,7 +351,8 @@ def build_report(summary: str, detail: str, ctx: ReportContext, risk_tag: str = 
     """Assemble the full markdown gist body.
 
     Sections: metadata header, the Telegram-visible summary (so the gist is
-    self-contained), the deterministic call flow, and the LLM's analysis.
+    self-contained), the deterministic call flow, optional protocol context,
+    and the LLM's analysis.
 
     Args:
         summary: The authoritative TLDR, risk tag already stripped by the caller.
@@ -370,6 +375,8 @@ def build_report(summary: str, detail: str, ctx: ReportContext, risk_tag: str = 
     call_flow = format_call_flow(ctx)
     if call_flow:
         sections.append(f"## Call Flow\n\n{call_flow}")
+    if ctx.protocol_context:
+        sections.append(f"## Protocol Context\n\n{ctx.protocol_context}")
     if detail:
         sections.append(f"## Analysis\n\n{_REDUNDANT_ANALYSIS_HEADING_RE.sub('', detail)}")
     return "\n\n".join(sections)
