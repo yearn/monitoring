@@ -9,11 +9,16 @@ from utils.llm import infinifi_context
 from utils.llm.infinifi_context import (
     InfinifiEscrowContext,
     TokenContext,
+    _candidate_addresses,
     _EscrowState,
+    _farm_by_address,
     _farm_matches_escrow,
     _FarmRecord,
+    _fetch_farm_records,
     _fetch_whitelist_targets,
+    _looks_like_escrow,
     _resolve_configured_tokens,
+    _token_label,
     _TokenCandidate,
     format_infinifi_prompt,
     format_infinifi_report,
@@ -188,6 +193,97 @@ class TestReadToken(unittest.TestCase):
         token = infinifi_context._read_token(1, _TokenCandidate(DROP, "fallback"))
 
         self.assertEqual(token, TokenContext(DROP, "New Silver Series 2 DROP", "NS2DRP", 18))
+
+
+class TestCandidateAddresses(unittest.TestCase):
+    def test_collects_target_and_address_params(self) -> None:
+        call = DecodedCall(
+            function_name="setRate",
+            signature="setRate(address,uint256)",
+            params=[("address", ESCROW), ("uint256", 1)],
+        )
+        result = _candidate_addresses([(MANAGER, call)])
+        self.assertEqual(result, [MANAGER, ESCROW])
+
+    def test_dedupes_across_calls(self) -> None:
+        call = DecodedCall(function_name="setRate", signature="setRate(address,uint256)", params=[("address", ESCROW)])
+        self.assertEqual(_candidate_addresses([(ESCROW, call), (MANAGER, call)]), [ESCROW, MANAGER])
+
+
+class TestLooksLikeEscrow(unittest.TestCase):
+    def test_requires_all_three_getters(self) -> None:
+        abi = [
+            {"type": "function", "name": "assetToken", "outputs": []},
+            {"type": "function", "name": "owner", "outputs": []},
+            {"type": "function", "name": "totalAssets", "outputs": []},
+        ]
+        self.assertTrue(_looks_like_escrow(abi))
+        self.assertFalse(_looks_like_escrow(abi[:-1]))
+        self.assertFalse(_looks_like_escrow([]))
+
+
+class TestFarmLookupAndParsing(unittest.TestCase):
+    def setUp(self) -> None:
+        infinifi_context.reset_cache()
+
+    def test_farm_by_address_matches_checksummed_and_lowercase(self) -> None:
+        farms = (_FarmRecord(FARM, "New Silver 2 Senior", "new-silver-senior"),)
+        self.assertEqual(_farm_by_address(FARM, farms), farms[0])
+        self.assertEqual(_farm_by_address(FARM.lower(), farms), farms[0])
+        self.assertIsNone(_farm_by_address(MANAGER, farms))
+
+    @patch.object(infinifi_context, "fetch_json")
+    def test_fetch_farm_records_parses_api_shape(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = {
+            "code": "OK",
+            "data": {
+                "farms": [
+                    {"name": "new-silver-senior", "label": "New Silver 2 Senior", "address": FARM},
+                    {"name": "broken", "label": "", "address": "not-an-address"},
+                    {"name": "no-address", "label": "", "address": None},
+                ]
+            },
+        }
+        records = _fetch_farm_records()
+        self.assertEqual(records, (_FarmRecord(FARM, "New Silver 2 Senior", "new-silver-senior"),))
+
+    @patch.object(infinifi_context, "fetch_json", return_value={"code": "ERROR"})
+    def test_fetch_farm_records_empty_on_bad_response(self, _mock_fetch: MagicMock) -> None:
+        self.assertEqual(_fetch_farm_records(), ())
+
+
+class TestTokenLabel(unittest.TestCase):
+    def test_combines_name_symbol_and_decimals(self) -> None:
+        token = TokenContext(USDC, "USD Coin", "USDC", 6)
+        self.assertEqual(_token_label(token), "USD Coin (USDC, 6 dec)")
+
+
+class TestFormattingEdgeCases(unittest.TestCase):
+    def test_report_omits_configured_tokens_section_when_empty(self) -> None:
+        context = InfinifiEscrowContext(
+            escrow_address=ESCROW,
+            farm_address=FARM,
+            farm_name="New Silver 2 Senior",
+            farm_slug="new-silver-senior",
+            accounting_asset=TokenContext(USDC, "USD Coin", "USDC", 6),
+            total_assets_raw=3_003_294_554_623,
+            configured_tokens=(),
+        )
+        report = format_infinifi_report([context], 1, context.labels)
+        self.assertIn("**Farm:** New Silver 2 Senior", report)
+        self.assertNotIn("Configured non-accounting ERC-20 targets", report)
+
+    @patch.object(infinifi_context, "_fetch_farm_records")
+    @patch.object(infinifi_context, "_read_token", return_value=None)
+    @patch.object(infinifi_context, "_read_escrow_state", return_value=_EscrowState(ESCROW, FARM, USDC, 1))
+    def test_skips_escrow_with_non_erc20_accounting_asset(
+        self,
+        _mock_escrow: MagicMock,
+        _mock_token: MagicMock,
+        mock_farms: MagicMock,
+    ) -> None:
+        self.assertEqual(resolve_infinifi_context("INFINIFI", 1, [(MANAGER, _set_rate_call())]), [])
+        mock_farms.assert_not_called()
 
 
 if __name__ == "__main__":

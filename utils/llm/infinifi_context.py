@@ -215,7 +215,11 @@ def _read_escrow_state(chain_id: int, address: str) -> _EscrowState | None:
 @lru_cache(maxsize=1)
 def _fetch_farm_records() -> tuple[_FarmRecord, ...]:
     """Fetch the current Infinifi farm list used by its public analytics API."""
-    data = fetch_json(INFINIFI_API_URL, timeout=10)
+    data = fetch_json(
+        INFINIFI_API_URL,
+        timeout=10,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; Yearn Monitoring)"},
+    )
     payload = data.get("data") if isinstance(data, dict) and data.get("code") == "OK" else None
     farms = payload.get("farms") if isinstance(payload, dict) else None
     if not isinstance(farms, list):
@@ -305,6 +309,8 @@ def _resolve_configured_tokens(chain_id: int, escrow: _EscrowState) -> tuple[Tok
         token = _read_token(chain_id, _TokenCandidate(address, ""))
         if token is not None:
             tokens.append(token)
+        else:
+            logger.debug("Infinifi whitelist target %s is not an ERC20; skipping", address)
     return tuple(tokens)
 
 
@@ -326,11 +332,22 @@ def resolve_infinifi_context(
                 continue
             accounting_asset = _read_token(chain_id, _TokenCandidate(escrow.asset_address, ""))
             if accounting_asset is None:
+                logger.info(
+                    "Infinifi escrow %s: accounting asset %s is not an ERC20", escrow.address, escrow.asset_address
+                )
                 continue
             if farms is None:
                 farms = _fetch_farm_records()
+                if not farms:
+                    logger.info("Infinifi farm records unavailable; skipping escrow %s", escrow.address)
             farm = _farm_by_address(escrow.farm_address, farms)
-            if farm is None or not _farm_matches_escrow(chain_id, farm.address, escrow.address):
+            if farm is None:
+                logger.info(
+                    "Infinifi escrow %s: owner %s is not a known Infinifi farm", escrow.address, escrow.farm_address
+                )
+                continue
+            if not _farm_matches_escrow(chain_id, farm.address, escrow.address):
+                logger.info("Infinifi escrow %s: farm %s does not reference this escrow", escrow.address, farm.address)
                 continue
             try:
                 configured_tokens = _resolve_configured_tokens(chain_id, escrow)
