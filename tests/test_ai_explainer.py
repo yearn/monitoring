@@ -334,6 +334,27 @@ class TestRelatedTokensSection(unittest.TestCase):
         self.assertEqual(mapping, {"0xaaa": one})
 
 
+class TestProtocolContextSection(unittest.TestCase):
+    """Protocol adapters can add verified facts to the prompt."""
+
+    def test_section_included(self) -> None:
+        calls = [DecodedCall(function_name="setRate", signature="setRate(address,uint256)")]
+        result = _build_prompt(
+            target="0xT",
+            value=0,
+            decoded_calls=calls,
+            simulation=None,
+            protocol_context="Farm: New Silver 2 Senior\nAccounting asset: USDC",
+        )
+        self.assertIn("--- Protocol Context", result)
+        self.assertIn("Farm: New Silver 2 Senior", result)
+        self.assertIn("Accounting asset: USDC", result)
+
+    def test_system_prompt_distinguishes_whitelist_from_accounting_asset(self) -> None:
+        self.assertIn("Distinguish", SYSTEM_INSTRUCTIONS)
+        self.assertIn("non-accounting ERC20 targets", SYSTEM_INSTRUCTIONS)
+
+
 class TestCollectUniqueAddresses(unittest.TestCase):
     """Targets and address args are gathered once, deduped, checksummed."""
 

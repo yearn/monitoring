@@ -65,6 +65,8 @@ Governance monitoring will be monitored via Tenderly alerts on the following add
 - `TIMELOCK_SHORT`: [`0x4B174afbeD7b98BA01F50E36109EEE5e6d327c32`](https://etherscan.io/address/0x4B174afbeD7b98BA01F50E36109EEE5e6d327c32)
 - `TIMELOCK_LONG`: [`0x3D18480CC32B6AB3B833dCabD80E76CfD41c48a9`](https://etherscan.io/address/0x3D18480CC32B6AB3B833dCabD80E76CfD41c48a9)
 
+For RWA escrow governance calls, the linked AI report resolves the owning farm, accounting asset, normalized `totalAssets`, and configured non-accounting ERC20 targets into a deterministic `Protocol Context` section.
+
 **Deployer Address**:
 
 - `0xdecaDAc8778D088A30eE811b8Cc4eE72cED9Bf22`
