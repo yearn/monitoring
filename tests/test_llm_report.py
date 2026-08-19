@@ -215,8 +215,8 @@ class TestAmountAnnotation(unittest.TestCase):
         return format_call_flow(_add_farms_ctx(entries=[entry]))
 
     def test_large_uint_annotated(self) -> None:
-        flow = self._flow([("uint256", 43), ("uint256", 5369214230155537376952673)], self.JANE)
-        self.assertIn("`5,369,214,230,155,537,376,952,673` (≈ 5,369,214.230155537376952673 JANE)", flow)
+        flow = self._flow([("uint256", 43), ("uint256", 5499673832374850402183062)], self.JANE)
+        self.assertIn("`5,499,673,832,374,850,402,183,062` (≈ 5,499,673 JANE)", flow)
 
     def test_small_uint_not_annotated(self) -> None:
         """An epoch number must not be rendered as 0.000000000000000043 JANE."""
@@ -227,10 +227,11 @@ class TestAmountAnnotation(unittest.TestCase):
         flow = self._flow([("uint256", 43), ("uint256", 5369214230155537376952673)], None)
         self.assertNotIn("≈", flow)
 
-    def test_threshold_is_one_thousandth_of_a_token(self) -> None:
+    def test_sub_token_amount_keeps_one_truncated_decimal(self) -> None:
         usdc = RelatedToken(getter="self", address=REGISTRY, symbol="USDC", decimals=6)
-        self.assertIn("(≈ 0.001 USDC)", self._flow([("uint256", 1000)], usdc))
-        self.assertNotIn("≈", self._flow([("uint256", 999)], usdc))
+        self.assertIn("(≈ 0.5 USDC)", self._flow([("uint256", 590_000)], usdc))
+        self.assertNotIn("≈", self._flow([("uint256", 99_999)], usdc))
+        self.assertIn("(≈ 1 USDC)", self._flow([("uint256", 1_000_000)], usdc))
 
     def test_non_uint_types_untouched(self) -> None:
         call = DecodedCall(function_name="setRoot", signature="setRoot(bytes32)", params=[("bytes32", b"\\x01" * 32)])
