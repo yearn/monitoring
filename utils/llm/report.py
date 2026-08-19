@@ -24,7 +24,6 @@ from utils.calldata.decoder import (
     try_decode_inner_calldata,
 )
 from utils.chains import EXPLORER_URLS, Chain
-from utils.formatting import format_decimal_amount, normalize_token_amount
 from utils.related_tokens import RelatedToken
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
@@ -124,16 +123,19 @@ def format_address_links_block(addresses: list[str], chain_id: int, labels: dict
 def _amount_hint(type_str: str, value: object, token: RelatedToken | None) -> str:
     """Human-readable suffix for a raw token amount, or "" when it doesn't apply.
 
-    Only annotates unsigned integers large enough to plausibly be an amount
-    (≥0.001 of the token). Without that floor every small integer picks up a
-    nonsense hint — an epoch number like ``43`` would render as
-    ``0.000000000000000043 JANE``.
+    Only annotates values of at least one whole token. Without that floor every
+    small integer picks up a nonsense hint — an epoch number like ``43`` would
+    render as ``0 JANE``. Fractional tokens are truncated so the call flow stays
+    concise.
     """
     if token is None or not type_str.startswith("uint"):
         return ""
-    if not isinstance(value, int) or isinstance(value, bool) or value < 10 ** max(token.decimals - 3, 0):
+    if not isinstance(value, int) or isinstance(value, bool):
         return ""
-    return f" (≈ {format_decimal_amount(normalize_token_amount(value, token.decimals))} {token.symbol})"
+    whole_tokens = value // (10**token.decimals)
+    if whole_tokens < 1:
+        return ""
+    return f" (≈ {whole_tokens:,} {token.symbol})"
 
 
 def _format_param_value(
