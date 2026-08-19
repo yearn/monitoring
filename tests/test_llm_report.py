@@ -227,9 +227,10 @@ class TestAmountAnnotation(unittest.TestCase):
         flow = self._flow([("uint256", 43), ("uint256", 5369214230155537376952673)], None)
         self.assertNotIn("≈", flow)
 
-    def test_sub_token_amount_not_annotated(self) -> None:
+    def test_sub_token_amount_keeps_one_truncated_decimal(self) -> None:
         usdc = RelatedToken(getter="self", address=REGISTRY, symbol="USDC", decimals=6)
-        self.assertNotIn("≈", self._flow([("uint256", 999_999)], usdc))
+        self.assertIn("(≈ 0.5 USDC)", self._flow([("uint256", 590_000)], usdc))
+        self.assertNotIn("≈", self._flow([("uint256", 99_999)], usdc))
         self.assertIn("(≈ 1 USDC)", self._flow([("uint256", 1_000_000)], usdc))
 
     def test_non_uint_types_untouched(self) -> None:
