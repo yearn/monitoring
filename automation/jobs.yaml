@@ -17,6 +17,22 @@
 
 profiles:
 
+  half_hourly:
+    cron: "*/30 * * * *"
+    description: "Thirty-minute risk monitoring for active Yearn strategies."
+    tasks:
+      - name: "yearn-lender-borrower-ltv"
+        script: protocols/yearn/lender_borrower.py
+        args: { checks: ltv }
+
+  six_hourly:
+    cron: "17 */6 * * *"
+    description: "Six-hour rate and debt-coverage monitoring for active Yearn strategies."
+    tasks:
+      - name: "yearn-lender-borrower-rates-and-coverage"
+        script: protocols/yearn/lender_borrower.py
+        args: { checks: rates-and-coverage }
+
   hourly:
     cron: "5 * * * *"
     description: "Hourly monitoring (was .github/workflows/hourly.yml)."
