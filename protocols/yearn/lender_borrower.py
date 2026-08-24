@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from dataclasses import dataclass
 from decimal import Decimal
+from math import isqrt
 from typing import Any
 
 from web3 import Web3
@@ -14,6 +16,7 @@ from web3 import Web3
 from utils import store
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
+from utils.chainlink import CHAINLINK_ABI, RoundData
 from utils.chains import Chain
 from utils.logger import get_logger
 from utils.web3_wrapper import ChainManager, Web3Client
@@ -26,12 +29,18 @@ USD_SCALE = 10**8
 MAX_BPS = 10_000
 ORACLE_PRICE_SCALE = 10**36
 SECONDS_PER_YEAR = 31_556_952
+MORPHO_SECONDS_PER_YEAR = 365 * 24 * 60 * 60
+MORPHO_TARGET_UTILIZATION_WAD = 9 * WAD // 10
+MORPHO_CURVE_STEEPNESS_WAD = 4 * WAD
+MORPHO_MIN_RATE_AT_TARGET = (WAD // 1_000) // MORPHO_SECONDS_PER_YEAR
+MORPHO_MAX_RATE_AT_TARGET = (2 * WAD) // MORPHO_SECONDS_PER_YEAR
 VIRTUAL_SHARES = 10**6
 VIRTUAL_ASSETS = 1
 
 YEARN_APR_ORACLE = "0x1981AD9F44F2EA9aDd2dC4AD7D075c102C70aF92"
 RATE_STATE_NAMESPACE = "yearn_lender_borrower_rates"
 ALERT_STATE_NAMESPACE = "yearn_lender_borrower_alerts"
+ERROR_STATE_NAMESPACE = "yearn_lender_borrower_errors"
 ALERT_REMINDER_SECONDS = 24 * 60 * 60
 CHECK_LTV = "ltv"
 CHECK_RATES_AND_COVERAGE = "rates-and-coverage"
@@ -43,7 +52,6 @@ IRM_ABI = load_abi("protocols/yearn/abi/MorphoIrm.json")
 MORPHO_ORACLE_ABI = load_abi("protocols/yearn/abi/MorphoOracle.json")
 APR_ORACLE_ABI = load_abi("protocols/yearn/abi/AprOracle.json")
 ERC20_ABI = load_abi("common-abi/ERC20.json")
-CHAINLINK_ABI = load_abi("common-abi/ChainlinkAggregator.json")
 
 
 @dataclass(frozen=True)
@@ -56,9 +64,10 @@ class StrategyConfig:
     joc_url: str
     negative_spread_threshold_bps: int = 100
     rate_window_hours: int = 24
-    minimum_rate_samples: int = 4
+    minimum_rate_samples: int = 3
     deficit_threshold_bps: int = 10
     deficit_min_usd: int = 100
+    borrow_price_max_age_seconds: int = 26 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -150,6 +159,73 @@ def calculate_target_ltv(liquidation_ltv_wad: int, target_multiplier_bps: int) -
     return liquidation_ltv_wad * target_multiplier_bps // MAX_BPS
 
 
+def _divide_to_zero(numerator: int, denominator: int) -> int:
+    """Divide integers with Solidity's signed truncation toward zero."""
+    if denominator == 0:
+        raise ZeroDivisionError("division by zero")
+    sign = -1 if (numerator < 0) != (denominator < 0) else 1
+    return sign * (abs(numerator) // abs(denominator))
+
+
+def morpho_curve_coefficient_wad(market: tuple[int, ...]) -> int:
+    """Return AdaptiveCurveIRM's utilization coefficient in WAD."""
+    total_supply_assets = int(market[0])
+    total_borrow_assets = int(market[2])
+    utilization = total_borrow_assets * WAD // total_supply_assets if total_supply_assets else 0
+    utilization = min(utilization, WAD)
+
+    if utilization > MORPHO_TARGET_UTILIZATION_WAD:
+        err = (utilization - MORPHO_TARGET_UTILIZATION_WAD) * WAD // (WAD - MORPHO_TARGET_UTILIZATION_WAD)
+        coefficient = MORPHO_CURVE_STEEPNESS_WAD - WAD
+    else:
+        err = _divide_to_zero(
+            (utilization - MORPHO_TARGET_UTILIZATION_WAD) * WAD,
+            MORPHO_TARGET_UTILIZATION_WAD,
+        )
+        coefficient = WAD - WAD * WAD // MORPHO_CURVE_STEEPNESS_WAD
+    return WAD + _divide_to_zero(coefficient * err, WAD)
+
+
+def calculate_instantaneous_borrow_rate(
+    average_rate_per_second: int,
+    start_rate_per_second: int,
+    market: tuple[int, ...],
+) -> int:
+    """Invert AdaptiveCurveIRM's window average to obtain its current end rate.
+
+    The IRM averages start, midpoint, and end target rates using the trapezoidal
+    rule. Since the curve is linear in the target rate, ``avg / start`` equals
+    ``((1 + adaptation_factor) / 2) ** 2`` until a target-rate bound is hit.
+    The final clamp mirrors the IRM's min/max target-rate bounds.
+    """
+    if average_rate_per_second <= 0 or start_rate_per_second <= 0:
+        raise ValueError("Morpho IRM returned a non-positive borrow rate")
+
+    root_wad = isqrt(average_rate_per_second * WAD**2 // start_rate_per_second)
+    adaptation_factor_wad = 2 * root_wad - WAD
+    if adaptation_factor_wad <= 0:
+        raise ValueError("Morpho IRM average cannot be inverted safely")
+
+    inferred_end_rate = start_rate_per_second * adaptation_factor_wad**2 // WAD**2
+    curve_coefficient = morpho_curve_coefficient_wad(market)
+    minimum_rate = MORPHO_MIN_RATE_AT_TARGET * curve_coefficient // WAD
+    maximum_rate = MORPHO_MAX_RATE_AT_TARGET * curve_coefficient // WAD
+    return min(max(inferred_end_rate, minimum_rate), maximum_rate)
+
+
+def validate_borrow_price_round(round_data: RoundData, now: int, max_age_seconds: int) -> None:
+    """Reject invalid, future-dated, or stale borrow-token USD prices."""
+    if round_data.answer <= 0:
+        raise ValueError("Borrow-token USD oracle returned an invalid price")
+    if round_data.updated_at <= 0:
+        raise ValueError("Borrow-token USD oracle returned no update timestamp")
+    if round_data.updated_at > now:
+        raise ValueError("Borrow-token USD oracle update timestamp is in the future")
+    age = now - round_data.updated_at
+    if age > max_age_seconds:
+        raise ValueError(f"Borrow-token USD oracle is stale: age={age}s maximum={max_age_seconds}s")
+
+
 def taylor_compounded(rate_per_second_wad: int, elapsed_seconds: int) -> int:
     """Reproduce Morpho's three-term compounded-interest approximation."""
     first_term = rate_per_second_wad * elapsed_seconds
@@ -232,6 +308,9 @@ def evaluate_snapshot(
 
     avg_spread_wad = None
     if checks in (CHECK_RATES_AND_COVERAGE, CHECK_ALL):
+        if snapshot.debt and (snapshot.lender_apr_wad is None or snapshot.borrow_apr_wad is None):
+            issue_codes.append("rate_data")
+            issue_messages.append("Current lender or borrow APR is unavailable; no rate sample was recorded")
         avg_spread_wad = average_spread(rate_samples, config.minimum_rate_samples) if snapshot.debt else None
         threshold_wad = config.negative_spread_threshold_bps * WAD // MAX_BPS
         if avg_spread_wad is not None and avg_spread_wad < -threshold_wad:
@@ -312,6 +391,7 @@ def _read_snapshot(config: StrategyConfig, *, include_rates: bool) -> StrategySn
         raise ValueError("Strategy liquidation factor does not match Morpho LLTV")
 
     block = client.execute(client.eth.get_block, "latest")
+    block_number = int(block["number"])
     block_timestamp = int(block["timestamp"])
     collateral_token = client.get_contract(collateral_address, ERC20_ABI)
     borrow_token = client.get_contract(borrow_address, ERC20_ABI)
@@ -340,9 +420,13 @@ def _read_snapshot(config: StrategyConfig, *, include_rates: bool) -> StrategySn
         price_feed_decimals,
         price_round,
     ) = aux
-    borrow_price_answer = int(price_round[1])
-    if borrow_price_answer <= 0:
-        raise ValueError("Borrow-token USD oracle returned an invalid price")
+    borrow_price_round = RoundData.from_tuple(price_round)
+    validate_borrow_price_round(
+        borrow_price_round,
+        block_timestamp,
+        config.borrow_price_max_age_seconds,
+    )
+    borrow_price_answer = borrow_price_round.answer
 
     borrow_price_usd_e8 = borrow_price_answer * USD_SCALE // (10 ** int(price_feed_decimals))
     collateral_price_borrow_wad = (
@@ -375,10 +459,11 @@ def _read_snapshot(config: StrategyConfig, *, include_rates: bool) -> StrategySn
             market_values[5],
         )
         irm = client.get_contract(market_params[3], IRM_ABI)
-        stored_rate = _call_irm(client, irm, market_params, market)
-        expected_market = accrue_market(market, stored_rate, block_timestamp)
-        borrow_rate_per_second = _call_irm(client, irm, market_params, expected_market)
-        lender_apr_wad = int(lender_apr_raw)
+        average_rate = _call_irm(client, irm, market_params, market, block_number)
+        current_timestamp_market = market[:4] + (block_timestamp, market[5])
+        start_rate = _call_irm(client, irm, market_params, current_timestamp_market, block_number)
+        borrow_rate_per_second = calculate_instantaneous_borrow_rate(average_rate, start_rate, market)
+        lender_apr_wad = int(lender_apr_raw) or None
         borrow_apr_wad = borrow_rate_per_second * SECONDS_PER_YEAR
 
     return StrategySnapshot(
@@ -408,9 +493,15 @@ def _call_irm(
     irm: Any,
     market_params: tuple[str, str, str, str, int],
     market: tuple[int, ...],
+    block_identifier: int,
 ) -> int:
     """Call Morpho's view IRM with the supplied market state."""
-    return int(client.execute(irm.functions.borrowRateView(market_params, market).call))
+    return int(
+        client.execute(
+            irm.functions.borrowRateView(market_params, market).call,
+            block_identifier=block_identifier,
+        )
+    )
 
 
 def _load_rate_samples(config: StrategyConfig) -> list[RateSample]:
@@ -427,7 +518,7 @@ def _load_rate_samples(config: StrategyConfig) -> list[RateSample]:
 
 def _update_rate_samples(config: StrategyConfig, snapshot: StrategySnapshot, *, persist: bool) -> list[RateSample]:
     samples = _load_rate_samples(config) if persist else []
-    if snapshot.debt:
+    if snapshot.debt and snapshot.lender_apr_wad is not None and snapshot.borrow_apr_wad is not None:
         samples.append(RateSample(snapshot.timestamp, snapshot.spread_wad))
     samples = prune_rate_samples(samples, snapshot.timestamp, config.rate_window_hours)
     if persist:
@@ -473,6 +564,37 @@ def _record_alert_sent(config: StrategyConfig, evaluation: Evaluation, now: int,
     )
 
 
+def _error_state_key(config: StrategyConfig, checks: str) -> str:
+    return f"{config.address.lower()}:{checks}"
+
+
+def _should_send_error(config: StrategyConfig, checks: str, error_type: str, now: int) -> bool:
+    """Return whether a monitor error is new or due for its daily reminder."""
+    raw = store.state_get(ERROR_STATE_NAMESPACE, _error_state_key(config, checks))
+    previous: dict[str, Any] = {}
+    if raw:
+        try:
+            previous = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            previous = {}
+    last_alert = int(previous.get("last_alert", 0))
+    return previous.get("fingerprint") != error_type or now - last_alert >= ALERT_REMINDER_SECONDS
+
+
+def _record_error_sent(config: StrategyConfig, checks: str, error_type: str, now: int) -> None:
+    store.state_set(
+        ERROR_STATE_NAMESPACE,
+        _error_state_key(config, checks),
+        json.dumps({"fingerprint": error_type, "last_alert": now}),
+    )
+
+
+def _clear_error_state(config: StrategyConfig, checks: str, now: int) -> None:
+    key = _error_state_key(config, checks)
+    if store.state_get(ERROR_STATE_NAMESPACE, key):
+        store.state_set(ERROR_STATE_NAMESPACE, key, json.dumps({"fingerprint": "", "last_alert": now}))
+
+
 def _format_percent(wad_value: int) -> str:
     return f"{Decimal(wad_value) * 100 / WAD:.2f}%"
 
@@ -508,13 +630,19 @@ def build_summary(config: StrategyConfig, snapshot: StrategySnapshot, evaluation
             ]
         )
     if checks in (CHECK_RATES_AND_COVERAGE, CHECK_ALL):
-        if snapshot.lender_apr_wad is None or snapshot.borrow_apr_wad is None:
-            raise ValueError("Rate summary requested without rate data")
         average_spread = (
             _format_percent(evaluation.average_spread_wad)
             if evaluation.average_spread_wad is not None
             else "warming up"
         )
+        if snapshot.lender_apr_wad is None or snapshot.borrow_apr_wad is None:
+            current_rates = "Rates: unavailable; current sample skipped"
+        else:
+            current_rates = (
+                f"Rates: lender {_format_percent(snapshot.lender_apr_wad)}, "
+                f"borrow {_format_percent(snapshot.borrow_apr_wad)}, "
+                f"instant spread {_format_percent(snapshot.spread_wad)}"
+            )
         lines.extend(
             [
                 f"Debt: {_format_token(snapshot.debt, snapshot.borrow_decimals)} {snapshot.borrow_symbol}",
@@ -522,10 +650,7 @@ def build_summary(config: StrategyConfig, snapshot: StrategySnapshot, evaluation
                 f"{snapshot.borrow_symbol}",
                 f"Deficit: {_format_token(snapshot.deficit, snapshot.borrow_decimals)} {snapshot.borrow_symbol} "
                 f"({_format_deficit_bps(snapshot)} bps, {_format_usd(snapshot.deficit_usd_e8)})",
-                f"Rates: lender {_format_percent(snapshot.lender_apr_wad)}, "
-                f"borrow {_format_percent(snapshot.borrow_apr_wad)}, "
-                f"instant spread {_format_percent(snapshot.spread_wad)}, "
-                f"{config.rate_window_hours}h average {average_spread} "
+                f"{current_rates}, {config.rate_window_hours}h average {average_spread} "
                 f"({evaluation.rate_sample_count}/{config.minimum_rate_samples} minimum samples)",
             ]
         )
@@ -541,6 +666,8 @@ def run_strategy(config: StrategyConfig, *, checks: str = CHECK_ALL, dry_run: bo
     evaluation = evaluate_snapshot(config, snapshot, samples, checks)
     summary = build_summary(config, snapshot, evaluation, checks)
     logger.info("%s", summary.replace("\n", " | "))
+    if not dry_run:
+        _clear_error_state(config, checks, snapshot.timestamp)
 
     if not evaluation.issue_codes:
         if not dry_run:
@@ -575,15 +702,19 @@ def main() -> None:
             logger.exception("Failed to evaluate %s", config.name)
             if args.dry_run:
                 raise
-            send_alert(
-                Alert(
-                    AlertSeverity.MEDIUM,
-                    f"Lender Borrower Monitor Error ({args.checks})\n"
-                    f"{config.name}\n{type(exc).__name__}: {exc}\n{config.joc_url}",
-                    PROTOCOL,
-                ),
-                plain_text=True,
-            )
+            now = int(time.time())
+            error_type = type(exc).__name__
+            if _should_send_error(config, args.checks, error_type, now):
+                send_alert(
+                    Alert(
+                        AlertSeverity.MEDIUM,
+                        f"Lender Borrower Monitor Error ({args.checks})\n"
+                        f"{config.name}\n{error_type}: {exc}\n{config.joc_url}",
+                        PROTOCOL,
+                    ),
+                    plain_text=True,
+                )
+                _record_error_sent(config, args.checks, error_type, now)
 
 
 if __name__ == "__main__":
