@@ -186,9 +186,33 @@ class RewardsDistributorContext:
 ThreeJaneContext = HashedLabelContext | RewardsDistributorContext
 
 
-def _abi_function_names(entries: list[dict]) -> set[str]:
+def _abi_function_names(entries: list[dict]) -> frozenset[str]:
     """Function names present in a verified ABI."""
-    return {str(entry.get("name")) for entry in entries if entry.get("type") == "function" and entry.get("name")}
+    return frozenset(
+        str(entry.get("name")) for entry in entries if entry.get("type") == "function" and entry.get("name")
+    )
+
+
+@lru_cache(maxsize=64)
+def _own_function_names(chain_id: int, address: str) -> frozenset[str]:
+    """Function names on the address's own verified ABI. No RPC — Etherscan is cached."""
+    return _abi_function_names(fetch_abi_entries(chain_id, address) or [])
+
+
+@lru_cache(maxsize=64)
+def _implementation_function_names(chain_id: int, address: str) -> frozenset[str]:
+    """Function names behind an EIP-1967 proxy, or empty when there is no proxy.
+
+    Cached because one alert probes the same target for several shapes — the
+    slot read is identical every time, and one governance transaction cannot
+    change the implementation it is still only scheduled against.
+    """
+    from utils.proxy import get_current_implementation
+
+    implementation = get_current_implementation(address, chain_id)
+    if not implementation or implementation.lower() == address.lower():
+        return frozenset()
+    return _abi_function_names(fetch_abi_entries(chain_id, implementation) or [])
 
 
 def _exposes(chain_id: int, address: str, wanted: set[str]) -> bool:
@@ -196,19 +220,12 @@ def _exposes(chain_id: int, address: str, wanted: set[str]) -> bool:
 
     3Jane's ProtocolConfig and MorphoCredit sit behind transparent proxies, so
     the address's own verified ABI lists the proxy's functions, not `config` or
-    the distributor getters. Only pay for the implementation lookup when the
-    proxy ABI comes up short.
+    the distributor getters. The implementation is only read when the proxy ABI
+    comes up short, and then only once per address.
     """
-    names = _abi_function_names(fetch_abi_entries(chain_id, address) or [])
-    if wanted.issubset(names):
+    if wanted.issubset(_own_function_names(chain_id, address)):
         return True
-
-    from utils.proxy import get_current_implementation
-
-    implementation = get_current_implementation(address, chain_id)
-    if not implementation or implementation.lower() == address.lower():
-        return False
-    return wanted.issubset(_abi_function_names(fetch_abi_entries(chain_id, implementation) or []))
+    return wanted.issubset(_implementation_function_names(chain_id, address))
 
 
 def _as_hex32(value: object) -> str | None:
@@ -473,3 +490,10 @@ def format_threejane_report(
                 lines.append(f"  - Value stored on-chain right now: {value}")
             sections.append("\n".join(lines))
     return "\n\n".join(sections)
+
+
+def reset_cache() -> None:
+    """Reset process caches for tests or long-running workers."""
+    _abi.cache_clear()
+    _own_function_names.cache_clear()
+    _implementation_function_names.cache_clear()

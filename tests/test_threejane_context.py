@@ -106,6 +106,42 @@ class TestArgumentParsing(unittest.TestCase):
         self.assertEqual(_requested_epochs([call], current_epoch=45), [45])
 
 
+class TestAbiProbeCaching(unittest.TestCase):
+    """One alert probes a target for several shapes; the slot is read once."""
+
+    def setUp(self) -> None:
+        threejane_context.reset_cache()
+
+    def tearDown(self) -> None:
+        threejane_context.reset_cache()
+
+    def test_implementation_is_read_once_per_address(self) -> None:
+        proxy_abi = [{"type": "function", "name": "upgradeToAndCall"}]
+        impl_abi = [{"type": "function", "name": "config"}]
+
+        def abi_for(chain_id: int, address: str) -> list[dict]:
+            return impl_abi if address == "0ximpl" else proxy_abi
+
+        with (
+            patch.object(threejane_context, "fetch_abi_entries", side_effect=abi_for),
+            patch("utils.proxy.get_current_implementation", return_value="0ximpl") as lookup,
+        ):
+            self.assertFalse(threejane_context._exposes(1, PROTOCOL_CONFIG, {"useMint", "merkleRoot"}))
+            self.assertTrue(threejane_context._exposes(1, PROTOCOL_CONFIG, {"config"}))
+
+        lookup.assert_called_once()
+
+    def test_non_proxy_never_reads_the_slot(self) -> None:
+        own_abi = [{"type": "function", "name": "useMint"}]
+        with (
+            patch.object(threejane_context, "fetch_abi_entries", return_value=own_abi),
+            patch("utils.proxy.get_current_implementation") as lookup,
+        ):
+            self.assertTrue(threejane_context._exposes(1, DISTRIBUTOR, {"useMint"}))
+
+        lookup.assert_not_called()
+
+
 class TestCheckedInAbis(unittest.TestCase):
     """The JSON ABIs cover exactly the getters the adapter reads."""
 
