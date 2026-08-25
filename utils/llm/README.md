@@ -185,6 +185,24 @@ For Infinifi mainnet alerts, the adapter:
 
 The result is added to the LLM prompt as verified protocol context and rendered independently in the Wavey Gist under `## Protocol Context`. The report distinguishes the escrow's accounting asset from non-accounting ERC20 targets it is allowed to interact with; whitelist membership does not establish how a token is valued downstream. Failures are best-effort and never block the governance alert.
 
+### 5f. 3Jane Governance Context (`utils/llm/threejane_context.py`)
+
+Both 3Jane timelocks schedule calls that arrive as opaque data. `ProtocolConfig.setConfig(bytes32,uint256)` names the parameter it changes only by `keccak256("<NAME>")`, and `RewardsDistributor.setEpochEmissions` / `updateRoot` allocate JANE without revealing whether a claim mints new supply or moves an existing balance.
+
+For 3Jane mainnet alerts, the adapter:
+
+1. Reverses every `bytes32` argument against a checked-in name table (`ProtocolConfig` keys plus the Jane / EmergencyController roles), so the prompt carries `keccak256("MAX_LTV")` and what that key controls instead of a bare hash. Hashes outside the table stay unresolved rather than being guessed at.
+2. Reads the current stored value for resolved `ProtocolConfig` keys, following EIP-1967 to the implementation ABI since the config sits behind a transparent proxy. Role hashes get no value line — there is nothing to read.
+3. Identifies a `RewardsDistributor` by its verified getters and reads `useMint`, the reward token's metadata and `totalSupply`, whether the distributor holds `MINTER_ROLE`, whether token transfers are globally enabled, `maxClaimable` / `totalClaimed`, the current `merkleRoot`, and the current epoch.
+4. Reads emissions already stored for the epoch being set and the three before it, and derives how the proposed allocation compares to the epoch before it, so a new allocation is judged against recent ones rather than called "substantial in absolute terms". Three consecutive weeks of this same operation had previously scored LOW, MEDIUM, MEDIUM.
+5. Renders a capping key beside the quantity it caps (`USD3_SUPPLY_CAP` next to USD3 `totalAssets`), batched into the config read, so a ceiling raise reads as slack or as unblocking deposits. `_USAGE_READS` holds only pairs whose denominations are known to match.
+
+Token amounts are truncated to whole tokens, matching the call flow's amount hints. Failures are best-effort and never block the governance alert.
+
+### 5g. Adapter Registry (`utils/llm/protocol_context.py`)
+
+Adapters register in `_ADAPTERS`; `resolve_protocol_context()` fans one call out to all of them and merges the rendered prompt text, report text, introduced addresses, and address labels. Each adapter guards its own protocol and chain, so registration order carries no meaning and one adapter raising is logged and skipped rather than dropping the alert.
+
 ### 6. LLM Prompt & Completion (`utils/llm/ai_explainer.py`)
 
 The prompt is split into a **system** prompt (static instructions) and a **user** prompt (per-tx context). `complete(prompt, system_prompt=...)` passes the system block via the provider's native system role, which improves instruction-following and lets the Anthropic provider mark it `cache_control: ephemeral` — repeated alerts within the cache window pay for the (large) instruction prompt only once. The static block (`SYSTEM_INSTRUCTIONS`) enforces brevity:
@@ -406,8 +424,11 @@ utils/llm/
 ├── anthropic_provider.py    # Anthropic (Claude) native API provider
 ├── base.py                  # Abstract LLMProvider base class + LLMError
 ├── factory.py               # Provider factory with env-based config + singleton
+├── infinifi_context.py      # Infinifi adapter: escrow → farm, accounting asset, whitelisted tokens
 ├── openai_compat.py         # OpenAI-compatible provider (Venice, OpenAI, etc.)
+├── protocol_context.py      # Registry fanning one call out to every protocol adapter
 ├── report.py                # Gist report: metadata header + deterministic call flow + analysis
+├── threejane_context.py     # 3Jane adapter: hashed config keys/roles, rewards distribution mode
 └── README.md                # This file
 
 utils/related_tokens.py      # Token discovery from a contract's own zero-arg address getters
