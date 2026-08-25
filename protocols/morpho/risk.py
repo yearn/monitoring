@@ -87,8 +87,8 @@ MARKETS_RISK_2 = {
         "0x973e9dd45799efe8775417bcc420a3ab84a583587b2108985746e2fe201d0c83",  # YFI/USDC -> lltv 77%, oracle: Chainlink YFI/USD and Chainlink USDC/USD.
         "0xb8fef900b383db2dbbf4458c7f46acf5b140f26d603a6d1829963f241b82510e",  # OETH/USDC -> lltv 86%, oracle: Chainlink ETH/USD and Chainlink USDC/USD. OETH = ETH
         "0xeb17955ea422baeddbfb0b8d8c9086c5be7a9cfdefb292119a102e981a30062e",  # stcUSD/USDC -> lltv 91.5%, oracle: Ojo Yield Risk Engine stcUSD/cUSD Exchange Rate, RedStone Price Feed for cUSD_FUNDAMENTAL and Chainlink USDC/USD.
-        "0x2fb3713487c7812e7309935b034f40228841666f6b048faf31fd2110ae674f20",  # PT-stcUSD-23JUL2026/USDC -> lltv 91.5%, oracle: OjoPTFeed oracle for stcUSD. RedStone Price Feed for cUSD_FUNDAMENTAL and Redstone USDC/USD v2.
-        "0x702b7ec7628de2622e51e1bb34a7e6ad9e95f3a25a2ed361e4ce621f23f5e642",  # PT-cUSD-23JUL2026/USDC -> lltv 91.5%, oracle: OjoPTFeed oracle for cUSD. RedStone Price Feed for cUSD_FUNDAMENTAL and Redstone USDC/USD v2.
+        "0x2fb3713487c7812e7309935b034f40228841666f6b048faf31fd2110ae674f20",  # PT-stcUSD-23JUL2026/USDC -> lltv 91.5%, oracle: OjoPTFeed = min(Pendle Chainlink-compatible oracle with 900s AMM TWAP, linear discount 15%/yr). min() only caps the price on the way up, so a downward TWAP push passes through unfiltered. RedStone Price Feed for cUSD_FUNDAMENTAL and Redstone USDC/USD v2.
+        "0x702b7ec7628de2622e51e1bb34a7e6ad9e95f3a25a2ed361e4ce621f23f5e642",  # PT-cUSD-23JUL2026/USDC -> lltv 91.5%, oracle: OjoPTFeed = min(Pendle Chainlink-compatible oracle with 900s AMM TWAP, linear discount 12.5%/yr). min() only caps the price on the way up, so a downward TWAP push passes through unfiltered. RedStone Price Feed for cUSD_FUNDAMENTAL and Redstone USDC/USD v2.
         "0x729badf297ee9f2f6b3f717b96fd355fc6ec00422284ce1968e76647b258cf44",  # syrupUSDC/USDC -> lltv 91.5%, oracle: syrupUSDC MaplePool vault rate. Oracle is using convertToAssets() to get the price but maple pool returns different amount, it should use convertToExitAssets() instead.
         "0x61765602144e91e5ac9f9e98b8584eae308f9951596fd7f5e0f59f21cd2bf664",  # weETH/USDC -> lltv 91.5%, oracle: redstone weETH/usdc exchange rate
         "0xb7843fe78e7e7fd3106a1b939645367967d1f986c2e45edb8932ad1896450877",  # XAUT/USDT -> lltv 77%, oracle: Chainlink XAUT/USD and Chainlink USDT/USD.
@@ -106,8 +106,8 @@ MARKETS_RISK_2 = {
         "0x6a7e36eb088bd501d73f7ab4c5b8671358559341a78ce521c9e499dc0bc642b9",  # LBTC/PYUSD -> lltv 86%, oracle: Redstone LBTC_FUNDAMENTAL, chainlink BTC/USD and Chainlink PYUSD/USD.
         "0x85d59152eeeab7ca024804895b358868d8dd1e134171be400d7792d5604a212c",  # weETH/PYUSD -> lltv 86%, oracle: chainlink weETH/ETH and chainlink ETH/USD and Chainlink PYUSD/USD.
         "0x90ef0c5a0dc7c4de4ad4585002d44e9d411d212d2f6258e94948beecf8b4c0d5",  # sUSDe/PYUSD -> lltv 91.5%, oracle: sUSDe ERC4626 vault, chainlink USDe/USD and Chainlink PYUSD/USD.
-        "0xcb12dcbc7c6c4f20ca1537a3cc1a41ec27501f85a3e322a710d9a16a88a28c0e",  # PT-sUSDE-7MAY2026/PYUSD -> lltv 91.5%, oracle: Pendle oracle PT to USDe, chainlink USDe/USD and Chainlink PYUSD/USD.
-        "0x22fe4c688161863c73571a2b8db65cc11a4a6bceee4f0dea4aa83e4b784f1bd9",  # PT-sUSDS-26NOV2026/USDC -> lltv 91.5%, oracle: MetaOracleDeviationTimelock (Steakhouse) — primary MorphoChainlinkOracleV2 Ojo PT Feed (Pendle Chainlink-compatible); backup MorphoChainlinkOracleV2 Ojo PT Feed + Chainlink USDS/USD + Morpho dummy quote (USDC = $1).
+        "0xcb12dcbc7c6c4f20ca1537a3cc1a41ec27501f85a3e322a710d9a16a88a28c0e",  # PT-sUSDE-7MAY2026/PYUSD -> lltv 91.5%, oracle: Pendle Chainlink-compatible oracle PT to USDe with 900s AMM TWAP and no floor. Chainlink USDe/USD and Chainlink PYUSD/USD.
+        "0x22fe4c688161863c73571a2b8db65cc11a4a6bceee4f0dea4aa83e4b784f1bd9",  # PT-sUSDS-26NOV2026/USDC -> lltv 91.5%, oracle: MetaOracleDeviationTimelock (Steakhouse) — primary MorphoChainlinkOracleV2 Ojo PT Feed (Pendle Chainlink-compatible, 900s AMM TWAP); backup MorphoChainlinkOracleV2 Ojo PT Feed + Chainlink USDS/USD + Morpho dummy quote (USDC = $1). Both legs read the same Ojo PT feed https://etherscan.io/address/0x16bDf4c1A1fbD0D3a181dCee4141BB106e22B002, so the deviation check moves in lockstep with a manipulated PT price instead of catching it.
         "0xd8a8e6667f58aa9229e8979bd619742b1660ee856c200a93e407dbccb7222323",  # cbBTC/PYUSD -> lltv 86%, oracle: chainlink cbBTC/USD and Chainlink PYUSD/USD.
         "0x6d2fba32b8649d92432d036c16aa80779034b7469b63abc259b17678857f31c2",  # wstETH/USDC -> lltv 86%, oracle: MorphoChainlinkOracleV2 —  Api3 wstETH/USD + Api3 USDC/USD.
         "0xba3ba077d9c838696b76e29a394ae9f0d1517a372e30fd9a0fc19c516fb4c5a7",  # cbBTC/USDC -> lltv 86%, oracle: MorphoChainlinkOracleV2, Api3 cbBTC/USD + Api3 USDC/USD.
@@ -143,15 +143,15 @@ MARKETS_RISK_2 = {
         "0xa7cd449cc319d65be3d0926d6b6f599a8c3434bd95ba3e91bbf1ee5e80e72b56",  # LBTC/vbUSDC -> lltv 86%, oracle: RedStone Price Feed for LBTC_FUNDAMENTAL and RedStone BTC/USD. USD=vbUSDC.
         "0x2c4f26c76b4de51d3c9260c15a796cd2a35efab17786d0aa78ca2e638b0f8ba8",  # yvvbUSDC/vbETH -> lltv 77%, oracle: yearn vault exchange rate. Chainlink ETH/USD and Chainlink USDC/USD.
         "0x61fcb4d6d1534eedeb0e0bea361745f727d73f14569d231c4a2b39232b6b7312",  # yvvbUSDT/vbWBTC -> lltv 77%, oracle: yearn vault exchange rate. Chainlink WBTC/USD and Chainlink USDT/USD.
-        "0x09c2ecea0580698a91be0cff2bad3648b00744453c14a9bfb6be5ca7b9950908",  # PT-yvvbUSDC/vbUSDT -> lltv 86%, oracle: Pendle PT exchange rate(PT to asset) yvvbUSDC with yearn vault rate. Chainlink USDC/USD and Chainlink USDT/USD.
+        "0x09c2ecea0580698a91be0cff2bad3648b00744453c14a9bfb6be5ca7b9950908",  # PT-yvvbUSDC/vbUSDT -> lltv 86%, oracle: Spectra PriceFeedCurvePTAssetBounded (not Pendle) — min(max(Curve StableSwap-NG TWAP, ZCB model at 25% implied rate), redemption value), so the ZCB floor bounds a downward TWAP push. Chainlink USDC/USD and Chainlink USDT/USD.
     ],
 }
 
 MARKETS_RISK_3 = {
     Chain.MAINNET: [
         "0x0cd36e6ecd9d846cffd921d011d2507bc4c2c421929cec65205b3cd72925367c",  # Curve TricryptoLLAMA LP / crvUSD -> collaterals: crvUSD, wstETH, tBTC.
-        "0x198132864e7974fb451dfebeb098b3b7e7e65566667fb1cf1116db4fb2ad23f9",  # PT-LBTC-27MAR2025 / WBTC -> lltv 86%, oracle: Pendle PT exchange rate, readstone exchange rate LBTC/BTC and chainlink WBTC/BTC.
-        "0x8a0384fe5b1a68ff217845752287f432029b20754fbce577b6a5f8a80030a825",  # PT-LBTC-26JUN2025 / WBTC -> lltv 91.5%, oracle: Pendle PT exchange rate, readstone exchange rate LBTC/BTC
+        "0x198132864e7974fb451dfebeb098b3b7e7e65566667fb1cf1116db4fb2ad23f9",  # PT-LBTC-27MAR2025 / WBTC -> lltv 86%, oracle: PTOraclePriceAdapter calling Pendle getPtToAssetRate with a 900s AMM TWAP hardcoded in latestRoundData(), readstone exchange rate LBTC/BTC and chainlink WBTC/BTC.
+        "0x8a0384fe5b1a68ff217845752287f432029b20754fbce577b6a5f8a80030a825",  # PT-LBTC-26JUN2025 / WBTC -> lltv 91.5%, oracle: Pendle Chainlink-compatible oracle with 1800s AMM TWAP, readstone exchange rate LBTC/BTC
         "0xba761af4134efb0855adfba638945f454f0a704af11fc93439e20c7c5ebab942",  # rsETH/WETH -> lltv 94.5%, oracle: origami rsETH/ETH which calls KELP_LRT_ORACLE.rsETHPrice(). Oracle address: https://etherscan.io/address/0x349A73444b1a310BAe67ef67973022020d70020d
         "0xa0534c78620867b7c8706e3b6df9e69a2bc67c783281b7a77e034ed75cee012e",  # ezETH/WETH -> lltv 94.5%, oracle: origami ezETH/ETH which calls renzoOracle()).calculateRedeemAmount(). It is hypothetical price, not the actual price.
         "0x8e7cc042d739a365c43d0a52d5f24160fa7ae9b7e7c9a479bd02a56041d4cf77",  # USR/USDC -> lltv 91.5%, oracle: USR/USD price aggregator which is checking reserves and defining max price as 1
@@ -166,12 +166,12 @@ MARKETS_RISK_3 = {
         "0x7a7018e22a8bb2d08112eae9391e09f065a8ae7ae502c1c23dc96c21411a6efd",  # EIGEN/USDC -> lltv 77%, oracle: Redstone EIGEN/USD. USD = USDC.
         "0xce68c7aa336675e42bbc8eaa8b5ecc7ebd816bf8625b5316330c6ac2dabc4cf2",  # SolvBTC/BTC -> lltv 94.5%, oracle: upgradeable MetaOracleDeviationTimelock with prime oracle morpho oracle with 1:1 hardcoded rate. same assets
         "0xbbf7ce1b40d32d3e3048f5cf27eeaa6de8cb27b80194690aab191a63381d8c99",  # siUSD/USDC -> lltv 91.5%, oracle: infinity accouting contract provides the price iUSD, vault rate siUSD to iUSD. usdc = 1 using dummy oracle.
-        "0xaac3ffcdf8a75919657e789fa72ab742a7bbfdf5bb0b87e4bbeb3c29bbbbb05c",  # PT-siUSD-26MAR2026/USDC -> lltv 91.5%, oracle: ChainlinkOracleV2 — Pendle Chainlink-compatible PT feed, InfiniFi RT oracle (baseFeedTwo), dummy USDC feed (quote).
-        "0xdf034d0351a4c0af947e1a37ecd5ccbce60d72eac90de6fcad48c74e2869d14c",  # PT-iUSD-25JUN2026/USDC -> lltv 91.5%, oracle: same stack as PT-siUSD row but Ojo PT Feed (Pendle-compatible) for PT leg; InfiniFi RT + dummy USDC.
-        "0xc6ae8e71e11ef511acee3f6cc6ad2af67b862877d459e3789905f537c85db5e3",  # PT-sUSDE-25SEP2025/DAI -> lltv 91.5%, oracle: PendleSparkLinearDiscountOracle with linear discount oracle for sUSDE. No price oracle for DAI, USDe = DAI.
-        "0x27b9a0a5bfee98a31eb51e3850250d103a9f8e41673c782defc66aa943af0e65",  # PT-srUSDe-2APR2026/USDC -> lltv 91.5%, oracle: Pendle PT exchange rate(PT to asset) srUSDe. USDC = 1 using dummy oracle.
+        "0xaac3ffcdf8a75919657e789fa72ab742a7bbfdf5bb0b87e4bbeb3c29bbbbb05c",  # PT-siUSD-26MAR2026/USDC -> lltv 91.5%, oracle: ChainlinkOracleV2 — Pendle Chainlink-compatible PT feed with 900s AMM TWAP and no floor, InfiniFi RT oracle (baseFeedTwo), dummy USDC feed (quote).
+        "0xdf034d0351a4c0af947e1a37ecd5ccbce60d72eac90de6fcad48c74e2869d14c",  # PT-iUSD-25JUN2026/USDC -> lltv 91.5%, oracle: same stack as PT-siUSD row but Ojo PT Feed = min(Pendle 900s AMM TWAP, linear discount 4%/yr) for the PT leg; min() only caps the price on the way up. InfiniFi RT + dummy USDC.
+        "0xc6ae8e71e11ef511acee3f6cc6ad2af67b862877d459e3789905f537c85db5e3",  # PT-sUSDE-25SEP2025/DAI -> lltv 91.5%, oracle: PendleSparkLinearDiscountOracle for sUSDE, 15%/yr linear discount and no AMM TWAP. No price oracle for DAI, USDe = DAI.
+        "0x27b9a0a5bfee98a31eb51e3850250d103a9f8e41673c782defc66aa943af0e65",  # PT-srUSDe-2APR2026/USDC -> lltv 91.5%, oracle: MetaOracleDeviationTimelock whose primary and backup both read the same Pendle Chainlink-compatible PT feed https://etherscan.io/address/0x01C1274723D238DE249D897ef39d8Df95E1dc309 (900s AMM TWAP), so the deviation check moves in lockstep with a manipulated PT price instead of catching it. USDC = 1 using dummy oracle.
         "0xe3df58f9d3011b7481ff36b939fa5f8da642f34ea5792d25d3958dbf1efa26d7",  # USD3/USDC -> lltv 91.5%, oracle: MorphoChainlinkOracleV2, USD3 ERC4626 vault rate (underlying USDC). No price feeds; USDC = $1.
-        "0xf8c5aa31ea6b2a068a9eddb46dd110cae57bf0f12be9583a3f9a818effecba89",  # PT-USD3-17DEC2026/USDC -> lltv 86%, oracle: MorphoChainlinkOracleV2, PendleSparkLinearDiscountOracle PT feed for PT-USD3. No quote feed (USDC = $1). Discount 30% per year.
+        "0xf8c5aa31ea6b2a068a9eddb46dd110cae57bf0f12be9583a3f9a818effecba89",  # PT-USD3-17DEC2026/USDC -> lltv 86%, oracle: MorphoChainlinkOracleV2, PendleLinearDiscountOracleWrapper over a linear discount PT feed for PT-USD3, no AMM TWAP. No quote feed (USDC = $1). Discount 30% per year.
     ],
     Chain.BASE: [
         "0x4944a1169bc07b441473b830308ffe5bb535c10a9f824e33988b60738120c48e",  # LBTC/cbBTC -> lltv 91.5%, oracle: Custom moonwell oracle. Base feed is fetched from upgradeable oracle which uses 2 oracles. Primary oracle is redstone oracle, if the price changes more than 2% than it uses fallback oracle chainlink oracle. Chainlink didn't have an exchange rate feed. Redstone was the only provider for the LBTC reserves.
@@ -190,8 +190,8 @@ MARKETS_RISK_3 = {
     ],
     Chain.ARBITRUM: [
         "0x71c2954e00c8f72864600c9d1d1cd70fa15202c4294cd938d80add3be2eced26",  # sUSDai/USDC -> lltv 91.5%, oracle: Chronicle sUSDai/USD and Chainlink USDC/USD.
-        "0x8147c63f3f6f5a0825c84bf2cb11443c72b609fa39cf9a362e3d4dc2c5ca76c4",  # PT-USDai-19FEB2026/USDC -> lltv 91.5% oracle: MetaOracleDeviationTimelock by Steakhouse with primary oracle set to Pendle PT where USDai=USDC and backup oracle set to
-        "0x7717f1e04510390518811b3133ea47c298094ddd1d806ed8f8867d88c727bad7",  # PT-sUSDai-19FEB2026/USDC -> lltv 86%, oracle: Pendle PT exchange rate(PT to asset) sUSDai with ERC4626 vault rate sUSDai to USDai. Chainlink oracle USDC/USD.
+        "0x8147c63f3f6f5a0825c84bf2cb11443c72b609fa39cf9a362e3d4dc2c5ca76c4",  # PT-USDai-19FEB2026/USDC -> lltv 91.5%, oracle: MetaOracleDeviationTimelock by Steakhouse whose primary and backup both read the same Pendle Chainlink-compatible PT feed https://arbiscan.io/address/0x7bfCE6c9717F29dcffAAE3a96DE10c379fE97F88 (900s AMM TWAP) where USDai=USDC, so the deviation check moves in lockstep with a manipulated PT price instead of catching it.
+        "0x7717f1e04510390518811b3133ea47c298094ddd1d806ed8f8867d88c727bad7",  # PT-sUSDai-19FEB2026/USDC -> lltv 86%, oracle: Pendle Chainlink-compatible oracle (PT to asset, 900s AMM TWAP) for sUSDai with ERC4626 vault rate sUSDai to USDai. Chainlink oracle USDC/USD.
     ],
 }
 
