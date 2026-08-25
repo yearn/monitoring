@@ -106,6 +106,23 @@ class TestArgumentParsing(unittest.TestCase):
         self.assertEqual(_requested_epochs([call], current_epoch=45), [45])
 
 
+class TestCheckedInAbis(unittest.TestCase):
+    """The JSON ABIs cover exactly the getters the adapter reads."""
+
+    def test_distributor_abi_covers_the_detection_getters(self) -> None:
+        names = {entry["name"] for entry in threejane_context._abi("RewardsDistributor")}
+        self.assertTrue(threejane_context._DISTRIBUTOR_GETTERS.issubset(names))
+        self.assertIn("epoch", names)
+
+    def test_jane_abi_covers_the_token_reads(self) -> None:
+        names = {entry["name"] for entry in threejane_context._abi("Jane")}
+        self.assertEqual(names, {"totalSupply", "transferable", "balanceOf", "hasRole"})
+
+    def test_protocol_config_abi_exposes_config(self) -> None:
+        names = {entry["name"] for entry in threejane_context._abi("ProtocolConfig")}
+        self.assertIn("config", names)
+
+
 class TestHashedLabelRendering(unittest.TestCase):
     """Known hashes are named; only config keys carry a stored value."""
 

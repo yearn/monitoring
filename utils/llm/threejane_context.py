@@ -16,9 +16,11 @@ a checked-in name table, and reads the surrounding state on-chain.
 """
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 from eth_utils import keccak, to_checksum_address
 
+from utils.abi import load_abi
 from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
 from utils.erc20_metadata import fetch_erc20_metadata
@@ -90,80 +92,20 @@ _LABELS_BY_HASH: dict[str, tuple[str, str]] = {
     "0x" + keccak(text=name).hex(): (name, note) for name, note in _HASHED_LABELS.items()
 }
 
-_CONFIG_ABI = [
-    {
-        "name": "config",
-        "type": "function",
-        "stateMutability": "view",
-        "inputs": [{"name": "key", "type": "bytes32"}],
-        "outputs": [{"name": "", "type": "uint256"}],
-    }
-]
+ABI_DIR = "protocols/3jane/abi"
 
-_DISTRIBUTOR_ABI = [
-    {"name": "useMint", "type": "function", "stateMutability": "view", "inputs": [], "outputs": [{"type": "bool"}]},
-    {
-        "name": "merkleRoot",
-        "type": "function",
-        "stateMutability": "view",
-        "inputs": [],
-        "outputs": [{"type": "bytes32"}],
-    },
-    {"name": "jane", "type": "function", "stateMutability": "view", "inputs": [], "outputs": [{"type": "address"}]},
-    {
-        "name": "maxClaimable",
-        "type": "function",
-        "stateMutability": "view",
-        "inputs": [],
-        "outputs": [{"type": "uint256"}],
-    },
-    {
-        "name": "totalClaimed",
-        "type": "function",
-        "stateMutability": "view",
-        "inputs": [],
-        "outputs": [{"type": "uint256"}],
-    },
-    {"name": "epoch", "type": "function", "stateMutability": "view", "inputs": [], "outputs": [{"type": "uint256"}]},
-    {
-        "name": "epochEmissions",
-        "type": "function",
-        "stateMutability": "view",
-        "inputs": [{"type": "uint256"}],
-        "outputs": [{"type": "uint256"}],
-    },
-]
 
-_JANE_ABI = [
-    {
-        "name": "totalSupply",
-        "type": "function",
-        "stateMutability": "view",
-        "inputs": [],
-        "outputs": [{"type": "uint256"}],
-    },
-    {
-        "name": "transferable",
-        "type": "function",
-        "stateMutability": "view",
-        "inputs": [],
-        "outputs": [{"type": "bool"}],
-    },
-    {
-        "name": "balanceOf",
-        "type": "function",
-        "stateMutability": "view",
-        "inputs": [{"type": "address"}],
-        "outputs": [{"type": "uint256"}],
-    },
-    {
-        "name": "hasRole",
-        "type": "function",
-        "stateMutability": "view",
-        "inputs": [{"type": "bytes32"}, {"type": "address"}],
-        "outputs": [{"type": "bool"}],
-    },
-]
+@lru_cache(maxsize=None)
+def _abi(name: str) -> list[dict]:
+    """Load a checked-in 3Jane ABI once per process.
+
+    Lazily, not at import: this module sits in the explainer's import chain, and
+    a missing or unreadable file should degrade one protocol's context rather
+    than break every AI alert.
+    """
+    entries: list[dict] = load_abi(f"{ABI_DIR}/{name}.json")
+    return entries
+
 
 _MINTER_ROLE = keccak(text="MINTER_ROLE")
 
@@ -305,7 +247,7 @@ def _requested_epochs(calls: list[DecodedCall], current_epoch: int) -> list[int]
 def _read_config_values(chain_id: int, target: str, keys: list[str]) -> dict[str, int]:
     """Read ProtocolConfig values for hashed keys, batched. Empty dict on failure."""
     client = ChainManager.get_client(Chain.from_chain_id(chain_id))
-    contract = client.get_contract(to_checksum_address(target), _CONFIG_ABI)
+    contract = client.get_contract(to_checksum_address(target), _abi("ProtocolConfig"))
     with client.batch_requests() as batch:
         for key in keys:
             batch.add(contract.functions.config(bytes.fromhex(key[2:])))
@@ -351,7 +293,7 @@ def _read_distributor_context(chain_id: int, target: str, calls: list[DecodedCal
 
     client = ChainManager.get_client(Chain.from_chain_id(chain_id))
     address = to_checksum_address(target)
-    distributor = client.get_contract(address, _DISTRIBUTOR_ABI)
+    distributor = client.get_contract(address, _abi("RewardsDistributor"))
     with client.batch_requests() as batch:
         batch.add(distributor.functions.useMint())
         batch.add(distributor.functions.merkleRoot())
@@ -375,7 +317,7 @@ def _read_distributor_context(chain_id: int, target: str, calls: list[DecodedCal
             if epoch - offset >= 0
         }
     )
-    token = client.get_contract(token_address, _JANE_ABI)
+    token = client.get_contract(token_address, _abi("Jane"))
     with client.batch_requests() as batch:
         batch.add(token.functions.totalSupply())
         batch.add(token.functions.balanceOf(address))
