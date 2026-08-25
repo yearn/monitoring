@@ -194,7 +194,8 @@ For 3Jane mainnet alerts, the adapter:
 1. Reverses every `bytes32` argument against a checked-in name table (`ProtocolConfig` keys plus the Jane / EmergencyController roles), so the prompt carries `keccak256("MAX_LTV")` and what that key controls instead of a bare hash. Hashes outside the table stay unresolved rather than being guessed at.
 2. Reads the current stored value for resolved `ProtocolConfig` keys, following EIP-1967 to the implementation ABI since the config sits behind a transparent proxy. Role hashes get no value line — there is nothing to read.
 3. Identifies a `RewardsDistributor` by its verified getters and reads `useMint`, the reward token's metadata and `totalSupply`, whether the distributor holds `MINTER_ROLE`, whether token transfers are globally enabled, `maxClaimable` / `totalClaimed`, the current `merkleRoot`, and the current epoch.
-4. Reads emissions already stored for the epoch being set and the three before it, so a new allocation is judged against recent ones rather than called "substantial in absolute terms".
+4. Reads emissions already stored for the epoch being set and the three before it, and derives how the proposed allocation compares to the epoch before it, so a new allocation is judged against recent ones rather than called "substantial in absolute terms". Three consecutive weeks of this same operation had previously scored LOW, MEDIUM, MEDIUM.
+5. Renders a capping key beside the quantity it caps (`USD3_SUPPLY_CAP` next to USD3 `totalAssets`), batched into the config read, so a ceiling raise reads as slack or as unblocking deposits. `_USAGE_READS` holds only pairs whose denominations are known to match.
 
 Token amounts are truncated to whole tokens, matching the call flow's amount hints. Failures are best-effort and never block the governance alert.
 

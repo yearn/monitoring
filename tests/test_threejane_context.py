@@ -1,6 +1,7 @@
 """Tests for 3Jane-specific LLM governance context."""
 
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from eth_utils import keccak
@@ -57,6 +58,7 @@ def _distributor_context(use_mint: bool = True, is_minter: bool = True) -> Rewar
         total_claimed_raw=38_919_583 * WAD,
         current_epoch=45,
         epoch_emissions=((43, 5_369_214 * WAD), (44, 5_499_673 * WAD), (45, 0)),
+        proposed_emissions=((45, 5_564_323 * WAD),),
     )
 
 
@@ -195,6 +197,32 @@ class TestHashedLabelRendering(unittest.TestCase):
         self.assertIn("3Jane ProtocolConfig", report)
         self.assertIn("`63,366,281,225,814`", report)
 
+    def test_capped_quantity_is_rendered_beside_the_cap(self) -> None:
+        context = HashedLabelContext(
+            target=PROTOCOL_CONFIG,
+            argument_hex="0x" + keccak(text="USD3_SUPPLY_CAP").hex(),
+            name="USD3_SUPPLY_CAP",
+            note="cap on USD3 supply in asset units",
+            is_config_key=True,
+            current_value=75_000_000_000_000,
+            usage_label="USD3 totalAssets",
+            current_usage=75_045_566_960_234,
+        )
+        prompt = format_threejane_prompt([context])
+        report = format_threejane_report([context], 1, {})
+        self.assertIn("USD3 totalAssets right now: 75045566960234", prompt)
+        self.assertIn("directly comparable", prompt)
+        self.assertIn("`75,045,566,960,234`", report)
+
+    def test_usage_line_absent_for_keys_without_one(self) -> None:
+        context = HashedLabelContext(PROTOCOL_CONFIG, "0xabc", "MAX_LTV", "ltv", True, 350000000000000000)
+        self.assertNotIn("directly comparable", format_threejane_prompt([context]))
+        self.assertNotIn("totalAssets", format_threejane_report([context], 1, {}))
+
+    def test_usage_reads_are_registered_for_known_keys_only(self) -> None:
+        for as_hex in threejane_context._USAGE_READS:
+            self.assertIn(as_hex, threejane_context._LABELS_BY_HASH)
+
     def test_every_known_label_hashes_to_its_own_entry(self) -> None:
         for as_hex, (name, note) in threejane_context._LABELS_BY_HASH.items():
             self.assertEqual(as_hex, "0x" + keccak(text=name).hex())
@@ -240,6 +268,23 @@ class TestDistributorRendering(unittest.TestCase):
         self.assertIn("**Distribution mode:**", report)
         self.assertIn("maxClaimable 84,649,011 JANE", report)
         self.assertIn(f"https://etherscan.io/address/{JANE}", report)
+
+    def test_cadence_line_compares_against_the_previous_epoch(self) -> None:
+        prompt = format_threejane_prompt([_distributor_context()])
+        self.assertIn("Epoch 45 is the current epoch.", prompt)
+        self.assertIn("Proposed 5,564,323 JANE is +1.2% versus epoch 44's 5,499,673 JANE.", prompt)
+
+    def test_cadence_line_flags_a_past_epoch(self) -> None:
+        context = replace(_distributor_context(), current_epoch=47)
+        self.assertIn("a past epoch (current is 47)", format_threejane_prompt([context]))
+
+    def test_cadence_line_without_a_previous_allocation(self) -> None:
+        context = replace(_distributor_context(), epoch_emissions=((44, 0), (45, 0)))
+        self.assertIn("no allocation stored for epoch 44 to compare against", format_threejane_prompt([context]))
+
+    def test_cadence_line_absent_when_no_emissions_proposed(self) -> None:
+        context = replace(_distributor_context(), proposed_emissions=())
+        self.assertNotIn("Proposed", format_threejane_prompt([context]))
 
     def test_context_contributes_addresses_and_labels(self) -> None:
         context = _distributor_context()

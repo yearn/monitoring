@@ -109,6 +109,15 @@ def _abi(name: str) -> list[dict]:
 
 _MINTER_ROLE = keccak(text="MINTER_ROLE")
 
+# A cap only reads as slack or binding next to what it is capping. USD3's cap
+# and its totalAssets are both denominated in the vault's 6-decimal asset, so
+# the two are directly comparable; DEBT_CAP is deliberately absent until its
+# denomination against the market's borrow accounting is confirmed.
+USD3_ADDRESS = "0x056B269Eb1f75477a8666ae8C7fE01b64dD55eCc"
+_USAGE_READS: dict[str, tuple[str, str, str]] = {
+    "0x" + keccak(text="USD3_SUPPLY_CAP").hex(): (USD3_ADDRESS, "ERC4626Vault", "USD3 totalAssets"),
+}
+
 _DISTRIBUTOR_GETTERS = {"useMint", "merkleRoot", "jane", "maxClaimable", "totalClaimed", "epochEmissions"}
 
 
@@ -123,6 +132,9 @@ class HashedLabelContext:
     # Set only for ProtocolConfig keys; a role hash has no value to read.
     is_config_key: bool = False
     current_value: int | None = None
+    # What the key is capping, when the two are denominated the same way.
+    usage_label: str = ""
+    current_usage: int | None = None
 
     @property
     def addresses(self) -> list[str]:
@@ -151,6 +163,8 @@ class RewardsDistributorContext:
     total_claimed_raw: int
     current_epoch: int
     epoch_emissions: tuple[tuple[int, int], ...]
+    # (epoch, emissions) this transaction proposes, straight from the calldata.
+    proposed_emissions: tuple[tuple[int, int], ...]
 
     @property
     def addresses(self) -> list[str]:
@@ -167,6 +181,33 @@ class RewardsDistributorContext:
     def outstanding_raw(self) -> int:
         """Allocated but not yet claimed — the distributor's remaining claim ceiling."""
         return max(self.max_claimable_raw - self.total_claimed_raw, 0)
+
+    def cadence_lines(self) -> list[str]:
+        """State how each proposed allocation compares to the epoch before it.
+
+        Emissions run in a tight weekly band, so the same routine allocation has
+        been called "substantial in absolute terms" one week and routine the
+        next. Deriving the comparison here means the verdict rests on the
+        series rather than on the model's own arithmetic.
+        """
+        stored = dict(self.epoch_emissions)
+        lines = []
+        for epoch, proposed in self.proposed_emissions:
+            timing = (
+                "the current epoch"
+                if epoch == self.current_epoch
+                else f"a past epoch (current is {self.current_epoch})"
+                if epoch < self.current_epoch
+                else f"a future epoch (current is {self.current_epoch})"
+            )
+            previous = stored.get(epoch - 1, 0)
+            if previous > 0:
+                delta = (proposed - previous) / previous * 100
+                comparison = f"{delta:+.1f}% versus epoch {epoch - 1}'s {self.amount(previous)}"
+            else:
+                comparison = f"no allocation stored for epoch {epoch - 1} to compare against"
+            lines.append(f"Epoch {epoch} is {timing}. Proposed {self.amount(proposed)} is {comparison}.")
+        return lines
 
     def amount(self, raw: int) -> str:
         """Render a raw token amount with this token's verified decimals.
@@ -249,27 +290,46 @@ def _bytes32_arguments(call: DecodedCall) -> list[str]:
     return hexes
 
 
+def _proposed_emissions(calls: list[DecodedCall]) -> list[tuple[int, int]]:
+    """(epoch, emissions) pairs each setEpochEmissions call proposes."""
+    proposed = []
+    for call in calls:
+        if call.function_name != "setEpochEmissions" or len(call.params) < 2:
+            continue
+        (epoch_type, epoch), (value_type, value) = call.params[0], call.params[1]
+        if not (epoch_type.startswith("uint") and value_type.startswith("uint")):
+            continue
+        if isinstance(epoch, int) and isinstance(value, int):
+            proposed.append((int(epoch), int(value)))
+    return proposed
+
+
 def _requested_epochs(calls: list[DecodedCall], current_epoch: int) -> list[int]:
     """Epochs named by setEpochEmissions calls, else the current epoch."""
-    epochs = [
-        int(value)
-        for call in calls
-        if call.function_name == "setEpochEmissions"
-        for type_str, value in call.params[:1]
-        if type_str.startswith("uint") and isinstance(value, int)
-    ]
-    return epochs or [current_epoch]
+    return [epoch for epoch, _ in _proposed_emissions(calls)] or [current_epoch]
 
 
-def _read_config_values(chain_id: int, target: str, keys: list[str]) -> dict[str, int]:
-    """Read ProtocolConfig values for hashed keys, batched. Empty dict on failure."""
+def _read_config_state(chain_id: int, target: str, keys: list[str]) -> tuple[dict[str, int], dict[str, int]]:
+    """Read config values, plus what any capped quantity currently stands at.
+
+    Both come back in one batched request: a cap read without its usage costs
+    the same round trip and leaves the reader unable to tell a routine ceiling
+    raise from one that unblocks a queue.
+    """
     client = ChainManager.get_client(Chain.from_chain_id(chain_id))
     contract = client.get_contract(to_checksum_address(target), _abi("ProtocolConfig"))
+    usage_keys = [key for key in keys if key in _USAGE_READS]
     with client.batch_requests() as batch:
         for key in keys:
             batch.add(contract.functions.config(bytes.fromhex(key[2:])))
-        values = client.execute_batch(batch)
-    return {key: int(value) for key, value in zip(keys, values)}
+        for key in usage_keys:
+            address, abi_name, _ = _USAGE_READS[key]
+            batch.add(client.get_contract(to_checksum_address(address), _abi(abi_name)).functions.totalAssets())
+        results = client.execute_batch(batch)
+
+    values = {key: int(value) for key, value in zip(keys, results[: len(keys)])}
+    usage = {key: int(value) for key, value in zip(usage_keys, results[len(keys) :])}
+    return values, usage
 
 
 def _resolve_hashed_labels(chain_id: int, target: str, calls: list[DecodedCall]) -> list[HashedLabelContext]:
@@ -281,9 +341,10 @@ def _resolve_hashed_labels(chain_id: int, target: str, calls: list[DecodedCall])
 
     is_config_key = _exposes(chain_id, target, {"config"})
     values: dict[str, int] = {}
+    usage: dict[str, int] = {}
     if is_config_key:
         try:
-            values = _read_config_values(chain_id, target, known)
+            values, usage = _read_config_state(chain_id, target, known)
         except Exception as error:  # noqa: BLE001 - the name alone is still useful
             logger.info("3Jane config read failed for %s: %s", target, error)
 
@@ -298,6 +359,8 @@ def _resolve_hashed_labels(chain_id: int, target: str, calls: list[DecodedCall])
                 note=note,
                 is_config_key=is_config_key,
                 current_value=values.get(as_hex),
+                usage_label=_USAGE_READS[as_hex][2] if as_hex in _USAGE_READS else "",
+                current_usage=usage.get(as_hex),
             )
         )
     return contexts
@@ -359,6 +422,7 @@ def _read_distributor_context(chain_id: int, target: str, calls: list[DecodedCal
         total_claimed_raw=int(total_claimed),
         current_epoch=int(current_epoch),
         epoch_emissions=tuple((epoch, int(value)) for epoch, value in zip(epochs, emissions)),
+        proposed_emissions=tuple(_proposed_emissions(calls)),
     )
 
 
@@ -433,6 +497,7 @@ def format_threejane_prompt(contexts: list[ThreeJaneContext]) -> str:
                         f"Current merkleRoot: {context.merkle_root}",
                         f"Current epoch: {context.current_epoch}",
                         _emissions_line(context),
+                        *context.cadence_lines(),
                     ]
                 )
             )
@@ -441,6 +506,11 @@ def format_threejane_prompt(contexts: list[ThreeJaneContext]) -> str:
             if context.is_config_key:
                 value = "not readable" if context.current_value is None else str(context.current_value)
                 line += f"; value stored on-chain right now: {value}"
+            if context.current_usage is not None:
+                line += (
+                    f"; {context.usage_label} right now: {context.current_usage} "
+                    "(same units as the key, so the two are directly comparable)"
+                )
             sections.append(line)
     return "\n\n".join(sections)
 
@@ -479,6 +549,7 @@ def format_threejane_report(
                 "- **Epoch emissions on-chain now:**",
             ]
             lines.extend(f"  - Epoch `{epoch}`: `{context.amount(value)}`" for epoch, value in context.epoch_emissions)
+            lines.extend(f"- **Proposed:** {line}" for line in context.cadence_lines())
             sections.append("\n".join(lines))
         else:
             lines = [
@@ -488,6 +559,10 @@ def format_threejane_report(
             if context.is_config_key:
                 value = "not readable" if context.current_value is None else f"`{context.current_value:,}`"
                 lines.append(f"  - Value stored on-chain right now: {value}")
+            if context.current_usage is not None:
+                lines.append(
+                    f"  - {context.usage_label} right now: `{context.current_usage:,}` (same units as the key)"
+                )
             sections.append("\n".join(lines))
     return "\n\n".join(sections)
 
