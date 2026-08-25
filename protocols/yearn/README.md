@@ -2,6 +2,27 @@
 
 This folder contains monitoring scripts for Yearn vault activity, Safe multisig queues, and timelock operations.
 
+## Lender-Borrower Risk
+
+The script `yearn/lender_borrower.py` monitors the active Katana Morpho `vbWBTC/yvUSDC` lender-borrower strategy. The strategy deposits vbWBTC as Morpho collateral, borrows vbUSDC, and lends the borrowed vbUSDC into the Yearn vbUSDC vault.
+
+### Checks
+
+1. **Liquidation risk**: reproduces the strategy warning LTV from Morpho's LLTV and `warningLTVMultiplier()`, then alerts when `getCurrentLTV()` exceeds it. The displayed vbWBTC and vbUSDC prices come from the strategy's Morpho and USD oracles. The borrow-token USD feed must have updated within 26 hours. Runs every 30 minutes.
+2. **Net spread**: derives Morpho's instantaneous borrow APR from the adaptive IRM's window-average rate and subtracts it from the lender vault APR returned by Yearn's APR oracle. A medium alert fires after at least three samples when the rolling 24-hour average is below `-1%`. A zero lender APR is treated as unavailable data, alerts, and is not stored as a rate sample. Runs every six hours.
+3. **Debt coverage**: compares `balanceOfLentAssets() + balanceOfBorrowToken()` with `balanceOfDebt()`. A medium alert fires when the deficit is both at least 10 basis points of debt and worth at least $100. Runs every six hours with the net-spread check.
+
+All breach, unavailable-data, and monitor-error alerts use `MEDIUM` severity and route to the internal curation Telegram channel, falling back to the Yearn channel when curation is not configured. MEDIUM sends Telegram without invoking the HIGH/CRITICAL emergency-dispatch hook. Persistent breaches and errors are deduplicated and reminded once per 24 hours. The monitor is read-only and does not initiate deleveraging.
+
+### Usage
+
+```bash
+uv run protocols/yearn/lender_borrower.py --checks=ltv --dry-run
+uv run protocols/yearn/lender_borrower.py --checks=rates-and-coverage --dry-run
+```
+
+Omit `--dry-run` to persist rate samples and send configured alerts.
+
 ## Large Flows
 
 The script `yearn/alert_large_flows.py` checks recent deposit and withdrawal events and sends a Telegram alert when a single flow exceeds a USD threshold. It runs hourly via the [monitoring runner](../automation/jobs.yaml).

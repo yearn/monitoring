@@ -455,15 +455,19 @@ protocols:
 
   yearn:
     display_name: "Yearn"
-    description: "Yearn vault flow and timelock monitoring"
-    cadence: "Hourly / Daily"
+    description: "Yearn vault, strategy risk, and timelock monitoring"
+    cadence: "Every 30 minutes / 6 hours / Hourly / Daily"
     tasks:
+      - protocols/yearn/lender_borrower.py
       - protocols/yearn/alert_large_flows.py
       - protocols/yearn/check_timelock_delay.py
       - protocols/yearn/check_indexer_freshness.py
     monitors:
       - name: "Indexer Freshness"
         description: "Envio indexer lag per chain; alerts the Envio channel when a chain's newest indexed block is older than 60 minutes or the GraphQL endpoint is down"
+      - name: "Lender-Borrower Risk"
+        description: "Katana Morpho vbWBTC/yvUSDC: LTV every 30m; 24h net spread and debt coverage every 6h"
+        severity: "MEDIUM"
       - name: "Large Flows"
         description: "Deposit/withdrawal flows >=$500k USD (Katana withdrawals >=$50k; or 10% of vault totalSupply fallback for unpriced tokens)"
       - name: "Timelock Delay"
