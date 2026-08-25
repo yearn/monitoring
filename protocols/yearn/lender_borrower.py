@@ -19,6 +19,7 @@ from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chainlink import CHAINLINK_ABI, RoundData
 from utils.chains import Chain
 from utils.logger import get_logger
+from utils.telegram import CURATION_CHANNEL, resolve_channel
 from utils.web3_wrapper import ChainManager, Web3Client
 
 PROTOCOL = "yearn"
@@ -51,7 +52,6 @@ MORPHO_ABI = load_abi("protocols/yearn/abi/MorphoCore.json")
 IRM_ABI = load_abi("protocols/yearn/abi/MorphoIrm.json")
 MORPHO_ORACLE_ABI = load_abi("protocols/yearn/abi/MorphoOracle.json")
 APR_ORACLE_ABI = load_abi("protocols/yearn/abi/AprOracle.json")
-ERC20_ABI = load_abi("common-abi/ERC20.json")
 
 
 @dataclass(frozen=True)
@@ -61,6 +61,18 @@ class StrategyConfig:
     name: str
     chain: Chain
     address: str
+    collateral_address: str
+    collateral_symbol: str
+    collateral_decimals: int
+    borrow_address: str
+    borrow_symbol: str
+    borrow_decimals: int
+    lender_vault_address: str
+    morpho_address: str
+    market_id: str
+    morpho_oracle_address: str
+    morpho_irm_address: str
+    liquidation_ltv_wad: int
     joc_url: str
     negative_spread_threshold_bps: int = 100
     rate_window_hours: int = 24
@@ -68,6 +80,17 @@ class StrategyConfig:
     deficit_threshold_bps: int = 10
     deficit_min_usd: int = 100
     borrow_price_max_age_seconds: int = 26 * 60 * 60
+
+    @property
+    def market_params(self) -> tuple[str, str, str, str, int]:
+        """Return the immutable Morpho market parameters."""
+        return (
+            self.borrow_address,
+            self.collateral_address,
+            self.morpho_oracle_address,
+            self.morpho_irm_address,
+            self.liquidation_ltv_wad,
+        )
 
 
 @dataclass(frozen=True)
@@ -144,6 +167,18 @@ STRATEGIES = (
         name="Morpho vbWBTC/yvUSDC Lender Borrower",
         chain=Chain.KATANA,
         address="0x0432337365d89c0D73f1D0Cb263791F8f1B98D43",
+        collateral_address="0x0913DA6Da4b42f538B445599b46Bb4622342Cf52",
+        collateral_symbol="vbWBTC",
+        collateral_decimals=8,
+        borrow_address="0x203A662b0BD271A6ed5a60EdFbd04bFce608FD36",
+        borrow_symbol="vbUSDC",
+        borrow_decimals=6,
+        lender_vault_address="0x80c34BD3A3569E126e7055831036aa7b212cB159",
+        morpho_address="0xD50F2DffFd62f94Ee4AEd9ca05C61d0753268aBc",
+        market_id="0xcd2dc555dced7422a3144a4126286675449019366f83e9717be7c2deb3daae3e",
+        morpho_oracle_address="0xB60F728BdcE5e3921C0E42c1a6F07A1313D0040e",
+        morpho_irm_address="0x4F708C0ae7deD3d74736594C2109C2E3c065B428",
+        liquidation_ltv_wad=860_000_000_000_000_000,
         joc_url="https://joc.yearn.dev/strategy/katana/0x0432337365d89c0D73f1D0Cb263791F8f1B98D43",
     ),
 )
@@ -323,31 +358,21 @@ def evaluate_snapshot(
     return Evaluation(tuple(issue_codes), tuple(issue_messages), avg_spread_wad, len(rate_samples))
 
 
-def _as_address(value: Any) -> str:
-    return str(Web3.to_checksum_address(str(value)))
-
-
 def _read_snapshot(config: StrategyConfig, *, include_rates: bool) -> StrategySnapshot:
     client = ChainManager.get_client(config.chain)
     strategy_address = Web3.to_checksum_address(config.address)
     strategy = client.get_contract(strategy_address, STRATEGY_ABI)
 
+    # Static addresses and Morpho market parameters live in StrategyConfig. The
+    # remaining values are position state or management-settable configuration.
     with client.batch_requests() as batch:
         for call in (
-            strategy.functions.name(),
-            strategy.functions.asset(),
-            strategy.functions.borrowToken(),
-            strategy.functions.lenderVault(),
-            strategy.functions.morpho(),
-            strategy.functions.marketId(),
             strategy.functions.borrowUsdOracle(),
-            strategy.functions.marketParams(),
             strategy.functions.balanceOfCollateral(),
             strategy.functions.balanceOfDebt(),
             strategy.functions.balanceOfLentAssets(),
             strategy.functions.balanceOfBorrowToken(),
             strategy.functions.getCurrentLTV(),
-            strategy.functions.getLiquidateCollateralFactor(),
             strategy.functions.warningLTVMultiplier(),
             strategy.functions.targetLTVMultiplier(),
         ):
@@ -355,55 +380,30 @@ def _read_snapshot(config: StrategyConfig, *, include_rates: bool) -> StrategySn
         values = client.execute_batch(batch)
 
     (
-        strategy_name,
-        collateral_address,
-        borrow_address,
-        lender_vault_address,
-        morpho_address,
-        market_id,
         borrow_usd_oracle_address,
-        market_params_raw,
         collateral,
         debt,
         lent,
         idle_borrow_token,
         current_ltv_wad,
-        liquidation_ltv_wad,
         warning_multiplier_bps,
         target_multiplier_bps,
     ) = values
 
-    collateral_address = _as_address(collateral_address)
-    borrow_address = _as_address(borrow_address)
-    lender_vault_address = _as_address(lender_vault_address)
-    morpho_address = _as_address(morpho_address)
-    borrow_usd_oracle_address = _as_address(borrow_usd_oracle_address)
-    market_params = (
-        _as_address(market_params_raw[0]),
-        _as_address(market_params_raw[1]),
-        _as_address(market_params_raw[2]),
-        _as_address(market_params_raw[3]),
-        int(market_params_raw[4]),
-    )
-    if market_params[0] != borrow_address or market_params[1] != collateral_address:
-        raise ValueError("Strategy token getters do not match Morpho market params")
-    if int(liquidation_ltv_wad) != market_params[4]:
-        raise ValueError("Strategy liquidation factor does not match Morpho LLTV")
+    lender_vault_address = Web3.to_checksum_address(config.lender_vault_address)
+    morpho_address = Web3.to_checksum_address(config.morpho_address)
+    borrow_usd_oracle_address = Web3.to_checksum_address(borrow_usd_oracle_address)
+    market_params = config.market_params
+    liquidation_ltv_wad = market_params[4]
 
     block = client.execute(client.eth.get_block, "latest")
     block_number = int(block["number"])
     block_timestamp = int(block["timestamp"])
-    collateral_token = client.get_contract(collateral_address, ERC20_ABI)
-    borrow_token = client.get_contract(borrow_address, ERC20_ABI)
     morpho_oracle = client.get_contract(market_params[2], MORPHO_ORACLE_ABI)
     price_feed = client.get_contract(borrow_usd_oracle_address, CHAINLINK_ABI)
 
     with client.batch_requests() as batch:
         for call in (
-            collateral_token.functions.symbol(),
-            collateral_token.functions.decimals(),
-            borrow_token.functions.symbol(),
-            borrow_token.functions.decimals(),
             morpho_oracle.functions.price(),
             price_feed.functions.decimals(),
             price_feed.functions.latestRoundData(),
@@ -412,10 +412,6 @@ def _read_snapshot(config: StrategyConfig, *, include_rates: bool) -> StrategySn
         aux = client.execute_batch(batch)
 
     (
-        collateral_symbol,
-        collateral_decimals,
-        borrow_symbol,
-        borrow_decimals,
         oracle_price,
         price_feed_decimals,
         price_round,
@@ -431,9 +427,9 @@ def _read_snapshot(config: StrategyConfig, *, include_rates: bool) -> StrategySn
     borrow_price_usd_e8 = borrow_price_answer * USD_SCALE // (10 ** int(price_feed_decimals))
     collateral_price_borrow_wad = (
         int(oracle_price)
-        * (10 ** int(collateral_decimals))
+        * (10**config.collateral_decimals)
         * WAD
-        // (ORACLE_PRICE_SCALE * (10 ** int(borrow_decimals)))
+        // (ORACLE_PRICE_SCALE * (10**config.borrow_decimals))
     )
     collateral_price_usd_e8 = collateral_price_borrow_wad * borrow_price_usd_e8 // WAD
 
@@ -443,7 +439,7 @@ def _read_snapshot(config: StrategyConfig, *, include_rates: bool) -> StrategySn
         morpho = client.get_contract(morpho_address, MORPHO_ABI)
         apr_oracle = client.get_contract(Web3.to_checksum_address(YEARN_APR_ORACLE), APR_ORACLE_ABI)
         with client.batch_requests() as batch:
-            batch.add(morpho.functions.market(market_id))
+            batch.add(morpho.functions.market(config.market_id))
             batch.add(apr_oracle.functions.getStrategyApr(lender_vault_address, 0))
             market_raw, lender_apr_raw = client.execute_batch(batch)
 
@@ -468,11 +464,11 @@ def _read_snapshot(config: StrategyConfig, *, include_rates: bool) -> StrategySn
 
     return StrategySnapshot(
         timestamp=block_timestamp,
-        strategy_name=str(strategy_name),
-        collateral_symbol=str(collateral_symbol),
-        collateral_decimals=int(collateral_decimals),
-        borrow_symbol=str(borrow_symbol),
-        borrow_decimals=int(borrow_decimals),
+        strategy_name=config.name,
+        collateral_symbol=config.collateral_symbol,
+        collateral_decimals=config.collateral_decimals,
+        borrow_symbol=config.borrow_symbol,
+        borrow_decimals=config.borrow_decimals,
         collateral=int(collateral),
         debt=int(debt),
         lent=int(lent),
@@ -530,12 +526,12 @@ def _update_rate_samples(config: StrategyConfig, snapshot: StrategySnapshot, *, 
     return samples
 
 
-def _alert_state_key(config: StrategyConfig, checks: str) -> str:
+def _state_key(config: StrategyConfig, checks: str) -> str:
     return f"{config.address.lower()}:{checks}"
 
 
 def _should_send_alert(config: StrategyConfig, evaluation: Evaluation, now: int, checks: str = CHECK_ALL) -> bool:
-    key = _alert_state_key(config, checks)
+    key = _state_key(config, checks)
     raw = store.state_get(ALERT_STATE_NAMESPACE, key)
     previous: dict[str, Any] = {}
     if raw:
@@ -559,18 +555,14 @@ def _record_alert_sent(config: StrategyConfig, evaluation: Evaluation, now: int,
     fingerprint = "|".join(sorted(evaluation.issue_codes))
     store.state_set(
         ALERT_STATE_NAMESPACE,
-        _alert_state_key(config, checks),
+        _state_key(config, checks),
         json.dumps({"fingerprint": fingerprint, "last_alert": now}),
     )
 
 
-def _error_state_key(config: StrategyConfig, checks: str) -> str:
-    return f"{config.address.lower()}:{checks}"
-
-
 def _should_send_error(config: StrategyConfig, checks: str, error_type: str, now: int) -> bool:
     """Return whether a monitor error is new or due for its daily reminder."""
-    raw = store.state_get(ERROR_STATE_NAMESPACE, _error_state_key(config, checks))
+    raw = store.state_get(ERROR_STATE_NAMESPACE, _state_key(config, checks))
     previous: dict[str, Any] = {}
     if raw:
         try:
@@ -584,13 +576,13 @@ def _should_send_error(config: StrategyConfig, checks: str, error_type: str, now
 def _record_error_sent(config: StrategyConfig, checks: str, error_type: str, now: int) -> None:
     store.state_set(
         ERROR_STATE_NAMESPACE,
-        _error_state_key(config, checks),
+        _state_key(config, checks),
         json.dumps({"fingerprint": error_type, "last_alert": now}),
     )
 
 
 def _clear_error_state(config: StrategyConfig, checks: str, now: int) -> None:
-    key = _error_state_key(config, checks)
+    key = _state_key(config, checks)
     if store.state_get(ERROR_STATE_NAMESPACE, key):
         store.state_set(ERROR_STATE_NAMESPACE, key, json.dumps({"fingerprint": "", "last_alert": now}))
 
@@ -679,7 +671,15 @@ def run_strategy(config: StrategyConfig, *, checks: str = CHECK_ALL, dry_run: bo
     if dry_run:
         logger.warning("Dry run would alert: %s", message.replace("\n", " | "))
     elif _should_send_alert(config, evaluation, snapshot.timestamp, checks):
-        send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL), plain_text=True)
+        send_alert(
+            Alert(
+                AlertSeverity.MEDIUM,
+                message,
+                PROTOCOL,
+                channel=resolve_channel(CURATION_CHANNEL, PROTOCOL),
+            ),
+            plain_text=True,
+        )
         _record_alert_sent(config, evaluation, snapshot.timestamp, checks)
 
 
@@ -711,6 +711,7 @@ def main() -> None:
                         f"Lender Borrower Monitor Error ({args.checks})\n"
                         f"{config.name}\n{error_type}: {exc}\n{config.joc_url}",
                         PROTOCOL,
+                        channel=resolve_channel(CURATION_CHANNEL, PROTOCOL),
                     ),
                     plain_text=True,
                 )
