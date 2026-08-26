@@ -37,6 +37,9 @@ PROTOCOL = "stables"
 CACHE_KEY_LAST_TX = "stables_dune_large_transfers_last_tx"
 MAX_ROWS_PER_PROTOCOL_ALERT = 100
 DEFAULT_LARGE_TRANSFER_THRESHOLD = 5_000_000.0  # can be set only to higher value because dune query is set to 5M
+# dune-client defaults to the "medium" cluster, which the API plan rejects with
+# "Invalid performance tier". Override via DUNE_PERFORMANCE_TIER after a plan upgrade.
+DEFAULT_PERFORMANCE_TIER = "free"
 
 # Route each token to its owning protocol channel.
 TOKEN_ROUTE: dict[tuple[str, str], tuple[str, str]] = {
@@ -205,6 +208,7 @@ def main() -> None:
     api_key = os.getenv("DUNE_API_KEY")
     query_id = Config.get_env_int("DUNE_LARGE_TRANSFERS_QUERY_ID", 0)
     threshold = Config.get_env_float("DUNE_LARGE_TRANSFER_THRESHOLD", DEFAULT_LARGE_TRANSFER_THRESHOLD)
+    performance_tier = os.getenv("DUNE_PERFORMANCE_TIER", DEFAULT_PERFORMANCE_TIER)
 
     if not api_key:
         logger.warning("DUNE_API_KEY is not set; skipping Dune large transfer monitor")
@@ -214,7 +218,7 @@ def main() -> None:
         return
 
     try:
-        dune = DuneClient(api_key)
+        dune = DuneClient(api_key, performance=performance_tier)
         result = dune.run_query(QueryBase(query_id=query_id, name="stables_large_transfers"), ping_frequency=2)
         rows = list(result.result.rows) if result and result.result and result.result.rows else []
     except Exception as exc:
@@ -222,7 +226,6 @@ def main() -> None:
         send_error_message(
             f"Dune large-transfer monitor failed while querying Dune: {exc}",
             PROTOCOL,
-            plain_text=True,
         )
         return
 

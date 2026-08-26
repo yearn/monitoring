@@ -1,6 +1,6 @@
 """Tests for the Dune-backed large transfer monitor."""
 
-from unittest.mock import Mock
+from unittest.mock import Mock, create_autospec
 
 from protocols.stables import dune_large_transfers as monitor
 
@@ -199,3 +199,60 @@ def test_main_sends_pretty_alert_with_markdown_enabled(monkeypatch):
     alert = send_alert.call_args.args[0]
     assert alert.message.startswith("*Large cUSD transfer detected*")
     assert send_alert.call_args.kwargs == {}
+
+
+def test_main_reports_query_failure_through_send_error_message(monkeypatch):
+    dune = Mock()
+    dune.run_query.side_effect = RuntimeError("dune exploded")
+
+    monkeypatch.setenv("DUNE_API_KEY", "test-key")
+    monkeypatch.setattr(monitor, "DuneClient", Mock(return_value=dune))
+    monkeypatch.setattr(monitor.Config, "get_env_int", Mock(return_value=7558262))
+    monkeypatch.setattr(monitor.Config, "get_env_float", Mock(return_value=5_000_000))
+    # autospec keeps the real signature, so an unsupported kwarg fails the test
+    send_error_message = create_autospec(monitor.send_error_message)
+    monkeypatch.setattr(monitor, "send_error_message", send_error_message)
+
+    monitor.main()
+
+    send_error_message.assert_called_once_with(
+        "Dune large-transfer monitor failed while querying Dune: dune exploded",
+        "stables",
+    )
+
+
+def test_main_runs_query_on_free_performance_tier(monkeypatch):
+    result = Mock()
+    result.result.rows = []
+    dune = Mock()
+    dune.run_query.return_value = result
+    dune_client = Mock(return_value=dune)
+
+    monkeypatch.setenv("DUNE_API_KEY", "test-key")
+    monkeypatch.delenv("DUNE_PERFORMANCE_TIER", raising=False)
+    monkeypatch.setattr(monitor, "DuneClient", dune_client)
+    monkeypatch.setattr(monitor.Config, "get_env_int", Mock(return_value=7558262))
+    monkeypatch.setattr(monitor.Config, "get_env_float", Mock(return_value=5_000_000))
+
+    monitor.main()
+
+    # "medium" (dune-client's default) is rejected by the API plan
+    assert dune_client.call_args.kwargs["performance"] == "free"
+
+
+def test_main_honours_performance_tier_override(monkeypatch):
+    result = Mock()
+    result.result.rows = []
+    dune = Mock()
+    dune.run_query.return_value = result
+    dune_client = Mock(return_value=dune)
+
+    monkeypatch.setenv("DUNE_API_KEY", "test-key")
+    monkeypatch.setenv("DUNE_PERFORMANCE_TIER", "medium")
+    monkeypatch.setattr(monitor, "DuneClient", dune_client)
+    monkeypatch.setattr(monitor.Config, "get_env_int", Mock(return_value=7558262))
+    monkeypatch.setattr(monitor.Config, "get_env_float", Mock(return_value=5_000_000))
+
+    monitor.main()
+
+    assert dune_client.call_args.kwargs["performance"] == "medium"
