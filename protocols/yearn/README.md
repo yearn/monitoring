@@ -55,6 +55,31 @@ Optional flags:
 - `--chain-ids` (default: all vault chain IDs — `1,8453,42161,747474`)
 - `--no-cache` (disable caching)
 
+## Small Parent Vault Deposits
+
+The script `yearn/alert_small_parent_deposits.py` alerts on every positive deposit strictly below 10,000 normalized underlying-token units into an active Yearn v3 parent vault. The comparison is in token units, not USD: for example, both 9,999 USDC and 9,999 WETH qualify.
+
+### Data Sources
+
+- **Parent vault discovery**: Kong GraphQL, filtered to Yearn v3 `vaultType: 1` vaults and excluding retired or hidden entries.
+- **Deposit events**: Envio `Deposit` entities, including the ERC-4626 owner and sender as well as the transaction initiator.
+- **Token decimals**: the parent vault's underlying asset metadata from Kong.
+
+Events are processed with a per-chain `(blockNumber, logIndex)` cursor stored in the monitoring database. The cursor advances only after an event is successfully evaluated and, when applicable, delivered to Telegram. A new deployment starts with a two-hour lookback.
+
+### Usage
+
+```bash
+uv run protocols/yearn/alert_small_parent_deposits.py
+```
+
+Optional flags:
+
+- `--threshold-units` (default: `10000`)
+- `--lookback-seconds` (default: `7200`, used only before a chain cursor exists)
+- `--page-size` (default: `1000`)
+- `--chain-ids` (default: `1,10,8453,42161,137,747474`)
+
 =======
 
 ## Shadow Debt Check
