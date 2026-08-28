@@ -30,7 +30,7 @@ getcontext().prec = 60
 
 ENVIO_GRAPHQL_URL = os.getenv("ENVIO_GRAPHQL_URL")
 DEFAULT_LOG_LEVEL = os.getenv("SMALL_PARENT_FLOWS_LOG_LEVEL", "INFO")
-DEFAULT_THRESHOLD_UNITS = Decimal("10000")
+DEFAULT_THRESHOLD_RAW = 10_000
 DEFAULT_LOOKBACK_SECONDS = 7200
 DEFAULT_PAGE_SIZE = 1000
 PROTOCOL = "yearn"
@@ -166,10 +166,10 @@ def format_units(raw_assets: str | int, decimals: int) -> Decimal:
     return Decimal(str(raw_assets)) / (Decimal(10) ** decimals)
 
 
-def is_small_flow(raw_assets: str | int, decimals: int, threshold_units: Decimal) -> bool:
-    """Return whether a positive flow is strictly below the unit threshold."""
-    amount = format_units(raw_assets, decimals)
-    return Decimal(0) < amount < threshold_units
+def is_small_flow(raw_assets: str | int, threshold_raw: int) -> bool:
+    """Return whether a positive raw asset amount is below the threshold."""
+    amount_raw = int(str(raw_assets))
+    return 0 < amount_raw < threshold_raw
 
 
 def format_amount(amount: Decimal) -> str:
@@ -185,7 +185,13 @@ def address_link(address: str, explorer: str | None) -> str:
     return address
 
 
-def build_alert_message(event: dict, vault: dict, amount: Decimal, threshold_units: Decimal) -> str:
+def build_alert_message(
+    event: dict,
+    vault: dict,
+    raw_assets: int,
+    amount: Decimal,
+    threshold_raw: int,
+) -> str:
     """Build the Telegram message for one qualifying flow."""
     chain_id = int(event["chainId"])
     chain = Chain.from_chain_id(chain_id)
@@ -198,8 +204,9 @@ def build_alert_message(event: dict, vault: dict, amount: Decimal, threshold_uni
     lines = [
         f"Small parent-vault {flow_type}",
         f"🏦 Vault: {address_link(vault_address, explorer)} ({vault['symbol']})",
-        f"🪙 Amount: {format_amount(amount)} {vault['asset_symbol']}",
-        f"📏 Threshold: < {format_amount(threshold_units)} {vault['asset_symbol']}",
+        f"🔢 Raw Assets: {raw_assets:,}",
+        f"🪙 Normalized: {format_amount(amount)} {vault['asset_symbol']}",
+        f"📏 Raw Threshold: < {threshold_raw:,}",
         f"⛓️ Chain: {chain.network_name}",
         f"👤 Owner: {address_link(str(event['owner']), explorer)}",
         f"💳 Sender: {address_link(str(event['sender']), explorer)}",
@@ -251,7 +258,7 @@ def save_cursor(chain_id: int, flow_type: str, cursor: EventCursor) -> None:
 def process_event(
     event: dict,
     vaults_by_address: dict[str, dict],
-    threshold_units: Decimal,
+    threshold_raw: int,
     alert_sender: Callable[[Alert], None] = send_alert,
 ) -> bool:
     """Evaluate one flow, sending an alert when it is below the threshold."""
@@ -260,12 +267,12 @@ def process_event(
     if vault is None:
         raise RuntimeError(f"Envio returned unknown parent vault {event['vaultAddress']}")
 
-    decimals = int(vault["asset_decimals"])
-    if not is_small_flow(event["assets"], decimals, threshold_units):
+    raw_assets = int(str(event["assets"]))
+    if not is_small_flow(raw_assets, threshold_raw):
         return False
 
-    amount = format_units(event["assets"], decimals)
-    message = build_alert_message(event, vault, amount, threshold_units)
+    amount = format_units(raw_assets, int(vault["asset_decimals"]))
+    message = build_alert_message(event, vault, raw_assets, amount, threshold_raw)
     alert_sender(Alert(AlertSeverity.LOW, message, PROTOCOL))
     return True
 
@@ -275,7 +282,7 @@ def monitor_flow_type(
     flow_type: str,
     addresses: list[str],
     vaults_by_address: dict[str, dict],
-    threshold_units: Decimal,
+    threshold_raw: int,
     lookback_seconds: int,
     page_size: int,
     now: int | None = None,
@@ -298,7 +305,7 @@ def monitor_flow_type(
             event_cursor = cursor_from_event(event)
             if event_cursor <= cursor:
                 continue
-            if process_event(event, vaults_by_address, threshold_units):
+            if process_event(event, vaults_by_address, threshold_raw):
                 alerted += 1
             save_cursor(chain_id, flow_type, event_cursor)
             cursor = event_cursor
@@ -312,7 +319,7 @@ def monitor_flow_type(
 
 def monitor_chain(
     chain: Chain,
-    threshold_units: Decimal,
+    threshold_raw: int,
     lookback_seconds: int,
     page_size: int,
     now: int | None = None,
@@ -338,7 +345,7 @@ def monitor_chain(
             flow_type,
             addresses,
             vaults_by_address,
-            threshold_units,
+            threshold_raw,
             lookback_seconds,
             page_size,
             now,
@@ -368,9 +375,9 @@ def main() -> None:
     """Run the small parent-vault flow monitor."""
     default_chain_ids = ",".join(str(chain.chain_id) for chain in Chain)
     parser = argparse.ArgumentParser(
-        description="Alert on Yearn v3 parent-vault deposits and withdrawals below a token-unit threshold."
+        description="Alert on Yearn v3 parent-vault deposits and withdrawals below a raw-assets threshold."
     )
-    parser.add_argument("--threshold-units", type=Decimal, default=DEFAULT_THRESHOLD_UNITS)
+    parser.add_argument("--threshold-raw", type=int, default=DEFAULT_THRESHOLD_RAW)
     parser.add_argument("--lookback-seconds", type=int, default=DEFAULT_LOOKBACK_SECONDS)
     parser.add_argument("--page-size", type=int, default=DEFAULT_PAGE_SIZE)
     parser.add_argument("--chain-ids", default=default_chain_ids)
@@ -382,8 +389,8 @@ def main() -> None:
         format="[%(name)s] %(levelname)s %(message)s",
         stream=sys.stderr,
     )
-    if args.threshold_units <= 0:
-        parser.error("--threshold-units must be positive")
+    if args.threshold_raw <= 0:
+        parser.error("--threshold-raw must be positive")
     if args.lookback_seconds < 0:
         parser.error("--lookback-seconds must be non-negative")
     if args.page_size <= 0:
@@ -394,7 +401,7 @@ def main() -> None:
     for chain in parse_chain_ids(args.chain_ids):
         processed, alerted = monitor_chain(
             chain,
-            args.threshold_units,
+            args.threshold_raw,
             args.lookback_seconds,
             args.page_size,
         )

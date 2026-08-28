@@ -18,7 +18,7 @@ VAULT = {
 def make_event(
     *,
     flow_type: str = "deposit",
-    assets: str = "9999999999",
+    assets: str = "5000",
     block_number: int = 100,
     log_index: int = 2,
 ) -> dict:
@@ -42,14 +42,12 @@ def make_event(
     return event
 
 
-def test_small_flow_uses_normalized_token_units() -> None:
-    threshold = Decimal("10000")
-
+def test_small_flow_uses_raw_asset_units() -> None:
     assert monitor.format_units("1234567", 6) == Decimal("1.234567")
-    assert monitor.is_small_flow("9999999999", 6, threshold)
-    assert not monitor.is_small_flow("10000000000", 6, threshold)
-    assert not monitor.is_small_flow("10000000001", 6, threshold)
-    assert not monitor.is_small_flow("0", 6, threshold)
+    assert monitor.is_small_flow("9999", 10_000)
+    assert not monitor.is_small_flow("10000", 10_000)
+    assert not monitor.is_small_flow("10001", 10_000)
+    assert not monitor.is_small_flow("0", 10_000)
 
 
 def test_process_deposit_sends_low_alert_with_all_addresses() -> None:
@@ -58,7 +56,7 @@ def test_process_deposit_sends_low_alert_with_all_addresses() -> None:
     did_alert = monitor.process_event(
         make_event(),
         {"0xparent": VAULT},
-        Decimal("10000"),
+        10_000,
         alert_sender=alerts.append,
     )
 
@@ -68,7 +66,9 @@ def test_process_deposit_sends_low_alert_with_all_addresses() -> None:
     assert alert.severity is AlertSeverity.LOW
     assert alert.protocol == "yearn"
     assert "Small parent-vault deposit" in alert.message
-    assert "9,999.999999 USDC" in alert.message
+    assert "Raw Assets: 5,000" in alert.message
+    assert "Normalized: 0.005 USDC" in alert.message
+    assert "Raw Threshold: < 10,000" in alert.message
     assert "0xOwner" in alert.message
     assert "0xSender" in alert.message
     assert "0xTransactionFrom" in alert.message
@@ -82,7 +82,7 @@ def test_process_withdrawal_includes_asset_receiver() -> None:
     did_alert = monitor.process_event(
         make_event(flow_type="withdrawal"),
         {"0xparent": VAULT},
-        Decimal("10000"),
+        10_000,
         alert_sender=alerts.append,
     )
 
@@ -97,9 +97,9 @@ def test_process_event_does_not_alert_at_threshold() -> None:
     alerts = []
 
     did_alert = monitor.process_event(
-        make_event(assets="10000000000"),
+        make_event(assets="10000"),
         {"0xparent": VAULT},
-        Decimal("10000"),
+        10_000,
         alert_sender=alerts.append,
     )
 
@@ -158,7 +158,7 @@ def test_monitor_flow_type_pages_and_persists_each_processed_event(monkeypatch) 
         "withdrawal",
         ["0xParent"],
         {"0xparent": VAULT},
-        Decimal("10000"),
+        10_000,
         lookback_seconds=7200,
         page_size=2,
         now=1_700_010_000,
@@ -187,7 +187,7 @@ def test_monitor_chain_runs_deposit_and_withdrawal_streams(monkeypatch) -> None:
 
     monkeypatch.setattr(monitor, "monitor_flow_type", fake_monitor)
 
-    result = monitor.monitor_chain(Chain.MAINNET, Decimal("10000"), 7200, 1000)
+    result = monitor.monitor_chain(Chain.MAINNET, 10_000, 7200, 1000)
 
     assert result == (2, 2)
     assert flow_types == ["deposit", "withdrawal"]
