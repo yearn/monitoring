@@ -290,6 +290,29 @@ class TestReferenceTable(unittest.TestCase):
         self.assertEqual(table.count(f"| [`{REGISTRY}`](https://etherscan.io/address/{REGISTRY})"), 1)
         self.assertEqual(table.count("Receives `addFarms(uint256,address[])`"), 1)
 
+    def test_keeps_each_description_paired_with_its_role(self) -> None:
+        set_rate = DecodedCall(function_name="setRate", signature="setRate(uint256)", params=[("uint256", 1)])
+        pause = DecodedCall(function_name="pause", signature="pause()")
+        set_owner = DecodedCall(
+            function_name="setOwner",
+            signature="setOwner(address)",
+            params=[("address", REGISTRY)],
+        )
+        ctx = _add_farms_ctx(
+            entries=[
+                CallEntry(target=REGISTRY, call=set_rate),
+                CallEntry(target=REGISTRY, call=pause),
+                CallEntry(target=DROP, call=set_owner, param_names=["owner"]),
+            ],
+        )
+
+        row = next(line for line in format_reference_table(ctx).splitlines() if line.startswith(f"| [`{REGISTRY}`]"))
+
+        self.assertIn("| Call target; Calldata argument |", row)
+        self.assertIn("**Call target:** Receives `setRate(uint256)`", row)
+        self.assertIn("**Call target:** Receives `pause()`", row)
+        self.assertIn("**Calldata argument:** Passed as `owner` to `setOwner(address)`", row)
+
     def test_escapes_dynamic_table_text(self) -> None:
         ctx = _add_farms_ctx(labels={REGISTRY: "Farm | Registry\nMain"})
         self.assertIn("Farm \\| Registry Main", format_reference_table(ctx))
@@ -298,6 +321,34 @@ class TestReferenceTable(unittest.TestCase):
         transfer = "0xa9059cbb" + FARM[2:].zfill(64) + f"{1:064x}"
         outer = DecodedCall(function_name="execute", signature="execute(bytes)", params=[("bytes", transfer)])
         ctx = _add_farms_ctx(entries=[CallEntry(target=REGISTRY, call=outer)])
+
+        table = format_reference_table(ctx)
+
+        self.assertIn(f"[`{FARM_CKS}`](https://etherscan.io/address/{FARM_CKS})", table)
+        self.assertIn("to `transfer(address,uint256)`", table)
+
+    def test_includes_addresses_from_bytes_array_payloads(self) -> None:
+        transfer = "0xa9059cbb" + FARM[2:].zfill(64) + f"{1:064x}"
+        batch = DecodedCall(
+            function_name="executeBatch",
+            signature="executeBatch(bytes[])",
+            params=[("bytes[]", (transfer,))],
+        )
+        ctx = _add_farms_ctx(entries=[CallEntry(target=REGISTRY, call=batch)])
+
+        table = format_reference_table(ctx)
+
+        self.assertIn(f"[`{FARM_CKS}`](https://etherscan.io/address/{FARM_CKS})", table)
+        self.assertIn("to `transfer(address,uint256)`", table)
+
+    def test_includes_addresses_from_tuple_payloads(self) -> None:
+        transfer = "0xa9059cbb" + FARM[2:].zfill(64) + f"{1:064x}"
+        wrapper = DecodedCall(
+            function_name="execute",
+            signature="execute((address,bytes))",
+            params=[("(address,bytes)", (REGISTRY, transfer))],
+        )
+        ctx = _add_farms_ctx(entries=[CallEntry(target=DROP, call=wrapper)])
 
         table = format_reference_table(ctx)
 

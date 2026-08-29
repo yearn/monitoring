@@ -75,12 +75,11 @@ class ReportContext:
 
 @dataclass
 class _ReferenceEntry:
-    """One address and its accumulated deterministic report roles."""
+    """One address and its accumulated deterministic report usages."""
 
     address: str
     label: str
-    roles: list[str] = field(default_factory=list)
-    descriptions: list[str] = field(default_factory=list)
+    usages: list[tuple[str, str]] = field(default_factory=list)
 
 
 def checksum_or_none(addr: object) -> str | None:
@@ -339,15 +338,32 @@ def _add_reference(
         return
     key = address.lower()
     entry = entries.setdefault(key, _ReferenceEntry(address, _reference_label(ctx, address)))
-    if role not in entry.roles:
-        entry.roles.append(role)
-    if description not in entry.descriptions:
-        entry.descriptions.append(description)
+    usage = (role, description)
+    if usage not in entry.usages:
+        entry.usages.append(usage)
 
 
 def _table_cell(value: str) -> str:
     """Escape dynamic text for one GitHub-flavored Markdown table cell."""
     return value.replace("|", "\\|").replace("\r", " ").replace("\n", " ").strip()
+
+
+def _iter_inner_calldata(type_str: str, value: object) -> Iterator[DecodedCall]:
+    """Yield decodable calldata from bytes leaves inside arrays and tuples."""
+    element = array_element_type(type_str)
+    if element is not None and isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_inner_calldata(element, item)
+        return
+    components = tuple_component_types(type_str)
+    if components is not None and isinstance(value, (list, tuple)) and len(components) == len(value):
+        for component, item in zip(components, value):
+            yield from _iter_inner_calldata(component, item)
+        return
+    if type_str == "bytes":
+        inner = try_decode_inner_calldata(value)
+        if inner is not None:
+            yield inner
 
 
 def _iter_reference_arguments(
@@ -362,16 +378,15 @@ def _iter_reference_arguments(
         description = f"Passed as {parameter} to `{call.signature}`"
         for address in iter_address_values(type_str, value):
             yield address, description
-        if type_str == "bytes" and depth < MAX_BYTES_RECURSION_DEPTH:
-            inner = try_decode_inner_calldata(value)
-            if inner is not None:
+        if depth < MAX_BYTES_RECURSION_DEPTH:
+            for inner in _iter_inner_calldata(type_str, value):
                 yield from _iter_reference_arguments(inner, None, depth + 1)
 
 
 def format_reference_table(ctx: ReportContext) -> str:
     """Render addresses used by the transaction as a deterministic table."""
     references: dict[str, _ReferenceEntry] = {}
-    _add_reference(references, ctx, ctx.from_address, "Executor", "Executes the governance transaction")
+    _add_reference(references, ctx, ctx.from_address, "Executor", "Execution authority for the governance transaction")
 
     label_address = checksum_or_none(ctx.label_address)
     sender = checksum_or_none(ctx.from_address)
@@ -402,8 +417,10 @@ def format_reference_table(ctx: ReportContext) -> str:
     for reference in references.values():
         address = address_link(reference.address, ctx.chain_id)
         label = _table_cell(reference.label) or "—"
-        roles = _table_cell("; ".join(reference.roles))
-        descriptions = _table_cell("; ".join(reference.descriptions))
+        roles = _table_cell("; ".join(dict.fromkeys(role for role, _description in reference.usages)))
+        descriptions = "<br>".join(
+            f"**{_table_cell(role)}:** {_table_cell(description)}" for role, description in reference.usages
+        )
         lines.append(f"| {address} | {label} | {roles} | {descriptions} |")
     return "\n".join(lines)
 

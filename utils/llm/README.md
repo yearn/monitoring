@@ -366,12 +366,12 @@ The report also includes a code-generated `## Reference` table before Analysis:
 ```markdown
 | Address | Label | Role | Description |
 |---|---|---|---|
-| [`0x4B17…7c32`](https://etherscan.io/address/0x4B17…) | Infinifi Shorttimelock | Executor | Executes the governance transaction |
-| [`0x11F6…4189`](https://etherscan.io/address/0x11F6…) | RWAEscrowRateManager | Call target | Receives `setRate(address,uint256)` |
-| [`0xE4C7…dAA0`](https://etherscan.io/address/0xE4C7…) | New Silver Series 2 DROP | Protocol context | Resolved by the INFINIFI protocol adapter |
+| [`0x4B174afbeD7b98BA01F50E36109EEE5e6d327c32`](https://etherscan.io/address/0x4B174afbeD7b98BA01F50E36109EEE5e6d327c32) | Infinifi Shorttimelock | Executor | **Executor:** Execution authority for the governance transaction |
+| [`0x11F6FAb3f4D8635880C3e80cbae8AEF8136D4189`](https://etherscan.io/address/0x11F6FAb3f4D8635880C3e80cbae8AEF8136D4189) | RWAEscrowRateManager | Call target | **Call target:** Receives `setRate(address,uint256)` |
+| [`0xE4C72b4dE5b0F9ACcEA880Ad0b1F944F85A9dAA0`](https://etherscan.io/address/0xE4C72b4dE5b0F9ACcEA880Ad0b1F944F85A9dAA0) | New Silver Series 2 DROP | Protocol context | **Protocol context:** Resolved by the INFINIFI protocol adapter |
 ```
 
-The table deduplicates the executor, report contract, call targets, address-valued calldata arguments, and addresses introduced by protocol adapters. Roles and descriptions come from those deterministic relationships; the LLM does not generate them.
+The table deduplicates the executor, alert contract, call targets, address-valued calldata arguments, and addresses introduced by protocol adapters. Every description is prefixed with its role so multi-use addresses remain unambiguous. Roles and descriptions come from those deterministic relationships; the LLM does not generate them.
 
 **Call Flow is built in Python, not asked of the LLM** — it comes straight from the
 decoded calldata (`CallEntry` per call: target, signature, ABI parameter names, ETH
