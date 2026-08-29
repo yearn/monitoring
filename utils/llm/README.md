@@ -361,6 +361,18 @@ Registers a new type-2 farm in FarmRegistry. …
 <the LLM detail>
 ```
 
+The report also includes a code-generated `## Reference` table before Analysis:
+
+```markdown
+| Address | Label | Role | Description |
+|---|---|---|---|
+| [`0x4B17…7c32`](https://etherscan.io/address/0x4B17…) | Infinifi Shorttimelock | Executor | Executes the governance transaction |
+| [`0x11F6…4189`](https://etherscan.io/address/0x11F6…) | RWAEscrowRateManager | Call target | Receives `setRate(address,uint256)` |
+| [`0xE4C7…dAA0`](https://etherscan.io/address/0xE4C7…) | New Silver Series 2 DROP | Protocol context | Resolved by the INFINIFI protocol adapter |
+```
+
+The table deduplicates the executor, report contract, call targets, address-valued calldata arguments, and addresses introduced by protocol adapters. Roles and descriptions come from those deterministic relationships; the LLM does not generate them.
+
 **Call Flow is built in Python, not asked of the LLM** — it comes straight from the
 decoded calldata (`CallEntry` per call: target, signature, ABI parameter names, ETH
 value, nested `bytes` payloads unwrapped up to `MAX_BYTES_RECURSION_DEPTH`), so it

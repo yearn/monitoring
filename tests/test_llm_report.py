@@ -15,6 +15,7 @@ from utils.llm.report import (
     explorer_address_url,
     format_address_links_block,
     format_call_flow,
+    format_reference_table,
     iter_address_values,
     tuple_component_types,
 )
@@ -24,6 +25,7 @@ REGISTRY = "0xF5f2718708f471e43968271956CC01aaA8c46119"
 FARM = "0x79e1b8e45932a7c802ea3dab3844e5dea68d971f"
 FARM_CKS = "0x79e1B8e45932A7C802eA3dAb3844e5DEa68d971f"
 TIMELOCK = "0x4B174afbeD7b98BA01F50E36109EEE5e6d327c32"
+DROP = "0xE4C72b4dE5b0F9ACcEA880Ad0b1F944F85A9dAA0"
 
 
 def _add_farms_ctx(**overrides) -> ReportContext:
@@ -259,18 +261,67 @@ class TestBuildTitle(unittest.TestCase):
         )
 
 
+class TestReferenceTable(unittest.TestCase):
+    def test_renders_executor_target_argument_and_protocol_context(self) -> None:
+        ctx = _add_farms_ctx(
+            labels={REGISTRY: "FarmRegistry", FARM_CKS: "New Silver 2 Senior", DROP: "New Silver Series 2 DROP"},
+            label_address=TIMELOCK,
+            related_addresses=[FARM, DROP],
+        )
+
+        table = format_reference_table(ctx)
+
+        self.assertIn("| Address | Label | Role | Description |", table)
+        self.assertIn(f"| [`{TIMELOCK}`](https://etherscan.io/address/{TIMELOCK}) | Infinifi Shorttimelock |", table)
+        self.assertIn(
+            f"| [`{REGISTRY}`](https://etherscan.io/address/{REGISTRY}) | FarmRegistry | Call target |", table
+        )
+        self.assertIn("Receives `addFarms(uint256,address[])`", table)
+        self.assertIn("New Silver 2 Senior | Calldata argument; Protocol context", table)
+        self.assertIn("Passed as `_farms` to `addFarms(uint256,address[])`", table)
+        self.assertIn("New Silver Series 2 DROP | Protocol context", table)
+
+    def test_deduplicates_repeated_addresses_and_descriptions(self) -> None:
+        call = _add_farms_ctx().entries[0]
+        ctx = _add_farms_ctx(entries=[call, call], related_addresses=[REGISTRY])
+
+        table = format_reference_table(ctx)
+
+        self.assertEqual(table.count(f"| [`{REGISTRY}`](https://etherscan.io/address/{REGISTRY})"), 1)
+        self.assertEqual(table.count("Receives `addFarms(uint256,address[])`"), 1)
+
+    def test_escapes_dynamic_table_text(self) -> None:
+        ctx = _add_farms_ctx(labels={REGISTRY: "Farm | Registry\nMain"})
+        self.assertIn("Farm \\| Registry Main", format_reference_table(ctx))
+
+    def test_includes_addresses_from_nested_calldata(self) -> None:
+        transfer = "0xa9059cbb" + FARM[2:].zfill(64) + f"{1:064x}"
+        outer = DecodedCall(function_name="execute", signature="execute(bytes)", params=[("bytes", transfer)])
+        ctx = _add_farms_ctx(entries=[CallEntry(target=REGISTRY, call=outer)])
+
+        table = format_reference_table(ctx)
+
+        self.assertIn(f"[`{FARM_CKS}`](https://etherscan.io/address/{FARM_CKS})", table)
+        self.assertIn("to `transfer(address,uint256)`", table)
+
+    def test_empty_without_addresses(self) -> None:
+        self.assertEqual(format_reference_table(ReportContext()), "")
+
+
 class TestBuildReport(unittest.TestCase):
     def test_sections_in_order(self) -> None:
         report = build_report("Registers a type-2 farm.", "Long analysis.", _add_farms_ctx(), "MEDIUM")
         self.assertLess(report.index("## Summary"), report.index("## Call Flow"))
-        self.assertLess(report.index("## Call Flow"), report.index("## Analysis"))
+        self.assertLess(report.index("## Call Flow"), report.index("## Reference"))
+        self.assertLess(report.index("## Reference"), report.index("## Analysis"))
 
     def test_protocol_context_is_deterministic_section_before_analysis(self) -> None:
         ctx = _add_farms_ctx(protocol_context="- **Farm:** New Silver 2 Senior")
         report = build_report("Updates the rate.", "Long analysis.", ctx, "LOW")
         self.assertIn("## Protocol Context\n\n- **Farm:** New Silver 2 Senior", report)
         self.assertLess(report.index("## Call Flow"), report.index("## Protocol Context"))
-        self.assertLess(report.index("## Protocol Context"), report.index("## Analysis"))
+        self.assertLess(report.index("## Protocol Context"), report.index("## Reference"))
+        self.assertLess(report.index("## Reference"), report.index("## Analysis"))
 
     def test_metadata_header(self) -> None:
         report = build_report("Summary.", "Analysis.", _add_farms_ctx(label_address=TIMELOCK), "HIGH")

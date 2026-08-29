@@ -2,8 +2,9 @@
 
 The Telegram alert only carries the short AI summary; the linked gist is the
 full artifact a reviewer opens. It pairs the LLM's analysis with a
-deterministic, code-built **call flow** — the exact function each call hits,
-its arguments, and every address rendered as a block-explorer hyperlink.
+deterministic, code-built **call flow** and **reference table** — the exact
+function each call hits, its arguments, and every address rendered as a
+block-explorer hyperlink.
 
 The call flow is built here rather than asked of the LLM on purpose: it is
 ground truth straight from the decoded calldata, so it can't be hallucinated,
@@ -67,6 +68,19 @@ class ReportContext:
     # are not part of the raw calldata flow (for example an Infinifi farm and
     # the non-accounting ERC20 targets configured in its escrow).
     protocol_context: str = ""
+    # Addresses introduced by protocol-specific context. These may not occur in
+    # calldata but still belong in the report's deterministic reference table.
+    related_addresses: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _ReferenceEntry:
+    """One address and its accumulated deterministic report roles."""
+
+    address: str
+    label: str
+    roles: list[str] = field(default_factory=list)
+    descriptions: list[str] = field(default_factory=list)
 
 
 def checksum_or_none(addr: object) -> str | None:
@@ -74,7 +88,7 @@ def checksum_or_none(addr: object) -> str | None:
     if not isinstance(addr, str) or not addr.startswith("0x"):
         return None
     try:
-        return to_checksum_address(addr)
+        return str(to_checksum_address(addr))
     except ValueError:
         return None
 
@@ -305,9 +319,98 @@ def format_call_flow(ctx: ReportContext) -> str:
     return "\n".join(lines).rstrip()
 
 
+def _reference_label(ctx: ReportContext, address: str) -> str:
+    """Return the best deterministic label available for a reference row."""
+    if checksum_or_none(ctx.label_address) == address and ctx.label:
+        return ctx.label
+    return ctx.labels.get(address, "")
+
+
+def _add_reference(
+    entries: dict[str, _ReferenceEntry],
+    ctx: ReportContext,
+    raw_address: str,
+    role: str,
+    description: str,
+) -> None:
+    """Add or enrich one checksummed reference entry."""
+    address = checksum_or_none(raw_address)
+    if address is None or address == ZERO_ADDRESS:
+        return
+    key = address.lower()
+    entry = entries.setdefault(key, _ReferenceEntry(address, _reference_label(ctx, address)))
+    if role not in entry.roles:
+        entry.roles.append(role)
+    if description not in entry.descriptions:
+        entry.descriptions.append(description)
+
+
+def _table_cell(value: str) -> str:
+    """Escape dynamic text for one GitHub-flavored Markdown table cell."""
+    return value.replace("|", "\\|").replace("\r", " ").replace("\n", " ").strip()
+
+
+def _iter_reference_arguments(
+    call: DecodedCall,
+    param_names: list[str] | None,
+    depth: int = 0,
+) -> Iterator[tuple[str, str]]:
+    """Yield address arguments and factual descriptions, including nested calldata."""
+    for index, (type_str, value) in enumerate(call.params):
+        name = param_names[index] if param_names is not None and index < len(param_names) else ""
+        parameter = f"`{name}`" if name else f"argument {index + 1}"
+        description = f"Passed as {parameter} to `{call.signature}`"
+        for address in iter_address_values(type_str, value):
+            yield address, description
+        if type_str == "bytes" and depth < MAX_BYTES_RECURSION_DEPTH:
+            inner = try_decode_inner_calldata(value)
+            if inner is not None:
+                yield from _iter_reference_arguments(inner, None, depth + 1)
+
+
+def format_reference_table(ctx: ReportContext) -> str:
+    """Render addresses used by the transaction as a deterministic table."""
+    references: dict[str, _ReferenceEntry] = {}
+    _add_reference(references, ctx, ctx.from_address, "Executor", "Executes the governance transaction")
+
+    label_address = checksum_or_none(ctx.label_address)
+    sender = checksum_or_none(ctx.from_address)
+    if label_address is not None and label_address != sender:
+        _add_reference(references, ctx, label_address, "Alert contract", "Contract named in the report header")
+
+    for entry in ctx.entries:
+        _add_reference(
+            references,
+            ctx,
+            entry.target,
+            "Call target",
+            f"Receives `{entry.call.signature}`",
+        )
+        for address, description in _iter_reference_arguments(entry.call, entry.param_names):
+            _add_reference(references, ctx, address, "Calldata argument", description)
+
+    context_description = (
+        f"Resolved by the {ctx.protocol} protocol adapter" if ctx.protocol else "Resolved by protocol context"
+    )
+    for address in ctx.related_addresses:
+        _add_reference(references, ctx, address, "Protocol context", context_description)
+
+    if not references:
+        return ""
+
+    lines = ["| Address | Label | Role | Description |", "|---|---|---|---|"]
+    for reference in references.values():
+        address = address_link(reference.address, ctx.chain_id)
+        label = _table_cell(reference.label) or "—"
+        roles = _table_cell("; ".join(reference.roles))
+        descriptions = _table_cell("; ".join(reference.descriptions))
+        lines.append(f"| {address} | {label} | {roles} | {descriptions} |")
+    return "\n".join(lines)
+
+
 def _chain_name(chain_id: int) -> str:
     try:
-        return Chain.from_chain_id(chain_id).network_name.capitalize()
+        return str(Chain.from_chain_id(chain_id).network_name).capitalize()
     except ValueError:
         return f"Chain {chain_id}"
 
@@ -359,7 +462,7 @@ def build_report(summary: str, detail: str, ctx: ReportContext, risk_tag: str = 
 
     Sections: metadata header, the Telegram-visible summary (so the gist is
     self-contained), the deterministic call flow, optional protocol context,
-    and the LLM's analysis.
+    a deterministic address reference, and the LLM's analysis.
 
     Args:
         summary: The authoritative TLDR, risk tag already stripped by the caller.
@@ -384,6 +487,9 @@ def build_report(summary: str, detail: str, ctx: ReportContext, risk_tag: str = 
         sections.append(f"## Call Flow\n\n{call_flow}")
     if ctx.protocol_context:
         sections.append(f"## Protocol Context\n\n{ctx.protocol_context}")
+    reference = format_reference_table(ctx)
+    if reference:
+        sections.append(f"## Reference\n\n{reference}")
     if detail:
         sections.append(f"## Analysis\n\n{_REDUNDANT_ANALYSIS_HEADING_RE.sub('', detail)}")
     return "\n\n".join(sections)

@@ -1333,6 +1333,7 @@ def explain_transaction(
         from_address=from_address,
         label_address=label_address or from_address,
         protocol_context=protocol_ctx.report,
+        related_addresses=protocol_ctx.addresses,
     )
 
     try:
@@ -1489,6 +1490,7 @@ def explain_batch_transaction(
         from_address=from_address,
         label_address=label_address or from_address,
         protocol_context=protocol_ctx.report,
+        related_addresses=protocol_ctx.addresses,
     )
 
     try:
