@@ -21,8 +21,8 @@ def request_with_retry(
 ) -> requests.Response:
     """Make an HTTP request with exponential backoff retry on transient errors.
 
-    Retries on 5xx server errors, connection errors, and timeouts.
-    Raises immediately on 4xx client errors.
+    Retries on rate limiting (429), 5xx server errors, connection errors, and
+    timeouts. Raises immediately on other 4xx client errors.
 
     Args:
         method: HTTP method (get, post, etc.).
@@ -53,8 +53,8 @@ def request_with_retry(
             return response
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code if e.response is not None else None
-            if status_code is not None and status_code < 500:
-                raise  # Don't retry client errors (4xx)
+            if status_code is not None and status_code < 500 and status_code != 429:
+                raise  # Do not retry permanent client errors.
             last_exception = e
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             last_exception = e

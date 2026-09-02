@@ -129,11 +129,11 @@ ACCOUNTABLE_FEED = AccountableFeedConfig(
         "USD3 On-Chain Reserves",
     ),
 )
-ACCOUNTABLE_CRITICAL_RATIO = Decimal("1.00")  # Reserves below liabilities
-ACCOUNTABLE_HIGH_RATIO = Decimal("1.0002")
+# TODO: Recalibrate both thresholds after Accountable includes 3Jane's idle
+# funds in the reported reserve totals. These values are temporary test bands.
+ACCOUNTABLE_CRITICAL_RATIO = Decimal("0.95")
+ACCOUNTABLE_HIGH_RATIO = Decimal("0.99")
 ACCOUNTABLE_CRITICAL_CONFIRMATIONS = 2
-# Tolerate isolated blips; alert once the feed is persistently unusable.
-ACCOUNTABLE_MAX_CONSECUTIVE_FAILURES = 3
 
 THREE_JANE_BORROWER_DEFAULT_WATCH_QUERY = """
 query GetThreeJaneBorrowerDefaultWatch($limit: Int!, $offset: Int!) {
@@ -960,7 +960,7 @@ def _clear_accountable_ratio_alerts() -> None:
 
 
 def _critical_confirmed(report_ts_ms: int) -> bool:
-    """Return True once enough consecutive newer sub-100% reports are seen.
+    """Return True once enough consecutive newer sub-critical reports are seen.
 
     A first reading is treated as HIGH so it stays visible. Re-polling a frozen
     report cannot confirm itself.
@@ -1020,25 +1020,25 @@ def _alert_accountable_high(report: AccountableReport) -> None:
 
 
 def _alert_accountable_critical(report: AccountableReport) -> None:
-    """Alert once while ratio is confirmed below 100%."""
+    """Alert once while ratio is confirmed below the critical threshold."""
     if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED):
         return
     message = (
         f"🚨 *3Jane Proof of Solvency CRITICAL*\n"
         f"{_format_accountable_report(report)}\n"
-        f"⚠️ Reserves are below liabilities — the protocol is undercollateralized\n"
+        f"⚠️ Collateral ratio below the {ACCOUNTABLE_CRITICAL_RATIO:.0%} critical threshold\n"
         f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.message_url})"
     )
     _accountable_alert(AlertSeverity.CRITICAL, message)
     set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED, 1)
-    # Avoid a follow-up HIGH once CRITICAL clears but ratio is still under 1.01.
+    # Avoid a follow-up HIGH once CRITICAL clears but ratio is still under the HIGH threshold.
     set_cache_value(CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED, 1)
 
 
 def check_accountable_collateral(report: AccountableReport) -> None:
     """Alert when Accountable collateral ratio breaches thresholds.
 
-    HIGH when ratio < 1.01; CRITICAL when ratio < 1.00 for two consecutive newer
+    HIGH when ratio < 99%; CRITICAL when ratio < 95% for two consecutive newer
     reports. Each severity alerts once until the ratio recovers above its threshold.
 
     Args:
@@ -1093,10 +1093,10 @@ def check_accountable_staleness(report: AccountableReport, reason: str) -> None:
 
 
 def check_accountable_availability(reason: str) -> None:
-    """Track consecutive feed failures and alert once they become persistent.
+    """Track feed failures and alert after one exhausted retrieval cycle.
 
-    Isolated failures are logged only; the alert fires when the feed has been
-    unusable for enough consecutive runs that we are effectively flying blind.
+    ``fetch_report`` has already exhausted bounded retries before reporting a
+    request failure. The alert is deduplicated until the feed recovers.
 
     Args:
         reason: Why the feed was unusable this run.
@@ -1108,17 +1108,17 @@ def check_accountable_availability(reason: str) -> None:
     set_cache_value(CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK, streak)
     logger.warning("Accountable feed unusable (%d consecutive): %s", streak, reason)
 
-    if streak < ACCOUNTABLE_MAX_CONSECUTIVE_FAILURES or get_cache_int(CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED):
+    if get_cache_int(CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED):
         return
 
     message = (
         f"⚠️ *3Jane Proof of Solvency Unavailable*\n"
-        f"📡 Failed {streak} consecutive runs\n"
+        f"📡 Retrieval failed after all retry attempts\n"
         f"❌ {escape_markdown(reason)}\n"
         f"⚠️ Collateral ratio is not being monitored\n"
         f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.message_url})"
     )
-    _accountable_alert(AlertSeverity.MEDIUM, message)
+    _accountable_alert(AlertSeverity.HIGH, message)
     set_cache_value(CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED, 1)
 
 
@@ -1147,7 +1147,7 @@ def check_accountable_solvency() -> None:
         elif get_cache_int(CACHE_KEY_ACCOUNTABLE_STALE_ALERTED):
             set_cache_value(CACHE_KEY_ACCOUNTABLE_STALE_ALERTED, 0)
 
-        # The ratio is still evaluated on a stale report: an undercollateralized
+        # The ratio is still evaluated on a stale report: a low-ratio
         # reading matters even when the inputs behind it have aged.
         check_accountable_collateral(report)
     except Exception as e:

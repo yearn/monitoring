@@ -44,6 +44,14 @@ def load_payload() -> dict[str, Any]:
     return json.loads(FIXTURE_PATH.read_text())
 
 
+def load_fresh_payload() -> dict[str, Any]:
+    """Return the recorded report with every required source made current."""
+    payload = load_payload()
+    for source in payload["data"]["dataSources"].values():
+        source["lastUpdated"] = str(FIXTURE_NOW_MS)
+    return payload
+
+
 # --- Parsing the real recorded payload ---
 
 
@@ -79,13 +87,15 @@ def test_coerces_numeric_strings() -> None:
     assert report.verifiability == Decimal("100")
 
 
-def test_live_payload_is_not_stale() -> None:
-    """Document Report sources lag their cadence; per-type grace must absorb that."""
-    result = evaluate_report(parse_report(load_payload(), CONFIG, FIXTURE_NOW_MS), CONFIG)
+def test_recorded_live_payload_flags_late_daily_and_weekly_sources() -> None:
+    result = evaluate_report(parse_report(load_payload(), CONFIG, FIXTURE_NOW_MS))
 
-    assert result.status is AccountableStatus.OK
+    assert result.status is AccountableStatus.STALE
     assert result.report is not None
-    assert result.report.stale_sources == ()
+    assert [source.name for source in result.report.stale_sources] == [
+        "LendSwift - Warehouse Senior Note",
+        "Slope - Forward Flows",
+    ]
 
 
 # --- Rejection cases ---
@@ -201,6 +211,15 @@ def test_rejects_future_timestamp() -> None:
         parse_report(payload, CONFIG, FIXTURE_NOW_MS)
 
 
+@pytest.mark.parametrize("interval", [None, "sometimes"])
+def test_rejects_unrecognised_report_interval(interval: str | None) -> None:
+    payload = load_payload()
+    payload["data"]["reserves"]["interval"] = interval
+
+    with pytest.raises(AccountableError, match="reserves.interval"):
+        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+
+
 # --- Freshness ---
 
 
@@ -225,14 +244,35 @@ def test_parse_frequency_seconds(text: Any, expected: int | None) -> None:
     assert parse_frequency_seconds(text) == expected
 
 
-def test_stale_aggregate_report_is_detected() -> None:
-    payload = load_payload()
-    late_ms = FIXTURE_NOW_MS + (CONFIG.max_report_age_seconds + 3600) * 1000
+def test_aggregate_report_is_stale_only_after_more_than_two_cadence_periods() -> None:
+    payload = load_fresh_payload()
+    payload["data"]["reserves"]["interval"] = "15 MIN"
+    payload["data"]["ts"] = str(FIXTURE_NOW_MS - 30 * 60 * 1000)
 
-    result = evaluate_report(parse_report(payload, CONFIG, late_ms), CONFIG)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.OK
+
+    payload["data"]["ts"] = str(FIXTURE_NOW_MS - (30 * 60 + 1) * 1000)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
 
     assert result.status is AccountableStatus.STALE
     assert "old" in result.reason
+
+
+def test_weekly_aggregate_report_is_not_stale_after_six_hours() -> None:
+    payload = load_fresh_payload()
+    payload["data"]["reserves"]["interval"] = "WEEKLY"
+    payload["data"]["ts"] = str(FIXTURE_NOW_MS - 6 * 60 * 60 * 1000)
+
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.OK
+
+    payload["data"]["ts"] = str(FIXTURE_NOW_MS - (7 * 24 * 60 * 60 + 1) * 1000)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.STALE
 
 
 def test_fresh_aggregate_with_stale_source_is_detected() -> None:
@@ -240,7 +280,7 @@ def test_fresh_aggregate_with_stale_source_is_detected() -> None:
     payload = load_payload()
     payload["data"]["dataSources"]["USD3 On-Chain Reserves"]["lastUpdated"] = str(FIXTURE_NOW_MS - 86_400_000)
 
-    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS), CONFIG)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
 
     assert result.status is AccountableStatus.STALE
     assert "USD3 On-Chain Reserves" in result.reason
@@ -248,22 +288,47 @@ def test_fresh_aggregate_with_stale_source_is_detected() -> None:
     assert result.report.collateralization > 1
 
 
-def test_document_report_grace_is_wider_than_onchain_grace() -> None:
-    report = parse_report(load_payload(), CONFIG, FIXTURE_NOW_MS)
-    budgets = {source.source_type: source.max_age_seconds for source in report.sources}
+def test_source_is_stale_only_after_more_than_two_cadence_periods() -> None:
+    payload = load_fresh_payload()
+    source = payload["data"]["dataSources"]["USD3 Minted Liabilities"]
+    source["lastUpdated"] = str(FIXTURE_NOW_MS - 30 * 60 * 1000)
 
-    assert budgets["Document Report"] > budgets["ERC4626"]
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.OK
+
+    source["lastUpdated"] = str(FIXTURE_NOW_MS - (30 * 60 + 1) * 1000)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.STALE
+    assert "USD3 Minted Liabilities" in result.reason
+
+
+def test_daily_source_is_stale_after_first_missed_period() -> None:
+    payload = load_fresh_payload()
+    source = payload["data"]["dataSources"]["Slope - Forward Flows"]
+    source["lastUpdated"] = str(FIXTURE_NOW_MS - 24 * 60 * 60 * 1000)
+
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.OK
+
+    source["lastUpdated"] = str(FIXTURE_NOW_MS - (24 * 60 * 60 + 1) * 1000)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.STALE
+    assert "Slope - Forward Flows" in result.reason
 
 
 def test_unparseable_source_frequency_is_skipped_not_flagged_stale() -> None:
-    payload = load_payload()
+    payload = load_fresh_payload()
     payload["data"]["dataSources"]["Mystery Source"] = {
         "type": "Unknown",
         "frequency": "whenever",
         "lastUpdated": "1",
     }
 
-    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS), CONFIG)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
 
     assert result.status is AccountableStatus.OK
     assert result.report is not None
@@ -271,11 +336,11 @@ def test_unparseable_source_frequency_is_skipped_not_flagged_stale() -> None:
 
 
 def test_missing_required_source_is_stale_not_unavailable() -> None:
-    """A source rename must not blind the sub-100% check — the ratio is unaffected."""
+    """A source rename must not blind the ratio check."""
     payload = load_payload()
     del payload["data"]["dataSources"]["Slope - Forward Flows"]
 
-    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS), CONFIG)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
 
     assert result.status is AccountableStatus.STALE
     assert "Slope - Forward Flows" in result.reason
@@ -288,7 +353,7 @@ def test_malformed_required_source_is_stale_not_unavailable(field: str) -> None:
     payload = load_payload()
     del payload["data"]["dataSources"]["USD3 On-Chain Reserves"][field]
 
-    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS), CONFIG)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
 
     assert result.status is AccountableStatus.STALE
     assert "USD3 On-Chain Reserves" in result.reason
@@ -302,7 +367,7 @@ def test_future_source_timestamp_is_not_treated_as_fresh() -> None:
     payload = load_payload()
     payload["data"]["dataSources"]["USD3 On-Chain Reserves"]["lastUpdated"] = str(FIXTURE_NOW_MS + 86_400_000)
 
-    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS), CONFIG)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
 
     assert result.status is AccountableStatus.STALE
     assert "future" in result.reason
@@ -311,10 +376,10 @@ def test_future_source_timestamp_is_not_treated_as_fresh() -> None:
 
 
 def test_small_future_source_skew_is_tolerated() -> None:
-    payload = load_payload()
+    payload = load_fresh_payload()
     payload["data"]["dataSources"]["USD3 On-Chain Reserves"]["lastUpdated"] = str(FIXTURE_NOW_MS + 60_000)
 
-    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS), CONFIG)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
 
     assert result.status is AccountableStatus.OK
 
@@ -387,7 +452,7 @@ def test_fetch_report_returns_unavailable_on_schema_violation(monkeypatch: pytes
 
 
 def test_fetch_report_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(accountable, "request_with_retry", lambda *_a, **_k: _FakeResponse(load_payload()))
+    monkeypatch.setattr(accountable, "request_with_retry", lambda *_a, **_k: _FakeResponse(load_fresh_payload()))
 
     result = fetch_report(CONFIG, FIXTURE_NOW_MS)
 

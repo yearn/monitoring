@@ -50,14 +50,10 @@ MAX_PLAUSIBLE_RATIO = Decimal("100")
 # Reject reports timestamped meaningfully in the future (clock skew allowance).
 MAX_FUTURE_SKEW_SECONDS = 15 * 60
 
-# How long after a source's own declared cadence it is still considered fresh.
-# Keyed by the source's ``type``. "Document Report" sources are manual uploads
-# that routinely run past their nominal frequency, so they get a wide grace;
-# on-chain sources are automated and should be near-realtime.
-DEFAULT_SOURCE_GRACE_SECONDS = 2 * SECONDS_PER_HOUR
-SOURCE_TYPE_GRACE_SECONDS: dict[str, int] = {
-    "Document Report": 7 * SECONDS_PER_DAY,
-}
+# Short-cadence feeds get one missed-period allowance to absorb transient
+# delays. Longer cadences alert as soon as their first expected update is late.
+SHORT_CADENCE_MAX_SECONDS = SECONDS_PER_HOUR
+SHORT_CADENCE_STALE_PERIODS = 2
 
 # Declared cadence strings observed on Accountable dashboards, in seconds.
 _NAMED_FREQUENCIES: dict[str, int] = {
@@ -90,6 +86,13 @@ _FREQUENCY_UNIT_SECONDS: dict[str, int] = {
 }
 
 
+def _stale_after_seconds(cadence_seconds: int) -> int:
+    """Return the age at which a report or source becomes stale."""
+    if cadence_seconds <= SHORT_CADENCE_MAX_SECONDS:
+        return cadence_seconds * SHORT_CADENCE_STALE_PERIODS
+    return cadence_seconds
+
+
 class AccountableError(Exception):
     """Raised when an Accountable report cannot be parsed or fails validation."""
 
@@ -118,7 +121,6 @@ class AccountableFeedConfig:
         message_url: Public URL for the dashboard, used in alerts.
         dashboard_type: Dashboard type the endpoint serves
         required_sources: Source names that must carry usable freshness metadata.
-        max_report_age_seconds: Aggregate report age beyond which it is stale.
     """
 
     dfid: str
@@ -126,7 +128,6 @@ class AccountableFeedConfig:
     message_url: str
     dashboard_type: str
     required_sources: tuple[str, ...] = ()
-    max_report_age_seconds: int = 6 * SECONDS_PER_HOUR
 
 
 @dataclass(frozen=True)
@@ -142,7 +143,7 @@ class DataSourceSnapshot:
 
     @property
     def is_stale(self) -> bool:
-        """Whether the source is older than its cadence plus grace."""
+        """Whether the source is older than its cadence-based age limit."""
         return self.age_seconds > self.max_age_seconds
 
 
@@ -168,13 +169,20 @@ class AccountableReport:
     verifiability: Decimal
     ts_ms: int
     report_age_seconds: int
+    report_interval: str
+    report_cadence_seconds: int
     sources: tuple[DataSourceSnapshot, ...]
     source_problems: tuple[str, ...] = ()
 
     @property
     def stale_sources(self) -> tuple[DataSourceSnapshot, ...]:
-        """Sources older than their declared cadence plus grace."""
+        """Sources older than their cadence-based age limits."""
         return tuple(source for source in self.sources if source.is_stale)
+
+    @property
+    def report_is_stale(self) -> bool:
+        """Whether the aggregate report is older than its cadence-based limit."""
+        return self.report_age_seconds > _stale_after_seconds(self.report_cadence_seconds)
 
     @property
     def report_timestamp(self) -> datetime:
@@ -283,7 +291,7 @@ def _parse_data_sources(
     now_ms: int,
     required_sources: tuple[str, ...] = (),
 ) -> tuple[tuple[DataSourceSnapshot, ...], tuple[str, ...]]:
-    """Build source snapshots with per-source-type staleness budgets.
+    """Build source snapshots with cadence-based staleness budgets.
 
     Unknown sources with an unrecognised cadence or missing timestamp are
     skipped, so an Accountable schema addition cannot spuriously page us. A
@@ -291,7 +299,7 @@ def _parse_data_sources(
     problem rather than raised: freshness can no longer be established, but the
     collateral ratio itself is unaffected and must still be evaluated. A source
     rename upstream degrades the feed to ``STALE``, it does not blind the
-    sub-100% check.
+    collateral-ratio check.
 
     Returns:
         The parsed snapshots, and descriptions of any required-source problems.
@@ -349,7 +357,6 @@ def _parse_data_sources(
             source_type = ""
         else:
             source_type = source_type_value
-        grace = SOURCE_TYPE_GRACE_SECONDS.get(source_type, DEFAULT_SOURCE_GRACE_SECONDS)
         snapshots.append(
             DataSourceSnapshot(
                 name=str(name),
@@ -357,7 +364,7 @@ def _parse_data_sources(
                 frequency=str(entry.get("frequency") or ""),
                 last_updated_ms=last_updated_ms,
                 age_seconds=max(0, age_seconds),
-                max_age_seconds=cadence_seconds + grace,
+                max_age_seconds=_stale_after_seconds(cadence_seconds),
             )
         )
     return tuple(snapshots), tuple(problems)
@@ -453,6 +460,11 @@ def parse_report(payload: Any, config: AccountableFeedConfig, now_ms: int) -> Ac
     if age_seconds < -MAX_FUTURE_SKEW_SECONDS:
         raise AccountableError(f"report timestamp is {-age_seconds}s in the future")
 
+    report_interval_value = reserves.get("interval")
+    report_cadence_seconds = parse_frequency_seconds(report_interval_value)
+    if report_cadence_seconds is None:
+        raise AccountableError(f"reserves.interval is not recognised: {report_interval_value!r}")
+
     sources, source_problems = _parse_data_sources(data.get("dataSources"), now_ms, config.required_sources)
 
     return AccountableReport(
@@ -465,23 +477,25 @@ def parse_report(payload: Any, config: AccountableFeedConfig, now_ms: int) -> Ac
         verifiability=_coerce_decimal(reserves.get("verifiability"), "reserves.verifiability"),
         ts_ms=ts_ms,
         report_age_seconds=max(0, age_seconds),
+        report_interval=str(report_interval_value),
+        report_cadence_seconds=report_cadence_seconds,
         sources=sources,
         source_problems=source_problems,
     )
 
 
-def evaluate_report(report: AccountableReport, config: AccountableFeedConfig) -> AccountableFetchResult:
+def evaluate_report(report: AccountableReport) -> AccountableFetchResult:
     """Classify a parsed report as OK or STALE.
 
-    Staleness covers the aggregate report age, any individual source that has
-    outrun its own cadence plus grace, and any required source whose freshness
-    could not be established at all.
+    Short cadences of up to one hour become stale after two periods. Longer
+    cadences become stale after the first missed update. Required sources whose
+    freshness cannot be established are also stale.
     """
-    if report.report_age_seconds > config.max_report_age_seconds:
+    if report.report_is_stale:
         return AccountableFetchResult(
             AccountableStatus.STALE,
             report,
-            f"report is {report.report_age_seconds // SECONDS_PER_HOUR}h old",
+            f"report is {report.report_age_seconds // SECONDS_PER_HOUR}h old (interval {report.report_interval})",
         )
 
     if report.source_problems:
@@ -504,7 +518,8 @@ def fetch_report(config: AccountableFeedConfig, now_ms: int | None = None) -> Ac
 
     Network and schema failures are converted into an ``UNAVAILABLE`` result
     rather than raised, so a feed outage cannot interrupt a caller's other
-    checks. Retries follow ``utils.http_client`` (transient 5xx/timeouts only).
+    checks. Retries follow ``utils.http_client`` for rate limiting, transient
+    5xx responses, connection errors, and timeouts.
 
     Args:
         config: Feed to fetch.
@@ -543,4 +558,4 @@ def fetch_report(config: AccountableFeedConfig, now_ms: int | None = None) -> Ac
         logger.warning("Accountable feed %s failed validation: %s", config.dfid, exc)
         return AccountableFetchResult(AccountableStatus.UNAVAILABLE, None, str(exc))
 
-    return evaluate_report(report, config)
+    return evaluate_report(report)

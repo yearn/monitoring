@@ -529,6 +529,8 @@ def make_accountable_report(
         verifiability=Decimal("100"),
         ts_ms=ts_ms,
         report_age_seconds=age_seconds,
+        report_interval="live",
+        report_cadence_seconds=15 * 60,
         sources=(),
     )
 
@@ -550,21 +552,21 @@ def test_accountable_high_threshold_alerts(monkeypatch: pytest.MonkeyPatch) -> N
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
-    module.check_accountable_collateral(make_accountable_report(module, "1.0001"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.98"))
 
     assert len(alerts) == 1
     assert alerts[0].severity == module.AlertSeverity.HIGH
-    assert "100.0100%" in alerts[0].message
+    assert "98.0000%" in alerts[0].message
 
 
 def test_accountable_critical_requires_two_consecutive_runs(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A single sub-100% reading is more likely a stale refresh than insolvency."""
+    """A single sub-95% reading is more likely a stale refresh than insolvency."""
     module = load_3jane_module()
     alerts: list = []
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
-    first_report = make_accountable_report(module, "0.98")
-    second_report = make_accountable_report(module, "0.98", ts_ms=first_report.ts_ms + 1)
+    first_report = make_accountable_report(module, "0.94")
+    second_report = make_accountable_report(module, "0.94", ts_ms=first_report.ts_ms + 1)
 
     module.check_accountable_collateral(first_report)
     assert len(alerts) == 1
@@ -573,7 +575,7 @@ def test_accountable_critical_requires_two_consecutive_runs(monkeypatch: pytest.
     module.check_accountable_collateral(second_report)
     assert len(alerts) == 2
     assert alerts[1].severity == module.AlertSeverity.CRITICAL
-    assert "undercollateralized" in alerts[1].message
+    assert "95% critical threshold" in alerts[1].message
 
 
 def test_accountable_frozen_report_does_not_confirm_critical(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -581,7 +583,7 @@ def test_accountable_frozen_report_does_not_confirm_critical(monkeypatch: pytest
     alerts: list = []
     cache = stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
-    report = make_accountable_report(module, "0.98")
+    report = make_accountable_report(module, "0.94")
 
     module.check_accountable_collateral(report)
     module.check_accountable_collateral(report)
@@ -596,9 +598,9 @@ def test_accountable_critical_streak_resets_on_recovery(monkeypatch: pytest.Monk
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
-    module.check_accountable_collateral(make_accountable_report(module, "0.98"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.94"))
     module.check_accountable_collateral(make_accountable_report(module, "1.20"))
-    module.check_accountable_collateral(make_accountable_report(module, "0.98"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.94"))
 
     # The recovery reset the streak, so the second breach is unconfirmed again
     # and never escalates — two non-consecutive dips must not reach CRITICAL.
@@ -611,9 +613,9 @@ def test_accountable_does_not_realert_while_below_high(monkeypatch: pytest.Monke
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
-    module.check_accountable_collateral(make_accountable_report(module, "1.0001"))
-    module.check_accountable_collateral(make_accountable_report(module, "1.00015"))
-    module.check_accountable_collateral(make_accountable_report(module, "1.00005"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.98"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.981"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.982"))
 
     assert len(alerts) == 1
 
@@ -624,9 +626,9 @@ def test_accountable_recovery_rearms_alert(monkeypatch: pytest.MonkeyPatch) -> N
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
-    module.check_accountable_collateral(make_accountable_report(module, "1.0001"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.98"))
     module.check_accountable_collateral(make_accountable_report(module, "1.20"))
-    module.check_accountable_collateral(make_accountable_report(module, "1.0001"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.98"))
 
     assert len(alerts) == 2
     assert all(alert.severity == module.AlertSeverity.HIGH for alert in alerts)
@@ -640,8 +642,8 @@ def test_accountable_alerts_never_trigger_emergency_dispatch(monkeypatch: pytest
     alerts: list = []
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
-    first_report = make_accountable_report(module, "0.98")
-    second_report = make_accountable_report(module, "0.98", ts_ms=first_report.ts_ms + 1)
+    first_report = make_accountable_report(module, "0.94")
+    second_report = make_accountable_report(module, "0.94", ts_ms=first_report.ts_ms + 1)
 
     module.check_accountable_collateral(first_report)
     module.check_accountable_collateral(second_report)
@@ -661,15 +663,22 @@ def test_accountable_unavailable_run_breaks_critical_confirmation(monkeypatch: p
     monkeypatch.setattr(module, "send_alert", alerts.append)
     first_ts = 1_785_490_814_726
 
-    module.check_accountable_collateral(make_accountable_report(module, "0.98", ts_ms=first_ts))
+    module.check_accountable_collateral(make_accountable_report(module, "0.94", ts_ms=first_ts))
     module.check_accountable_availability("connection refused")
-    module.check_accountable_collateral(make_accountable_report(module, "0.98", ts_ms=first_ts + 1))
+    module.check_accountable_collateral(make_accountable_report(module, "0.94", ts_ms=first_ts + 1))
 
-    assert [alert.severity for alert in alerts] == [module.AlertSeverity.HIGH]
+    assert [alert.severity for alert in alerts] == [
+        module.AlertSeverity.HIGH,  # Initial ratio warning.
+        module.AlertSeverity.HIGH,  # Feed unavailable after retries.
+    ]
     assert cache[module.CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK] == "1"
 
-    module.check_accountable_collateral(make_accountable_report(module, "0.98", ts_ms=first_ts + 2))
-    assert [alert.severity for alert in alerts] == [module.AlertSeverity.HIGH, module.AlertSeverity.CRITICAL]
+    module.check_accountable_collateral(make_accountable_report(module, "0.94", ts_ms=first_ts + 2))
+    assert [alert.severity for alert in alerts] == [
+        module.AlertSeverity.HIGH,
+        module.AlertSeverity.HIGH,
+        module.AlertSeverity.CRITICAL,
+    ]
 
 
 def test_accountable_staleness_alerts_once(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -687,7 +696,7 @@ def test_accountable_staleness_alerts_once(monkeypatch: pytest.MonkeyPatch) -> N
     assert "Slope" in alerts[0].message
 
 
-def test_accountable_availability_alerts_only_after_repeated_failures(
+def test_accountable_availability_alerts_after_retries_are_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = load_3jane_module()
@@ -695,13 +704,10 @@ def test_accountable_availability_alerts_only_after_repeated_failures(
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
-    for _ in range(module.ACCOUNTABLE_MAX_CONSECUTIVE_FAILURES - 1):
-        module.check_accountable_availability("connection refused")
-    assert alerts == []
-
     module.check_accountable_availability("connection refused")
     assert len(alerts) == 1
-    assert alerts[0].severity == module.AlertSeverity.MEDIUM
+    assert alerts[0].severity == module.AlertSeverity.HIGH
+    assert "after all retry attempts" in alerts[0].message
 
     # Stays quiet while the outage persists.
     module.check_accountable_availability("connection refused")
@@ -709,7 +715,7 @@ def test_accountable_availability_alerts_only_after_repeated_failures(
 
 
 def test_accountable_stale_report_still_evaluates_ratio(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An undercollateralized reading matters even when its inputs have aged."""
+    """A low collateralization reading matters even when its inputs have aged."""
     from utils.accountable import AccountableFetchResult, AccountableStatus
 
     module = load_3jane_module()
@@ -727,7 +733,7 @@ def test_accountable_stale_report_still_evaluates_ratio(monkeypatch: pytest.Monk
 
     severities = [alert.severity for alert in alerts]
     assert module.AlertSeverity.MEDIUM in severities  # staleness
-    assert module.AlertSeverity.HIGH in severities  # first sub-100% reading
+    assert module.AlertSeverity.HIGH in severities  # low-ratio reading
 
 
 def test_accountable_recovery_clears_health_alert(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -743,8 +749,7 @@ def test_accountable_recovery_clears_health_alert(monkeypatch: pytest.MonkeyPatc
         lambda _config: AccountableFetchResult(AccountableStatus.UNAVAILABLE, None, "boom"),
     )
 
-    for _ in range(module.ACCOUNTABLE_MAX_CONSECUTIVE_FAILURES):
-        module.check_accountable_solvency()
+    module.check_accountable_solvency()
     assert len(alerts) == 1
     assert cache[module.CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED] == "1"
 
