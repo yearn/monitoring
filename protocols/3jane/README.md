@@ -103,6 +103,8 @@ A fresh aggregate timestamp does not prove every input is fresh, and this matter
 
 The aggregate report and each required source use their declared cadence. Cadences of one hour or less get one missed-period allowance and become stale after two periods; longer cadences become stale as soon as the first expected update is late. The aggregate cadence comes from `reserves.interval`; source cadences come from each source's `frequency`. This means `15 MIN` becomes stale after 30 minutes, hourly after 2 hours, daily after 24 hours, and weekly after 7 days. A source whose `lastUpdated` is in the future is treated as unusable rather than clamped to "fresh", which would defeat the check. Unknown additional sources with an unrecognised cadence are skipped rather than flagged, so a schema addition on Accountable's side cannot spuriously page us.
 
+The 3Jane dashboard UI declares `Slope - Forward Flows` as weekly, while older `/dashboard` JSON responses reported it as daily. The feed configuration therefore binds that source to `WEEKLY`; stale alerts display the effective cadence used by the monitor.
+
 The four known 3Jane sources are required, and a missing or malformed freshness record for one of them makes the feed **stale**, not unavailable. Freshness can no longer be established, but the collateral ratio itself is unaffected — so the report is still returned and the sub-95% check still runs. An upstream source rename degrades the feed to a MEDIUM staleness alert; it cannot silently disable the CRITICAL solvency check.
 
 ### Ratio alerts

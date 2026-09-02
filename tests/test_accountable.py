@@ -36,6 +36,7 @@ CONFIG = AccountableFeedConfig(
         "Slope - Forward Flows",
         "USD3 On-Chain Reserves",
     ),
+    source_frequency_overrides=(("Slope - Forward Flows", "WEEKLY"),),
 )
 
 
@@ -87,15 +88,17 @@ def test_coerces_numeric_strings() -> None:
     assert report.verifiability == Decimal("100")
 
 
-def test_recorded_live_payload_flags_late_daily_and_weekly_sources() -> None:
+def test_recorded_live_payload_uses_slope_weekly_override() -> None:
     result = evaluate_report(parse_report(load_payload(), CONFIG, FIXTURE_NOW_MS))
 
     assert result.status is AccountableStatus.STALE
     assert result.report is not None
     assert [source.name for source in result.report.stale_sources] == [
         "LendSwift - Warehouse Senior Note",
-        "Slope - Forward Flows",
     ]
+    slope = next(source for source in result.report.sources if source.name == "Slope - Forward Flows")
+    assert slope.frequency == "WEEKLY"
+    assert not slope.is_stale
 
 
 # --- Rejection cases ---
@@ -306,7 +309,8 @@ def test_source_is_stale_only_after_more_than_two_cadence_periods() -> None:
 
 def test_daily_source_is_stale_after_first_missed_period() -> None:
     payload = load_fresh_payload()
-    source = payload["data"]["dataSources"]["Slope - Forward Flows"]
+    source = payload["data"]["dataSources"]["USD3 Minted Liabilities"]
+    source["frequency"] = "DAILY"
     source["lastUpdated"] = str(FIXTURE_NOW_MS - 24 * 60 * 60 * 1000)
 
     result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
@@ -317,7 +321,7 @@ def test_daily_source_is_stale_after_first_missed_period() -> None:
     result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
 
     assert result.status is AccountableStatus.STALE
-    assert "Slope - Forward Flows" in result.reason
+    assert "USD3 Minted Liabilities" in result.reason
 
 
 def test_unparseable_source_frequency_is_skipped_not_flagged_stale() -> None:

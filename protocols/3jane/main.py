@@ -128,6 +128,9 @@ ACCOUNTABLE_FEED = AccountableFeedConfig(
         "Slope - Forward Flows",
         "USD3 On-Chain Reserves",
     ),
+    # The dashboard UI declares Slope as Weekly, while older JSON responses
+    # reported Daily. Bind the operator-confirmed cadence to avoid false alerts.
+    source_frequency_overrides=(("Slope - Forward Flows", "WEEKLY"),),
 )
 # TODO: Recalibrate both thresholds after Accountable includes 3Jane's idle
 # funds in the reported reserve totals. These values are temporary test bands.

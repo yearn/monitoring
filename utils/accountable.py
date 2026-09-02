@@ -121,6 +121,8 @@ class AccountableFeedConfig:
         message_url: Public URL for the dashboard, used in alerts.
         dashboard_type: Dashboard type the endpoint serves
         required_sources: Source names that must carry usable freshness metadata.
+        source_frequency_overrides: Trusted source-frequency corrections keyed
+            by source name, used when the JSON endpoint disagrees with the UI.
     """
 
     dfid: str
@@ -128,6 +130,7 @@ class AccountableFeedConfig:
     message_url: str
     dashboard_type: str
     required_sources: tuple[str, ...] = ()
+    source_frequency_overrides: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -290,6 +293,7 @@ def _parse_data_sources(
     payload: Any,
     now_ms: int,
     required_sources: tuple[str, ...] = (),
+    frequency_overrides: tuple[tuple[str, str], ...] = (),
 ) -> tuple[tuple[DataSourceSnapshot, ...], tuple[str, ...]]:
     """Build source snapshots with cadence-based staleness budgets.
 
@@ -310,6 +314,7 @@ def _parse_data_sources(
         return (), ()
 
     required = set(required_sources)
+    overrides = dict(frequency_overrides)
     problems: list[str] = []
     missing = sorted(required.difference(payload))
     if missing:
@@ -322,13 +327,22 @@ def _parse_data_sources(
             if is_required:
                 problems.append(f"dataSources.{name} is not an object")
             continue
-        cadence_seconds = parse_frequency_seconds(entry.get("frequency"))
+        reported_frequency = entry.get("frequency")
+        effective_frequency = overrides.get(str(name), reported_frequency)
+        cadence_seconds = parse_frequency_seconds(effective_frequency)
         if cadence_seconds is None:
             if is_required:
-                problems.append(f"dataSources.{name}.frequency is not recognised: {entry.get('frequency')!r}")
+                problems.append(f"dataSources.{name}.frequency is not recognised: {effective_frequency!r}")
             else:
-                logger.debug("Accountable source %s has unparseable frequency %r", name, entry.get("frequency"))
+                logger.debug("Accountable source %s has unparseable frequency %r", name, effective_frequency)
             continue
+        if str(name) in overrides and reported_frequency != effective_frequency:
+            logger.warning(
+                "Accountable source %s reports frequency %r; using configured override %r",
+                name,
+                reported_frequency,
+                effective_frequency,
+            )
         try:
             last_updated_ms = _coerce_int(entry.get("lastUpdated"), f"dataSources.{name}.lastUpdated")
         except AccountableError as exc:
@@ -361,7 +375,7 @@ def _parse_data_sources(
             DataSourceSnapshot(
                 name=str(name),
                 source_type=source_type,
-                frequency=str(entry.get("frequency") or ""),
+                frequency=str(effective_frequency),
                 last_updated_ms=last_updated_ms,
                 age_seconds=max(0, age_seconds),
                 max_age_seconds=_stale_after_seconds(cadence_seconds),
@@ -465,7 +479,12 @@ def parse_report(payload: Any, config: AccountableFeedConfig, now_ms: int) -> Ac
     if report_cadence_seconds is None:
         raise AccountableError(f"reserves.interval is not recognised: {report_interval_value!r}")
 
-    sources, source_problems = _parse_data_sources(data.get("dataSources"), now_ms, config.required_sources)
+    sources, source_problems = _parse_data_sources(
+        data.get("dataSources"),
+        now_ms,
+        config.required_sources,
+        config.source_frequency_overrides,
+    )
 
     return AccountableReport(
         dfid=config.dfid,
@@ -507,7 +526,10 @@ def evaluate_report(report: AccountableReport) -> AccountableFetchResult:
 
     stale = report.stale_sources
     if stale:
-        detail = ", ".join(f"{source.name} ({source.age_seconds // SECONDS_PER_HOUR}h)" for source in stale)
+        detail = ", ".join(
+            f"{source.name} ({source.age_seconds // SECONDS_PER_HOUR}h old, cadence {source.frequency})"
+            for source in stale
+        )
         return AccountableFetchResult(AccountableStatus.STALE, report, f"stale sources: {detail}")
 
     return AccountableFetchResult(AccountableStatus.OK, report)
