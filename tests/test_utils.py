@@ -11,13 +11,17 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import requests
+from web3 import Web3
 
 from utils.alert import Alert, AlertSeverity, register_alert_hook, send_alert
 from utils.config import Config, ProtocolConfig
 from utils.telegram import TelegramError, send_envio_error_message, send_error_message, send_telegram_message
 from utils.web3_wrapper import (
     MAX_BACKOFF_SECONDS,
+    MultiHTTPProvider,
     ProviderConnectionError,
+    RetryProviders,
+    Web3Client,
     retry_with_provider_rotation,
 )
 
@@ -985,6 +989,33 @@ class TestRetryWithProviderRotation(unittest.TestCase):
         slept = [call.args[0] for call in mock_sleep.call_args_list]
         self.assertTrue(slept)
         self.assertTrue(all(s <= MAX_BACKOFF_SECONDS for s in slept))
+
+    def test_batch_rpc_error_rotates_underlying_web3_provider(self):
+        """Batch-level retries must switch the provider that sends the request."""
+
+        class _FailOnceBatch:
+            def __init__(self):
+                self.call_count = 0
+
+            def execute(self):
+                self.call_count += 1
+                if self.call_count == 1:
+                    raise RuntimeError("header not found")
+                return ["ok"]
+
+        provider_urls = ["https://rpc-a.example", "https://rpc-b.example"]
+        provider = MultiHTTPProvider(provider_urls, max_retries=1, backoff_factor=0)
+        client = Web3Client.__new__(Web3Client)
+        RetryProviders.__init__(client, provider_urls, max_retries=1, backoff_factor=0)
+        client.w3 = Web3(provider)
+        batch = _FailOnceBatch()
+
+        with patch("utils.web3_wrapper.time.sleep"):
+            self.assertEqual(client.execute_batch(batch), ["ok"])
+
+        self.assertEqual(batch.call_count, 2)
+        self.assertEqual(provider.endpoint_uri, provider_urls[1])
+        self.assertEqual(client.endpoint_uri, provider_urls[1])
 
 
 class TestUstbCachePath(unittest.TestCase):
