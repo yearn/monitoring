@@ -8,6 +8,8 @@ values so it is trivially unit testable without a chain connection.
 from dataclasses import dataclass
 from decimal import Decimal
 
+from web3.types import BlockIdentifier
+
 from utils.abi import load_abi
 from utils.logger import get_logger
 from utils.web3_wrapper import Web3Client
@@ -91,12 +93,18 @@ def scale_price(answer: int, decimals: int) -> Decimal:
 # ---------------------------------------------------------------------------
 
 
-def read_feeds(client: Web3Client, feed_addresses: list[str]) -> dict[str, FeedReading]:
+def read_feeds(
+    client: Web3Client,
+    feed_addresses: list[str],
+    *,
+    block_identifier: BlockIdentifier = "latest",
+) -> dict[str, FeedReading]:
     """Read ``latestRoundData`` and ``decimals`` for several feeds in one batch.
 
     Args:
         client: Connected ``Web3Client`` for the target chain.
         feed_addresses: Chainlink aggregator addresses to read.
+        block_identifier: Block at which every feed call should execute.
 
     Returns:
         Mapping of feed address to its :class:`FeedReading`, preserving input order.
@@ -108,8 +116,8 @@ def read_feeds(client: Web3Client, feed_addresses: list[str]) -> dict[str, FeedR
 
     with client.batch_requests() as batch:
         for contract in contracts:
-            batch.add(contract.functions.latestRoundData())
-            batch.add(contract.functions.decimals())
+            batch.add(contract.functions.latestRoundData().call(block_identifier=block_identifier))
+            batch.add(contract.functions.decimals().call(block_identifier=block_identifier))
         responses = client.execute_batch(batch)
 
     readings: dict[str, FeedReading] = {}

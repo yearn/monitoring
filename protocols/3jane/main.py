@@ -928,20 +928,25 @@ def main() -> None:
     protocol_config = client.eth.contract(address=PROTOCOL_CONFIG_ADDRESS, abi=ABI_PROTOCOL_CONFIG)
 
     try:
+        block_number = int(client.eth.block_number)
         # Batch all core vault reads in a single RPC call
         with client.batch_requests() as batch:
-            batch.add(usd3_vault.functions.totalAssets())
-            batch.add(usd3_vault.functions.totalSupply())
-            batch.add(usd3_vault.functions.convertToAssets(ONE_SHARE))
-            batch.add(susd3_vault.functions.totalAssets())
-            batch.add(susd3_vault.functions.totalSupply())
-            batch.add(susd3_vault.functions.convertToAssets(ONE_SHARE))
-            batch.add(usd3_vault.functions.balanceOf(SUSD3_ADDRESS))
-            batch.add(usd3_vault.functions.getMarketLiquidity())
-            batch.add(protocol_config.functions.config(CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR))
-            batch.add(protocol_config.functions.config(CFG_KEY_IS_PAUSED))
-            batch.add(wausdc_vault.functions.balanceOf(INSURANCE_FUND_ADDRESS))
-            batch.add(usd3_vault.functions.availableWithdrawLimit(ZERO_ADDRESS))
+            batch.add(usd3_vault.functions.totalAssets().call(block_identifier=block_number))
+            batch.add(usd3_vault.functions.totalSupply().call(block_identifier=block_number))
+            batch.add(usd3_vault.functions.convertToAssets(ONE_SHARE).call(block_identifier=block_number))
+            batch.add(susd3_vault.functions.totalAssets().call(block_identifier=block_number))
+            batch.add(susd3_vault.functions.totalSupply().call(block_identifier=block_number))
+            batch.add(susd3_vault.functions.convertToAssets(ONE_SHARE).call(block_identifier=block_number))
+            batch.add(usd3_vault.functions.balanceOf(SUSD3_ADDRESS).call(block_identifier=block_number))
+            batch.add(usd3_vault.functions.getMarketLiquidity().call(block_identifier=block_number))
+            batch.add(
+                protocol_config.functions.config(CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR).call(
+                    block_identifier=block_number
+                )
+            )
+            batch.add(protocol_config.functions.config(CFG_KEY_IS_PAUSED).call(block_identifier=block_number))
+            batch.add(wausdc_vault.functions.balanceOf(INSURANCE_FUND_ADDRESS).call(block_identifier=block_number))
+            batch.add(usd3_vault.functions.availableWithdrawLimit(ZERO_ADDRESS).call(block_identifier=block_number))
             responses = client.execute_batch(batch)
             if len(responses) != 12:
                 raise ValueError(f"Expected 12 responses, got {len(responses)}")
@@ -968,8 +973,8 @@ def main() -> None:
         # Value the USD3 shares held by sUSD3 and fetch one high-precision waUSDC
         # conversion rate. All waUSDC values below use that same rate and block.
         with client.batch_requests() as batch:
-            batch.add(usd3_vault.functions.convertToAssets(susd3_usd3_balance))
-            batch.add(wausdc_vault.functions.convertToAssets(RATE_SCALE))
+            batch.add(usd3_vault.functions.convertToAssets(susd3_usd3_balance).call(block_identifier=block_number))
+            batch.add(wausdc_vault.functions.convertToAssets(RATE_SCALE).call(block_identifier=block_number))
             backing_responses = client.execute_batch(batch)
             if len(backing_responses) != 2:
                 raise ValueError(f"Expected 2 backing responses, got {len(backing_responses)}")

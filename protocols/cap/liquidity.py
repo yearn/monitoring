@@ -37,14 +37,15 @@ def _format_units(raw_value: int) -> Decimal:
 
 def main():
     client = ChainManager.get_client(Chain.MAINNET)
+    block_number = int(client.eth.block_number)
     ctoken = client.eth.contract(address=CUSD, abi=load_abi("protocols/cap/abi/CToken.json"))  # aka cusd
 
-    assets = ctoken.functions.assets().call()
+    assets = ctoken.functions.assets().call(block_identifier=block_number)
 
     # Batch 1: resolve vault addresses for each asset
     with client.batch_requests() as batch:
         for asset in assets:
-            batch.add(ctoken.functions.fractionalReserveVault(asset))
+            batch.add(ctoken.functions.fractionalReserveVault(asset).call(block_identifier=block_number))
         vault_addresses = batch.execute()
 
     # Batch 2: for each asset, get vault maxWithdraw for CUSD owner, token balance, decimals, and symbol
@@ -52,10 +53,10 @@ def main():
         for asset, vault_addr in zip(assets, vault_addresses):
             vault = client.eth.contract(address=vault_addr, abi=load_abi("protocols/cap/abi/YearnV3Vault.json"))
             token = client.eth.contract(address=asset, abi=load_abi("common-abi/ERC20.json"))
-            batch.add(vault.functions.maxWithdraw(CUSD))
-            batch.add(token.functions.balanceOf(CUSD))
-            batch.add(token.functions.decimals())
-            batch.add(token.functions.symbol())
+            batch.add(vault.functions.maxWithdraw(CUSD).call(block_identifier=block_number))
+            batch.add(token.functions.balanceOf(CUSD).call(block_identifier=block_number))
+            batch.add(token.functions.decimals().call(block_identifier=block_number))
+            batch.add(token.functions.symbol().call(block_identifier=block_number))
         responses = batch.execute()
 
     # Parse batched results (4 entries per asset)
@@ -81,7 +82,7 @@ def main():
         send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
     # --- cUSD Large Mint Monitoring (No Event Scanning) ---
-    current_supply_raw = int(ctoken.functions.totalSupply().call())
+    current_supply_raw = int(ctoken.functions.totalSupply().call(block_identifier=block_number))
     last_supply_cached = _to_int(
         get_fresh_last_value_for_key_from_file(cache_filename, CACHE_KEY_LAST_SUPPLY, DAILY_CACHE_STALE_AFTER_SECONDS)
     )

@@ -39,6 +39,7 @@ ABI_MARKET = load_abi("protocols/pendle/abi/PendleMarket.json")
 
 def process_assets(chain: Chain):
     client = ChainManager.get_client(chain)
+    block_number = int(client.eth.block_number)
     vaults = VAULTS_BY_CHAIN[chain]
     oracle = client.eth.contract(address=ORACLE_ADDRESS, abi=ABI_ORACLE)
 
@@ -47,8 +48,8 @@ def process_assets(chain: Chain):
     with client.batch_requests() as batch:
         for vault_address in vaults:
             vault = client.eth.contract(address=vault_address, abi=ABI_VAULT)
-            batch.add(vault.functions.get_default_queue())
-            batch.add(vault.functions.name())
+            batch.add(vault.functions.get_default_queue().call(block_identifier=block_number))
+            batch.add(vault.functions.name().call(block_identifier=block_number))
         responses = client.execute_batch(batch)
 
     # Process vault responses and prepare strategy checks
@@ -62,9 +63,9 @@ def process_assets(chain: Chain):
         for strategies, _ in strategies_data:
             for strategy_address in strategies:
                 strategy = client.eth.contract(address=strategy_address, abi=ABI_STRATEGY)
-                batch.add(strategy.functions.totalAssets())
-                batch.add(strategy.functions.isExpired())
-                batch.add(strategy.functions.market())
+                batch.add(strategy.functions.totalAssets().call(block_identifier=block_number))
+                batch.add(strategy.functions.isExpired().call(block_identifier=block_number))
+                batch.add(strategy.functions.market().call(block_identifier=block_number))
         responses = client.execute_batch(batch)
 
     # Process strategy responses and prepare market checks
@@ -85,9 +86,9 @@ def process_assets(chain: Chain):
     with client.batch_requests() as batch:
         for market_address, _, _ in active_markets:
             market = client.eth.contract(address=market_address, abi=ABI_MARKET)
-            batch.add(market.functions.isExpired())
-            batch.add(market.functions.expiry())
-            batch.add(oracle.functions.getPtToAssetRate(market_address, DURATION))
+            batch.add(market.functions.isExpired().call(block_identifier=block_number))
+            batch.add(market.functions.expiry().call(block_identifier=block_number))
+            batch.add(oracle.functions.getPtToAssetRate(market_address, DURATION).call(block_identifier=block_number))
         responses = client.execute_batch(batch)
 
     # Process final results

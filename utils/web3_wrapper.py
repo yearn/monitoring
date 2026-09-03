@@ -139,6 +139,17 @@ class Web3Client(RetryProviders):
         provider = MultiHTTPProvider(providers=provider_urls, max_retries=3, backoff_factor=2)
         return Web3(provider)
 
+    def _rotate_provider(self) -> None:
+        """Rotate the provider used by the underlying Web3 instance."""
+        provider = self.w3.provider
+        if not isinstance(provider, MultiHTTPProvider):
+            raise ProviderConnectionError(f"Cannot rotate unsupported provider type {type(provider).__name__}")
+        provider._rotate_provider()
+        endpoint_uri = provider.endpoint_uri
+        if endpoint_uri is None:
+            raise ProviderConnectionError("Rotated provider has no endpoint URI")
+        self.endpoint_uri = endpoint_uri
+
     def _get_provider_urls(self) -> List[str]:
         """Get provider URLs for the chain from environment variables"""
         urls = []

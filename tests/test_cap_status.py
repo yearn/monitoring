@@ -27,6 +27,13 @@ def make_status_client(responses: Sequence[int | None]) -> tuple[SimpleNamespace
     """Build a batch-capable fake client and capture its submitted calls."""
     added_calls: list[object] = []
 
+    class ContractCall:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def call(self, *, block_identifier: int) -> tuple[str, int]:
+            return self.name, block_identifier
+
     class Batch:
         def __enter__(self) -> "Batch":
             return self
@@ -41,14 +48,14 @@ def make_status_client(responses: Sequence[int | None]) -> tuple[SimpleNamespace
             return list(responses)
 
     functions = SimpleNamespace(
-        balanceOf=lambda _owner: "balanceOf",
-        totalAssets=lambda: "totalAssets",
-        lockedProfit=lambda: "lockedProfit",
-        convertToAssets=lambda _shares: "convertToAssets",
+        balanceOf=lambda _owner: ContractCall("balanceOf"),
+        totalAssets=lambda: ContractCall("totalAssets"),
+        lockedProfit=lambda: ContractCall("lockedProfit"),
+        convertToAssets=lambda _shares: ContractCall("convertToAssets"),
     )
     contract = SimpleNamespace(functions=functions)
     client = SimpleNamespace(
-        eth=SimpleNamespace(contract=lambda **_kwargs: contract),
+        eth=SimpleNamespace(block_number=23_456_789, contract=lambda **_kwargs: contract),
         batch_requests=Batch,
     )
     return client, added_calls
@@ -113,13 +120,18 @@ def test_stcusd_assets_per_share_increase_does_not_alert(monkeypatch: pytest.Mon
     assert alerts == []
 
 
-def test_load_status_batches_all_calls() -> None:
+def test_load_status_batches_all_calls_at_one_block() -> None:
     responses = [120, 100, 10, 1_050_000_000_000_000_000]
     client, added_calls = make_status_client(responses)
 
     stcusd_state = status.load_status(client)
 
-    assert added_calls == ["balanceOf", "totalAssets", "lockedProfit", "convertToAssets"]
+    assert added_calls == [
+        ("balanceOf", 23_456_789),
+        ("totalAssets", 23_456_789),
+        ("lockedProfit", 23_456_789),
+        ("convertToAssets", 23_456_789),
+    ]
     assert stcusd_state == status.StcUsdState(120, 100, 10, 1_050_000_000_000_000_000)
 
 

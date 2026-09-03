@@ -362,6 +362,9 @@ def _read_snapshot(config: StrategyConfig, *, include_rates: bool) -> StrategySn
     client = ChainManager.get_client(config.chain)
     strategy_address = Web3.to_checksum_address(config.address)
     strategy = client.get_contract(strategy_address, STRATEGY_ABI)
+    block_number = int(client.eth.block_number)
+    block = client.execute(client.eth.get_block, block_number)
+    block_timestamp = int(block["timestamp"])
 
     # Static addresses and Morpho market parameters live in StrategyConfig. The
     # remaining values are position state or management-settable configuration.
@@ -376,7 +379,7 @@ def _read_snapshot(config: StrategyConfig, *, include_rates: bool) -> StrategySn
             strategy.functions.warningLTVMultiplier(),
             strategy.functions.targetLTVMultiplier(),
         ):
-            batch.add(call)
+            batch.add(call.call(block_identifier=block_number))
         values = client.execute_batch(batch)
 
     (
@@ -396,9 +399,6 @@ def _read_snapshot(config: StrategyConfig, *, include_rates: bool) -> StrategySn
     market_params = config.market_params
     liquidation_ltv_wad = market_params[4]
 
-    block = client.execute(client.eth.get_block, "latest")
-    block_number = int(block["number"])
-    block_timestamp = int(block["timestamp"])
     morpho_oracle = client.get_contract(market_params[2], MORPHO_ORACLE_ABI)
     price_feed = client.get_contract(borrow_usd_oracle_address, CHAINLINK_ABI)
 
@@ -408,7 +408,7 @@ def _read_snapshot(config: StrategyConfig, *, include_rates: bool) -> StrategySn
             price_feed.functions.decimals(),
             price_feed.functions.latestRoundData(),
         ):
-            batch.add(call)
+            batch.add(call.call(block_identifier=block_number))
         aux = client.execute_batch(batch)
 
     (
@@ -439,8 +439,8 @@ def _read_snapshot(config: StrategyConfig, *, include_rates: bool) -> StrategySn
         morpho = client.get_contract(morpho_address, MORPHO_ABI)
         apr_oracle = client.get_contract(Web3.to_checksum_address(YEARN_APR_ORACLE), APR_ORACLE_ABI)
         with client.batch_requests() as batch:
-            batch.add(morpho.functions.market(config.market_id))
-            batch.add(apr_oracle.functions.getStrategyApr(lender_vault_address, 0))
+            batch.add(morpho.functions.market(config.market_id).call(block_identifier=block_number))
+            batch.add(apr_oracle.functions.getStrategyApr(lender_vault_address, 0).call(block_identifier=block_number))
             market_raw, lender_apr_raw = client.execute_batch(batch)
 
         market_values = tuple(int(value) for value in market_raw)

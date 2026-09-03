@@ -119,15 +119,16 @@ def _fetch_single_market(client: Web3Client, address: str, name: str, risk_level
     (Tenderly caps at ~50 per batch).
     """
     comet = client.eth.contract(address=address, abi=ABI_COMET)
+    block_number = int(client.eth.block_number)
 
     # --- Batch 1: market-level data (6 calls) ---
     with client.batch_requests() as batch:
-        batch.add(comet.functions.numAssets())
-        batch.add(comet.functions.totalSupply())
-        batch.add(comet.functions.totalBorrow())
-        batch.add(comet.functions.getReserves())
-        batch.add(comet.functions.baseTokenPriceFeed())
-        batch.add(comet.functions.baseScale())
+        batch.add(comet.functions.numAssets().call(block_identifier=block_number))
+        batch.add(comet.functions.totalSupply().call(block_identifier=block_number))
+        batch.add(comet.functions.totalBorrow().call(block_identifier=block_number))
+        batch.add(comet.functions.getReserves().call(block_identifier=block_number))
+        batch.add(comet.functions.baseTokenPriceFeed().call(block_identifier=block_number))
+        batch.add(comet.functions.baseScale().call(block_identifier=block_number))
         resp_1 = client.execute_batch(batch)
 
     num_assets = int(resp_1[0])
@@ -140,19 +141,19 @@ def _fetch_single_market(client: Web3Client, address: str, name: str, risk_level
     # --- Batch 2: getAssetInfo for all assets (up to ~16 calls) ---
     with client.batch_requests() as batch:
         for asset_idx in range(num_assets):
-            batch.add(comet.functions.getAssetInfo(asset_idx))
+            batch.add(comet.functions.getAssetInfo(asset_idx).call(block_identifier=block_number))
         resp_2 = client.execute_batch(batch)
 
     # --- Batch 3: per-asset data + base price (up to ~49 calls) ---
     with client.batch_requests() as batch:
-        batch.add(comet.functions.getPrice(base_price_feed))
+        batch.add(comet.functions.getPrice(base_price_feed).call(block_identifier=block_number))
         for info in resp_2:
             asset_address = info[1]
             price_feed = info[2]
-            batch.add(comet.functions.totalsCollateral(asset_address))
-            batch.add(comet.functions.getPrice(price_feed))
+            batch.add(comet.functions.totalsCollateral(asset_address).call(block_identifier=block_number))
+            batch.add(comet.functions.getPrice(price_feed).call(block_identifier=block_number))
             erc20 = client.eth.contract(address=asset_address, abi=ABI_ERC20)
-            batch.add(erc20.functions.symbol())
+            batch.add(erc20.functions.symbol().call(block_identifier=block_number))
         resp_3 = client.execute_batch(batch)
 
     # Parse batch 3
