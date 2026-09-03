@@ -93,11 +93,11 @@ def _breach_once(cache_key: str, condition: bool, message: str, messages: list[s
         write_last_value_with_timestamp_to_file(cache_filename, cache_key, 0)
 
 
-def _check_susde_vault(messages: list[str], client, susde_vault, cooldown_contract) -> None:
+def _check_susde_vault(messages: list[str], client, susde_vault, cooldown_contract, block_number: int) -> None:
     try:
         with client.batch_requests() as batch:
-            batch.add(susde_vault.functions.convertToAssets(WEI))
-            batch.add(cooldown_contract.functions.cooldownDuration())
+            batch.add(susde_vault.functions.convertToAssets(WEI).call(block_identifier=block_number))
+            batch.add(cooldown_contract.functions.cooldownDuration().call(block_identifier=block_number))
             responses = client.execute_batch(batch)
     except Exception as e:
         logger.warning("Could not read sUSDe vault metrics: %s", e)
@@ -235,7 +235,7 @@ def main() -> None:
         _set_fresh_cache_float(strategy_ratio_cache_key, strategy_ratio)
         _check_daily_tvl(messages, total_deposits)
         _check_jr_drain(messages, jr_assets)
-        _check_susde_vault(messages, client, susde_vault, susde_cooldown)
+        _check_susde_vault(messages, client, susde_vault, susde_cooldown, block_number)
 
         if messages:
             send_telegram_message("\n\n".join(messages), PROTOCOL)
