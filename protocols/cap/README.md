@@ -12,8 +12,8 @@ For more info about CAP protocol check [the docs](https://docs.cap.app/).
 
 The hourly [status.py](./status.py) monitor checks the [stcUSD contract](https://etherscan.io/address/0x88887bE419578051FF9F4eb6C858A951921D8888):
 
-1. The contract's cUSD balance must cover `totalAssets() + lockedProfit()`. A deficit sends one critical alert; recovery re-arms the monitor.
-2. `convertToAssets(1e18)` must not decrease between runs. Any decrease sends a critical alert.
+1. The contract's cUSD balance must cover `totalAssets() + lockedProfit()`. All values are pinned to the same block so profit unlocking between RPC calls cannot create a false deficit. A deficit sends one critical alert; recovery re-arms the monitor.
+2. `convertToAssets(1e18)` must not decrease between runs. It is read at the same pinned block as the backing values. Any decrease sends a critical alert.
 
 stcUSD has no withdrawal pause, cooldown, queue, allowlist, or withdrawal-cap override. Its 86,400-second `lockDuration` only vests newly received profit. The duration is set during the one-time initializer and has no setter. Changing it requires a UUPS upgrade, whose sole live upgrade-role holder is the monitored CAP TimelockController.
 

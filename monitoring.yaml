@@ -84,7 +84,7 @@ protocols:
       - protocols/cap/liquidity.py
     monitors:
       - name: "stcUSD Backing"
-        description: "cUSD balance covers stcUSD totalAssets plus lockedProfit"
+        description: "Same-block cUSD balance covers stcUSD totalAssets plus lockedProfit"
       - name: "stcUSD Assets Per Share"
         description: "Critical alert if convertToAssets(1 stcUSD) decreases"
       - name: "Withdrawable Liquidity"
@@ -176,7 +176,7 @@ protocols:
       - name: "Liquid Reserves"
         description: "Liquid reserves < $8M; crossing detection re-armed after a monitoring gap >3 hours"
       - name: "Backing Per iUSD"
-        description: "totalTVL / iUSD supply < 0.999; re-armed after a monitoring gap >3 hours"
+        description: "API totalTVL / block-pinned iUSD supply < 0.999; supply block included in alerts"
       - name: "Redemption Pressure"
         description: "Pending redemptions / liquid reserves >80%; re-armed after a monitoring gap >3 hours"
       - name: "Large iUSD Mints"

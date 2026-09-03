@@ -117,7 +117,7 @@ def check_stcusd_assets_per_share(current_assets_per_share: int) -> None:
 
 
 def load_status(client: Any) -> StcUsdState:
-    """Load stcUSD status values in one Mainnet RPC batch.
+    """Load stcUSD status values at one Mainnet block in an RPC batch.
 
     Args:
         client: Mainnet Web3 client supporting batch requests.
@@ -125,14 +125,16 @@ def load_status(client: Any) -> StcUsdState:
     Returns:
         Current stcUSD accounting state.
     """
+    block_number = _to_int(client.eth.block_number, "latest block number")
     cusd = client.eth.contract(address=CUSD, abi=load_abi("protocols/cap/abi/CToken.json"))
     stcusd = client.eth.contract(address=STCUSD, abi=load_abi("protocols/cap/abi/StakedCap.json"))
+    logger.info("Loading stcUSD status at block=%s", block_number)
 
     with client.batch_requests() as batch:
-        batch.add(cusd.functions.balanceOf(STCUSD))
-        batch.add(stcusd.functions.totalAssets())
-        batch.add(stcusd.functions.lockedProfit())
-        batch.add(stcusd.functions.convertToAssets(ONE_STCUSD))
+        batch.add(cusd.functions.balanceOf(STCUSD).call(block_identifier=block_number))
+        batch.add(stcusd.functions.totalAssets().call(block_identifier=block_number))
+        batch.add(stcusd.functions.lockedProfit().call(block_identifier=block_number))
+        batch.add(stcusd.functions.convertToAssets(ONE_STCUSD).call(block_identifier=block_number))
         responses = batch.execute()
 
     return StcUsdState(

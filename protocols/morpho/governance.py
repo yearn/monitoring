@@ -113,11 +113,16 @@ def format_cap(cap: int, decimals: int | None) -> str:
     return str(format_with_suffix(format_token_amount(cap, decimals)))
 
 
-def _load_vault_market_ids(morpho_contract: Any, chain: Chain, client: Any) -> list[bytes]:
+def _load_vault_market_ids(
+    morpho_contract: Any,
+    chain: Chain,
+    client: Any,
+    block_number: int,
+) -> list[bytes]:
     """Load accepted and pending-cap market IDs for one V1 vault."""
     with client.batch_requests() as batch:
-        batch.add(morpho_contract.functions.supplyQueueLength())
-        batch.add(morpho_contract.functions.withdrawQueueLength())
+        batch.add(morpho_contract.functions.supplyQueueLength().call(block_identifier=block_number))
+        batch.add(morpho_contract.functions.withdrawQueueLength().call(block_identifier=block_number))
         lengths = client.execute_batch(batch)
     if len(lengths) != 2:
         raise ValueError(f"Expected 2 queue length responses, got {len(lengths)}")
@@ -125,9 +130,9 @@ def _load_vault_market_ids(morpho_contract: Any, chain: Chain, client: Any) -> l
     supply_length, withdraw_length = lengths
     with client.batch_requests() as batch:
         for index in range(supply_length):
-            batch.add(morpho_contract.functions.supplyQueue(index))
+            batch.add(morpho_contract.functions.supplyQueue(index).call(block_identifier=block_number))
         for index in range(withdraw_length):
-            batch.add(morpho_contract.functions.withdrawQueue(index))
+            batch.add(morpho_contract.functions.withdrawQueue(index).call(block_identifier=block_number))
         queued_markets = client.execute_batch(batch)
     expected_count = supply_length + withdraw_length
     if len(queued_markets) != expected_count:
@@ -144,12 +149,13 @@ def _load_market_governance_states(
     morpho_contract: Any,
     market_ids: list[bytes],
     client: Any,
+    block_number: int,
 ) -> list[MarketGovernanceState]:
     """Batch pending-cap and config reads for V1 vault markets."""
     with client.batch_requests() as batch:
         for market_id in market_ids:
-            batch.add(morpho_contract.functions.pendingCap(market_id))
-            batch.add(morpho_contract.functions.config(market_id))
+            batch.add(morpho_contract.functions.pendingCap(market_id).call(block_identifier=block_number))
+            batch.add(morpho_contract.functions.config(market_id).call(block_identifier=block_number))
         responses = client.execute_batch(batch)
     expected_count = len(market_ids) * 2
     if len(responses) != expected_count:
@@ -253,10 +259,18 @@ def check_market_governance_state(name: str, state: MarketGovernanceState, chain
     _check_market_removal(state, chain, diff)
 
 
-def check_markets_pending_cap(name: str, morpho_contract: Any, chain: Chain, client: Any, diff: VaultDiff) -> None:
+def check_markets_pending_cap(
+    name: str,
+    morpho_contract: Any,
+    chain: Chain,
+    client: Any,
+    diff: VaultDiff,
+    *,
+    block_number: int,
+) -> None:
     """Check V1 market cap and removal governance for one vault."""
-    market_ids = _load_vault_market_ids(morpho_contract, chain, client)
-    for state in _load_market_governance_states(morpho_contract, market_ids, client):
+    market_ids = _load_vault_market_ids(morpho_contract, chain, client, block_number)
+    for state in _load_market_governance_states(morpho_contract, market_ids, client, block_number):
         check_market_governance_state(name, state, chain, diff)
 
 
@@ -272,10 +286,15 @@ def check_pending_role_change(
         diff.defer(write_last_executed_morpho_to_file, morpho_contract.address, market_id, role_type, timestamp)
 
 
-def check_timelock_and_guardian(morpho_contract: Any, client: Any, diff: VaultDiff) -> None:
+def check_timelock_and_guardian(
+    morpho_contract: Any,
+    client: Any,
+    diff: VaultDiff,
+    block_number: int,
+) -> None:
     with morpho_contract.w3.batch_requests() as batch:
-        batch.add(morpho_contract.functions.pendingTimelock())
-        batch.add(morpho_contract.functions.pendingGuardian())
+        batch.add(morpho_contract.functions.pendingTimelock().call(block_identifier=block_number))
+        batch.add(morpho_contract.functions.pendingGuardian().call(block_identifier=block_number))
         responses = client.execute_batch(batch)
         if len(responses) != 2:
             raise ValueError("Expected 2 responses from batch, got: ", len(responses))
@@ -293,14 +312,22 @@ def get_data_for_chain(chain: Chain) -> None:
 
     logger.info("Processing Morpho Vaults on %s ...", chain.name)
     logger.debug("Vaults: %s", vaults)
+    block_number = int(client.eth.block_number)
 
     for vault in vaults:
         morpho_contract = client.eth.contract(address=vault.address, abi=ABI_MORPHO)
         # Buffer every finding for this vault, then send them as one message and
         # only then record them as alerted.
         diff = VaultDiff()
-        check_markets_pending_cap(vault.name, morpho_contract, chain, client, diff)
-        check_timelock_and_guardian(morpho_contract, client, diff)
+        check_markets_pending_cap(
+            vault.name,
+            morpho_contract,
+            chain,
+            client,
+            diff,
+            block_number=block_number,
+        )
+        check_timelock_and_guardian(morpho_contract, client, diff, block_number)
         send_vault_alerts(_vault_header(vault.name, vault.address, chain), diff.alerts, PROTOCOL)
         diff.commit()
 

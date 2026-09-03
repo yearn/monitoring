@@ -166,11 +166,12 @@ def main() -> None:
     susde_cooldown = client.get_contract(SUSDE, SUSDE_COOLDOWN_ABI)
 
     try:
+        block_number = int(client.eth.block_number)
         with client.batch_requests() as batch:
-            batch.add(sr.functions.totalAssets())
-            batch.add(sr.functions.convertToAssets(WEI))
-            batch.add(jr.functions.totalAssets())
-            batch.add(susde.functions.balanceOf(SUSDE_STRATEGY))
+            batch.add(sr.functions.totalAssets().call(block_identifier=block_number))
+            batch.add(sr.functions.convertToAssets(WEI).call(block_identifier=block_number))
+            batch.add(jr.functions.totalAssets().call(block_identifier=block_number))
+            batch.add(susde.functions.balanceOf(SUSDE_STRATEGY).call(block_identifier=block_number))
             responses = client.execute_batch(batch)
 
         if len(responses) != 4:

@@ -105,13 +105,10 @@ def main():
 
     try:
         # --- 1. iUSD Supply ---
-        # Batch call for totalSupply
-        with client.batch_requests() as batch:
-            batch.add(iusd_contract.functions.totalSupply())
-
-            batch_results = client.execute_batch(batch)
-
-        iusd_supply_raw = int(batch_results[0])
+        # The backing API does not expose a block identifier to this monitor. Pin
+        # and report the on-chain side so any cross-source alert is reproducible.
+        supply_block_number = int(client.eth.block_number)
+        iusd_supply_raw = int(iusd_contract.functions.totalSupply().call(block_identifier=supply_block_number))
 
         iusd_supply = iusd_supply_raw / (10**IUSD_DECIMALS)
 
@@ -160,7 +157,11 @@ def main():
             # target_reserve_ratio = to_float(params.get("reserveRatio"))
             # target_illiquid_ratio = to_float(params.get("illiquidTargetRatio"))
 
-        logger.info("--- Infinifi Stats ---\niUSD Supply:     $%s", f"{iusd_supply:,.2f}")
+        logger.info(
+            "--- Infinifi Stats ---\niUSD Supply:     $%s\nSupply Block:    %s",
+            f"{iusd_supply:,.2f}",
+            supply_block_number,
+        )
 
         if liquid_reserves > 0:
             logger.info("Liquid Reserves: $%s", f"{liquid_reserves:,.2f}")
@@ -292,7 +293,9 @@ def main():
                     alert_message=(
                         "🚨 *Infinifi Backing Alert*\n\n"
                         f"Backing per iUSD is {backing_per_iusd:.6f}, below {BACKING_PER_IUSD_MIN:.3f}.\n"
-                        f"TVL: ${total_backing:,.2f}\nSupply: ${iusd_supply:,.2f}"
+                        f"TVL: ${total_backing:,.2f}\n"
+                        f"Supply: ${iusd_supply:,.2f}\n"
+                        f"Supply block: {supply_block_number}"
                     ),
                 )
             else:
