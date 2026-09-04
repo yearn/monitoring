@@ -45,6 +45,10 @@ protocols:
         description: "Alert-once when IS_PAUSED is true; re-armed after a monitoring gap >3 hours"
       - name: "Borrower Default Watch"
         description: "Envio-backed MorphoCredit borrower watch; MEDIUM alerts when unpaid obligations become delinquent after grace or reach default"
+      - name: "Proof of Solvency"
+        description: "Accountable collateral ratio <95% (CRITICAL, after 2 consecutive runs) or <99% (HIGH)"
+      - name: "Proof of Solvency Freshness"
+        description: "MEDIUM when a short-cadence report/source misses 2 periods or a >1h cadence misses 1; HIGH after an unavailable feed exhausts retries"
       - name: "Timelock"
         description: "CallScheduled events from 24h and 7-day TimelockControllers via Envio"
 

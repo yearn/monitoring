@@ -1,0 +1,475 @@
+"""Tests for the Accountable Proof of Solvency client."""
+
+import copy
+import json
+from dataclasses import replace
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+import pytest
+import requests
+
+from utils import accountable
+from utils.accountable import (
+    AccountableError,
+    AccountableFeedConfig,
+    AccountableStatus,
+    evaluate_report,
+    fetch_report,
+    parse_frequency_seconds,
+    parse_report,
+)
+
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "accountable_3jane_dashboard.json"
+# Fixture was recorded at ts=1785490814726; this is a few minutes later.
+FIXTURE_NOW_MS = 1785491000000
+
+CONFIG = AccountableFeedConfig(
+    dfid="100000026",
+    dashboard_url="https://accountable.3jane.xyz/dashboard",
+    message_url="https://accountable.3jane.xyz/",
+    dashboard_type="three-jane",
+    required_sources=(
+        "LendSwift - Warehouse Senior Note",
+        "USD3 Minted Liabilities",
+        "Slope - Forward Flows",
+        "USD3 On-Chain Reserves",
+    ),
+    source_frequency_overrides=(("Slope - Forward Flows", "WEEKLY"),),
+)
+
+
+def load_payload() -> dict[str, Any]:
+    """Return a mutable copy of the recorded dashboard response."""
+    return json.loads(FIXTURE_PATH.read_text())
+
+
+def load_fresh_payload() -> dict[str, Any]:
+    """Return the recorded report with every required source made current."""
+    payload = load_payload()
+    for source in payload["data"]["dataSources"].values():
+        source["lastUpdated"] = str(FIXTURE_NOW_MS)
+    return payload
+
+
+# --- Parsing the real recorded payload ---
+
+
+def test_parses_recorded_live_payload() -> None:
+    report = parse_report(load_payload(), CONFIG, FIXTURE_NOW_MS)
+
+    assert report.dfid == "100000026"
+    assert report.total_reserves == Decimal("75021555.53")
+    assert report.total_supply == Decimal("74999990.44")
+    assert report.net == Decimal("21565.08")
+    assert report.verifiability == Decimal("100")
+    assert report.ts_ms == 1785490814726
+
+
+def test_ratio_is_derived_at_full_precision_not_taken_from_rounded_field() -> None:
+    report = parse_report(load_payload(), CONFIG, FIXTURE_NOW_MS)
+
+    assert report.reported_collateralization == Decimal("1.000288")
+    assert report.collateralization == Decimal("75021555.53") / Decimal("74999990.44")
+    # The derived value carries precision the rounded API field discards.
+    assert report.collateralization != report.reported_collateralization
+
+
+def test_coerces_numeric_strings() -> None:
+    """ts and verifiability ship as strings despite being documented as numbers."""
+    payload = load_payload()
+    assert isinstance(payload["data"]["ts"], str)
+    assert isinstance(payload["data"]["reserves"]["verifiability"], str)
+
+    report = parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+
+    assert isinstance(report.ts_ms, int)
+    assert report.verifiability == Decimal("100")
+
+
+def test_recorded_live_payload_uses_slope_weekly_override() -> None:
+    result = evaluate_report(parse_report(load_payload(), CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.STALE
+    assert result.report is not None
+    assert [source.name for source in result.report.stale_sources] == [
+        "LendSwift - Warehouse Senior Note",
+    ]
+    slope = next(source for source in result.report.sources if source.name == "Slope - Forward Flows")
+    assert slope.frequency == "WEEKLY"
+    assert not slope.is_stale
+
+
+# --- Rejection cases ---
+
+
+def test_rejects_non_ok_res() -> None:
+    payload = load_payload()
+    payload["res"] = "error"
+
+    with pytest.raises(AccountableError, match="res"):
+        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+
+
+def test_rejects_missing_reserves() -> None:
+    payload = load_payload()
+    del payload["data"]["reserves"]
+
+    with pytest.raises(AccountableError, match="reserves"):
+        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+
+
+def test_rejects_missing_total_supply_value() -> None:
+    payload = load_payload()
+    del payload["data"]["reserves"]["total_supply"]["value"]
+
+    with pytest.raises(AccountableError, match="total_supply.value"):
+        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+
+
+def test_rejects_non_numeric_field() -> None:
+    payload = load_payload()
+    payload["data"]["reserves"]["total_reserves"]["value"] = "not-a-number"
+
+    with pytest.raises(AccountableError, match="not numeric"):
+        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+
+
+def test_rejects_non_finite_value() -> None:
+    payload = load_payload()
+    payload["data"]["reserves"]["total_reserves"]["value"] = float("inf")
+
+    with pytest.raises(AccountableError, match="not finite"):
+        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+
+
+def test_rejects_zero_supply_instead_of_dividing_by_zero() -> None:
+    payload = load_payload()
+    payload["data"]["reserves"]["total_supply"]["value"] = 0
+
+    with pytest.raises(AccountableError, match="implausible totals"):
+        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+
+
+def test_rejects_inconsistent_collateralization() -> None:
+    """A reported ratio that disagrees with the totals means we cannot trust either."""
+    payload = load_payload()
+    payload["data"]["collateralization"] = 1.5
+
+    with pytest.raises(AccountableError, match="disagrees"):
+        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+
+
+def test_rejects_inconsistent_net() -> None:
+    payload = load_payload()
+    payload["data"]["net"] = 999_999.0
+
+    with pytest.raises(AccountableError, match="net"):
+        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+
+
+def test_accepts_rounding_level_disagreement() -> None:
+    """The API rounds collateralization to 6dp, so tolerance must absorb that."""
+    payload = load_payload()
+    reserves = Decimal(str(payload["data"]["reserves"]["total_reserves"]["value"]))
+    supply = Decimal(str(payload["data"]["reserves"]["total_supply"]["value"]))
+    payload["data"]["collateralization"] = float(round(reserves / supply, 6))
+
+    report = parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+
+    assert report.collateralization == reserves / supply
+
+
+def test_rejects_non_usd_pegged_feed() -> None:
+    """liabilities == total_supply only holds when fx is 1."""
+    payload = load_payload()
+    payload["data"]["reserves"]["total_supply"]["fx"] = 0.92
+
+    with pytest.raises(AccountableError, match="fx"):
+        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+
+
+def test_rejects_non_usd_liabilities_when_fx_is_omitted() -> None:
+    """With fx absent, the net identity is what enforces the USD denominator."""
+    payload = load_payload()
+    reserves = Decimal(str(payload["data"]["reserves"]["total_reserves"]["value"]))
+    supply = Decimal(str(payload["data"]["reserves"]["total_supply"]["value"]))
+    liabilities = supply * Decimal("0.92")
+    payload["data"]["net"] = float(reserves - liabilities)
+    payload["data"]["collateralization"] = float(round(reserves / liabilities, 6))
+    assert "fx" not in payload["data"]["reserves"]["total_supply"]
+
+    # Both consistency identities are computed against raw supply, so a feed
+    # denominated in anything else fails on the ratio cross-check first.
+    with pytest.raises(AccountableError, match="disagrees"):
+        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+
+
+def test_rejects_future_timestamp() -> None:
+    payload = load_payload()
+    payload["data"]["ts"] = str(FIXTURE_NOW_MS + 86_400_000)
+
+    with pytest.raises(AccountableError, match="future"):
+        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+
+
+@pytest.mark.parametrize("interval", [None, "sometimes"])
+def test_rejects_unrecognised_report_interval(interval: str | None) -> None:
+    payload = load_payload()
+    payload["data"]["reserves"]["interval"] = interval
+
+    with pytest.raises(AccountableError, match="reserves.interval"):
+        parse_report(payload, CONFIG, FIXTURE_NOW_MS)
+
+
+# --- Freshness ---
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("15 MIN", 900),
+        ("DAILY", 86_400),
+        ("WEEKLY", 604_800),
+        ("48 H", 172_800),
+        ("1 W", 604_800),
+        ("live", 900),
+        ("", None),
+        ("sometimes", None),
+        (None, None),
+        # Ambiguous between minutes and months; guessing months would grant a
+        # 30x freshness budget, so it is rejected instead.
+        ("15 M", None),
+    ],
+)
+def test_parse_frequency_seconds(text: Any, expected: int | None) -> None:
+    assert parse_frequency_seconds(text) == expected
+
+
+def test_aggregate_report_is_stale_only_after_more_than_two_cadence_periods() -> None:
+    payload = load_fresh_payload()
+    payload["data"]["reserves"]["interval"] = "15 MIN"
+    payload["data"]["ts"] = str(FIXTURE_NOW_MS - 30 * 60 * 1000)
+
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.OK
+
+    payload["data"]["ts"] = str(FIXTURE_NOW_MS - (30 * 60 + 1) * 1000)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.STALE
+    assert "old" in result.reason
+
+
+def test_weekly_aggregate_report_is_not_stale_after_six_hours() -> None:
+    payload = load_fresh_payload()
+    payload["data"]["reserves"]["interval"] = "WEEKLY"
+    payload["data"]["ts"] = str(FIXTURE_NOW_MS - 6 * 60 * 60 * 1000)
+
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.OK
+
+    payload["data"]["ts"] = str(FIXTURE_NOW_MS - (7 * 24 * 60 * 60 + 1) * 1000)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.STALE
+
+
+def test_fresh_aggregate_with_stale_source_is_detected() -> None:
+    """The headline timestamp can be fresh while an input has gone dark."""
+    payload = load_payload()
+    payload["data"]["dataSources"]["USD3 On-Chain Reserves"]["lastUpdated"] = str(FIXTURE_NOW_MS - 86_400_000)
+
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.STALE
+    assert "USD3 On-Chain Reserves" in result.reason
+    assert result.report is not None
+    assert result.report.collateralization > 1
+
+
+def test_source_is_stale_only_after_more_than_two_cadence_periods() -> None:
+    payload = load_fresh_payload()
+    source = payload["data"]["dataSources"]["USD3 Minted Liabilities"]
+    source["lastUpdated"] = str(FIXTURE_NOW_MS - 30 * 60 * 1000)
+
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.OK
+
+    source["lastUpdated"] = str(FIXTURE_NOW_MS - (30 * 60 + 1) * 1000)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.STALE
+    assert "USD3 Minted Liabilities" in result.reason
+
+
+def test_daily_source_is_stale_after_first_missed_period() -> None:
+    payload = load_fresh_payload()
+    source = payload["data"]["dataSources"]["USD3 Minted Liabilities"]
+    source["frequency"] = "DAILY"
+    source["lastUpdated"] = str(FIXTURE_NOW_MS - 24 * 60 * 60 * 1000)
+
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.OK
+
+    source["lastUpdated"] = str(FIXTURE_NOW_MS - (24 * 60 * 60 + 1) * 1000)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.STALE
+    assert "USD3 Minted Liabilities" in result.reason
+
+
+def test_unparseable_source_frequency_is_skipped_not_flagged_stale() -> None:
+    payload = load_fresh_payload()
+    payload["data"]["dataSources"]["Mystery Source"] = {
+        "type": "Unknown",
+        "frequency": "whenever",
+        "lastUpdated": "1",
+    }
+
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.OK
+    assert result.report is not None
+    assert all(source.name != "Mystery Source" for source in result.report.sources)
+
+
+def test_missing_required_source_is_stale_not_unavailable() -> None:
+    """A source rename must not blind the ratio check."""
+    payload = load_payload()
+    del payload["data"]["dataSources"]["Slope - Forward Flows"]
+
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.STALE
+    assert "Slope - Forward Flows" in result.reason
+    assert result.report is not None
+    assert result.report.collateralization > 1
+
+
+@pytest.mark.parametrize("field", ["frequency", "lastUpdated", "type"])
+def test_malformed_required_source_is_stale_not_unavailable(field: str) -> None:
+    payload = load_payload()
+    del payload["data"]["dataSources"]["USD3 On-Chain Reserves"][field]
+
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.STALE
+    assert "USD3 On-Chain Reserves" in result.reason
+    assert result.report is not None
+    # The unusable source is dropped rather than counted as fresh.
+    assert all(source.name != "USD3 On-Chain Reserves" for source in result.report.sources)
+
+
+def test_future_source_timestamp_is_not_treated_as_fresh() -> None:
+    """Clamping a future lastUpdated to age 0 would defeat the freshness check."""
+    payload = load_payload()
+    payload["data"]["dataSources"]["USD3 On-Chain Reserves"]["lastUpdated"] = str(FIXTURE_NOW_MS + 86_400_000)
+
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.STALE
+    assert "future" in result.reason
+    assert result.report is not None
+    assert all(source.name != "USD3 On-Chain Reserves" for source in result.report.sources)
+
+
+def test_small_future_source_skew_is_tolerated() -> None:
+    payload = load_fresh_payload()
+    payload["data"]["dataSources"]["USD3 On-Chain Reserves"]["lastUpdated"] = str(FIXTURE_NOW_MS + 60_000)
+
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.OK
+
+
+# --- fetch_report network behaviour ---
+
+
+class _FakeResponse:
+    def __init__(self, payload: Any) -> None:
+        self._payload = payload
+
+    def json(self) -> Any:
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+
+
+def test_fetch_report_returns_unavailable_on_network_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise requests.ConnectionError("refused")
+
+    monkeypatch.setattr(accountable, "request_with_retry", boom)
+
+    result = fetch_report(CONFIG, FIXTURE_NOW_MS)
+
+    assert result.status is AccountableStatus.UNAVAILABLE
+    assert result.report is None
+    assert "refused" in result.reason
+
+
+def test_fetch_report_returns_unavailable_on_invalid_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    """requests raises JSONDecodeError, which is itself a RequestException."""
+    decode_error = requests.exceptions.JSONDecodeError("not json", "<html>", 0)
+    monkeypatch.setattr(
+        accountable,
+        "request_with_retry",
+        lambda *_a, **_k: _FakeResponse(decode_error),
+    )
+
+    result = fetch_report(CONFIG, FIXTURE_NOW_MS)
+
+    assert result.status is AccountableStatus.UNAVAILABLE
+    assert "invalid JSON" in result.reason
+
+
+def test_fetch_report_rejects_non_https_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v1 authenticates the feed with TLS alone, so plaintext must not be fetched."""
+
+    def unexpected(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("request must not be attempted")
+
+    monkeypatch.setattr(accountable, "request_with_retry", unexpected)
+    config = replace(CONFIG, dashboard_url="http://accountable.3jane.xyz/dashboard")
+
+    result = fetch_report(config, FIXTURE_NOW_MS)
+
+    assert result.status is AccountableStatus.UNAVAILABLE
+    assert "HTTPS" in result.reason
+
+
+def test_fetch_report_returns_unavailable_on_schema_violation(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = load_payload()
+    del payload["data"]["collateralization"]
+    monkeypatch.setattr(accountable, "request_with_retry", lambda *_a, **_k: _FakeResponse(payload))
+
+    result = fetch_report(CONFIG, FIXTURE_NOW_MS)
+
+    assert result.status is AccountableStatus.UNAVAILABLE
+    assert result.report is None
+
+
+def test_fetch_report_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(accountable, "request_with_retry", lambda *_a, **_k: _FakeResponse(load_fresh_payload()))
+
+    result = fetch_report(CONFIG, FIXTURE_NOW_MS)
+
+    assert result.is_ok
+    assert result.report is not None
+    assert result.report.collateralization > 1
+
+
+def test_fixture_is_not_mutated_between_tests() -> None:
+    """Guards the shared-fixture pattern used throughout this module."""
+    first = load_payload()
+    second = load_payload()
+
+    assert first == second
+    assert first is not second
+    assert copy.deepcopy(first) == second
