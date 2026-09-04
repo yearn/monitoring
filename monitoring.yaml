@@ -466,7 +466,7 @@ protocols:
       - name: "Indexer Freshness"
         description: "Envio indexer lag per chain; alerts the Envio channel when a chain's newest indexed block is older than 60 minutes or the GraphQL endpoint is down"
       - name: "Lender-Borrower Risk"
-        description: "Katana Morpho vbWBTC/yvUSDC: LTV every 30m; 24h net spread and debt coverage every 6h"
+        description: "All configured lender-borrower strategies: collateral and borrow-token prices plus LTV/liquidation risk every 30m; lender and borrow APR availability, 24h net spread, and debt coverage every 6h"
         severity: "MEDIUM"
       - name: "Large Flows"
         description: "Deposit/withdrawal flows >=$500k USD (Katana withdrawals >=$50k; or 10% of vault totalSupply fallback for unpriced tokens)"
