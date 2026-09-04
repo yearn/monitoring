@@ -29,6 +29,7 @@ WAD = 10**18
 USD_SCALE = 10**8
 MAX_BPS = 10_000
 ORACLE_PRICE_SCALE = 10**36
+RAY_TO_WAD = 10**9
 SECONDS_PER_YEAR = 31_556_952
 MORPHO_SECONDS_PER_YEAR = 365 * 24 * 60 * 60
 MORPHO_TARGET_UTILIZATION_WAD = 9 * WAD // 10
@@ -52,6 +53,28 @@ MORPHO_ABI = load_abi("protocols/yearn/abi/MorphoCore.json")
 IRM_ABI = load_abi("protocols/yearn/abi/MorphoIrm.json")
 MORPHO_ORACLE_ABI = load_abi("protocols/yearn/abi/MorphoOracle.json")
 APR_ORACLE_ABI = load_abi("protocols/yearn/abi/AprOracle.json")
+AAVE_POOL_ABI = load_abi("protocols/aave/abi/AavePool.json")
+AAVE_ORACLE_ABI = load_abi("protocols/yearn/abi/AaveOracle.json")
+
+
+@dataclass(frozen=True)
+class MorphoMarketConfig:
+    """Immutable Morpho market configuration."""
+
+    morpho_address: str
+    market_id: str
+    oracle_address: str
+    irm_address: str
+    liquidation_ltv_wad: int
+
+
+@dataclass(frozen=True)
+class AaveMarketConfig:
+    """Immutable Aave/Spark market configuration."""
+
+    pool_address: str
+    price_oracle_address: str
+    price_scale: int = USD_SCALE
 
 
 @dataclass(frozen=True)
@@ -68,12 +91,9 @@ class StrategyConfig:
     borrow_symbol: str
     borrow_decimals: int
     lender_vault_address: str
-    morpho_address: str
-    market_id: str
-    morpho_oracle_address: str
-    morpho_irm_address: str
-    liquidation_ltv_wad: int
-    joc_url: str
+    market: MorphoMarketConfig | AaveMarketConfig
+    strategy_url: str
+    borrower_address: str | None = None
     negative_spread_threshold_bps: int = 100
     rate_window_hours: int = 24
     minimum_rate_samples: int = 3
@@ -82,14 +102,20 @@ class StrategyConfig:
     borrow_price_max_age_seconds: int = 26 * 60 * 60
 
     @property
-    def market_params(self) -> tuple[str, str, str, str, int]:
+    def monitored_address(self) -> str:
+        """Return the contract that directly owns the borrow position."""
+        return self.borrower_address or self.address
+
+    def morpho_market_params(self) -> tuple[str, str, str, str, int]:
         """Return the immutable Morpho market parameters."""
+        if not isinstance(self.market, MorphoMarketConfig):
+            raise TypeError("Strategy is not configured for Morpho")
         return (
             self.borrow_address,
             self.collateral_address,
-            self.morpho_oracle_address,
-            self.morpho_irm_address,
-            self.liquidation_ltv_wad,
+            self.market.oracle_address,
+            self.market.irm_address,
+            self.market.liquidation_ltv_wad,
         )
 
 
@@ -174,12 +200,49 @@ STRATEGIES = (
         borrow_symbol="vbUSDC",
         borrow_decimals=6,
         lender_vault_address="0x80c34BD3A3569E126e7055831036aa7b212cB159",
-        morpho_address="0xD50F2DffFd62f94Ee4AEd9ca05C61d0753268aBc",
-        market_id="0xcd2dc555dced7422a3144a4126286675449019366f83e9717be7c2deb3daae3e",
-        morpho_oracle_address="0xB60F728BdcE5e3921C0E42c1a6F07A1313D0040e",
-        morpho_irm_address="0x4F708C0ae7deD3d74736594C2109C2E3c065B428",
-        liquidation_ltv_wad=860_000_000_000_000_000,
-        joc_url="https://joc.yearn.dev/strategy/katana/0x0432337365d89c0D73f1D0Cb263791F8f1B98D43",
+        market=MorphoMarketConfig(
+            morpho_address="0xD50F2DffFd62f94Ee4AEd9ca05C61d0753268aBc",
+            market_id="0xcd2dc555dced7422a3144a4126286675449019366f83e9717be7c2deb3daae3e",
+            oracle_address="0xB60F728BdcE5e3921C0E42c1a6F07A1313D0040e",
+            irm_address="0x4F708C0ae7deD3d74736594C2109C2E3c065B428",
+            liquidation_ltv_wad=860_000_000_000_000_000,
+        ),
+        strategy_url="https://joc.yearn.dev/strategy/katana/0x0432337365d89c0D73f1D0Cb263791F8f1B98D43",
+    ),
+    StrategyConfig(
+        name="Spark wstETH to yvUSD Lender Borrower Accumulator",
+        chain=Chain.MAINNET,
+        address="0x13f6Cb609959a43c3bE29407766A683b42e26D28",
+        borrower_address="0x41cfE42D221a591C6308Dcea419015Ba8570B380",
+        collateral_address="0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
+        collateral_symbol="wstETH",
+        collateral_decimals=18,
+        borrow_address="0xdC035D45d973E3EC169d2276DDab16f1e407384F",
+        borrow_symbol="USDS",
+        borrow_decimals=18,
+        lender_vault_address="0x7a716dA432531c0DCeC0F4915d877631AA258fa3",
+        market=AaveMarketConfig(
+            pool_address="0xC13e21B648A5Ee794902342038FF3aDAB66BE987",
+            price_oracle_address="0x8105f69D9C41644c6A0803fDA7D03Aa70996cFD9",
+        ),
+        strategy_url="https://etherscan.io/address/0x13f6Cb609959a43c3bE29407766A683b42e26D28",
+    ),
+    StrategyConfig(
+        name="Spark WETH/USDS (yvUSD) Lender Borrower",
+        chain=Chain.MAINNET,
+        address="0x5E8A9Acd00AdCED69b30D36929CbF7D4d4F9AE1F",
+        collateral_address="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        collateral_symbol="WETH",
+        collateral_decimals=18,
+        borrow_address="0xdC035D45d973E3EC169d2276DDab16f1e407384F",
+        borrow_symbol="USDS",
+        borrow_decimals=18,
+        lender_vault_address="0x7a716dA432531c0DCeC0F4915d877631AA258fa3",
+        market=AaveMarketConfig(
+            pool_address="0xC13e21B648A5Ee794902342038FF3aDAB66BE987",
+            price_oracle_address="0x8105f69D9C41644c6A0803fDA7D03Aa70996cFD9",
+        ),
+        strategy_url="https://etherscan.io/address/0x5E8A9Acd00AdCED69b30D36929CbF7D4d4F9AE1F",
     ),
 )
 
@@ -192,6 +255,13 @@ def calculate_warning_ltv(liquidation_ltv_wad: int, warning_multiplier_bps: int)
 def calculate_target_ltv(liquidation_ltv_wad: int, target_multiplier_bps: int) -> int:
     """Reproduce BaseLenderBorrower._getTargetLTV()."""
     return liquidation_ltv_wad * target_multiplier_bps // MAX_BPS
+
+
+def aave_borrow_apr_wad(reserve_data: tuple[Any, ...]) -> int:
+    """Return an Aave-compatible reserve's variable borrow APR in WAD."""
+    if len(reserve_data) < 5:
+        raise ValueError("Aave reserve data is missing the variable borrow rate")
+    return int(reserve_data[4]) // RAY_TO_WAD
 
 
 def _divide_to_zero(numerator: int, denominator: int) -> int:
@@ -360,17 +430,16 @@ def evaluate_snapshot(
 
 def _read_snapshot(config: StrategyConfig, *, include_rates: bool) -> StrategySnapshot:
     client = ChainManager.get_client(config.chain)
-    strategy_address = Web3.to_checksum_address(config.address)
+    strategy_address = Web3.to_checksum_address(config.monitored_address)
     strategy = client.get_contract(strategy_address, STRATEGY_ABI)
     block_number = int(client.eth.block_number)
     block = client.execute(client.eth.get_block, block_number)
     block_timestamp = int(block["timestamp"])
 
-    # Static addresses and Morpho market parameters live in StrategyConfig. The
-    # remaining values are position state or management-settable configuration.
+    # Static addresses and market parameters live in StrategyConfig. Position
+    # state and management-settable LTV multipliers are refreshed every run.
     with client.batch_requests() as batch:
         for call in (
-            strategy.functions.borrowUsdOracle(),
             strategy.functions.balanceOfCollateral(),
             strategy.functions.balanceOfDebt(),
             strategy.functions.balanceOfLentAssets(),
@@ -380,10 +449,13 @@ def _read_snapshot(config: StrategyConfig, *, include_rates: bool) -> StrategySn
             strategy.functions.targetLTVMultiplier(),
         ):
             batch.add(call.call(block_identifier=block_number))
+        if isinstance(config.market, MorphoMarketConfig):
+            batch.add(strategy.functions.borrowUsdOracle().call(block_identifier=block_number))
+        else:
+            batch.add(strategy.functions.getLiquidateCollateralFactor().call(block_identifier=block_number))
         values = client.execute_batch(batch)
 
     (
-        borrow_usd_oracle_address,
         collateral,
         debt,
         lent,
@@ -391,76 +463,86 @@ def _read_snapshot(config: StrategyConfig, *, include_rates: bool) -> StrategySn
         current_ltv_wad,
         warning_multiplier_bps,
         target_multiplier_bps,
+        market_specific_value,
     ) = values
 
     lender_vault_address = Web3.to_checksum_address(config.lender_vault_address)
-    morpho_address = Web3.to_checksum_address(config.morpho_address)
-    borrow_usd_oracle_address = Web3.to_checksum_address(borrow_usd_oracle_address)
-    market_params = config.market_params
-    liquidation_ltv_wad = market_params[4]
 
-    morpho_oracle = client.get_contract(market_params[2], MORPHO_ORACLE_ABI)
-    price_feed = client.get_contract(borrow_usd_oracle_address, CHAINLINK_ABI)
+    if isinstance(config.market, MorphoMarketConfig):
+        market_params = config.morpho_market_params()
+        liquidation_ltv_wad = config.market.liquidation_ltv_wad
+        morpho_oracle = client.get_contract(config.market.oracle_address, MORPHO_ORACLE_ABI)
+        price_feed = client.get_contract(Web3.to_checksum_address(market_specific_value), CHAINLINK_ABI)
+        with client.batch_requests() as batch:
+            batch.add(morpho_oracle.functions.price().call(block_identifier=block_number))
+            batch.add(price_feed.functions.decimals().call(block_identifier=block_number))
+            batch.add(price_feed.functions.latestRoundData().call(block_identifier=block_number))
+            oracle_price, price_feed_decimals, price_round = client.execute_batch(batch)
 
-    with client.batch_requests() as batch:
-        for call in (
-            morpho_oracle.functions.price(),
-            price_feed.functions.decimals(),
-            price_feed.functions.latestRoundData(),
-        ):
-            batch.add(call.call(block_identifier=block_number))
-        aux = client.execute_batch(batch)
-
-    (
-        oracle_price,
-        price_feed_decimals,
-        price_round,
-    ) = aux
-    borrow_price_round = RoundData.from_tuple(price_round)
-    validate_borrow_price_round(
-        borrow_price_round,
-        block_timestamp,
-        config.borrow_price_max_age_seconds,
-    )
-    borrow_price_answer = borrow_price_round.answer
-
-    borrow_price_usd_e8 = borrow_price_answer * USD_SCALE // (10 ** int(price_feed_decimals))
-    collateral_price_borrow_wad = (
-        int(oracle_price)
-        * (10**config.collateral_decimals)
-        * WAD
-        // (ORACLE_PRICE_SCALE * (10**config.borrow_decimals))
-    )
-    collateral_price_usd_e8 = collateral_price_borrow_wad * borrow_price_usd_e8 // WAD
+        borrow_price_round = RoundData.from_tuple(price_round)
+        validate_borrow_price_round(
+            borrow_price_round,
+            block_timestamp,
+            config.borrow_price_max_age_seconds,
+        )
+        borrow_price_usd_e8 = borrow_price_round.answer * USD_SCALE // (10 ** int(price_feed_decimals))
+        collateral_price_borrow_wad = (
+            int(oracle_price)
+            * (10**config.collateral_decimals)
+            * WAD
+            // (ORACLE_PRICE_SCALE * (10**config.borrow_decimals))
+        )
+        collateral_price_usd_e8 = collateral_price_borrow_wad * borrow_price_usd_e8 // WAD
+    else:
+        liquidation_ltv_wad = int(market_specific_value)
+        price_oracle = client.get_contract(config.market.price_oracle_address, AAVE_ORACLE_ABI)
+        with client.batch_requests() as batch:
+            batch.add(
+                price_oracle.functions.getAssetPrice(config.collateral_address).call(block_identifier=block_number)
+            )
+            batch.add(price_oracle.functions.getAssetPrice(config.borrow_address).call(block_identifier=block_number))
+            collateral_price, borrow_price = client.execute_batch(batch)
+        if int(collateral_price) <= 0 or int(borrow_price) <= 0:
+            raise ValueError("Aave-compatible price oracle returned an invalid price")
+        collateral_price_usd_e8 = int(collateral_price) * USD_SCALE // config.market.price_scale
+        borrow_price_usd_e8 = int(borrow_price) * USD_SCALE // config.market.price_scale
 
     lender_apr_wad: int | None = None
     borrow_apr_wad: int | None = None
     if include_rates:
-        morpho = client.get_contract(morpho_address, MORPHO_ABI)
         apr_oracle = client.get_contract(Web3.to_checksum_address(YEARN_APR_ORACLE), APR_ORACLE_ABI)
         with client.batch_requests() as batch:
-            batch.add(morpho.functions.market(config.market_id).call(block_identifier=block_number))
             batch.add(apr_oracle.functions.getStrategyApr(lender_vault_address, 0).call(block_identifier=block_number))
-            market_raw, lender_apr_raw = client.execute_batch(batch)
+            if isinstance(config.market, MorphoMarketConfig):
+                morpho = client.get_contract(config.market.morpho_address, MORPHO_ABI)
+                batch.add(morpho.functions.market(config.market.market_id).call(block_identifier=block_number))
+            else:
+                pool = client.get_contract(config.market.pool_address, AAVE_POOL_ABI)
+                batch.add(pool.functions.getReserveData(config.borrow_address).call(block_identifier=block_number))
+            lender_apr_raw, rate_data = client.execute_batch(batch)
 
-        market_values = tuple(int(value) for value in market_raw)
-        if len(market_values) != 6:
-            raise ValueError(f"Morpho market returned {len(market_values)} values instead of 6")
-        market = (
-            market_values[0],
-            market_values[1],
-            market_values[2],
-            market_values[3],
-            market_values[4],
-            market_values[5],
-        )
-        irm = client.get_contract(market_params[3], IRM_ABI)
-        average_rate = _call_irm(client, irm, market_params, market, block_number)
-        current_timestamp_market = market[:4] + (block_timestamp, market[5])
-        start_rate = _call_irm(client, irm, market_params, current_timestamp_market, block_number)
-        borrow_rate_per_second = calculate_instantaneous_borrow_rate(average_rate, start_rate, market)
         lender_apr_wad = int(lender_apr_raw) or None
-        borrow_apr_wad = borrow_rate_per_second * SECONDS_PER_YEAR
+        if isinstance(config.market, MorphoMarketConfig):
+            market_values = tuple(int(value) for value in rate_data)
+            if len(market_values) != 6:
+                raise ValueError(f"Morpho market returned {len(market_values)} values instead of 6")
+            market = (
+                market_values[0],
+                market_values[1],
+                market_values[2],
+                market_values[3],
+                market_values[4],
+                market_values[5],
+            )
+            market_params = config.morpho_market_params()
+            irm = client.get_contract(config.market.irm_address, IRM_ABI)
+            average_rate = _call_irm(client, irm, market_params, market, block_number)
+            current_timestamp_market = market[:4] + (block_timestamp, market[5])
+            start_rate = _call_irm(client, irm, market_params, current_timestamp_market, block_number)
+            borrow_rate_per_second = calculate_instantaneous_borrow_rate(average_rate, start_rate, market)
+            borrow_apr_wad = borrow_rate_per_second * SECONDS_PER_YEAR
+        else:
+            borrow_apr_wad = aave_borrow_apr_wad(tuple(rate_data))
 
     return StrategySnapshot(
         timestamp=block_timestamp,
@@ -646,7 +728,7 @@ def build_summary(config: StrategyConfig, snapshot: StrategySnapshot, evaluation
                 f"({evaluation.rate_sample_count}/{config.minimum_rate_samples} minimum samples)",
             ]
         )
-    lines.append(config.joc_url)
+    lines.append(config.strategy_url)
     return "\n".join(lines)
 
 
@@ -709,7 +791,7 @@ def main() -> None:
                     Alert(
                         AlertSeverity.MEDIUM,
                         f"Lender Borrower Monitor Error ({args.checks})\n"
-                        f"{config.name}\n{error_type}: {exc}\n{config.joc_url}",
+                        f"{config.name}\n{error_type}: {exc}\n{config.strategy_url}",
                         PROTOCOL,
                         channel=resolve_channel(CURATION_CHANNEL, PROTOCOL),
                     ),
