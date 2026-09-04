@@ -55,6 +55,31 @@ Optional flags:
 - `--chain-ids` (default: all vault chain IDs — `1,8453,42161,747474`)
 - `--no-cache` (disable caching)
 
+## Small Parent Vault Flows
+
+The script `yearn/alert_small_parent_flows.py` alerts on every deposit or withdrawal whose raw ERC-4626 `assets` value is strictly between 0 and 10,000 for an active Yearn v3 parent vault. The comparison happens before decimal normalization: 10,000 raw units equals 0.01 USDC, 0.0001 WBTC, or 0.00000000000001 WETH.
+
+### Data Sources
+
+- **Parent vault discovery**: Kong GraphQL, filtered to Yearn v3 `vaultType: 1` vaults and excluding retired or hidden entries.
+- **Flow events**: Envio `Deposit` and `Withdraw` entities. Alerts include the ERC-4626 owner and sender, the transaction initiator, and the asset receiver for withdrawals.
+- **Token decimals**: the parent vault's underlying asset metadata from Kong, used only to show a human-readable amount alongside the raw value.
+
+Deposits and withdrawals are processed with independent per-chain `(blockNumber, logIndex)` cursors stored in the monitoring database. A cursor advances only after an event is successfully evaluated and, when applicable, delivered to Telegram. A new deployment starts each stream with a two-hour lookback.
+
+### Usage
+
+```bash
+uv run protocols/yearn/alert_small_parent_flows.py
+```
+
+Optional flags:
+
+- `--threshold-raw` (default: `10000`)
+- `--lookback-seconds` (default: `7200`, used only before a chain cursor exists)
+- `--page-size` (default: `1000`)
+- `--chain-ids` (default: `1,10,8453,42161,137,747474`)
+
 =======
 
 ## Shadow Debt Check
