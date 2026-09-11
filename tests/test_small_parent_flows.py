@@ -5,6 +5,7 @@ import pytest
 from protocols.yearn import alert_small_parent_flows as monitor
 from utils.alert import Alert, AlertSeverity
 from utils.chains import Chain
+from utils.telegram import CURATION_CHANNEL
 
 VAULT = {
     "address": "0xParent",
@@ -52,7 +53,8 @@ def test_small_flow_uses_raw_asset_units() -> None:
     assert not monitor.is_small_flow("0", 10_000)
 
 
-def test_process_deposit_sends_low_alert_with_all_addresses() -> None:
+def test_process_deposit_sends_low_alert_with_all_addresses(monkeypatch) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID_CURATION", "curation_chat_id")
     alerts = []
 
     did_alert = monitor.process_event(
@@ -67,6 +69,7 @@ def test_process_deposit_sends_low_alert_with_all_addresses() -> None:
     alert = alerts[0]
     assert alert.severity is AlertSeverity.LOW
     assert alert.protocol == "yearn"
+    assert alert.channel == CURATION_CHANNEL
     assert "Small parent-vault deposit" in alert.message
     assert "Raw Assets: 5,000" in alert.message
     assert "Normalized: 0.005 USDC" in alert.message
@@ -93,6 +96,15 @@ def test_process_withdrawal_includes_asset_receiver() -> None:
     assert "Small parent-vault withdrawal" in alerts[0].message
     assert "Receiver" in alerts[0].message
     assert "0xReceiver" in alerts[0].message
+
+
+def test_process_event_falls_back_to_yearn_channel_without_curation_chat(monkeypatch) -> None:
+    monkeypatch.delenv("TELEGRAM_CHAT_ID_CURATION", raising=False)
+    alerts = []
+
+    monitor.process_event(make_event(), {"0xparent": VAULT}, 10_000, alert_sender=alerts.append)
+
+    assert alerts[0].channel == monitor.PROTOCOL
 
 
 def test_process_event_does_not_alert_at_threshold() -> None:
@@ -242,7 +254,8 @@ def test_first_run_lookback_floor_persists_without_events(monkeypatch) -> None:
     assert monitor.load_cursor(8453, "deposit") is None
 
 
-def test_alert_limiter_caps_individual_alerts_and_summarizes() -> None:
+def test_alert_limiter_caps_individual_alerts_and_summarizes(monkeypatch) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID_CURATION", "curation_chat_id")
     delivered = []
     limiter = monitor.AlertLimiter(2, sender=delivered.append)
 
@@ -254,6 +267,7 @@ def test_alert_limiter_caps_individual_alerts_and_summarizes() -> None:
     assert [alert.message for alert in delivered[:2]] == ["alert 0", "alert 1"]
     assert len(delivered) == 3
     assert "3 more qualifying flows" in delivered[2].message
+    assert delivered[2].channel == CURATION_CHANNEL
 
 
 def test_alert_limiter_skips_summary_when_nothing_suppressed() -> None:

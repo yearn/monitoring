@@ -67,6 +67,8 @@ The script `yearn/alert_small_parent_flows.py` alerts on every deposit or withdr
 
 Deposits and withdrawals are processed with independent per-chain `(blockNumber, logIndex)` cursors stored in the monitoring database. A cursor advances only after an event is successfully evaluated and, when applicable, delivered to Telegram. A new deployment starts each stream with a two-hour lookback; that starting timestamp is persisted, so a stream that has not yet seen any event never slides its window forward and a long run gap cannot drop events.
 
+**Routing:** flow alerts and the overflow summary go to the internal curation chat (`TELEGRAM_CHAT_ID_CURATION`), not the public yearn group. If that chat id is unset they fall back to the yearn group.
+
 At most `--max-alerts` individual alerts are sent per run; any further qualifying flows are logged and summarized in a single message. The first Envio failure is reported once to the Envio channel and stops the run, and the unprocessed events are picked up on the next run.
 
 ### Usage

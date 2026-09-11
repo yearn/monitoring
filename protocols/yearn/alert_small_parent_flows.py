@@ -21,7 +21,7 @@ from utils import store
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import EXPLORER_URLS, Chain
 from utils.logger import get_logger
-from utils.telegram import send_envio_error_message
+from utils.telegram import CURATION_CHANNEL, resolve_channel, send_envio_error_message
 
 load_dotenv()
 
@@ -86,6 +86,7 @@ class AlertLimiter:
                 f"Small parent-vault flows: {self.suppressed:,} more qualifying flows were not sent "
                 f"individually after reaching the per-run cap of {self.max_alerts:,}. See the run logs for details.",
                 PROTOCOL,
+                channel=resolve_channel(CURATION_CHANNEL, PROTOCOL),
             )
         )
 
@@ -342,7 +343,10 @@ def process_event(
 
     amount = format_units(raw_assets, int(vault["asset_decimals"]))
     message = build_alert_message(event, vault, raw_assets, amount, threshold_raw)
-    (alert_sender or send_alert)(Alert(AlertSeverity.LOW, message, PROTOCOL))
+    # Dust flows are for the curation team to review, not something the public
+    # yearn group can act on.
+    alert = Alert(AlertSeverity.LOW, message, PROTOCOL, channel=resolve_channel(CURATION_CHANNEL, PROTOCOL))
+    (alert_sender or send_alert)(alert)
     return True
 
 
