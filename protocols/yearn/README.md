@@ -61,11 +61,13 @@ The script `yearn/alert_small_parent_flows.py` alerts on every deposit or withdr
 
 ### Data Sources
 
-- **Parent vault discovery**: Kong GraphQL, filtered to Yearn v3 `vaultType: 1` vaults and excluding retired or hidden entries.
+- **Parent vault discovery**: Kong GraphQL, filtered to Yearn v3 `vaultType: 1` vaults and excluding retired entries. Hidden vaults stay monitored because `isHidden` only controls UI visibility; rows missing asset metadata are logged and skipped.
 - **Flow events**: Envio `Deposit` and `Withdraw` entities. Alerts include the ERC-4626 owner and sender, the transaction initiator, and the asset receiver for withdrawals.
 - **Token decimals**: the parent vault's underlying asset metadata from Kong, used only to show a human-readable amount alongside the raw value.
 
-Deposits and withdrawals are processed with independent per-chain `(blockNumber, logIndex)` cursors stored in the monitoring database. A cursor advances only after an event is successfully evaluated and, when applicable, delivered to Telegram. A new deployment starts each stream with a two-hour lookback.
+Deposits and withdrawals are processed with independent per-chain `(blockNumber, logIndex)` cursors stored in the monitoring database. A cursor advances only after an event is successfully evaluated and, when applicable, delivered to Telegram. A new deployment starts each stream with a two-hour lookback; that starting timestamp is persisted, so a stream that has not yet seen any event never slides its window forward and a long run gap cannot drop events.
+
+At most `--max-alerts` individual alerts are sent per run; any further qualifying flows are logged and summarized in a single message. The first Envio failure is reported once to the Envio channel and stops the run, and the unprocessed events are picked up on the next run.
 
 ### Usage
 
@@ -76,9 +78,11 @@ uv run protocols/yearn/alert_small_parent_flows.py
 Optional flags:
 
 - `--threshold-raw` (default: `10000`)
-- `--lookback-seconds` (default: `7200`, used only before a chain cursor exists)
+- `--lookback-seconds` (default: `7200`, used only the first time a chain/flow stream runs)
 - `--page-size` (default: `1000`)
-- `--chain-ids` (default: `1,10,8453,42161,137,747474`)
+- `--chain-ids` (default: `1,8453,42161,137,747474`, the chains indexed by [yearn-envio](https://github.com/yearn/yearn-envio))
+- `--max-alerts` (default: `20`, individual alerts per run before summarizing)
+- `--log-level` (default: `SMALL_PARENT_FLOWS_LOG_LEVEL`, then `LOG_LEVEL`, then `INFO`)
 
 =======
 

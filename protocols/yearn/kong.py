@@ -5,6 +5,9 @@ from typing import Any, Dict, List
 import requests
 
 from utils.chains import Chain
+from utils.logger import get_logger
+
+logger = get_logger("yearn.kong")
 
 KONG_GQL_URL = "https://kong.yearn.fi/api/gql"
 KONG_VAULTS_QUERY = """
@@ -36,7 +39,6 @@ query YearnParentVaults($chainId: Int) {
     }
     meta {
       isRetired
-      isHidden
     }
   }
 }
@@ -106,14 +108,6 @@ def _is_retired(vault: Dict[str, Any]) -> bool:
     return bool(meta.get("isRetired"))
 
 
-def _is_hidden(vault: Dict[str, Any]) -> bool:
-    """Return whether Kong metadata marks the vault hidden."""
-    meta = vault.get("meta")
-    if not isinstance(meta, dict):
-        return False
-    return bool(meta.get("isHidden"))
-
-
 def _strategy_field(strategy_source: str) -> str:
     """Return the Kong field backing the requested strategy source."""
     if strategy_source == STRATEGY_SOURCE_ALL:
@@ -169,11 +163,13 @@ def fetch_kong_vaults(
 
 
 def fetch_kong_parent_vaults(chain: Chain) -> List[Dict[str, object]]:
-    """Fetch active Yearn v3 parent/allocator vault metadata from Kong.
+    """Fetch non-retired Yearn v3 parent/allocator vault metadata from Kong.
 
     Kong's ``vaultType: 1`` identifies parent/allocator vaults, while
-    ``vaultType: 2`` identifies strategy vaults. Retired and hidden vaults are
-    excluded locally so callers only monitor active user-facing parents.
+    ``vaultType: 2`` identifies strategy vaults. Only retired vaults are
+    excluded: ``isHidden`` is a UI-visibility flag, and hidden vaults can still
+    hold meaningful TVL. Rows missing required metadata are logged and skipped
+    so one malformed Kong entry cannot stop monitoring of every other vault.
 
     Args:
         chain: Chain to fetch.
@@ -182,7 +178,7 @@ def fetch_kong_parent_vaults(chain: Chain) -> List[Dict[str, object]]:
         Parent vault dicts containing vault and underlying-asset metadata.
 
     Raises:
-        KongRequestError: If Kong omits required address or decimal metadata.
+        KongRequestError: If the Kong request fails or omits the vaults list.
     """
     data = _post_graphql(KONG_PARENT_VAULTS_QUERY, {"chainId": chain.chain_id})
     vaults = data.get("vaults")
@@ -191,18 +187,24 @@ def fetch_kong_parent_vaults(chain: Chain) -> List[Dict[str, object]]:
 
     result: List[Dict[str, object]] = []
     for vault in vaults:
-        if not isinstance(vault, dict) or _is_retired(vault) or _is_hidden(vault):
+        if not isinstance(vault, dict) or _is_retired(vault):
             continue
 
         address = vault.get("address")
-        asset = vault.get("asset")
-        if not isinstance(address, str) or not isinstance(asset, dict):
-            raise KongRequestError("Kong parent vault missing address or asset metadata")
+        if not isinstance(address, str):
+            logger.warning("Skipping Kong parent vault on %s without an address: %s", chain.network_name, vault)
+            continue
 
-        asset_address = asset.get("address")
-        asset_decimals = _parse_decimals(asset.get("decimals"))
-        if not isinstance(asset_address, str) or asset_decimals is None:
-            raise KongRequestError(f"Kong parent vault {address} missing asset address or decimals")
+        asset = vault.get("asset")
+        asset_address = asset.get("address") if isinstance(asset, dict) else None
+        asset_decimals = _parse_decimals(asset.get("decimals")) if isinstance(asset, dict) else None
+        if not isinstance(asset, dict) or not isinstance(asset_address, str) or asset_decimals is None:
+            logger.warning(
+                "Skipping Kong parent vault %s on %s: missing asset address or decimals",
+                address,
+                chain.network_name,
+            )
+            continue
 
         result.append(
             {

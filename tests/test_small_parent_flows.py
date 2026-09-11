@@ -1,7 +1,9 @@
 from decimal import Decimal
 
+import pytest
+
 from protocols.yearn import alert_small_parent_flows as monitor
-from utils.alert import AlertSeverity
+from utils.alert import Alert, AlertSeverity
 from utils.chains import Chain
 
 VAULT = {
@@ -191,3 +193,74 @@ def test_monitor_chain_runs_deposit_and_withdrawal_streams(monkeypatch) -> None:
 
     assert result == (2, 2)
     assert flow_types == ["deposit", "withdrawal"]
+
+
+def test_load_events_handles_null_data(monkeypatch) -> None:
+    monkeypatch.setattr(monitor, "gql_request", lambda _query, _variables: {"data": None})
+
+    with pytest.raises(RuntimeError, match="missing Deposit list"):
+        monitor.load_events("deposit", 1, ["0xParent"], monitor.EventCursor(0, -1), 0, 100)
+
+
+def test_gql_request_reports_once_and_raises(monkeypatch) -> None:
+    reported = []
+
+    def failing_http(_url, _body):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(monitor, "ENVIO_GRAPHQL_URL", "https://envio.example/graphql")
+    monkeypatch.setattr(monitor, "http_json", failing_http)
+    monkeypatch.setattr(monitor, "send_envio_error_message", lambda *args, **kwargs: reported.append(args))
+
+    with pytest.raises(monitor.EnvioUnavailableError):
+        monitor.gql_request("query {}", {})
+    assert len(reported) == 1
+
+
+def test_first_run_lookback_floor_persists_without_events(monkeypatch) -> None:
+    since_values = []
+
+    def fake_load(_flow_type, _chain_id, _addresses, _cursor, since_ts, _limit):
+        since_values.append(since_ts)
+        return []
+
+    monkeypatch.setattr(monitor, "load_events", fake_load)
+
+    for now in (1_700_010_000, 1_700_100_000):
+        monitor.monitor_flow_type(
+            8453,
+            "deposit",
+            ["0xParent"],
+            {"0xparent": VAULT},
+            10_000,
+            lookback_seconds=7200,
+            page_size=100,
+            now=now,
+        )
+
+    assert since_values == [1_700_002_800, 1_700_002_800]
+    assert monitor.load_cursor(8453, "deposit") is None
+
+
+def test_alert_limiter_caps_individual_alerts_and_summarizes() -> None:
+    delivered = []
+    limiter = monitor.AlertLimiter(2, sender=delivered.append)
+
+    for index in range(5):
+        limiter(Alert(AlertSeverity.LOW, f"alert {index}", monitor.PROTOCOL))
+    limiter.send_summary()
+
+    assert (limiter.sent, limiter.suppressed) == (2, 3)
+    assert [alert.message for alert in delivered[:2]] == ["alert 0", "alert 1"]
+    assert len(delivered) == 3
+    assert "3 more qualifying flows" in delivered[2].message
+
+
+def test_alert_limiter_skips_summary_when_nothing_suppressed() -> None:
+    delivered = []
+    limiter = monitor.AlertLimiter(2, sender=delivered.append)
+
+    limiter(Alert(AlertSeverity.LOW, "alert", monitor.PROTOCOL))
+    limiter.send_summary()
+
+    assert len(delivered) == 1

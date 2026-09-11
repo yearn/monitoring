@@ -89,7 +89,7 @@ def test_fetch_kong_vaults_raises_on_graphql_errors(monkeypatch) -> None:
         kong.fetch_kong_vaults(Chain.MAINNET)
 
 
-def test_fetch_kong_parent_vaults_filters_inactive_vaults(monkeypatch) -> None:
+def test_fetch_kong_parent_vaults_filters_retired_and_malformed_vaults(monkeypatch) -> None:
     payload = {
         "data": {
             "vaults": [
@@ -100,7 +100,7 @@ def test_fetch_kong_parent_vaults_filters_inactive_vaults(monkeypatch) -> None:
                     "decimals": "6",
                     "vaultType": 1,
                     "asset": {"address": "0xAsset", "symbol": "USDC", "decimals": 6},
-                    "meta": {"isRetired": False, "isHidden": False},
+                    "meta": {"isRetired": False},
                 },
                 {
                     "address": "0xRetired",
@@ -109,7 +109,7 @@ def test_fetch_kong_parent_vaults_filters_inactive_vaults(monkeypatch) -> None:
                     "decimals": "18",
                     "vaultType": 1,
                     "asset": {"address": "0xOldAsset", "symbol": "OLD", "decimals": 18},
-                    "meta": {"isRetired": True, "isHidden": False},
+                    "meta": {"isRetired": True},
                 },
                 {
                     "address": "0xHidden",
@@ -119,6 +119,24 @@ def test_fetch_kong_parent_vaults_filters_inactive_vaults(monkeypatch) -> None:
                     "vaultType": 1,
                     "asset": {"address": "0xHiddenAsset", "symbol": "HIDDEN", "decimals": 18},
                     "meta": {"isRetired": False, "isHidden": True},
+                },
+                {
+                    "address": "0xNoAsset",
+                    "name": "Broken vault",
+                    "symbol": "yvBROKEN",
+                    "decimals": "18",
+                    "vaultType": 1,
+                    "asset": None,
+                    "meta": {"isRetired": False},
+                },
+                {
+                    "address": "0xNoDecimals",
+                    "name": "Broken decimals vault",
+                    "symbol": "yvNODEC",
+                    "decimals": "18",
+                    "vaultType": 1,
+                    "asset": {"address": "0xAsset2", "symbol": "NODEC", "decimals": None},
+                    "meta": {"isRetired": False},
                 },
             ]
         }
@@ -144,5 +162,14 @@ def test_fetch_kong_parent_vaults_filters_inactive_vaults(monkeypatch) -> None:
             "asset_address": "0xAsset",
             "asset_symbol": "USDC",
             "asset_decimals": 6,
-        }
+        },
+        {
+            "address": "0xHidden",
+            "name": "Hidden vault",
+            "symbol": "yvHIDDEN",
+            "decimals": 18,
+            "asset_address": "0xHiddenAsset",
+            "asset_symbol": "HIDDEN",
+            "asset_decimals": 18,
+        },
     ]

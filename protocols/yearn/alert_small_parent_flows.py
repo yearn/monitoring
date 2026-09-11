@@ -7,7 +7,6 @@ import argparse
 import json
 import logging
 import os
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -29,16 +28,66 @@ load_dotenv()
 getcontext().prec = 60
 
 ENVIO_GRAPHQL_URL = os.getenv("ENVIO_GRAPHQL_URL")
-DEFAULT_LOG_LEVEL = os.getenv("SMALL_PARENT_FLOWS_LOG_LEVEL", "INFO")
+DEFAULT_LOG_LEVEL = os.getenv("SMALL_PARENT_FLOWS_LOG_LEVEL") or os.getenv("LOG_LEVEL", "INFO")
 DEFAULT_THRESHOLD_RAW = 10_000
 DEFAULT_LOOKBACK_SECONDS = 7200
 DEFAULT_PAGE_SIZE = 1000
+DEFAULT_MAX_ALERTS = 20
 PROTOCOL = "yearn"
 STATE_NAMESPACE = "yearn.small_parent_flows"
 FLOW_TYPES = ("deposit", "withdrawal")
 FLOW_ENTITY = {"deposit": "Deposit", "withdrawal": "Withdraw"}
+# Chains indexed by yearn-envio (https://github.com/yearn/yearn-envio/blob/main/config.yaml).
+# Optimism is a `Chain` member but is not indexed, so its flows would silently never arrive.
+ENVIO_CHAINS: tuple[Chain, ...] = (Chain.MAINNET, Chain.BASE, Chain.ARBITRUM, Chain.POLYGON, Chain.KATANA)
 
 logger = get_logger("yearn.alert_small_parent_flows")
+
+
+class EnvioUnavailableError(RuntimeError):
+    """Raised after an Envio failure has been reported, so the run stops without re-alerting."""
+
+
+class AlertLimiter:
+    """Deliver alerts up to a per-run cap and summarize the overflow in one message."""
+
+    def __init__(self, max_alerts: int, sender: Callable[[Alert], None] | None = None) -> None:
+        """Initialize the limiter.
+
+        Args:
+            max_alerts: Maximum number of individual alerts to deliver in one run.
+            sender: Alert delivery function. Defaults to ``send_alert``.
+        """
+        self.max_alerts = max_alerts
+        self.sender = sender
+        self.sent = 0
+        self.suppressed = 0
+
+    def _send(self, alert: Alert) -> None:
+        """Deliver one alert through the configured sender."""
+        (self.sender or send_alert)(alert)
+
+    def __call__(self, alert: Alert) -> None:
+        """Deliver ``alert`` if the cap allows it, otherwise log and count it."""
+        if self.sent < self.max_alerts:
+            self._send(alert)
+            self.sent += 1
+            return
+        self.suppressed += 1
+        logger.warning("Per-run alert cap reached; suppressed alert:\n%s", alert.message)
+
+    def send_summary(self) -> None:
+        """Send one summary alert if any individual alerts were suppressed."""
+        if not self.suppressed:
+            return
+        self._send(
+            Alert(
+                AlertSeverity.LOW,
+                f"Small parent-vault flows: {self.suppressed:,} more qualifying flows were not sent "
+                f"individually after reaching the per-run cap of {self.max_alerts:,}. See the run logs for details.",
+                PROTOCOL,
+            )
+        )
 
 
 @dataclass(frozen=True, order=True)
@@ -64,8 +113,12 @@ def http_json(url: str, body: dict) -> dict:
     return payload
 
 
-def gql_request(query: str, variables: dict) -> dict | None:
-    """Execute an Envio GraphQL query, routing failures to its ops channel."""
+def gql_request(query: str, variables: dict) -> dict:
+    """Execute an Envio GraphQL query, routing failures to its ops channel.
+
+    Raises:
+        EnvioUnavailableError: After reporting a request or GraphQL failure once.
+    """
     if not ENVIO_GRAPHQL_URL:
         raise RuntimeError("ENVIO_GRAPHQL_URL is not set")
 
@@ -78,7 +131,7 @@ def gql_request(query: str, variables: dict) -> dict | None:
             source="small_parent_flows",
         )
         logger.error("Envio request failed: %s", exc)
-        return None
+        raise EnvioUnavailableError(f"Envio request failed: {exc}") from exc
 
     if payload.get("errors"):
         send_envio_error_message(
@@ -87,7 +140,7 @@ def gql_request(query: str, variables: dict) -> dict | None:
             source="small_parent_flows",
         )
         logger.error("Envio GraphQL errors: %s", payload["errors"])
-        return None
+        raise EnvioUnavailableError(f"Envio GraphQL errors: {payload['errors']}")
     return payload
 
 
@@ -98,7 +151,7 @@ def load_events(
     cursor: EventCursor,
     since_ts: int,
     limit: int,
-) -> list[dict] | None:
+) -> list[dict]:
     """Load one ordered page of parent-vault flow events after ``cursor``."""
     try:
         entity = FLOW_ENTITY[flow_type]
@@ -153,9 +206,7 @@ def load_events(
         "limit": limit,
     }
     response = gql_request(query, variables)
-    if response is None:
-        return None
-    events = response.get("data", {}).get("events")
+    events = (response.get("data") or {}).get("events")
     if not isinstance(events, list):
         raise RuntimeError(f"Envio response missing {entity} list")
     return [{**event, "flow_type": flow_type} for event in events]
@@ -246,6 +297,24 @@ def load_cursor(chain_id: int, flow_type: str) -> EventCursor | None:
         raise RuntimeError(f"Invalid small-flow cursor for {key}: {raw}") from exc
 
 
+def load_or_init_start_ts(chain_id: int, flow_type: str, default_ts: int) -> int:
+    """Return the persisted first-run lookback floor, storing ``default_ts`` if none exists.
+
+    Streams that have never seen an event have no block cursor. Persisting the
+    first run's lookback floor keeps later runs from sliding the window forward,
+    so a run gap longer than the lookback cannot silently drop events.
+    """
+    key = f"{state_key(chain_id, flow_type)}:start_ts"
+    raw = store.state_get(STATE_NAMESPACE, key)
+    if raw is None:
+        store.state_set(STATE_NAMESPACE, key, str(default_ts))
+        return default_ts
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid small-flow start timestamp for {key}: {raw}") from exc
+
+
 def save_cursor(chain_id: int, flow_type: str, cursor: EventCursor) -> None:
     """Persist a successfully processed chain/flow cursor."""
     store.state_set(
@@ -259,7 +328,7 @@ def process_event(
     event: dict,
     vaults_by_address: dict[str, dict],
     threshold_raw: int,
-    alert_sender: Callable[[Alert], None] = send_alert,
+    alert_sender: Callable[[Alert], None] | None = None,
 ) -> bool:
     """Evaluate one flow, sending an alert when it is below the threshold."""
     vault_address = str(event["vaultAddress"]).lower()
@@ -273,7 +342,7 @@ def process_event(
 
     amount = format_units(raw_assets, int(vault["asset_decimals"]))
     message = build_alert_message(event, vault, raw_assets, amount, threshold_raw)
-    alert_sender(Alert(AlertSeverity.LOW, message, PROTOCOL))
+    (alert_sender or send_alert)(Alert(AlertSeverity.LOW, message, PROTOCOL))
     return True
 
 
@@ -286,18 +355,21 @@ def monitor_flow_type(
     lookback_seconds: int,
     page_size: int,
     now: int | None = None,
+    alert_sender: Callable[[Alert], None] | None = None,
 ) -> tuple[int, int]:
     """Fetch and process all new events of one type for a chain."""
     persisted_cursor = load_cursor(chain_id, flow_type)
-    cursor = persisted_cursor or EventCursor(0, -1)
-    since_ts = 0 if persisted_cursor else (now or int(time.time())) - lookback_seconds
+    if persisted_cursor is not None:
+        cursor = persisted_cursor
+        since_ts = 0
+    else:
+        cursor = EventCursor(0, -1)
+        since_ts = load_or_init_start_ts(chain_id, flow_type, (now or int(time.time())) - lookback_seconds)
     processed = 0
     alerted = 0
 
     while True:
         events = load_events(flow_type, chain_id, addresses, cursor, since_ts, page_size)
-        if events is None:
-            break
         if not events:
             break
 
@@ -305,7 +377,7 @@ def monitor_flow_type(
             event_cursor = cursor_from_event(event)
             if event_cursor <= cursor:
                 continue
-            if process_event(event, vaults_by_address, threshold_raw):
+            if process_event(event, vaults_by_address, threshold_raw, alert_sender):
                 alerted += 1
             save_cursor(chain_id, flow_type, event_cursor)
             cursor = event_cursor
@@ -323,6 +395,7 @@ def monitor_chain(
     lookback_seconds: int,
     page_size: int,
     now: int | None = None,
+    alert_sender: Callable[[Alert], None] | None = None,
 ) -> tuple[int, int]:
     """Fetch and process deposits and withdrawals for one chain."""
     vaults = fetch_kong_parent_vaults(chain)
@@ -349,6 +422,7 @@ def monitor_chain(
             lookback_seconds,
             page_size,
             now,
+            alert_sender,
         )
         processed += flow_processed
         alerted += flow_alerted
@@ -373,7 +447,7 @@ def parse_chain_ids(raw: str) -> list[Chain]:
 
 def main() -> None:
     """Run the small parent-vault flow monitor."""
-    default_chain_ids = ",".join(str(chain.chain_id) for chain in Chain)
+    default_chain_ids = ",".join(str(chain.chain_id) for chain in ENVIO_CHAINS)
     parser = argparse.ArgumentParser(
         description="Alert on Yearn v3 parent-vault deposits and withdrawals below a raw-assets threshold."
     )
@@ -381,34 +455,52 @@ def main() -> None:
     parser.add_argument("--lookback-seconds", type=int, default=DEFAULT_LOOKBACK_SECONDS)
     parser.add_argument("--page-size", type=int, default=DEFAULT_PAGE_SIZE)
     parser.add_argument("--chain-ids", default=default_chain_ids)
+    parser.add_argument("--max-alerts", type=int, default=DEFAULT_MAX_ALERTS)
     parser.add_argument("--log-level", default=DEFAULT_LOG_LEVEL)
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=args.log_level.upper(),
-        format="[%(name)s] %(levelname)s %(message)s",
-        stream=sys.stderr,
-    )
+    # get_logger() installs its own handler and disables propagation, so the
+    # root-logger basicConfig would not affect this module's output.
+    log_level = logging.getLevelName(args.log_level.upper())
+    if not isinstance(log_level, int):
+        parser.error(f"--log-level must be a logging level name, got {args.log_level!r}")
+    logger.setLevel(log_level)
     if args.threshold_raw <= 0:
         parser.error("--threshold-raw must be positive")
     if args.lookback_seconds < 0:
         parser.error("--lookback-seconds must be non-negative")
     if args.page_size <= 0:
         parser.error("--page-size must be positive")
+    if args.max_alerts < 0:
+        parser.error("--max-alerts must be non-negative")
 
+    limiter = AlertLimiter(args.max_alerts)
     total_processed = 0
     total_alerted = 0
-    for chain in parse_chain_ids(args.chain_ids):
-        processed, alerted = monitor_chain(
-            chain,
-            args.threshold_raw,
-            args.lookback_seconds,
-            args.page_size,
-        )
-        total_processed += processed
-        total_alerted += alerted
-        logger.info("%s: processed=%d alerted=%d", chain.network_name, processed, alerted)
-    logger.info("complete: processed=%d alerted=%d", total_processed, total_alerted)
+    try:
+        for chain in parse_chain_ids(args.chain_ids):
+            processed, alerted = monitor_chain(
+                chain,
+                args.threshold_raw,
+                args.lookback_seconds,
+                args.page_size,
+                alert_sender=limiter,
+            )
+            total_processed += processed
+            total_alerted += alerted
+            logger.info("%s: processed=%d alerted=%d", chain.network_name, processed, alerted)
+    except EnvioUnavailableError as exc:
+        # Already reported to the Envio channel once; stop instead of repeating it per chain/flow.
+        logger.error("Aborting run after Envio failure: %s", exc)
+    finally:
+        limiter.send_summary()
+    logger.info(
+        "complete: processed=%d alerted=%d sent=%d suppressed=%d",
+        total_processed,
+        total_alerted,
+        limiter.sent,
+        limiter.suppressed,
+    )
 
 
 if __name__ == "__main__":
