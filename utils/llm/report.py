@@ -24,6 +24,7 @@ from utils.calldata.decoder import (
     split_top_level_types,
     try_decode_inner_calldata,
 )
+from utils.calldata.role_names import normalize_role_hash
 from utils.chains import EXPLORER_URLS, Chain
 from utils.related_tokens import RelatedToken
 
@@ -45,6 +46,9 @@ class CallEntry:
     call: DecodedCall
     value: int = 0
     param_names: list[str] | None = None
+    # Role hash → role name for this call's bytes32 role arguments, so the call
+    # flow shows `GOVERNOR` next to the digest instead of the digest alone.
+    role_names: dict[str, str] = field(default_factory=dict)
     # The single ERC20 this call's target is denominated in, when exactly one
     # resolved. Used to annotate raw amounts with a human-readable figure.
     amount_token: RelatedToken | None = None
@@ -279,14 +283,23 @@ def _format_params(
     indent: str,
     depth: int = 0,
     token: "RelatedToken | None" = None,
+    role_names: dict[str, str] | None = None,
 ) -> list[str]:
-    """Render a call's parameters as an indented markdown bullet list."""
+    """Render a call's parameters as an indented markdown bullet list.
+
+    A ``bytes32`` that ``role_names`` resolves is annotated with its role name.
+    Scalars render to exactly one line, so the annotation is appended to the
+    line just produced; composites are left alone.
+    """
     lines: list[str] = []
     for i, (type_str, value) in enumerate(call.params):
         name = param_names[i] if param_names is not None and i < len(param_names) else None
-        lines.extend(
-            _render_param(_param_label(type_str, name), type_str, value, chain_id, labels, indent, depth, token)
-        )
+        rendered = _render_param(_param_label(type_str, name), type_str, value, chain_id, labels, indent, depth, token)
+        if role_names and type_str == "bytes32" and len(rendered) == 1:
+            role = role_names.get(normalize_role_hash(str(value)))
+            if role:
+                rendered = [f"{rendered[0]} — role **{role}**"]
+        lines.extend(rendered)
     return lines
 
 
@@ -310,7 +323,13 @@ def format_call_flow(ctx: ReportContext) -> str:
         if entry.value > 0:
             lines.append(f"   - **ETH value:** `{entry.value / 1e18:.6f}` ETH")
         param_lines = _format_params(
-            entry.call, ctx.chain_id, ctx.labels, entry.param_names, indent="   ", token=entry.amount_token
+            entry.call,
+            ctx.chain_id,
+            ctx.labels,
+            entry.param_names,
+            indent="   ",
+            token=entry.amount_token,
+            role_names=entry.role_names,
         )
         lines.extend(param_lines or ["   - _no inputs_"])
         lines.append("")

@@ -5,14 +5,18 @@ them to an LLM to produce human-readable explanations for governance
 transactions (timelocks and Safe multisigs).
 """
 
+import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from functools import lru_cache
 
 from eth_utils import function_signature_to_4byte_selector, to_checksum_address
 
+from utils.cache import cache_path
 from utils.calldata.decoder import MAX_BYTES_RECURSION_DEPTH, DecodedCall, decode_calldata, try_decode_inner_calldata
+from utils.calldata.role_names import resolve_role_names
 from utils.erc20_metadata import fetch_erc20_metadata
 from utils.formatting import format_decimal_amount, normalize_token_amount
 from utils.impl_diff import diff_implementations, format_impl_diff
@@ -108,9 +112,15 @@ Critical rules for parameter interpretation:
   normalized totalAssets, and configured token targets as verified deterministic facts. Distinguish
   the accounting asset from non-accounting ERC20 targets configured in an escrow whitelist;
   whitelisting proves permission to interact, but not how a token is valued or used downstream.
-- A bytes32 argument the Protocol Context resolves to a keccak256 pre-image IS identified.
-  Name the parameter or role, reason about what it controls, and never call it unknown or
-  unnamed. A bytes32 the section does NOT resolve stays unidentified — say so plainly.
+- A bytes32 argument the Protocol Context or a Role Names section resolves to a keccak256
+  pre-image IS identified. Name the parameter or role, reason about what it controls, and
+  never call it unknown or unnamed. A bytes32 neither section resolves stays unidentified —
+  say so plainly.
+- A Role Names section maps bytes32 role arguments to the role names they hash from, read
+  from the contract's own verified source. Treat those names as verified fact and use them
+  to judge severity: what the role permits drives the verdict, so a role that can mint or
+  burn a token, upgrade code, or move funds is materially more serious than an operational
+  one. Say what the named role actually controls rather than restating the constant.
 - When the Protocol Context states a token distribution mode, use it instead of hedging about
   funding: minting expands supply on claim, transferring draws down the stated balance.
   Compare a new allocation against the prior values the section lists before calling it large.
@@ -164,6 +174,9 @@ _TRAILING_RISK_TAG_RE = re.compile(r"\s*\b(?:" + "|".join(_RISK_TAGS) + r")\b[\s
 # Same match, but capturing, so the report header and gist title can name the risk.
 _TRAILING_RISK_TAG_CAPTURE_RE = re.compile(r"\b(" + "|".join(_RISK_TAGS) + r")\b[\s.]*$", re.IGNORECASE)
 DETAIL_REPORT_TITLE = "AI Transaction Analysis"
+
+# Where reports that failed to reach Wavey Gist are spilled, under CACHE_DIR.
+UNPUBLISHED_REPORTS_DIRNAME = "unpublished-reports"
 
 # JSON Schema for stage 1 (summary + risk_tag only). risk_tag is enum-constrained so
 # the Telegram tag is always valid — no regex extraction or fallback parsing needed.
@@ -432,6 +445,55 @@ def _collect_safety_checks(
                 f"(does not accept ETH) — the call will revert."
             )
     return notes
+
+
+def _collect_role_names(
+    targets_and_calls: list[tuple[str, DecodedCall]],
+    chain_id: int,
+) -> dict[str, dict[str, str]]:
+    """Resolve ``bytes32`` role arguments to names, keyed by lowercased target.
+
+    Only calls whose function name mentions a role (``grantRole``,
+    ``revokeRole``, ``setRoleAdmin``, …) are inspected. That heuristic matters:
+    resolving every ``bytes32`` would label an all-zero ``predecessor`` or
+    ``salt`` — routine in timelock calldata — as ``DEFAULT_ADMIN_ROLE``, which
+    is worse than leaving it unidentified.
+
+    Lookups are grouped by target so each contract's source is consulted once,
+    and that source is already memoized by the source-context fetch, so this is
+    effectively free. Unresolvable roles are deliberately omitted: the system
+    prompt tells the model to call anything absent here unidentified.
+    """
+    hashes_by_target: dict[str, set[str]] = {}
+    for target, decoded in targets_and_calls:
+        if not target or "role" not in (decoded.function_name or "").lower():
+            continue
+        for type_str, value in decoded.params:
+            if type_str == "bytes32":
+                hashes_by_target.setdefault(target, set()).add(str(value))
+
+    if not hashes_by_target:
+        return {}
+
+    def resolve(item: tuple[str, set[str]]) -> tuple[str, dict[str, str]]:
+        target, role_hashes = item
+        try:
+            return target.lower(), resolve_role_names(sorted(role_hashes), chain_id=chain_id, target=target)
+        except Exception as e:  # noqa: BLE001 - enrichment only; never block an explanation
+            logger.info("Role-name resolution failed for %s: %s", target, e)
+            return target.lower(), {}
+
+    resolved = _parallel_map(resolve, list(hashes_by_target.items()))
+    return {target: names for target, names in resolved if names}
+
+
+def _format_role_name_notes(roles_by_target: dict[str, dict[str, str]]) -> list[str]:
+    """Render resolved role names as prompt bullets, one per role."""
+    return [
+        f"{role_hash} on {target} is the role {name}"
+        for target, names in sorted(roles_by_target.items())
+        for role_hash, name in sorted(names.items())
+    ]
 
 
 def _new_impl_verification_note(new_impl: str, chain_id: int) -> str:
@@ -885,6 +947,7 @@ def _build_prompt(
     address_labels: dict[str, str] | None = None,
     param_names_per_call: list[list[str] | None] | None = None,
     safety_notes: list[str] | None = None,
+    role_names: list[str] | None = None,
     description: str = "",
     address_links: str = "",
 ) -> str:
@@ -965,6 +1028,9 @@ def _build_prompt(
 
     if safety_notes:
         parts.append("\n--- Safety Checks ---\n" + "\n".join(f"- {n}" for n in safety_notes))
+
+    if role_names:
+        parts.append("\n--- Role Names ---\n" + "\n".join(f"- {n}" for n in role_names))
 
     risk_anchors = _collect_risk_anchors(decoded_calls)
     if risk_anchors:
@@ -1264,6 +1330,7 @@ def explain_transaction(
     address_labels = _collect_address_labels([(target, decoded)], chain_id)
     param_names = _collect_param_names([(target, decoded)], chain_id)
     safety_notes = _collect_safety_checks([(target, decoded, value)], chain_id)
+    roles_by_target = _collect_role_names([(target, decoded)], chain_id)
     token_flows = _collect_token_flows([(target, decoded)], chain_id, address_labels)
     related_tokens = _collect_related_tokens([(target, decoded)], chain_id)
     protocol_ctx = resolve_protocol_context(protocol, chain_id, [(target, decoded)], address_labels)
@@ -1309,6 +1376,7 @@ def explain_transaction(
         address_labels=address_labels,
         param_names_per_call=param_names,
         safety_notes=safety_notes,
+        role_names=_format_role_name_notes(roles_by_target),
         description=description,
         address_links=address_links,
         related_tokens=format_related_tokens_block(related_tokens, address_labels),
@@ -1323,6 +1391,7 @@ def explain_transaction(
                 call=decoded,
                 value=value,
                 param_names=param_names[0],
+                role_names=roles_by_target.get(target.lower(), {}),
                 amount_token=_sole_token_by_target(related_tokens).get(target.lower()),
             )
         ],
@@ -1438,6 +1507,7 @@ def explain_batch_transaction(
     address_labels = _collect_address_labels(decoded_with_target, chain_id)
     param_names = _collect_param_names(decoded_with_target, chain_id)
     safety_notes = _collect_safety_checks(targets_calls_values, chain_id)
+    roles_by_target = _collect_role_names(decoded_with_target, chain_id)
     token_flows = _collect_token_flows(decoded_with_target, chain_id, address_labels)
     related_tokens = _collect_related_tokens(decoded_with_target, chain_id)
     protocol_ctx = resolve_protocol_context(protocol, chain_id, decoded_with_target, address_labels)
@@ -1464,6 +1534,7 @@ def explain_batch_transaction(
         address_labels=address_labels,
         param_names_per_call=param_names,
         safety_notes=safety_notes,
+        role_names=_format_role_name_notes(roles_by_target),
         description=description,
         address_links=address_links,
         related_tokens=format_related_tokens_block(related_tokens, address_labels),
@@ -1479,6 +1550,7 @@ def explain_batch_transaction(
                 call=call,
                 value=val,
                 param_names=names,
+                role_names=roles_by_target.get(tgt.lower(), {}),
                 amount_token=sole_tokens.get(tgt.lower()),
             )
             for (tgt, call, val), names in zip(targets_calls_values, param_names)
@@ -1512,14 +1584,43 @@ def format_explanation_line(explanation: Explanation) -> str:
     summary, call flow, optional protocol context, and analysis — is uploaded
     to Wavey Gist and linked. The bare detail is published instead when no report
     was built (explanations generated without report context).
+
+    When the upload fails the report is written to disk first. It exists only in
+    memory at this point, and regenerating it means paying for the LLM calls
+    again against a chain state that has since moved — so an unpublished report
+    is spilled to ``CACHE_DIR`` and a later recovery becomes a re-upload rather
+    than a reconstruction.
     """
     line = f"\n🤖 *AI Summary:*\n{escape_markdown(explanation.summary)}"
     if explanation.detail:
-        detail_url = upload_to_gist(
-            explanation.report or explanation.detail, title=explanation.title or DETAIL_REPORT_TITLE
-        )
+        report = explanation.report or explanation.detail
+        title = explanation.title or DETAIL_REPORT_TITLE
+        detail_url = upload_to_gist(report, title=title)
         if detail_url:
             line += f"\n[Full details]({detail_url})"
         else:
+            spilled = _spill_unpublished_report(report, title)
             line += "\n⚠️ Couldn't post full report"
+            if spilled:
+                logger.warning("Unpublished report saved to %s for later recovery", spilled)
     return line
+
+
+def _spill_unpublished_report(report: str, title: str) -> str:
+    """Write a report that failed to upload to ``CACHE_DIR``; return its path or "".
+
+    Best-effort: a failed spill must never take down the alert, which still
+    carries the summary.
+    """
+    try:
+        directory = cache_path(UNPUBLISHED_REPORTS_DIRNAME)
+        os.makedirs(directory, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60] or "report"
+        path = os.path.join(directory, f"{stamp}-{slug}.md")
+        with open(path, "w") as handle:
+            handle.write(f"# {title}\n\n{report}")
+        return path
+    except OSError as e:
+        logger.warning("Failed to save unpublished report: %s", e)
+        return ""
