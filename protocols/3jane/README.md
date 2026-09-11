@@ -6,12 +6,11 @@
 
 - **PPS (Price Per Share):** `convertToAssets(1e6)` on USD3 and sUSD3 vs cached prior run. Alerts on any decrease — indicates loan markdowns or defaults (critical since loans are unsecured).
 - **TVL (Total Value Locked):** `totalAssets()` on both vaults vs cached prior run. Alerts when absolute change is **≥15%**.
-- **Junior Buffer Ratio:** USD3 held by sUSD3, valued in USDC, as a percentage of deployed credit (`getMarketLiquidity().totalBorrowAssets` converted from waUSDC to USDC). Alerts below **15%** — thin first-loss coverage puts the senior tranche at risk. Deduped: re-alerts only when the ratio drops below the last alerted value; recovery above 15% re-arms. This matches the 3Jane backing UI's `sUSD3 / Deployed` loss-buffer metric.
-- **USD3 OC:** Deployed credit divided by senior at-risk credit after sUSD3 absorbs first loss: `Deployed / (Deployed - sUSD3)`. Alerts below the **111%** target as HIGH and below **106%** as CRITICAL. Deduped: re-alerts only when OC drops below the last alerted value (e.g. crossing into critical); recovery above 111% re-arms. This excludes indirect enhancement from underlying credit-line assets and warehouse equity slices.
+- **USD3 Protection (OC + Junior Buffer):** A single consistent protection check derived from sUSD3 backing and deployed credit. OC is `Deployed / (Deployed - sUSD3)` and the equivalent junior buffer is `sUSD3 / Deployed`. Alerts below **111% OC / 9.91% buffer** as HIGH and below **106% OC / 5.66% buffer** as CRITICAL. Both values appear in one alert, eliminating contradictory thresholds for the same first-loss protection. Deduped: re-alerts only when OC drops below the last alerted value; recovery above 111% re-arms. This excludes indirect enhancement from underlying credit-line assets and warehouse equity slices.
 - **Insurance Fund:** Tracks the fund's raw waUSDC share balance and alerts when an outflow is worth **≥$50k USDC**. Caching shares instead of asset value prevents waUSDC yield from masking withdrawals.
 - **Withdraw Liquidity:** `availableWithdrawLimit()` on the USD3 vault. Alerts when it falls below **$4M** — low withdraw liquidity means senior-tranche withdrawals may queue or stall. Deduped: re-alerts only when the limit drops below the last alerted value; recovery above $4M re-arms.
 - **Vault Shutdown:** `isShutdown()` on both vaults. Alert-once when either vault enters emergency shutdown.
-- **Debt Cap:** `ProtocolConfig.getDebtCap()` vs cached prior. Alerts on any change — signals governance scaling the protocol up or down.
+- **Debt Cap:** `ProtocolConfig.getDebtCap()` vs cached prior. The governed value is shown in waUSDC shares alongside its USDC equivalent at the current waUSDC conversion rate. Alerts on any change — signals governance scaling the protocol up or down.
 - **Nominal sUSD3 Backing Floor:** `ProtocolConfig.config(keccak256("SUSD3_NOMINAL_BACKING_FLOOR"))` vs cached prior. Alerts on any change (governance lever). Separate alert-once when the floor exceeds sUSD3's USD3 holdings valued in USDC — sUSD3 redemptions can be blocked while floor > backing.
 - **Protocol Pause:** `ProtocolConfig.config(keccak256("IS_PAUSED"))`. Alert-once on transition to true. Distinct from per-vault `isShutdown()` — pauses the underlying credit market.
 - **Borrower Default Watch:** optional Envio-backed borrower default risk feed. The Envio indexer maintains `ThreeJaneBorrowerMarket` rows from MorphoCredit events, and the monitor computes the current delinquent/default status at runtime. Alerts are **MEDIUM only** and deduped per borrower/cycle/default milestone.
@@ -32,9 +31,8 @@
 | USD3 PPS decrease | Any decrease vs cached prior | CRITICAL |
 | sUSD3 PPS decrease | Any decrease vs cached prior | HIGH |
 | TVL change | ≥15% absolute change vs prior run | LOW |
-| Junior buffer ratio | sUSD3 backing < 15% of deployed credit | HIGH |
-| USD3 OC low | OC < 111% | HIGH |
-| USD3 OC critical | OC < 106% | CRITICAL |
+| USD3 protection low | OC < 111% (equivalent junior buffer < 9.91%) | HIGH |
+| USD3 protection critical | OC < 106% (equivalent junior buffer < 5.66%) | CRITICAL |
 | Insurance fund outflow | ≥$50k USDC since prior run | MEDIUM |
 | Withdraw liquidity low | `availableWithdrawLimit()` < $4M | MEDIUM |
 | Vault shutdown | `isShutdown()` transitions to true (alert-once) | CRITICAL |
@@ -48,7 +46,7 @@
 ## Cache Freshness
 
 TVL delta baselines expire after 3 hours and initialize from the next valid observation. Current-state and threshold
-dedupe for junior buffer, USD3 OC, withdraw liquidity, vault shutdown, nominal-floor breach, and protocol pause is
+dedupe for USD3 protection, withdraw liquidity, vault shutdown, nominal-floor breach, and protocol pause is
 re-armed after the same monitoring gap. PPS, insurance-fund, governance-value, and borrower-event history does not
 expire.
 
@@ -63,7 +61,7 @@ Borrowers move through repayment states based on the active repayment obligation
 - `Delinquent`: the grace window has passed and `amountDue > 0`, but the default timestamp has not been reached yet. This is the proactive warning period, and the monitor alerts at `delinquent`, `14d`, `7d`, `3d`, and `1d` buckets.
 - `Default`: the default timestamp has passed, or the protocol emitted `DefaultStarted`. The monitor sends a MEDIUM alert and includes how long the borrower has been defaulted.
 
-By default, `defaultAt = cycleEnd + 7 days grace + 23 days delinquency`. These windows come from `gracePeriod` and `delinquencyPeriod` on the indexed borrower row.
+`defaultAt = cycleEnd + GRACE_PERIOD + DELINQUENCY_PERIOD`. The monitor reads both periods directly from `ProtocolConfig` at the same Ethereum block as the core vault snapshot on every run, matching `MorphoCredit.getRepaymentStatus()`. Envio supplies borrower obligations and cycle timestamps, but its stored timing fields are not used for status calculations.
 
 The monitor expects Envio to expose a `ThreeJaneBorrowerMarket` entity with at least:
 
@@ -76,16 +74,13 @@ The monitor expects Envio to expose a `ThreeJaneBorrowerMarket` entity with at l
 | `cycleId` | Payment cycle id for the current obligation |
 | `cycleEnd` | Indexed cycle end timestamp |
 | `endingBalance` | Borrower balance at cycle close |
-| `gracePeriod` | Grace period in seconds |
-| `delinquencyPeriod` | Delinquency period in seconds |
-| `defaultAt` | Event-derived default timestamp |
 | `defaultStarted` | Whether `DefaultStarted` has been emitted for the borrower |
 | `settled` | Whether the account was settled and should be skipped |
 | `lastSeenBlock` | Ordering/pagination |
 
 The indexer should populate/update that entity from `SetCreditLine`, `Borrow`, `Repay`, `PaymentCycleCreated`, `RepaymentObligationPosted`, `RepaymentTracked`, `DefaultStarted`, `DefaultCleared`, and `AccountSettled` events on `MorphoCredit`.
 
-The current countdown and alert bucket are intentionally computed in this monitoring script, not in Envio, because they depend on wall-clock time. Grace and delinquency windows default to 7 days and 23 days respectively in the indexer, and can be overridden there with `THREE_JANE_GRACE_PERIOD_SECONDS` and `THREE_JANE_DELINQUENCY_PERIOD_SECONDS`.
+The current countdown and alert bucket are intentionally computed in this monitoring script, not in Envio, because they depend on wall-clock time and governance-controlled timing. This also prevents an indexer environment value from drifting away from the live contract configuration.
 
 ## Alert dispatch
 
