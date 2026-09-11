@@ -410,3 +410,35 @@ class TestBuildReport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRoleNameAnnotation(unittest.TestCase):
+    """The call flow names a bytes32 role instead of showing only its digest."""
+
+    MINTER = "0x615a688d53344290b742a2e72e4f187e5b88227c01f9d77ce2406d32f8bd0eda"
+    VAULT = "0xa69e4155F62C097cE92DaAdeF7A925dD40907C0C"
+
+    def _flow(self, role_names: dict[str, str]) -> str:
+        # Raw bytes, matching what `decode_calldata` actually stores for bytes32.
+        call = DecodedCall(
+            function_name="grantRole",
+            signature="grantRole(bytes32,address)",
+            params=[("bytes32", bytes.fromhex(self.MINTER[2:])), ("address", self.VAULT)],
+        )
+        return format_call_flow(
+            _add_farms_ctx(
+                entries=[CallEntry(target=REGISTRY, call=call, param_names=["role", "account"], role_names=role_names)]
+            )
+        )
+
+    def test_resolved_role_is_named(self) -> None:
+        flow = self._flow({self.MINTER: "RECEIPT_TOKEN_MINTER"})
+        self.assertIn("role **RECEIPT_TOKEN_MINTER**", flow)
+        # The digest stays visible so the reader can still verify it.
+        self.assertIn(self.MINTER, flow)
+
+    def test_unresolved_role_renders_unchanged(self) -> None:
+        self.assertNotIn("role **", self._flow({}))
+
+    def test_lookup_is_case_insensitive(self) -> None:
+        self.assertIn("role **RECEIPT_TOKEN_MINTER**", self._flow({self.MINTER.lower(): "RECEIPT_TOKEN_MINTER"}))

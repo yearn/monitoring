@@ -33,6 +33,26 @@ TELEGRAM_PROTOCOL: str = "automation"
 _ERROR_TAIL_LINES: int = 4
 _ERROR_TAIL_CHARS: int = 500
 
+# A task can exit 0 while still logging a WARNING/ERROR for something it handled
+# internally — a failed upload, a skipped enrichment, a degraded data source. That
+# output used to land only in the DEBUG dump below, so at the service's default
+# LOG_LEVEL=INFO it was invisible and a broken integration could run unnoticed for
+# days. These lines are re-emitted at INFO instead, capped so a task that logs
+# thousands of warnings can't flood journald.
+_TASK_WARNING_MARKERS: tuple[str, ...] = ("WARNING", "ERROR", "CRITICAL")
+_MAX_SURFACED_WARNINGS: int = 10
+
+
+def _warning_lines(stdout: str | None) -> list[str]:
+    """Return the WARNING/ERROR/CRITICAL lines from a successful task's output.
+
+    Matches the level token produced by ``utils.logger``'s format. Capped at
+    ``_MAX_SURFACED_WARNINGS``; the caller notes how many were suppressed.
+    """
+    if not stdout:
+        return []
+    return [line.rstrip() for line in stdout.splitlines() if any(m in line for m in _TASK_WARNING_MARKERS)]
+
 
 def _error_tail(stdout: str | None, stderr: str | None) -> str | None:
     """Extract a short, human-readable error tail from a failed task's output.
@@ -225,6 +245,21 @@ def _run_task(task: Task, *, profile: Profile, repo_root: Path, dry_run: bool) -
 
     if stdout and stdout.strip():
         logger.debug("task %s output:\n%s", task.name, stdout.rstrip())
+
+    # Surface non-fatal problems from a task that still exited 0 (see above).
+    warnings = _warning_lines(stdout)
+    if warnings:
+        shown = warnings[:_MAX_SURFACED_WARNINGS]
+        suppressed = len(warnings) - len(shown)
+        note = f"\n… {suppressed} more suppressed" if suppressed > 0 else ""
+        logger.info(
+            "task %s exited 0 but logged %d warning(s):\n%s%s",
+            task.name,
+            len(warnings),
+            "\n".join(shown),
+            note,
+        )
+
     logger.info("task %s ok in %.1fs", task.name, duration)
     return TaskResult(
         name=task.name,
