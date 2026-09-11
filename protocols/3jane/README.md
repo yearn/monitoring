@@ -42,10 +42,10 @@
 | Nominal floor breach | Floor > sUSD3 backing valued in USDC (alert-once) | MEDIUM |
 | Protocol paused | `IS_PAUSED` transitions to true (alert-once) | CRITICAL |
 | Borrower delinquent/default watch | New milestone: delinquent, ≤14d, ≤7d, ≤3d, ≤1d, default | MEDIUM |
-| Accountable collateral ratio | < 95% for 2 consecutive runs (band transition) | CRITICAL |
+| Accountable collateral ratio | < 95% (band transition) | CRITICAL |
 | Accountable collateral ratio | < 99% (band transition) | HIGH |
 | Accountable feed stale | Short cadence >2 periods; long cadence >1 period (alert-once) | MEDIUM |
-| Accountable feed unavailable | One exhausted retrieval cycle (alert-once until recovery) | HIGH |
+| Accountable feed unavailable | First consecutive miss HIGH; second CRITICAL (then quiet until recovery) | HIGH / CRITICAL |
 | Monitoring run failure | Uncaught exception in `main()` | LOW |
 
 ## Cache Freshness
@@ -111,23 +111,17 @@ The four known 3Jane sources are required, and a missing or malformed freshness 
 
 ### Ratio alerts
 
-HIGH fires once when the ratio drops below 99%; CRITICAL fires once when it stays below 95% for **two consecutive, newer reports**. Each severity stays quiet until the ratio recovers above its threshold. Re-polling a frozen report cannot confirm CRITICAL, and an unavailable run resets partial confirmation. A single sub-95% reading is reported as HIGH so it stays visible without escalating on what is more likely a stale document-report refresh.
+HIGH fires once when the ratio drops below 99%; CRITICAL fires once on the first reading below 95%. Each severity stays quiet until the ratio recovers above its threshold. Recovering from below 95% into the 95–99% band re-arms CRITICAL without a second HIGH. Re-polling a frozen report cannot re-alert.
 
 The 95%/99% bands are temporary test thresholds while Accountable's report excludes 3Jane idle funds. Recalibrate both thresholds when idle funds are included in the reported reserve totals.
 
-### No emergency dispatch
-
-Accountable alerts are sent with protocol key `3jane-accountable` and channel `3jane`. They reach the normal 3Jane Telegram channel at full severity, but the protocol key is deliberately **absent** from `utils.dispatch.DISPATCHABLE_PROTOCOLS`, so a CRITICAL here cannot trigger the emergency cap-zeroing webhook.
-
-This is intentional for v1: the live collateral margin is only a few basis points, and the feed's noise profile needs a burn-in period before it should be allowed to drive automated action. Revisit once there is enough operating history — see issue #327.
-
 ## Alert dispatch
 
-Alerts use the structured `send_alert` path. HIGH and CRITICAL alerts invoke the default emergency-dispatch hook after Telegram delivery, and `3jane` is enabled in `utils.dispatch.DISPATCHABLE_PROTOCOLS`.
+Alerts use the structured `send_alert` path. HIGH and CRITICAL alerts invoke the default emergency-dispatch hook after Telegram delivery, and `3jane` is enabled in `utils.dispatch.DISPATCHABLE_PROTOCOLS`. Accountable ratio, freshness, and availability alerts use the same `3jane` protocol key as the onchain checks — a second Accountable feed is a new `AccountableFeedConfig` with that protocol's key, not a special-case name.
 
 The sender posts a signed `emergency_withdrawal` webhook using protocol key `3jane`. Dispatch requires `LIQUIDITY_WEBHOOK_SECRET`, is skipped in `LOG_LEVEL=DEBUG`, and has a 60-minute per-protocol cooldown. The receiving liquidity-monitoring deployment must independently map `3jane` to the vaults, collateral names, and markets whose caps should be zeroed.
 
-Only HIGH and CRITICAL alerts dispatch. LOW and MEDIUM alerts—including insurance-fund outflows—remain Telegram/database alerts only.
+Only HIGH and CRITICAL alerts dispatch. LOW and MEDIUM alerts—including insurance-fund outflows and Accountable staleness—remain Telegram/database alerts only.
 
 ## Governance
 

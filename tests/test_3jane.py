@@ -569,40 +569,46 @@ def test_accountable_high_threshold_alerts(monkeypatch: pytest.MonkeyPatch) -> N
     assert "98.0000%" in alerts[0].message
 
 
-def test_accountable_critical_requires_two_consecutive_runs(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A single sub-95% reading is more likely a stale refresh than insolvency."""
+def test_accountable_critical_alerts_on_first_crossing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A first sub-95% reading is CRITICAL, including after a HIGH warning."""
     module = load_3jane_module()
     alerts: list = []
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
-    first_report = make_accountable_report(module, "0.94")
-    second_report = make_accountable_report(module, "0.94", ts_ms=first_report.ts_ms + 1)
 
-    module.check_accountable_collateral(first_report)
+    module.check_accountable_collateral(make_accountable_report(module, "0.94"))
+
     assert len(alerts) == 1
-    assert alerts[0].severity == module.AlertSeverity.HIGH
-
-    module.check_accountable_collateral(second_report)
-    assert len(alerts) == 2
-    assert alerts[1].severity == module.AlertSeverity.CRITICAL
-    assert "95% critical threshold" in alerts[1].message
+    assert alerts[0].severity == module.AlertSeverity.CRITICAL
+    assert "95% critical threshold" in alerts[0].message
 
 
-def test_accountable_frozen_report_does_not_confirm_critical(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_accountable_high_then_critical_crossing_alerts_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
-    cache = stub_cache(monkeypatch, module)
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_accountable_collateral(make_accountable_report(module, "0.98"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.94"))
+
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.HIGH, module.AlertSeverity.CRITICAL]
+
+
+def test_accountable_frozen_report_does_not_realert_critical(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
     report = make_accountable_report(module, "0.94")
 
     module.check_accountable_collateral(report)
     module.check_accountable_collateral(report)
 
-    assert [alert.severity for alert in alerts] == [module.AlertSeverity.HIGH]
-    assert cache[module.CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK] == "1"
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.CRITICAL]
 
 
-def test_accountable_critical_streak_resets_on_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_accountable_critical_recovery_rearms_alert(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
     stub_cache(monkeypatch, module)
@@ -612,9 +618,20 @@ def test_accountable_critical_streak_resets_on_recovery(monkeypatch: pytest.Monk
     module.check_accountable_collateral(make_accountable_report(module, "1.20"))
     module.check_accountable_collateral(make_accountable_report(module, "0.94"))
 
-    # The recovery reset the streak, so the second breach is unconfirmed again
-    # and never escalates — two non-consecutive dips must not reach CRITICAL.
-    assert [alert.severity for alert in alerts] == [module.AlertSeverity.HIGH, module.AlertSeverity.HIGH]
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.CRITICAL, module.AlertSeverity.CRITICAL]
+
+
+def test_accountable_critical_to_high_band_rearms_critical(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_accountable_collateral(make_accountable_report(module, "0.94"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.97"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.94"))
+
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.CRITICAL, module.AlertSeverity.CRITICAL]
 
 
 def test_accountable_does_not_realert_while_below_high(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -644,32 +661,27 @@ def test_accountable_recovery_rearms_alert(monkeypatch: pytest.MonkeyPatch) -> N
     assert all(alert.severity == module.AlertSeverity.HIGH for alert in alerts)
 
 
-def test_accountable_alerts_never_trigger_emergency_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CRITICAL here must not zero market caps while the margin is basis points."""
+def test_accountable_alerts_use_the_protocol_dispatch_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Accountable HIGH/CRITICAL share the 3jane key so they can zero caps."""
     from utils.dispatch import DISPATCHABLE_PROTOCOLS
 
     module = load_3jane_module()
     alerts: list = []
     stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
-    first_report = make_accountable_report(module, "0.94")
-    second_report = make_accountable_report(module, "0.94", ts_ms=first_report.ts_ms + 1)
 
-    module.check_accountable_collateral(first_report)
-    module.check_accountable_collateral(second_report)
+    module.check_accountable_collateral(make_accountable_report(module, "0.94"))
 
     assert alerts[-1].severity == module.AlertSeverity.CRITICAL
-    assert alerts[-1].protocol == module.ACCOUNTABLE_ALERT_PROTOCOL
-    assert alerts[-1].protocol not in DISPATCHABLE_PROTOCOLS
-    # Still routed to the normal 3Jane Telegram channel.
-    assert alerts[-1].channel == module.PROTOCOL
-    assert module.PROTOCOL in DISPATCHABLE_PROTOCOLS
+    assert alerts[-1].protocol == module.PROTOCOL
+    assert module.ACCOUNTABLE_FEED.protocol == module.PROTOCOL
+    assert alerts[-1].protocol in DISPATCHABLE_PROTOCOLS
 
 
-def test_accountable_unavailable_run_breaks_critical_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_accountable_unavailable_run_does_not_rearm_critical(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
-    cache = stub_cache(monkeypatch, module)
+    stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
     first_ts = 1_785_490_814_726
 
@@ -678,16 +690,8 @@ def test_accountable_unavailable_run_breaks_critical_confirmation(monkeypatch: p
     module.check_accountable_collateral(make_accountable_report(module, "0.94", ts_ms=first_ts + 1))
 
     assert [alert.severity for alert in alerts] == [
-        module.AlertSeverity.HIGH,  # Initial ratio warning.
-        module.AlertSeverity.HIGH,  # Feed unavailable after retries.
-    ]
-    assert cache[module.CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK] == "1"
-
-    module.check_accountable_collateral(make_accountable_report(module, "0.94", ts_ms=first_ts + 2))
-    assert [alert.severity for alert in alerts] == [
-        module.AlertSeverity.HIGH,
-        module.AlertSeverity.HIGH,
         module.AlertSeverity.CRITICAL,
+        module.AlertSeverity.HIGH,  # Feed unavailable after retries.
     ]
 
 
@@ -717,11 +721,15 @@ def test_accountable_availability_alerts_after_retries_are_exhausted(
     module.check_accountable_availability("connection refused")
     assert len(alerts) == 1
     assert alerts[0].severity == module.AlertSeverity.HIGH
-    assert "after all retry attempts" in alerts[0].message
+    assert "1 consecutive run" in alerts[0].message
 
-    # Stays quiet while the outage persists.
     module.check_accountable_availability("connection refused")
-    assert len(alerts) == 1
+    assert len(alerts) == 2
+    assert alerts[1].severity == module.AlertSeverity.CRITICAL
+    assert "2 consecutive runs" in alerts[1].message
+
+    module.check_accountable_availability("connection refused")
+    assert len(alerts) == 2
 
 
 def test_accountable_stale_report_still_evaluates_ratio(monkeypatch: pytest.MonkeyPatch) -> None:

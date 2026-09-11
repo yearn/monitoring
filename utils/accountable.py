@@ -6,6 +6,10 @@ module fetches, validates, and converts into a typed report.
 
 The dashboard request is URL/type-based: it neither sends nor echoes the feed id
 (DFID), so feed identity is bound explicitly through :class:`AccountableFeedConfig`.
+Each feed is owned by one protocol key (``protocol``); monitors should alert with
+that key so HIGH/CRITICAL follow the same Telegram and emergency-dispatch path as
+the rest of that protocol. Adding another Accountable feed is a new config, not a
+special-case protocol name.
 
 Validation is deliberately strict. The reported ``collateralization`` is rounded
 to six decimals server-side, so it is only used as a cross-check; the ratio used
@@ -113,10 +117,12 @@ class AccountableStatus(Enum):
 
 @dataclass(frozen=True)
 class AccountableFeedConfig:
-    """Binds a feed id to the dashboard that serves it.
+    """Binds a feed id to the dashboard that serves it and the protocol that owns it.
 
     Args:
         dfid: Accountable data feed id, e.g. ``"100000026"``.
+        protocol: Owning protocol key used for Telegram routing and emergency
+            dispatch. Must match the rest of that protocol's monitors.
         dashboard_url: Public JSON endpoint for the report.
         message_url: Public URL for the dashboard, used in alerts.
         dashboard_type: Dashboard type the endpoint serves
@@ -126,6 +132,7 @@ class AccountableFeedConfig:
     """
 
     dfid: str
+    protocol: str
     dashboard_url: str
     message_url: str
     dashboard_type: str

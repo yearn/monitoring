@@ -20,8 +20,8 @@ drops below it; recovering above the threshold re-arms the alert.
 - Nominal sUSD3 backing floor — alerts on change and when floor > sUSD3 backing
 - Protocol-wide pause — alerts once when ProtocolConfig IS_PAUSED flips to true
 - Accountable Proof of Solvency — collateral ratio thresholds plus feed freshness
-  and availability. Alerts route to the 3Jane channel but never trigger the
-  emergency dispatch webhook; see the README for why.
+  and availability. HIGH and CRITICAL use the same ``3jane`` protocol key as the
+  onchain checks, so they dispatch the same way.
 """
 
 import json
@@ -54,13 +54,6 @@ from utils.web3_wrapper import ChainManager
 
 PROTOCOL = "3jane"
 logger = get_logger(PROTOCOL)
-
-# Accountable alerts route to the 3Jane Telegram channel but deliberately use a
-# protocol key that is absent from utils.dispatch.DISPATCHABLE_PROTOCOLS, so a
-# CRITICAL here cannot trigger the emergency cap-zeroing webhook. The live
-# collateral margin is only a few basis points, so automated action on this
-# signal needs a burn-in period first. See issue #327.
-ACCOUNTABLE_ALERT_PROTOCOL = "3jane-accountable"
 
 CACHE_FILENAME = cache_path("cache-id.txt")
 
@@ -103,8 +96,6 @@ CACHE_KEY_USD3_OC_ALERTED = "3JANE_USD3_OC_ALERTED"
 CACHE_KEY_WITHDRAW_LIMIT_ALERTED = "3JANE_WITHDRAW_LIMIT_ALERTED"
 CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED = "3JANE_ACCOUNTABLE_HIGH_ALERTED"
 CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED = "3JANE_ACCOUNTABLE_CRITICAL_ALERTED"
-CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK = "3JANE_ACCOUNTABLE_CRITICAL_STREAK"
-CACHE_KEY_ACCOUNTABLE_CRITICAL_LAST_TS = "3JANE_ACCOUNTABLE_CRITICAL_LAST_TS"
 CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK = "3JANE_ACCOUNTABLE_FAILURE_STREAK"
 CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED = "3JANE_ACCOUNTABLE_HEALTH_ALERTED"
 CACHE_KEY_ACCOUNTABLE_STALE_ALERTED = "3JANE_ACCOUNTABLE_STALE_ALERTED"
@@ -125,6 +116,7 @@ WITHDRAW_LIMIT_THRESHOLD = 4_000_000  # USDC, alert when USD3 availableWithdrawL
 # --- Accountable Proof of Solvency ---
 ACCOUNTABLE_FEED = AccountableFeedConfig(
     dfid="100000026",
+    protocol=PROTOCOL,
     dashboard_url=os.getenv("THREE_JANE_ACCOUNTABLE_URL", "https://accountable.3jane.xyz/dashboard"),
     message_url=os.getenv("THREE_JANE_ACCOUNTABLE_MESSAGE_URL", "https://accountable.3jane.xyz/"),
     dashboard_type="three-jane",
@@ -142,7 +134,6 @@ ACCOUNTABLE_FEED = AccountableFeedConfig(
 # funds in the reported reserve totals. These values are temporary test bands.
 ACCOUNTABLE_CRITICAL_RATIO = Decimal("0.95")
 ACCOUNTABLE_HIGH_RATIO = Decimal("0.99")
-ACCOUNTABLE_CRITICAL_CONFIRMATIONS = 2
 
 THREE_JANE_BORROWER_DEFAULT_WATCH_QUERY = """
 query GetThreeJaneBorrowerDefaultWatch($limit: Int!, $offset: Int!) {
@@ -949,16 +940,8 @@ def check_protocol_paused(is_paused: bool) -> None:
 
 
 def _accountable_alert(severity: AlertSeverity, message: str) -> None:
-    """Send an Accountable alert on the 3Jane channel without emergency dispatch."""
-    send_alert(Alert(severity, message, ACCOUNTABLE_ALERT_PROTOCOL, channel=PROTOCOL))
-
-
-def _reset_accountable_critical_confirmation() -> None:
-    """Clear partial CRITICAL confirmation after a gap or non-critical report."""
-    if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK):
-        set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK, 0)
-    if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_LAST_TS):
-        set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_LAST_TS, 0)
+    """Send an Accountable alert using the feed's owning protocol key."""
+    send_alert(Alert(severity, message, ACCOUNTABLE_FEED.protocol))
 
 
 def _clear_accountable_ratio_alerts() -> None:
@@ -967,40 +950,6 @@ def _clear_accountable_ratio_alerts() -> None:
         set_cache_value(CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED, 0)
     if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED):
         set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED, 0)
-
-
-def _critical_confirmed(report_ts_ms: int) -> bool:
-    """Return True once enough consecutive newer sub-critical reports are seen.
-
-    A first reading is treated as HIGH so it stays visible. Re-polling a frozen
-    report cannot confirm itself.
-    """
-    streak = get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK)
-    last_ts_ms = get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_LAST_TS)
-    if report_ts_ms > last_ts_ms:
-        streak += 1
-        set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_STREAK, streak)
-        set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_LAST_TS, report_ts_ms)
-    else:
-        logger.info(
-            "Accountable collateral remains below %s on unchanged/out-of-order report %d (last %d); "
-            "confirmation stays at %d/%d",
-            ACCOUNTABLE_CRITICAL_RATIO,
-            report_ts_ms,
-            last_ts_ms,
-            streak,
-            ACCOUNTABLE_CRITICAL_CONFIRMATIONS,
-        )
-    if streak >= ACCOUNTABLE_CRITICAL_CONFIRMATIONS:
-        return True
-
-    logger.info(
-        "Accountable collateral below %s but unconfirmed (%d/%d runs); holding at HIGH",
-        ACCOUNTABLE_CRITICAL_RATIO,
-        streak,
-        ACCOUNTABLE_CRITICAL_CONFIRMATIONS,
-    )
-    return False
 
 
 def _format_accountable_report(report: AccountableReport) -> str:
@@ -1030,7 +979,7 @@ def _alert_accountable_high(report: AccountableReport) -> None:
 
 
 def _alert_accountable_critical(report: AccountableReport) -> None:
-    """Alert once while ratio is confirmed below the critical threshold."""
+    """Alert once while ratio is below the critical threshold."""
     if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED):
         return
     message = (
@@ -1048,8 +997,8 @@ def _alert_accountable_critical(report: AccountableReport) -> None:
 def check_accountable_collateral(report: AccountableReport) -> None:
     """Alert when Accountable collateral ratio breaches thresholds.
 
-    HIGH when ratio < 99%; CRITICAL when ratio < 95% for two consecutive newer
-    reports. Each severity alerts once until the ratio recovers above its threshold.
+    HIGH when ratio < 99%; CRITICAL on the first reading below 95%. Each
+    severity alerts once until the ratio recovers above its threshold.
 
     Args:
         report: Validated Proof of Solvency report.
@@ -1058,20 +1007,15 @@ def check_accountable_collateral(report: AccountableReport) -> None:
     logger.info("Accountable collateral ratio: %.6f%%", ratio * 100)
 
     if ratio < ACCOUNTABLE_CRITICAL_RATIO:
-        if _critical_confirmed(report.ts_ms):
-            _alert_accountable_critical(report)
-        else:
-            _alert_accountable_high(report)
+        _alert_accountable_critical(report)
         return
 
     if ratio < ACCOUNTABLE_HIGH_RATIO:
-        _reset_accountable_critical_confirmation()
         if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED):
             set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED, 0)
         _alert_accountable_high(report)
         return
 
-    _reset_accountable_critical_confirmation()
     _clear_accountable_ratio_alerts()
 
 
@@ -1103,32 +1047,35 @@ def check_accountable_staleness(report: AccountableReport, reason: str) -> None:
 
 
 def check_accountable_availability(reason: str) -> None:
-    """Track feed failures and alert after one exhausted retrieval cycle.
+    """Track feed failures: HIGH on the first miss, CRITICAL on the second.
 
     ``fetch_report`` has already exhausted bounded retries before reporting a
-    request failure. The alert is deduplicated until the feed recovers.
+    request failure. A success clears the streak. Further misses after
+    CRITICAL stay quiet until recovery.
 
     Args:
         reason: Why the feed was unusable this run.
     """
-    # An unusable run breaks the sequence of confirmed collateral observations.
-    _reset_accountable_critical_confirmation()
-
     streak = get_cache_int(CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK) + 1
     set_cache_value(CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK, streak)
     logger.warning("Accountable feed unusable (%d consecutive): %s", streak, reason)
 
-    if get_cache_int(CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED):
+    if streak == 1:
+        severity = AlertSeverity.HIGH
+    elif streak == 2:
+        severity = AlertSeverity.CRITICAL
+    else:
         return
 
     message = (
         f"⚠️ *3Jane Proof of Solvency Unavailable*\n"
-        f"📡 Retrieval failed after all retry attempts\n"
+        f"📡 Retrieval failed after all retry attempts ({streak} consecutive run"
+        f"{'s' if streak > 1 else ''})\n"
         f"❌ {escape_markdown(reason)}\n"
         f"⚠️ Collateral ratio is not being monitored\n"
         f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.message_url})"
     )
-    _accountable_alert(AlertSeverity.HIGH, message)
+    _accountable_alert(severity, message)
     set_cache_value(CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED, 1)
 
 
