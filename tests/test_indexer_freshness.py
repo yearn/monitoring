@@ -15,7 +15,6 @@ INDEXED_BLOCKS: dict[Chain, int] = {
     Chain.BASE: 49220190,
     Chain.MAINNET: 24150245,
     Chain.KATANA: 38465232,
-    Chain.OPTIMISM: 154815667,
     Chain.POLYGON: 91016489,
     Chain.ARBITRUM: 488554295,
 }
@@ -78,7 +77,6 @@ def test_collect_freshness_computes_lag_and_sorts_by_chain(monkeypatch: pytest.M
     # Gnosis (100) and Berachain (80094) are indexed but unused here, so they drop out.
     assert [entry.chain for entry in result] == [
         Chain.MAINNET,
-        Chain.OPTIMISM,
         Chain.POLYGON,
         Chain.BASE,
         Chain.ARBITRUM,

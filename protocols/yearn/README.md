@@ -277,7 +277,7 @@ For each configured Safe on each chain:
 
 ## Timelock Monitoring
 
-Yearn TimelockController contracts are monitored across 6 chains via the shared [timelock monitoring script](../timelock/README.md). Alerts are routed to the `YEARN` Telegram channel.
+Yearn TimelockController contracts are monitored across 5 chains via the shared [timelock monitoring script](../timelock/README.md). Alerts are routed to the `YEARN` Telegram channel.
 
 ### Monitored Addresses
 
@@ -290,13 +290,14 @@ All chains use the same contract address: `0x88ba032be87d5ef1fbe87336b7090767f36
 | Arbitrum | [arbiscan.io](https://arbiscan.io/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
 | Polygon | [polygonscan.com](https://polygonscan.com/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
 | Katana | [katanascan.com](https://katanascan.com/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
-| Optimism | [optimistic.etherscan.io](https://optimistic.etherscan.io/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
+
+Optimism is not covered: the Envio indexer stopped indexing it, so its timelock events are no longer available.
 
 =======
 
 ## Indexer Freshness
 
-The script `yearn/check_indexer_freshness.py` watches the [Envio indexer](https://github.com/chain-events/yearn-indexing-test) that feeds the large-flows, timelock and 3jane borrower monitors. It runs hourly, first in the [hourly profile](../../automation/jobs.yaml).
+The script `yearn/check_indexer_freshness.py` watches the [Envio indexer](https://github.com/yearn/yearn-envio) that feeds the large-flows, timelock and 3jane borrower monitors. It runs hourly, first in the [hourly profile](../../automation/jobs.yaml).
 
 An indexer stall is invisible to the monitors that depend on it: GraphQL keeps answering, it just stops returning new rows, so an outage looks exactly like a quiet hour. This check makes the silence loud.
 
@@ -310,7 +311,7 @@ Step 2 is what makes the check trustworthy. Envio parks `chain_metadata.block_he
 
 Step 3 covers the inverse trap: an empty result set is not good news. If a chain drops out of the indexer's config, or comes back from a restart with no processed block, it simply stops appearing in `chain_metadata` — and a check that only looks at what it was given would report every remaining chain fresh while that chain's monitors sit blind. `EXPECTED_CHAINS` is therefore the authority on what must be present, and anything absent from it alerts.
 
-`EXPECTED_CHAINS` lists the chains whose indexed events feed monitors here (Mainnet, Optimism, Polygon, Base, Arbitrum, Katana). It is deliberately spelled out rather than derived from the `Chain` enum, so adding an enum member for an unrelated protocol doesn't start alerting that the indexer is missing a chain it was never asked to index — **add a chain here when its events start feeding a monitor.** The indexer also covers Gnosis and Berachain, which nothing here reads from; those are logged and skipped. A chain whose RPC is unreachable is skipped too rather than alerted on: a broken provider is not a stale indexer.
+`EXPECTED_CHAINS` lists the chains whose indexed events feed monitors here (Mainnet, Polygon, Base, Arbitrum, Katana). It is deliberately spelled out rather than derived from the `Chain` enum, so adding an enum member for an unrelated protocol doesn't start alerting that the indexer is missing a chain it was never asked to index — **add a chain here when its events start feeding a monitor.** Any other chain the indexer reports is one nothing here reads from; those are logged and skipped. A chain whose RPC is unreachable is skipped too rather than alerted on: a broken provider is not a stale indexer.
 
 ### Alerts
 
