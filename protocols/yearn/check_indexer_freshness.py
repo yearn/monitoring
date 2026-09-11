@@ -73,7 +73,6 @@ CACHE_KEY_LAST_ALERT_PREFIX = "YEARN_INDEXER_STALE_ALERT_"
 # feeding a monitor.
 EXPECTED_CHAINS: tuple[Chain, ...] = (
     Chain.MAINNET,
-    Chain.OPTIMISM,
     Chain.POLYGON,
     Chain.BASE,
     Chain.ARBITRUM,
@@ -174,9 +173,9 @@ def fetch_block_timestamp(chain: Chain, block_number: int) -> int | None:
 def collect_freshness(rows: list[dict], now: int) -> list[ChainFreshness]:
     """Resolve how far behind wall-clock time each expected chain is.
 
-    The indexer covers chains this repo doesn't read from (Gnosis, Berachain).
-    Nothing here consumes their events, so they are skipped rather than alerted
-    on. Expected chains absent from `rows` produce no entry — see
+    The indexer may cover chains this repo doesn't read from. Nothing here
+    consumes their events, so they are skipped rather than alerted on.
+    Expected chains absent from `rows` produce no entry — see
     `missing_chains`.
 
     Args:

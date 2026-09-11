@@ -72,7 +72,6 @@ TIMELOCK_LIST: list[TimelockConfig] = [
     TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 42161, "YEARN_TIMELOCK", "Yearn TimelockController"),
     TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 137, "YEARN_TIMELOCK", "Yearn TimelockController"),
     TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 747474, "YEARN_TIMELOCK", "Yearn TimelockController"),
-    TimelockConfig("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 10, "YEARN_TIMELOCK", "Yearn TimelockController"),
 ]
 
 # Lookup by (lowercase address, chain_id) to support same address on multiple chains

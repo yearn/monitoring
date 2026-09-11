@@ -16,7 +16,7 @@ Before making changes, identify the timelock's event signature. Fetch the ABI fr
 cast abi <timelock_address> --etherscan
 ```
 
-Compare the scheduling event against existing contract types in the [Envio config.yaml](https://github.com/chain-events/yearn-indexing-test/blob/main/config.yaml):
+Compare the scheduling event against existing contract types in the [Envio config.yaml](https://github.com/yearn/yearn-envio/blob/main/config.yaml):
 
 | Contract Type | Event Signature |
 |---|---|
@@ -34,7 +34,7 @@ The event signature must match exactly because the Envio indexer uses it to gene
 
 ## Step 2a: Reuse Existing Contract Type (Envio Indexer)
 
-**Repository**: [chain-events/yearn-indexing-test](https://github.com/chain-events/yearn-indexing-test)
+**Repository**: [yearn/yearn-envio](https://github.com/yearn/yearn-envio)
 
 Add the address under the matching contract type in `config.yaml`:
 
@@ -49,7 +49,7 @@ No handler changes needed. Skip to Step 3.
 
 ## Step 2b: New Contract Type (Envio Indexer)
 
-**Repository**: [chain-events/yearn-indexing-test](https://github.com/chain-events/yearn-indexing-test)
+**Repository**: [yearn/yearn-envio](https://github.com/yearn/yearn-envio)
 
 ### 2b.1 — Add contract definition in `config.yaml`
 

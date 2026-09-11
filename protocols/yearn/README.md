@@ -55,6 +55,37 @@ Optional flags:
 - `--chain-ids` (default: all vault chain IDs — `1,8453,42161,747474`)
 - `--no-cache` (disable caching)
 
+## Small Parent Vault Flows
+
+The script `yearn/alert_small_parent_flows.py` alerts on every deposit or withdrawal whose raw ERC-4626 `assets` value is strictly between 0 and 10,000 for an active Yearn v3 parent vault. The comparison happens before decimal normalization: 10,000 raw units equals 0.01 USDC, 0.0001 WBTC, or 0.00000000000001 WETH.
+
+### Data Sources
+
+- **Parent vault discovery**: Kong GraphQL, filtered to Yearn v3 `vaultType: 1` vaults and excluding retired entries. Hidden vaults stay monitored because `isHidden` only controls UI visibility; rows missing asset metadata are logged and skipped.
+- **Flow events**: Envio `Deposit` and `Withdraw` entities. Alerts include the ERC-4626 owner and sender, the transaction initiator, and the asset receiver for withdrawals.
+- **Token decimals**: the parent vault's underlying asset metadata from Kong, used only to show a human-readable amount alongside the raw value.
+
+Deposits and withdrawals are processed with independent per-chain `(blockNumber, logIndex)` cursors stored in the monitoring database. A cursor advances only after an event is successfully evaluated and, when applicable, delivered to Telegram. A new deployment starts each stream with a two-hour lookback; that starting timestamp is persisted, so a stream that has not yet seen any event never slides its window forward and a long run gap cannot drop events.
+
+**Routing:** flow alerts and the overflow summary go to the internal curation chat (`TELEGRAM_CHAT_ID_CURATION`), not the public yearn group. If that chat id is unset they fall back to the yearn group.
+
+At most `--max-alerts` individual alerts are sent per run; any further qualifying flows are logged and summarized in a single message. The first Envio failure is reported once to the Envio channel and stops the run, and the unprocessed events are picked up on the next run.
+
+### Usage
+
+```bash
+uv run protocols/yearn/alert_small_parent_flows.py
+```
+
+Optional flags:
+
+- `--threshold-raw` (default: `10000`)
+- `--lookback-seconds` (default: `7200`, used only the first time a chain/flow stream runs)
+- `--page-size` (default: `1000`)
+- `--chain-ids` (default: `1,8453,42161,137,747474`, the chains indexed by [yearn-envio](https://github.com/yearn/yearn-envio))
+- `--max-alerts` (default: `20`, individual alerts per run before summarizing)
+- `--log-level` (default: `SMALL_PARENT_FLOWS_LOG_LEVEL`, then `LOG_LEVEL`, then `INFO`)
+
 =======
 
 ## Shadow Debt Check
@@ -246,7 +277,7 @@ For each configured Safe on each chain:
 
 ## Timelock Monitoring
 
-Yearn TimelockController contracts are monitored across 6 chains via the shared [timelock monitoring script](../timelock/README.md). Alerts are routed to the `YEARN` Telegram channel.
+Yearn TimelockController contracts are monitored across 5 chains via the shared [timelock monitoring script](../timelock/README.md). Alerts are routed to the `YEARN` Telegram channel.
 
 ### Monitored Addresses
 
@@ -259,13 +290,14 @@ All chains use the same contract address: `0x88ba032be87d5ef1fbe87336b7090767f36
 | Arbitrum | [arbiscan.io](https://arbiscan.io/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
 | Polygon | [polygonscan.com](https://polygonscan.com/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
 | Katana | [katanascan.com](https://katanascan.com/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
-| Optimism | [optimistic.etherscan.io](https://optimistic.etherscan.io/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
+
+Optimism is not covered: the Envio indexer stopped indexing it, so its timelock events are no longer available.
 
 =======
 
 ## Indexer Freshness
 
-The script `yearn/check_indexer_freshness.py` watches the [Envio indexer](https://github.com/chain-events/yearn-indexing-test) that feeds the large-flows, timelock and 3jane borrower monitors. It runs hourly, first in the [hourly profile](../../automation/jobs.yaml).
+The script `yearn/check_indexer_freshness.py` watches the [Envio indexer](https://github.com/yearn/yearn-envio) that feeds the large-flows, timelock and 3jane borrower monitors. It runs hourly, first in the [hourly profile](../../automation/jobs.yaml).
 
 An indexer stall is invisible to the monitors that depend on it: GraphQL keeps answering, it just stops returning new rows, so an outage looks exactly like a quiet hour. This check makes the silence loud.
 
@@ -279,7 +311,7 @@ Step 2 is what makes the check trustworthy. Envio parks `chain_metadata.block_he
 
 Step 3 covers the inverse trap: an empty result set is not good news. If a chain drops out of the indexer's config, or comes back from a restart with no processed block, it simply stops appearing in `chain_metadata` — and a check that only looks at what it was given would report every remaining chain fresh while that chain's monitors sit blind. `EXPECTED_CHAINS` is therefore the authority on what must be present, and anything absent from it alerts.
 
-`EXPECTED_CHAINS` lists the chains whose indexed events feed monitors here (Mainnet, Optimism, Polygon, Base, Arbitrum, Katana). It is deliberately spelled out rather than derived from the `Chain` enum, so adding an enum member for an unrelated protocol doesn't start alerting that the indexer is missing a chain it was never asked to index — **add a chain here when its events start feeding a monitor.** The indexer also covers Gnosis and Berachain, which nothing here reads from; those are logged and skipped. A chain whose RPC is unreachable is skipped too rather than alerted on: a broken provider is not a stale indexer.
+`EXPECTED_CHAINS` lists the chains whose indexed events feed monitors here (Mainnet, Polygon, Base, Arbitrum, Katana). It is deliberately spelled out rather than derived from the `Chain` enum, so adding an enum member for an unrelated protocol doesn't start alerting that the indexer is missing a chain it was never asked to index — **add a chain here when its events start feeding a monitor.** Any other chain the indexer reports is one nothing here reads from; those are logged and skipped. A chain whose RPC is unreachable is skipped too rather than alerted on: a broken provider is not a stale indexer.
 
 ### Alerts
 
