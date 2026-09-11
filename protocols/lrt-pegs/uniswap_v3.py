@@ -24,19 +24,20 @@ POOL_CONFIGS = [
 ]
 
 
-def get_token_balances(client, pool_address, token0_address, token1_address):
+def get_token_balances(client, pool_address, token0_address, token1_address, block_number: int):
     """Get actual token balances held by the pool"""
     token0_contract = client.eth.contract(address=token0_address, abi=ABI_ERC20)
     token1_contract = client.eth.contract(address=token1_address, abi=ABI_ERC20)
 
-    balance0 = token0_contract.functions.balanceOf(pool_address).call()
-    balance1 = token1_contract.functions.balanceOf(pool_address).call()
+    balance0 = token0_contract.functions.balanceOf(pool_address).call(block_identifier=block_number)
+    balance1 = token1_contract.functions.balanceOf(pool_address).call(block_identifier=block_number)
 
     return balance0, balance1
 
 
 def process_pools(chain: Chain = Chain.MAINNET):
     client = ChainManager.get_client(chain)
+    block_number = int(client.eth.block_number)
     contracts = []
 
     # Prepare batch calls to get token addresses and balances
@@ -58,7 +59,13 @@ def process_pools(chain: Chain = Chain.MAINNET):
     for i, (pool_name, pool_address, _, _) in enumerate(POOL_CONFIGS):
         token0_address = responses[i * 2]
         token1_address = responses[i * 2 + 1]
-        balance0, balance1 = get_token_balances(client, pool_address, token0_address, token1_address)
+        balance0, balance1 = get_token_balances(
+            client,
+            pool_address,
+            token0_address,
+            token1_address,
+            block_number,
+        )
         pool_balances.append((balance0, balance1))
 
     # Process results

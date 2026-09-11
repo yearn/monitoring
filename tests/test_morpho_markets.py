@@ -1,10 +1,12 @@
 """Behavior tests for Morpho v1/v2 market and liquidity monitoring."""
 
+import os
 import unittest
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 from protocols.morpho._shared import (
+    PROTOCOL,
     Asset,
     BadDebt,
     MarketMetrics,
@@ -17,6 +19,7 @@ from protocols.morpho.markets import (
     YV_COLLATERAL_AT_RISK_POINTS,
     YV_COLLATERAL_STABLE_PRICE_SHOCK,
     calculate_combined_metrics,
+    check_yv_collateral_market_liquidity,
     collect_yv_collateral_markets,
     fetch_configured_vaults,
     get_markets_collateral_at_risk_usd,
@@ -31,6 +34,7 @@ from protocols.morpho.markets_v2 import (
     score_market_allocations,
 )
 from utils.chains import Chain
+from utils.telegram import CURATION_CHANNEL
 
 
 def _sample_metrics(market_id: str, asset_address: str = "0x" + "22" * 20) -> MarketMetrics:
@@ -278,6 +282,53 @@ class TestMorphoCollateralLiquidity(unittest.TestCase):
         )
 
         self.assertEqual(result, {market_id: (market, liquidity_group)})
+
+    def _run_underfunded_unwind_check(self) -> Any:
+        """Run the YV unwind check on a market whose liquidity cannot cover it."""
+        market_id = "0x6691cdcadd5d23ac68d2c1cf54dc97ab8242d2a888230de411094480252c2ed3"
+        asset_address = "0x203a662b0bd271a6ed5a60edfbd04bfce608fd36"
+        market = {
+            "marketId": market_id,
+            "collateralAsset": {"symbol": "yvvbUSDT", "chain": {"id": Chain.KATANA.chain_id}},
+            "loanAsset": {"symbol": "vbUSDC"},
+            "lltv": str(int(0.86 * 1e18)),
+            "state": {"borrowAssetsUsd": 1_000_000},
+        }
+        liquidity_by_asset = {
+            asset_address: {
+                "asset_address": asset_address,
+                "asset_symbol": "vbUSDT",
+                "combined_liquidity": 425_077.48,
+                "vault_names": ["Gauntlet USDT", "Yearn OG USDT (V2)"],
+            }
+        }
+
+        with (
+            patch(
+                "protocols.morpho.markets.get_markets_collateral_at_risk_usd",
+                return_value={market_id: 516_853.61},
+            ),
+            patch("protocols.morpho.markets.send_alert") as send,
+        ):
+            check_yv_collateral_market_liquidity(Chain.KATANA, [market], liquidity_by_asset)
+
+        send.assert_called_once()
+        return send.call_args.args[0]
+
+    def test_unwind_alert_goes_to_curation_chat(self) -> None:
+        with patch.dict(os.environ, {"TELEGRAM_CHAT_ID_CURATION": "curation_chat_id"}):
+            alert = self._run_underfunded_unwind_check()
+
+        self.assertEqual(alert.channel, CURATION_CHANNEL)
+        # protocol stays morpho so the emergency-withdrawal dispatch hook still fires.
+        self.assertEqual(alert.protocol, PROTOCOL)
+        self.assertIn("Insufficient vbUSDT unwind liquidity", alert.message)
+
+    def test_unwind_alert_falls_back_to_morpho_chat_when_curation_unset(self) -> None:
+        with patch.dict(os.environ, {"TELEGRAM_CHAT_ID_CURATION": ""}):
+            alert = self._run_underfunded_unwind_check()
+
+        self.assertEqual(alert.channel, PROTOCOL)
 
     def test_combines_v1_and_v2_withdrawable_liquidity(self) -> None:
         vaults: list[dict[str, Any]] = [

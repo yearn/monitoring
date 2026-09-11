@@ -16,7 +16,15 @@ Monitors:
 from protocols.maple.collateral import check_collateral_risk
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
-from utils.cache import cache_path, get_last_value_for_key_from_file, write_last_value_to_file
+from utils.cache import (
+    HOURLY_CACHE_STALE_AFTER_SECONDS,
+    cache_key_is_stale,
+    cache_path,
+    get_fresh_last_value_for_key_from_file,
+    get_last_value_for_key_from_file,
+    write_last_value_to_file,
+    write_last_value_with_timestamp_to_file,
+)
 from utils.chains import Chain
 from utils.formatting import format_usd
 from utils.logger import get_logger
@@ -84,9 +92,23 @@ def set_cache_value(key: str, value: float) -> None:
     write_last_value_to_file(CACHE_FILENAME, key, value)
 
 
-def check_pps(client, pool) -> float:
+def get_fresh_cache_value(key: str) -> float:
+    """Read an hourly baseline, returning zero when it is stale."""
+    val = get_fresh_last_value_for_key_from_file(CACHE_FILENAME, key, HOURLY_CACHE_STALE_AFTER_SECONDS)
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def set_fresh_cache_value(key: str, value: float) -> None:
+    """Write an hourly baseline and its observation timestamp."""
+    write_last_value_with_timestamp_to_file(CACHE_FILENAME, key, value)
+
+
+def check_pps(client, pool, block_number: int) -> float:
     """Check Price Per Share and alert on decrease."""
-    pps = client.execute(pool.functions.convertToAssets(ONE_SHARE).call)
+    pps = client.execute(pool.functions.convertToAssets(ONE_SHARE).call, block_identifier=block_number)
     pps_float = pps / ONE_SHARE
 
     previous_pps = get_cache_value(CACHE_KEY_PPS)
@@ -108,12 +130,12 @@ def check_pps(client, pool) -> float:
     return pps_float
 
 
-def check_tvl(client, pool) -> float:
+def check_tvl(client, pool, block_number: int) -> float:
     """Check Total Value Locked and alert on large changes."""
-    total_assets = client.execute(pool.functions.totalAssets().call)
+    total_assets = client.execute(pool.functions.totalAssets().call, block_identifier=block_number)
     tvl_usd = total_assets / ONE_SHARE
 
-    previous_tvl = get_cache_value(CACHE_KEY_TVL)
+    previous_tvl = get_fresh_cache_value(CACHE_KEY_TVL)
     logger.info("syrupUSDC TVL: %s (previous: %s)", format_usd(tvl_usd), format_usd(previous_tvl))
 
     if previous_tvl > 0:
@@ -128,12 +150,11 @@ def check_tvl(client, pool) -> float:
             )
             send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
-    if tvl_usd != previous_tvl:
-        set_cache_value(CACHE_KEY_TVL, tvl_usd)
+    set_fresh_cache_value(CACHE_KEY_TVL, tvl_usd)
     return tvl_usd
 
 
-def check_unrealized_losses(client) -> float:
+def check_unrealized_losses(client, block_number: int) -> float:
     """Check unrealized losses on both loan managers.
 
     Returns:
@@ -143,10 +164,10 @@ def check_unrealized_losses(client) -> float:
     open_lm = client.eth.contract(address=OPEN_TERM_LOAN_MANAGER, abi=ABI_LOAN_MANAGER)
 
     with client.batch_requests() as batch:
-        batch.add(fixed_lm.functions.unrealizedLosses())
-        batch.add(open_lm.functions.unrealizedLosses())
-        batch.add(fixed_lm.functions.assetsUnderManagement())
-        batch.add(open_lm.functions.assetsUnderManagement())
+        batch.add(fixed_lm.functions.unrealizedLosses().call(block_identifier=block_number))
+        batch.add(open_lm.functions.unrealizedLosses().call(block_identifier=block_number))
+        batch.add(fixed_lm.functions.assetsUnderManagement().call(block_identifier=block_number))
+        batch.add(open_lm.functions.assetsUnderManagement().call(block_identifier=block_number))
 
         responses = client.execute_batch(batch)
         if len(responses) != 4:
@@ -180,7 +201,7 @@ def check_unrealized_losses(client) -> float:
     return fixed_aum + open_aum
 
 
-def check_strategy_and_withdrawal_queue(client, pool, tvl: float) -> None:
+def check_strategy_and_withdrawal_queue(client, pool, tvl: float, block_number: int) -> None:
     """Check strategy allocations and alert on withdrawal queue size.
 
     Alerts when pending exit value exceeds 80% of liquid funds (Aave + Sky) or 1% of TVL.
@@ -190,9 +211,9 @@ def check_strategy_and_withdrawal_queue(client, pool, tvl: float) -> None:
     wm = client.eth.contract(address=WITHDRAWAL_MANAGER, abi=ABI_WITHDRAWAL_MANAGER)
 
     with client.batch_requests() as batch:
-        batch.add(aave_strategy.functions.assetsUnderManagement())
-        batch.add(sky_strategy.functions.assetsUnderManagement())
-        batch.add(wm.functions.totalShares())
+        batch.add(aave_strategy.functions.assetsUnderManagement().call(block_identifier=block_number))
+        batch.add(sky_strategy.functions.assetsUnderManagement().call(block_identifier=block_number))
+        batch.add(wm.functions.totalShares().call(block_identifier=block_number))
 
         responses = client.execute_batch(batch)
         if len(responses) != 3:
@@ -205,7 +226,10 @@ def check_strategy_and_withdrawal_queue(client, pool, tvl: float) -> None:
     # Convert pending shares to their exit value, accounting for unrealized losses.
     pending_assets = 0.0
     if pending_shares > 0:
-        pending_assets_raw = client.execute(pool.functions.convertToExitAssets(pending_shares).call)
+        pending_assets_raw = client.execute(
+            pool.functions.convertToExitAssets(pending_shares).call,
+            block_identifier=block_number,
+        )
         pending_assets = pending_assets_raw / ONE_SHARE
 
     liquid_funds = aave_assets + sky_assets
@@ -230,7 +254,7 @@ def check_strategy_and_withdrawal_queue(client, pool, tvl: float) -> None:
         send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
 
 
-def check_pool_liquidity(client, pool) -> None:
+def check_pool_liquidity(client, pool, block_number: int) -> None:
     """Check pool USDC cash vs pending withdrawal value.
 
     Alerts when pending withdrawal exit value exceeds available cash (delegate cannot satisfy
@@ -245,8 +269,8 @@ def check_pool_liquidity(client, pool) -> None:
     wm = client.eth.contract(address=WITHDRAWAL_MANAGER, abi=ABI_WITHDRAWAL_MANAGER)
 
     with client.batch_requests() as batch:
-        batch.add(usdc.functions.balanceOf(SYRUP_USDC_POOL))
-        batch.add(wm.functions.totalShares())
+        batch.add(usdc.functions.balanceOf(SYRUP_USDC_POOL).call(block_identifier=block_number))
+        batch.add(wm.functions.totalShares().call(block_identifier=block_number))
 
         responses = client.execute_batch(batch)
         if len(responses) != 2:
@@ -257,7 +281,10 @@ def check_pool_liquidity(client, pool) -> None:
 
     pending_assets = 0.0
     if pending_shares > 0:
-        pending_assets_raw = client.execute(pool.functions.convertToExitAssets(pending_shares).call)
+        pending_assets_raw = client.execute(
+            pool.functions.convertToExitAssets(pending_shares).call,
+            block_identifier=block_number,
+        )
         pending_assets = pending_assets_raw / ONE_SHARE
 
     logger.info(
@@ -267,7 +294,10 @@ def check_pool_liquidity(client, pool) -> None:
     )
 
     if pending_assets > cash_balance:
-        next_request_id, last_request_id = client.execute(wm.functions.queue().call)
+        next_request_id, last_request_id = client.execute(
+            wm.functions.queue().call,
+            block_identifier=block_number,
+        )
         pending_requests = max(0, last_request_id - next_request_id + 1) if last_request_id >= next_request_id else 0
         message = (
             f"*Maple syrupUSDC Pending Withdrawals Exceed Cash*\n"
@@ -278,7 +308,7 @@ def check_pool_liquidity(client, pool) -> None:
         send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
 
 
-def check_delegate_cover(client) -> None:
+def check_delegate_cover(client, block_number: int) -> None:
     """Check Pool Delegate Cover USDC balance and alert on changes.
 
     The Pool Delegate Cover is "skin in the game" — USDC deposited by the pool delegate
@@ -286,18 +316,28 @@ def check_delegate_cover(client) -> None:
     reduces delegate accountability.
     """
     usdc = client.eth.contract(address=USDC_ADDRESS, abi=ABI_ERC20_BALANCE)
-    cover_balance = client.execute(usdc.functions.balanceOf(POOL_DELEGATE_COVER).call)
+    cover_balance = client.execute(
+        usdc.functions.balanceOf(POOL_DELEGATE_COVER).call,
+        block_identifier=block_number,
+    )
     cover_usd = cover_balance / ONE_SHARE
 
     previous_cover = get_cache_value(CACHE_KEY_DELEGATE_COVER)
+    cover_cache_is_stale = cache_key_is_stale(
+        CACHE_FILENAME, CACHE_KEY_DELEGATE_COVER, HOURLY_CACHE_STALE_AFTER_SECONDS
+    )
     logger.info("Pool Delegate Cover: %s (previous: %s)", format_usd(cover_usd), format_usd(previous_cover))
 
     if cover_usd == 0:
-        # Only alert once when cover is first detected as zero (previous > 0 or first run)
-        if previous_cover > 0:
+        if previous_cover > 0 or cover_cache_is_stale:
+            previous_line = (
+                f"📊 Cover balance dropped from {format_usd(previous_cover)} to $0\n"
+                if previous_cover > 0
+                else "📊 Cover balance is $0 after a stale or missing observation baseline\n"
+            )
             message = (
                 f"🚨 *Maple syrupUSDC Pool Delegate Cover Empty*\n"
-                f"📊 Cover balance dropped from {format_usd(previous_cover)} to $0\n"
+                f"{previous_line}"
                 f"⚠️ No delegate skin-in-the-game — reduced accountability for loan defaults\n"
                 f"🔗 [PoolDelegateCover](https://etherscan.io/address/{POOL_DELEGATE_COVER})"
             )
@@ -311,8 +351,7 @@ def check_delegate_cover(client) -> None:
         )
         send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
 
-    if cover_usd != previous_cover:
-        set_cache_value(CACHE_KEY_DELEGATE_COVER, cover_usd)
+    set_fresh_cache_value(CACHE_KEY_DELEGATE_COVER, cover_usd)
 
 
 def main() -> None:
@@ -322,13 +361,14 @@ def main() -> None:
     pool = client.eth.contract(address=SYRUP_USDC_POOL, abi=ABI_POOL)
 
     try:
-        pps = check_pps(client, pool)
-        tvl = check_tvl(client, pool)
-        check_unrealized_losses(client)
-        check_strategy_and_withdrawal_queue(client, pool, tvl)
-        check_pool_liquidity(client, pool)
+        block_number = int(client.eth.block_number)
+        pps = check_pps(client, pool, block_number)
+        tvl = check_tvl(client, pool, block_number)
+        check_unrealized_losses(client, block_number)
+        check_strategy_and_withdrawal_queue(client, pool, tvl, block_number)
+        check_pool_liquidity(client, pool, block_number)
         check_collateral_risk()
-        check_delegate_cover(client)
+        check_delegate_cover(client, block_number)
 
         logger.info(
             "Monitoring complete — PPS: %.8f, TVL: %s",

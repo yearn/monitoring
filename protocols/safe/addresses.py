@@ -35,6 +35,10 @@ PROXY_UPGRADE_SIGNATURES = [
 ]
 
 # Watched non-yearn protocol multisigs. Format: [protocol, network, address, optional label].
+# The protocol field doubles as the Telegram channel key: send_telegram_message resolves
+# TELEGRAM_TOPIC_ID_{protocol.upper()} / TELEGRAM_CHAT_ID_{protocol.upper()}. It must therefore
+# be a legal env-var suffix — a label containing a space (or any non [A-Z0-9_] character) can
+# never resolve and its alerts are silently dropped as "Missing Telegram credentials".
 ALL_SAFE_ADDRESSES = [
     [
         "LIDO",
@@ -106,7 +110,7 @@ ALL_SAFE_ADDRESSES = [
         "sUSDai Admin Safe",
     ],
     [
-        "CAP MONEY",
+        "CAP",
         "mainnet",
         "0xb8FC49402dF3ee4f8587268FB89fda4d621a8793",
         "Cap Money Multisig",

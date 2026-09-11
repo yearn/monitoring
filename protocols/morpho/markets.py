@@ -39,6 +39,7 @@ from protocols.morpho.risk import (
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import Chain
 from utils.logger import get_logger
+from utils.telegram import CURATION_CHANNEL, resolve_channel
 
 # Configuration constants
 logger = get_logger(PROTOCOL)
@@ -533,7 +534,11 @@ def check_yv_collateral_market_liquidity(
             f"📊 Required with buffer: ${required_liquidity:,.2f} ({coverage:.2f}x coverage)\n"
             f"💹 Markets:\n{market_lines}\n"
         )
-        send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
+        # Unwind liquidity is a curation decision (rebalance the vaults, adjust the
+        # market caps), not something the public morpho group can act on — so it
+        # goes to the internal curation chat instead. `protocol` stays morpho so the
+        # emergency-withdrawal dispatch hook still sees it.
+        send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL, channel=resolve_channel(CURATION_CHANNEL, PROTOCOL)))
 
 
 def check_individual_liquidity_for_chain(chain: Chain, chain_vaults: List[Dict[str, Any]]) -> None:

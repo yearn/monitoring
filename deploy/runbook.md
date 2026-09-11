@@ -71,7 +71,8 @@ uv run python -m automation run hourly --dry-run
 uv run python -m automation run hourly
 ```
 
-Available profiles: `hourly`, `daily`, `multisig` (see `automation/jobs.yaml`).
+Available profiles: `half_hourly`, `six_hourly`, `hourly`, `daily`, `multisig`
+(see `automation/jobs.yaml`).
 
 ---
 
@@ -101,8 +102,8 @@ PR and the next ~10-min multisig tick syncs it in; no SSH needed.**
 auto-sync but stay inert until a restart, because they're read once at scheduler
 boot, not per-tick:
 
-- a `cron:` *cadence* change in `jobs.yaml` (the crontab is rendered at unit
-  start by `ExecStartPre`), and
+- adding/removing a profile or changing a profile's `cron:` *cadence* in
+  `jobs.yaml` (the crontab is rendered at unit start by `ExecStartPre`), and
 - a `pyproject.toml` / `uv.lock` change (the venv).
 
 For those, after the PR merges:

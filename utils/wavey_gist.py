@@ -4,15 +4,33 @@ import os
 
 import requests
 
+from utils.http_client import request_with_retry
 from utils.logger import get_logger
 
 logger = get_logger("utils.wavey_gist")
+
+# How much of an error response body to log. Wavey Gist explains rejections in
+# the body ("Legacy gist fields are no longer supported."), and `raise_for_status`
+# throws that away — leaving only "400 Client Error" in the logs, which says
+# nothing about what to fix.
+_ERROR_BODY_CHARS: int = 300
 
 WAVEY_GIST_API_URL = "https://api.wavey.info/api/v1/gists"
 DEFAULT_GIST_TITLE = "Monitoring Details"
 # Wavey Gist picks `README.md` as the primary file when present, so the rendered
 # page opens with our content. See https://gist.wavey.info/llms.txt.
 PRIMARY_FILE_NAME = "README.md"
+
+
+def _response_detail(error: Exception) -> str:
+    """Return the server's error body as a log suffix, or "" when unavailable."""
+    response = getattr(error, "response", None)
+    body = (getattr(response, "text", "") or "").strip()
+    if not body:
+        return ""
+    if len(body) > _ERROR_BODY_CHARS:
+        body = body[:_ERROR_BODY_CHARS] + "…"
+    return f" — response body: {body}"
 
 
 def upload_to_gist(content: str, title: str = "") -> str:
@@ -44,16 +62,18 @@ def upload_to_gist(content: str, title: str = "") -> str:
     }
 
     try:
-        response = requests.post(
+        # Retries transient 5xx/timeouts and never retries a 4xx, so a contract
+        # change like the legacy-payload rejection still fails fast.
+        response = request_with_retry(
+            "POST",
             WAVEY_GIST_API_URL,
             json=payload,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             timeout=10,
         )
-        response.raise_for_status()
         body = response.json()
     except (requests.RequestException, ValueError) as e:
-        logger.warning("Failed to upload to Wavey Gist: %s", e)
+        logger.warning("Failed to upload to Wavey Gist: %s%s", e, _response_detail(e))
         return ""
 
     url = body.get("url", "")
@@ -62,4 +82,4 @@ def upload_to_gist(content: str, title: str = "") -> str:
         return ""
 
     logger.info("Uploaded gist to %s", url)
-    return url
+    return str(url)

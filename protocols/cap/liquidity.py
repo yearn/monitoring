@@ -2,7 +2,12 @@ from decimal import Decimal
 
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
-from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
+from utils.cache import (
+    DAILY_CACHE_STALE_AFTER_SECONDS,
+    cache_filename,
+    get_fresh_last_value_for_key_from_file,
+    write_last_value_with_timestamp_to_file,
+)
 from utils.chains import Chain
 from utils.config import Config
 from utils.logger import get_logger
@@ -32,14 +37,15 @@ def _format_units(raw_value: int) -> Decimal:
 
 def main():
     client = ChainManager.get_client(Chain.MAINNET)
+    block_number = int(client.eth.block_number)
     ctoken = client.eth.contract(address=CUSD, abi=load_abi("protocols/cap/abi/CToken.json"))  # aka cusd
 
-    assets = ctoken.functions.assets().call()
+    assets = ctoken.functions.assets().call(block_identifier=block_number)
 
     # Batch 1: resolve vault addresses for each asset
     with client.batch_requests() as batch:
         for asset in assets:
-            batch.add(ctoken.functions.fractionalReserveVault(asset))
+            batch.add(ctoken.functions.fractionalReserveVault(asset).call(block_identifier=block_number))
         vault_addresses = batch.execute()
 
     # Batch 2: for each asset, get vault maxWithdraw for CUSD owner, token balance, decimals, and symbol
@@ -47,10 +53,10 @@ def main():
         for asset, vault_addr in zip(assets, vault_addresses):
             vault = client.eth.contract(address=vault_addr, abi=load_abi("protocols/cap/abi/YearnV3Vault.json"))
             token = client.eth.contract(address=asset, abi=load_abi("common-abi/ERC20.json"))
-            batch.add(vault.functions.maxWithdraw(CUSD))
-            batch.add(token.functions.balanceOf(CUSD))
-            batch.add(token.functions.decimals())
-            batch.add(token.functions.symbol())
+            batch.add(vault.functions.maxWithdraw(CUSD).call(block_identifier=block_number))
+            batch.add(token.functions.balanceOf(CUSD).call(block_identifier=block_number))
+            batch.add(token.functions.decimals().call(block_identifier=block_number))
+            batch.add(token.functions.symbol().call(block_identifier=block_number))
         responses = batch.execute()
 
     # Parse batched results (4 entries per asset)
@@ -76,8 +82,10 @@ def main():
         send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
     # --- cUSD Large Mint Monitoring (No Event Scanning) ---
-    current_supply_raw = int(ctoken.functions.totalSupply().call())
-    last_supply_cached = _to_int(get_last_value_for_key_from_file(cache_filename, CACHE_KEY_LAST_SUPPLY))
+    current_supply_raw = int(ctoken.functions.totalSupply().call(block_identifier=block_number))
+    last_supply_cached = _to_int(
+        get_fresh_last_value_for_key_from_file(cache_filename, CACHE_KEY_LAST_SUPPLY, DAILY_CACHE_STALE_AFTER_SECONDS)
+    )
     if last_supply_cached > 0:
         delta_raw = current_supply_raw - last_supply_cached
         threshold_raw = int(last_supply_cached * MINT_THRESHOLD_PERCENT)
@@ -99,7 +107,7 @@ def main():
             )
             send_alert(Alert(AlertSeverity.LOW, msg, PROTOCOL))
 
-    write_last_value_to_file(cache_filename, CACHE_KEY_LAST_SUPPLY, current_supply_raw)
+    write_last_value_with_timestamp_to_file(cache_filename, CACHE_KEY_LAST_SUPPLY, current_supply_raw)
 
 
 if __name__ == "__main__":

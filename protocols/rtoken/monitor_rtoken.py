@@ -74,6 +74,7 @@ def monitor_rtoken_on_chain(chain: Chain):
     # NOTE: propagate errors to the caller
     config = get_rtoken_config(chain)
     client = ChainManager.get_client(chain)
+    block_number = int(client.eth.block_number)
     rtoken = client.eth.contract(address=config.rtoken_address, abi=ABI_RTOKEN)
     strsr = client.eth.contract(address=config.strsr_address, abi=ABI_STRSR)
 
@@ -85,11 +86,11 @@ def monitor_rtoken_on_chain(chain: Chain):
     # --- Combined Blockchain Calls ---
     with client.batch_requests() as batch:
         # Add RToken calls
-        batch.add(rtoken.functions.basketsNeeded())
-        batch.add(rtoken.functions.totalSupply())
-        batch.add(rtoken.functions.redemptionAvailable())
+        batch.add(rtoken.functions.basketsNeeded().call(block_identifier=block_number))
+        batch.add(rtoken.functions.totalSupply().call(block_identifier=block_number))
+        batch.add(rtoken.functions.redemptionAvailable().call(block_identifier=block_number))
         # Add StRSR call
-        batch.add(strsr.functions.exchangeRate())
+        batch.add(strsr.functions.exchangeRate().call(block_identifier=block_number))
 
         responses = client.execute_batch(batch)
 

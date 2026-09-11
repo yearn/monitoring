@@ -66,6 +66,10 @@ uv run maple/main.py
 
 Runs hourly via the [monitoring runner](../automation/jobs.yaml).
 
+TVL delta baselines expire after 3 hours and initialize from the next valid observation. A zero delegate-cover state
+is re-armed after the same monitoring gap. PPS and non-zero cover-decrease history remain persistent because cumulative
+losses remain actionable.
+
 ## Risk Report
 
 Full risk assessment: [maple-syrupusdc report](https://github.com/tapired/risk-score/blob/master/reports/report/maple-syrupusdc.md)

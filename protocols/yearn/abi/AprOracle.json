@@ -1,0 +1,9 @@
+[
+  {
+    "inputs": [{"name": "strategy", "type": "address"}, {"name": "delta", "type": "int256"}],
+    "name": "getStrategyApr",
+    "outputs": [{"name": "apr", "type": "uint256"}],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]

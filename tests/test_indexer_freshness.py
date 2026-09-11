@@ -63,9 +63,9 @@ def envio_url(monkeypatch: pytest.MonkeyPatch) -> str:
 
 @pytest.fixture
 def sent(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Capture every message the monitor routes to the errors channel."""
+    """Capture every message the monitor routes to the envio channel."""
     messages: list[str] = []
-    monkeypatch.setattr(freshness, "send_error_message", lambda msg, protocol, **kwargs: messages.append(msg))
+    monkeypatch.setattr(freshness, "send_envio_error_message", lambda msg, protocol, **kwargs: messages.append(msg))
     return messages
 
 

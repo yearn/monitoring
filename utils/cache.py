@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Union
 
 from dotenv import load_dotenv
@@ -19,6 +20,9 @@ nonces_filename: str = cache_path(os.getenv("NONCE_FILENAME", "nonces.txt"))
 # Same default basename as cache_filename — hourly shares one file across alert
 # dedupe and morpho rows; the daily profile overrides MORPHO_FILENAME to isolate.
 morpho_filename: str = cache_path(os.getenv("MORPHO_FILENAME", "cache-id.txt"))
+
+HOURLY_CACHE_STALE_AFTER_SECONDS = 3 * 60 * 60
+DAILY_CACHE_STALE_AFTER_SECONDS = 36 * 60 * 60
 
 
 def get_last_queued_id_from_file(protocol: str) -> int:
@@ -74,6 +78,51 @@ def write_last_value_to_file(filename: str, write_key: str, write_value: Union[i
     store.state_set(os.path.basename(filename), write_key, str(write_value))
     if os.getenv("CACHE_DUAL_WRITE_LEGACY") == "1":
         _write_last_value_to_legacy_file(filename, write_key, write_value)
+
+
+def cache_timestamp_key(value_key: str) -> str:
+    return f"{value_key}_ts"
+
+
+def cache_key_is_stale(
+    filename: str,
+    value_key: str,
+    stale_after_seconds: int,
+    current_timestamp: int | None = None,
+) -> bool:
+    if current_timestamp is None:
+        current_timestamp = int(time.time())
+
+    timestamp_raw = get_last_value_for_key_from_file(filename, cache_timestamp_key(value_key))
+    try:
+        timestamp = int(timestamp_raw)
+    except (TypeError, ValueError, OverflowError):
+        return True
+
+    return timestamp <= 0 or timestamp > current_timestamp or current_timestamp - timestamp > stale_after_seconds
+
+
+def get_fresh_last_value_for_key_from_file(
+    filename: str,
+    wanted_key: str,
+    stale_after_seconds: int,
+    current_timestamp: int | None = None,
+) -> Union[str, int]:
+    if cache_key_is_stale(filename, wanted_key, stale_after_seconds, current_timestamp):
+        return 0
+    return get_last_value_for_key_from_file(filename, wanted_key)
+
+
+def write_last_value_with_timestamp_to_file(
+    filename: str,
+    write_key: str,
+    write_value: Union[int, str, float],
+    current_timestamp: int | None = None,
+) -> None:
+    if current_timestamp is None:
+        current_timestamp = int(time.time())
+    write_last_value_to_file(filename, write_key, write_value)
+    write_last_value_to_file(filename, cache_timestamp_key(write_key), current_timestamp)
 
 
 def _get_last_value_from_legacy_file(filename: str, wanted_key: str) -> Union[str, int]:

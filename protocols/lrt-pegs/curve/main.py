@@ -27,6 +27,7 @@ POOL_CONFIGS = [
 
 def process_pools(chain: Chain = Chain.MAINNET):
     client = ChainManager.get_client(chain)
+    block_number = int(client.eth.block_number)
 
     # Read each pool's two relevant coin balances. Using ``balances(i)`` (instead
     # of ``get_balances()``) keeps a single code path for both modern pools and
@@ -34,8 +35,8 @@ def process_pools(chain: Chain = Chain.MAINNET):
     with client.batch_requests() as batch:
         for _, pool_address, idx_lrt, idx_other_token, _, _ in POOL_CONFIGS:
             pool = client.eth.contract(address=pool_address, abi=ABI_CURVE_POOL)
-            batch.add(pool.functions.balances(idx_lrt))
-            batch.add(pool.functions.balances(idx_other_token))
+            batch.add(pool.functions.balances(idx_lrt).call(block_identifier=block_number))
+            batch.add(pool.functions.balances(idx_other_token).call(block_identifier=block_number))
 
         responses = client.execute_batch(batch)
         if len(responses) != len(POOL_CONFIGS) * 2:

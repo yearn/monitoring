@@ -26,25 +26,23 @@ protocols:
       - name: "Price Per Share"
         description: "USD3 PPS decrease (any drop vs cached prior, CRITICAL) and sUSD3 PPS decrease (HIGH)"
       - name: "TVL"
-        description: "Absolute TVL change >=15% for USD3 or sUSD3"
-      - name: "Junior Buffer Ratio"
-        description: "sUSD3 backing <15% of deployed credit"
-      - name: "USD3 Overcollateralization"
-        description: "OC <111% (HIGH) or <106% (CRITICAL)"
+        description: "Absolute TVL change >=15% for USD3 or sUSD3 using a baseline no older than 3 hours"
+      - name: "USD3 Protection"
+        description: "Combined OC and equivalent junior buffer: <111% OC / <9.91% buffer (HIGH), or <106% OC / <5.66% buffer (CRITICAL); re-armed after a monitoring gap >3 hours"
       - name: "Insurance Fund Outflow"
         description: "waUSDC outflow >=$50k since prior run"
       - name: "Withdraw Liquidity"
-        description: "USD3 availableWithdrawLimit < $4M"
+        description: "USD3 availableWithdrawLimit < $4M; re-armed after a monitoring gap >3 hours"
       - name: "Vault Shutdown"
-        description: "Alert-once when isShutdown() transitions to true"
+        description: "Alert-once when isShutdown() is true; re-armed after a monitoring gap >3 hours"
       - name: "Debt Cap"
-        description: "Any change to ProtocolConfig.getDebtCap()"
+        description: "Any change to ProtocolConfig.getDebtCap(), shown in waUSDC shares and USDC equivalent"
       - name: "Nominal sUSD3 Backing Floor"
-        description: "Any floor change; alert-once when floor > sUSD3 backing"
+        description: "Any floor change; floor-breach dedupe re-armed after a monitoring gap >3 hours"
       - name: "Protocol Pause"
-        description: "Alert-once when ProtocolConfig IS_PAUSED flips true"
+        description: "Alert-once when IS_PAUSED is true; re-armed after a monitoring gap >3 hours"
       - name: "Borrower Default Watch"
-        description: "Envio-backed MorphoCredit borrower watch; MEDIUM alerts when unpaid obligations become delinquent after grace or reach default"
+        description: "Envio-backed MorphoCredit borrower watch using live ProtocolConfig timing; MEDIUM alerts when unpaid obligations become delinquent after grace or reach default"
       - name: "Proof of Solvency"
         description: "Accountable collateral ratio <95% (CRITICAL, after 2 consecutive runs) or <99% (HIGH)"
       - name: "Proof of Solvency Freshness"
@@ -82,14 +80,19 @@ protocols:
   cap:
     display_name: "CAP"
     description: "CAP cUSD liquidity and governance monitoring on Mainnet"
-    cadence: "Daily"
+    cadence: "Hourly / Daily"
     tasks:
+      - protocols/cap/status.py
       - protocols/cap/liquidity.py
     monitors:
+      - name: "stcUSD Backing"
+        description: "Same-block cUSD balance covers stcUSD totalAssets plus lockedProfit"
+      - name: "stcUSD Assets Per Share"
+        description: "Critical alert if convertToAssets(1 stcUSD) decreases"
       - name: "Withdrawable Liquidity"
         description: "Total withdrawable liquidity across cUSD assets < $15M"
       - name: "Large cUSD Mints"
-        description: "totalSupply delta >5% vs cached prior"
+        description: "totalSupply delta >5% vs a cached prior no older than 36 hours"
       - name: "Timelock"
         description: "CAP TimelockController events via Envio"
       - name: "Safe Multisig"
@@ -125,14 +128,12 @@ protocols:
     tasks:
       - protocols/ethena/ethena.py
     monitors:
-      - name: "USDe Backing Ratio (Ethena API)"
+      - name: "USDe Backing Ratio"
         description: "(collateral + reserve fund) / supply < 1.0 (CRITICAL) or < 1.005 (HIGH) via Ethena transparency API"
-      - name: "USDe Backing Ratio (LlamaRisk)"
-        description: "Independent (collateral + reserve fund) / supply < 1.0 (CRITICAL) or < 1.005 (HIGH) via LlamaRisk"
       - name: "On-Chain Supply Consistency"
-        description: "LlamaRisk USDe/sUSDe supply vs on-chain totalSupply() differs by > 0.5%"
+        description: "Ethena API USDe supply vs on-chain totalSupply() differs by > 0.5%"
       - name: "Data Freshness"
-        description: "Collateral, chain, or reserve data older than 12 hours"
+        description: "Supply or reserve fund data older than 3 hours"
 
   euler:
     display_name: "Euler"
@@ -175,19 +176,19 @@ protocols:
       - protocols/infinifi/main.py
     monitors:
       - name: "Liquid Reserves"
-        description: "Liquid reserves < $8M"
+        description: "Liquid reserves < $8M; crossing detection re-armed after a monitoring gap >3 hours"
       - name: "Backing Per iUSD"
-        description: "totalTVL / iUSD supply < 0.999"
+        description: "API totalTVL / block-pinned iUSD supply < 0.999; supply block included in alerts"
       - name: "Redemption Pressure"
-        description: "Pending redemptions / liquid reserves >80%"
+        description: "Pending redemptions / liquid reserves >80%; re-armed after a monitoring gap >3 hours"
       - name: "Large iUSD Mints"
-        description: "totalSupply delta >5% vs cached prior"
+        description: "totalSupply delta >5% vs a cached prior no older than 3 hours"
       - name: "Farm Allocation Shift"
         description: "Farm allocation ratio change >30% vs prior run (farms <1% of TVL excluded)"
       - name: "Farm Activation"
         description: "Farm previously at 0 ratio moves above 3% of TVL"
       - name: "Junior TVL Coverage"
-        description: "Junior TVL <50% of risky farm exposure"
+        description: "Junior TVL <50% of risky farm exposure; re-armed after a monitoring gap >3 hours"
       - name: "Timelock"
         description: "Longtimelock and Shorttimelock events via Envio"
 
@@ -243,13 +244,14 @@ protocols:
     display_name: "Maple Finance"
     description: "Maple syrupUSDC pool monitoring"
     cadence: "Hourly"
+    disabled: true
     tasks:
       - protocols/maple/main.py
     monitors:
       - name: "Price Per Share"
         description: "Any PPS decrease"
       - name: "TVL"
-        description: "Absolute TVL change >=15%"
+        description: "Absolute TVL change >=15% using a baseline no older than 3 hours"
       - name: "Unrealized Losses"
         description: "Any non-zero on-chain unrealized losses; >=0.5% of pool assets via subgraph"
       - name: "Withdrawal Queue"
@@ -263,7 +265,7 @@ protocols:
       - name: "Unknown Collateral"
         description: "Collateral assets not in risk mapping"
       - name: "Pool Delegate Cover"
-        description: "Cover balance drops to $0 or decreases vs cached prior"
+        description: "Cover balance drops to $0 or decreases vs cached prior; zero state re-armed after >3 hours"
       - name: "Timelock"
         description: "Maple GovernorTimelock events via Envio"
       - name: "Safe Multisig"
@@ -286,7 +288,7 @@ protocols:
       - name: "Vault Risk Levels"
         description: "Weighted total risk score vs vault threshold"
       - name: "Low Liquidity"
-        description: "V1/V2 vault liquidity <1%; combined v1/v2 YV-collateral unwind liquidity vs collateral at risk"
+        description: "V1/V2 vault liquidity <1%; combined v1/v2 YV-collateral unwind liquidity vs collateral at risk (unwind alerts go to the internal curation chat)"
       - name: "V1 Governance"
         description: "Pending supply caps, market removals, timelock changes, guardian changes"
       - name: "V2 Governance"
@@ -368,17 +370,14 @@ protocols:
 
   stables:
     display_name: "Stablecoins"
-    description: "Cross-protocol stablecoin peg, oracle, and large-transfer monitoring"
+    description: "Cross-protocol stablecoin peg and oracle monitoring"
     cadence: "Hourly / Every 10 minutes"
     tasks:
       - protocols/stables/main.py
-      - protocols/stables/dune_large_transfers.py
       - protocols/stables/oracles.py
     monitors:
       - name: "Stablecoin Prices"
         description: "Depeg alerts via DeFiLlama (USDe/sUSDe/iUSD/syrupUSDC/syrupUSDT/USTB thresholds)"
-      - name: "Large Transfers"
-        description: "Dune-backed large transfers >=$5M for cUSD and iUSD"
       - name: "Oracle Health"
         description: "Chainlink staleness, round health, peg deviation, oracle-market divergence; rate-oracle monotonicity/delta"
 
@@ -392,13 +391,13 @@ protocols:
       - name: "srUSDe Exchange Rate"
         description: "srUSDe convertToAssets decrease vs cached prior"
       - name: "Senior Coverage Ratio"
-        description: "Senior coverage <105%"
+        description: "Senior coverage <105%; re-armed after a monitoring gap >36 hours"
       - name: "Junior Tranche Drain"
-        description: "jrUSDe totalAssets drop >=15%"
+        description: "jrUSDe totalAssets drop >=15% using a baseline no older than 36 hours"
       - name: "Strategy Balance"
-        description: "sUSDe strategy balance / total deposits drops >=20%"
+        description: "sUSDe strategy balance / total deposits drops >=20% using a baseline no older than 36 hours"
       - name: "TVL"
-        description: "Total deposits change >=15%"
+        description: "Total deposits change >=15% using a baseline no older than 36 hours"
       - name: "sUSDe Dependency"
         description: "sUSDe vault rate monotonicity and cooldown duration changes"
       - name: "Timelock"
@@ -428,7 +427,7 @@ protocols:
       - name: "Oracle Divergence"
         description: "Continuous Oracle vs Chainlink differ by >0.5%"
       - name: "Supply Changes"
-        description: "Total supply change >10% vs prior run"
+        description: "Total supply change >10% vs a prior observation no older than 3 hours"
       - name: "Oracle Staleness"
         description: "Latest checkpoint effectiveAt >4 days old"
       - name: "Stablecoin Price"
@@ -443,27 +442,31 @@ protocols:
       - protocols/usdai/large_mints.py
     monitors:
       - name: "Backing Invariant"
-        description: "totalSupply + bridgedSupply - PYUSD balance >= 100 USDai"
+        description: "totalSupply + bridgedSupply - PYUSD balance >= 100 USDai; re-armed after a gap >3 hours"
       - name: "Loan Activity"
         description: "Total verified principal change >1% vs prior run"
       - name: "Legacy Loan Expiry"
         description: "Hardcoded NVIDIA H200s legacy loan past 2028-07-27"
       - name: "Large Mints"
-        description: "totalSupply delta >5% via large_mints.py"
+        description: "totalSupply delta >5% via large_mints.py using a baseline no older than 3 hours"
       - name: "Safe Multisigs"
         description: "USDai and sUSDai Admin Safe queues"
 
   yearn:
     display_name: "Yearn"
-    description: "Yearn vault flow and timelock monitoring"
-    cadence: "Hourly / Daily"
+    description: "Yearn vault, strategy risk, and timelock monitoring"
+    cadence: "Every 30 minutes / 6 hours / Hourly / Daily"
     tasks:
+      - protocols/yearn/lender_borrower.py
       - protocols/yearn/alert_large_flows.py
       - protocols/yearn/check_timelock_delay.py
       - protocols/yearn/check_indexer_freshness.py
     monitors:
       - name: "Indexer Freshness"
-        description: "Envio indexer lag per chain; alerts the errors channel when a chain's newest indexed block is older than 60 minutes or the GraphQL endpoint is down"
+        description: "Envio indexer lag per chain; alerts the Envio channel when a chain's newest indexed block is older than 60 minutes or the GraphQL endpoint is down"
+      - name: "Lender-Borrower Risk"
+        description: "All configured lender-borrower strategies: collateral and borrow-token prices plus LTV/liquidation risk every 30m; lender and borrow APR availability, 24h net spread, and debt coverage every 6h"
+        severity: "MEDIUM"
       - name: "Large Flows"
         description: "Deposit/withdrawal flows >=$500k USD (Katana withdrawals >=$50k; or 10% of vault totalSupply fallback for unpriced tokens)"
       - name: "Timelock Delay"

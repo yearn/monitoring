@@ -12,7 +12,12 @@ from web3 import Web3
 
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
-from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
+from utils.cache import (
+    HOURLY_CACHE_STALE_AFTER_SECONDS,
+    cache_filename,
+    get_fresh_last_value_for_key_from_file,
+    write_last_value_with_timestamp_to_file,
+)
 from utils.chains import Chain
 from utils.logger import get_logger
 from utils.web3_wrapper import ChainManager
@@ -87,7 +92,10 @@ def run_erc20_supply_delta_monitor(config: ERC20SupplyDeltaMonitorConfig) -> Non
             decimals, token_symbol = client.execute_batch(batch)
 
         current_supply_raw = int(token.functions.totalSupply().call())
-        last_supply_cached = _to_int(get_last_value_for_key_from_file(cache_filename, _cache_key_last_supply(config)))
+        cache_key = _cache_key_last_supply(config)
+        last_supply_cached = _to_int(
+            get_fresh_last_value_for_key_from_file(cache_filename, cache_key, HOURLY_CACHE_STALE_AFTER_SECONDS)
+        )
 
         if last_supply_cached > 0:
             delta_raw = current_supply_raw - last_supply_cached
@@ -108,7 +116,7 @@ def run_erc20_supply_delta_monitor(config: ERC20SupplyDeltaMonitorConfig) -> Non
                     )
                 )
 
-        write_last_value_to_file(cache_filename, _cache_key_last_supply(config), current_supply_raw)
+        write_last_value_with_timestamp_to_file(cache_filename, cache_key, current_supply_raw)
 
     except Exception as exc:
         logger.error("ERC20 supply-delta monitor failed for %s: %s", config.protocol, exc)

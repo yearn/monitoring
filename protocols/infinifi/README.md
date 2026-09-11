@@ -14,7 +14,7 @@ This folder contains monitoring scripts for the Infinifi protocol.
 - **Liquid Reserves**: A Telegram alert is triggered if liquid reserves drop below $8M.
 - **Reserve Ratio Breach**: Alert if liquid ratio falls below protocol `reserveRatio` target.
 - **Illiquid Ratio Breach**: Alert if illiquid ratio rises above protocol `illiquidTargetRatio`.
-- **Backing Per iUSD**: Alert if `totalTVL / iUSD supply` drops below `0.999`.
+- **Backing Per iUSD**: Alert if API `totalTVL / iUSD supply` drops below `0.999`. The supply is pinned to and reported with an Ethereum block. The API does not expose a block identifier to this monitor, so this cross-source comparison cannot be atomic.
 - **Redemption Pressure**: Alert if `pending redemptions / liquid reserves` exceeds `80%`.
 - **Farm Allocation Shift**: Alert if any farm allocation ratio (`farm assets / total TVL`) changes by more than `FARM_RATIO_CHANGE_ALERT_THRESHOLD` versus cached ratio. Farms below 1% of total TVL are excluded.
 - **Farm Activation**: Alert if a farm previously at `0` cached ratio moves above `FARM_RATIO_ACTIVATION_ALERT_THRESHOLD` of total TVL.
@@ -27,6 +27,11 @@ This folder contains monitoring scripts for the Infinifi protocol.
 It compares cached `totalSupply` deltas and alerts when the increase is above:
 
 - `IUSD_LARGE_MINT_THRESHOLD_PERCENT` (default: `0.05`, i.e. `5%` of previous `totalSupply`)
+
+## Cache Freshness
+
+Hourly delta baselines expire after 3 hours and initialize from the next valid observation. Breach-dedupe state and
+liquid-reserve crossing detection are re-armed after the same monitoring gap. PPS-style loss baselines are not affected.
 
 ### Emergency dispatch
 
@@ -59,6 +64,8 @@ Governance monitoring will be monitored via Tenderly alerts on the following add
 
 - `TIMELOCK_SHORT`: [`0x4B174afbeD7b98BA01F50E36109EEE5e6d327c32`](https://etherscan.io/address/0x4B174afbeD7b98BA01F50E36109EEE5e6d327c32)
 - `TIMELOCK_LONG`: [`0x3D18480CC32B6AB3B833dCabD80E76CfD41c48a9`](https://etherscan.io/address/0x3D18480CC32B6AB3B833dCabD80E76CfD41c48a9)
+
+For RWA escrow governance calls, the linked AI report resolves the owning farm, accounting asset, normalized `totalAssets`, and configured non-accounting ERC20 targets into a deterministic `Protocol Context` section.
 
 **Deployer Address**:
 

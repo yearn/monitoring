@@ -18,12 +18,12 @@ STETH_ADDRESS = "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
 CURVE_POOL_ADDRESS = "0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"
 
 
-def check_steth_validator_rate(client):
+def check_steth_validator_rate(client, block_number: int):
     steth = client.eth.contract(address=STETH_ADDRESS, abi=ABI_STETH)
 
     with client.batch_requests() as batch:
-        batch.add(steth.functions.totalSupply())
-        batch.add(steth.functions.getTotalPooledEther())
+        batch.add(steth.functions.totalSupply().call(block_identifier=block_number))
+        batch.add(steth.functions.getTotalPooledEther().call(block_identifier=block_number))
 
         responses = client.execute_batch(batch)
         if len(responses) != 2:
@@ -46,16 +46,17 @@ def check_peg(validator_rate, curve_rate):
 
 def main():
     client = ChainManager.get_client(Chain.MAINNET)
+    block_number = int(client.eth.block_number)
     curve_pool = client.eth.contract(address=CURVE_POOL_ADDRESS, abi=ABI_CURVE_POOL)
 
-    validator_rate_unscaled = check_steth_validator_rate(client)
+    validator_rate_unscaled = check_steth_validator_rate(client, block_number)
     message = f"🔄 1 stETH is: {validator_rate_unscaled:.5f} ETH in Lido\n"
 
     amounts = [1e18, 100e18, 1000e18]
 
     with client.batch_requests() as batch:
         for amount in amounts:
-            batch.add(curve_pool.functions.get_dy(1, 0, int(amount)))
+            batch.add(curve_pool.functions.get_dy(1, 0, int(amount)).call(block_identifier=block_number))
 
         try:
             curve_rates = client.execute_batch(batch)

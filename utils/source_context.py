@@ -202,6 +202,17 @@ def fetch_source(chain_id: int, address: str) -> tuple[str, str] | None:
     return None if record is None else (record[0], record[1])
 
 
+def fetch_abi_entries(chain_id: int, address: str) -> list[dict] | None:
+    """Fetch the verified ABI for ``address`` as parsed entries, or None.
+
+    Shares the memoized/disk-cached Etherscan record with :func:`fetch_source`,
+    so callers that only need to inspect the ABI (e.g. finding a contract's
+    token getters) pay no extra HTTP when source context was already fetched.
+    """
+    record = _fetch_etherscan_contract(chain_id, address)
+    return None if record is None else _parse_abi(record[2])
+
+
 def _parse_abi(abi_json: str) -> list[dict] | None:
     """Parse Etherscan's ABI string. Returns None for unverified/malformed."""
     if not abi_json or abi_json == "Contract source code not verified":

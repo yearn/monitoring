@@ -39,7 +39,9 @@ Generates human-readable explanations for queued governance transactions (timelo
                        ┌─────────────────────┐
                        │  Telegram Alert      │
                        │  🤖 AI Summary: ... │
-                       └─────────────────────┘
+                       │  [Full details] ────┼──▶ Wavey Gist report
+                       └─────────────────────┘      (metadata + summary +
+                                                     call flow + analysis)
 ```
 
 ## Pipeline Steps
@@ -152,13 +154,63 @@ The system prompt instructs the LLM to treat each item as verified and reflect i
 
 This matters most on Safe multisig alerts, which run with `skip_simulation=True` (DELEGATECALL batches our plain-CALL simulator can't model) and so have no Tenderly asset-change rows with pre-normalized amounts.
 
+Normalization goes through `normalize_token_amount()` (`utils/formatting.py`), which builds the `Decimal` by shifting the exponent instead of dividing. Division is evaluated at `decimal.getcontext().prec`, and several modules set that **globally** at import time (`utils/defillama.py` uses 18) — enough to silently truncate a 25-digit 18-decimal amount depending on which modules the process happened to import.
+
+### 5d. Related Tokens (`utils/related_tokens.py`)
+
+Token Flows only covers calls that *move* a token. A governance call like `setEpochEmissions(uint256 epoch, uint256 emissions)` carries an amount with no address argument at all, so the LLM had no decimals and — correctly, per the anti-guessing rule — hedged: *"raw units, equal to X at 1e18 normalization; token decimals are unconfirmed."*
+
+`resolve_related_tokens()` closes that gap generically. It reads the target's verified ABI (already disk-cached by `source_context`, so no extra HTTP via `fetch_abi_entries()`), picks out every zero-arg `view` getter returning an `address`, batch-calls them, and keeps the results that `fetch_erc20_metadata` confirms are ERC20:
+
+```
+--- Related Tokens (resolved on-chain from the target) ---
+0xaC6985…64e8 (RewardsDistributor):
+  jane() -> 0x33333333…3404 (JANE, 18 decimals)
+```
+
+Filtering on "is it actually an ERC20" is what makes this need no configuration — `owner()` drops out on its own, no name blocklist. The target being itself a token is reported as `getter="self"`. Capped at `MAX_GETTER_CALLS` (8) per target, memoized per `(chain_id, target)`, and best-effort: any failure yields `[]` and the alert proceeds unchanged.
+
+The system prompt treats **exactly one** resolved token as verified decimals — state the amount and symbol, no hedge. Zero or several tokens keeps the hedge, since normalizing would be a guess. The Call Flow also annotates raw `uint*` values with `(≈ 5,369,214.23 JANE)`, but only above `10 ** (decimals - 3)` so an epoch number like `43` isn't rendered as `0.000000000000000043 JANE`.
+
+### 5e. Infinifi Escrow Context (`utils/llm/infinifi_context.py`)
+
+Infinifi RWA rate-manager calls target `RWAEscrowRateManager` and pass the affected escrow as an address argument. The generic Related Tokens resolver only inspects the direct call target, so it cannot identify the farm or tokens behind that escrow.
+
+For Infinifi mainnet alerts, the adapter:
+
+1. Identifies candidate `RWAEscrow` contracts by their verified ABI (`assetToken()`, `owner()`, and `totalAssets()`).
+2. Matches the owner address to the public Infinifi farm API and verifies that the farm's on-chain `escrow()` getter returns the candidate.
+3. Reads the accounting asset and current total assets on-chain.
+4. Reconstructs the escrow's current whitelist from `WhitelistUpdated` events and identifies non-accounting targets that verify as ERC20 tokens. Token names, symbols, and decimals are read on-chain.
+
+The result is added to the LLM prompt as verified protocol context and rendered independently in the Wavey Gist under `## Protocol Context`. The report distinguishes the escrow's accounting asset from non-accounting ERC20 targets it is allowed to interact with; whitelist membership does not establish how a token is valued downstream. Failures are best-effort and never block the governance alert.
+
+### 5f. 3Jane Governance Context (`utils/llm/threejane_context.py`)
+
+Both 3Jane timelocks schedule calls that arrive as opaque data. `ProtocolConfig.setConfig(bytes32,uint256)` names the parameter it changes only by `keccak256("<NAME>")`, and `RewardsDistributor.setEpochEmissions` / `updateRoot` allocate JANE without revealing whether a claim mints new supply or moves an existing balance.
+
+For 3Jane mainnet alerts, the adapter:
+
+1. Reverses every `bytes32` argument against a checked-in name table (`ProtocolConfig` keys plus the Jane / EmergencyController roles), so the prompt carries `keccak256("MAX_LTV")` and what that key controls instead of a bare hash. Hashes outside the table stay unresolved rather than being guessed at.
+2. Reads the current stored value for resolved `ProtocolConfig` keys, following EIP-1967 to the implementation ABI since the config sits behind a transparent proxy. Role hashes get no value line — there is nothing to read.
+3. Identifies a `RewardsDistributor` by its verified getters and reads `useMint`, the reward token's metadata and `totalSupply`, whether the distributor holds `MINTER_ROLE`, whether token transfers are globally enabled, `maxClaimable` / `totalClaimed`, the current `merkleRoot`, and the current epoch.
+4. Reads emissions already stored for the epoch being set and the three before it, and derives how the proposed allocation compares to the epoch before it, so a new allocation is judged against recent ones rather than called "substantial in absolute terms". Three consecutive weeks of this same operation had previously scored LOW, MEDIUM, MEDIUM.
+5. Renders a capping key beside the quantity it caps (`USD3_SUPPLY_CAP` next to USD3 `totalAssets`), batched into the config read, so a ceiling raise reads as slack or as unblocking deposits. `_USAGE_READS` holds only pairs whose denominations are known to match.
+
+Token amounts are truncated to whole tokens, matching the call flow's amount hints. Failures are best-effort and never block the governance alert.
+
+### 5g. Adapter Registry (`utils/llm/protocol_context.py`)
+
+Adapters register in `_ADAPTERS`; `resolve_protocol_context()` fans one call out to all of them and merges the rendered prompt text, report text, introduced addresses, and address labels. Each adapter guards its own protocol and chain, so registration order carries no meaning and one adapter raising is logged and skipped rather than dropping the alert.
+
 ### 6. LLM Prompt & Completion (`utils/llm/ai_explainer.py`)
 
 The prompt is split into a **system** prompt (static instructions) and a **user** prompt (per-tx context). `complete(prompt, system_prompt=...)` passes the system block via the provider's native system role, which improves instruction-following and lets the Anthropic provider mark it `cache_control: ephemeral` — repeated alerts within the cache window pay for the (large) instruction prompt only once. The static block (`SYSTEM_INSTRUCTIONS`) enforces brevity:
 
 - Starts with a verb, no "This transaction…" preamble
 - Trailing risk tag in caps (LOW / MEDIUM / HIGH / CRITICAL)
-- Refuses to assume parameter units from function name alone
+- Summary is plain text (it goes to Telegram); the detail is markdown and must render **every address as a block-explorer hyperlink**, copied verbatim from the prompt's `--- Address Links ---` section so the model never assembles an explorer URL or picks the wrong chain's explorer
+- Refuses to assume parameter units from function name alone; uses the Related Tokens section's decimals when exactly one token resolves, and hedges only when zero or several do
 - Trusts source-context natspec over prior assumptions
 - Quotes concrete before→after deltas when state reads are available
 - Flags any divergence between a proposal's **stated intent** and the decoded actions
@@ -185,6 +237,10 @@ Upgrade the pool implementation to add an emergency pause.
 --- Decoded Calldata ---
 Call 1: upgradeTo(address)
   address: 0xNewImpl
+
+--- Address Links (use these exact markdown links in the detailed report) ---
+- [`0xProxy`](https://etherscan.io/address/0xProxy) (PoolAddressesProvider)
+- [`0xNewImpl`](https://etherscan.io/address/0xNewImpl)
 
 --- Shared Across Batch ---           (optional, for batch txs with uniform args)
   arg[0] (address) is identical across all 4 calls: '0x...'
@@ -227,7 +283,7 @@ The full prompt is logged at INFO level for debugging.
 
 ### 7. Two-Stage Generation: Summary, then Detail Derived From It
 
-`_generate_explanation()` produces the `Explanation` dataclass (`summary` → Telegram, `detail` → Wavey Gist) in two stages so the two artifacts the team sees can never disagree on the headline number or risk verdict:
+`_generate_explanation()` produces the `Explanation` dataclass (`summary` → Telegram, `detail` → wrapped into `report` → Wavey Gist) in two stages so the two artifacts the team sees can never disagree on the headline number or risk verdict:
 
 1. **Summary (authoritative).** `_generate_summary()` produces just the `summary` + `risk_tag`.
 2. **Detail (derived).** `_expand_detail()` then writes the full report *from* the confirmed summary (`DETAIL_EXPANSION_TASK`), required to stay consistent with its magnitudes and risk level.
@@ -272,7 +328,71 @@ Upgrades AAVE pool impl 0xOld → 0xNew. Verify audited. MEDIUM.
 [Full details](https://gist.wavey.info/abc123)
 ```
 
-The "Full details" link points to a Wavey Gist upload with the detailed analysis.
+The "Full details" link points to a Wavey Gist upload of the **full report**
+(`Explanation.report`, built by `utils/llm/report.py`). The gist is titled
+`<contract> - <DD/MM/YYYY HH:MM> - <RISK>` (UTC, e.g.
+`Infinifi Shorttimelock - 11/08/2026 10:00 - LOW`) so a list of reports is
+scannable; it falls back to the protocol name, then `AI Transaction Analysis`.
+When no report was built (e.g. an explanation generated without report context),
+the bare detail is published under the fallback title instead.
+
+### 10. Gist Report (`utils/llm/report.py`)
+
+The gist is the artifact a reviewer actually opens, so it carries more than the LLM's prose:
+
+```markdown
+- **Protocol:** INFINIFI
+- **Contract:** Infinifi Shorttimelock — [`0x4B17…7c32`](https://etherscan.io/address/0x4B17…)
+- **Chain:** Mainnet (chain id 1)
+- **Risk:** MEDIUM
+
+## Summary
+Registers a new type-2 farm in FarmRegistry. …
+
+## Analysis
+<the LLM detail>
+
+## Call Flow
+**From:** [`0x4B17…7c32`](https://etherscan.io/address/0x4B17…)
+
+1. **`addFarms(uint256,address[])`** on [`0xF5f2…6119`](https://etherscan.io/address/0xF5f2…) (FarmRegistry)
+   - `uint256 _type`: `2`
+   - `address[] _farms`:
+     - [`0x79e1…971f`](https://etherscan.io/address/0x79e1…)
+```
+
+The report also ends with a code-generated `## Reference` table after Call Flow:
+
+```markdown
+| Address | Label | Role | Description |
+|---|---|---|---|
+| [`0x4B174afbeD7b98BA01F50E36109EEE5e6d327c32`](https://etherscan.io/address/0x4B174afbeD7b98BA01F50E36109EEE5e6d327c32) | Infinifi Shorttimelock | Executor | **Executor:** Execution authority for the governance transaction |
+| [`0x11F6FAb3f4D8635880C3e80cbae8AEF8136D4189`](https://etherscan.io/address/0x11F6FAb3f4D8635880C3e80cbae8AEF8136D4189) | RWAEscrowRateManager | Call target | **Call target:** Receives `setRate(address,uint256)` |
+| [`0xE4C72b4dE5b0F9ACcEA880Ad0b1F944F85A9dAA0`](https://etherscan.io/address/0xE4C72b4dE5b0F9ACcEA880Ad0b1F944F85A9dAA0) | New Silver Series 2 DROP | Protocol context | **Protocol context:** Resolved by the INFINIFI protocol adapter |
+```
+
+The table deduplicates the executor, alert contract, call targets, address-valued calldata arguments, and addresses introduced by protocol adapters. Every description is prefixed with its role so multi-use addresses remain unambiguous. Roles and descriptions come from those deterministic relationships; the LLM does not generate them.
+
+**Call Flow is built in Python, not asked of the LLM** — it comes straight from the
+decoded calldata (`CallEntry` per call: target, signature, ABI parameter names, ETH
+value, nested `bytes` payloads unwrapped up to `MAX_BYTES_RECURSION_DEPTH`), so it
+can't be hallucinated, re-ordered, or summarized away. Arrays and tuple/struct
+arguments are decomposed recursively (`array_element_type` / `tuple_component_types`),
+so an address inside a `MarketParams`-style struct is still rendered as a link and
+still reaches label lookup and the Address Links section — `iter_address_values()`
+walks the same type structure for collection. Every address is rendered
+full-length (never truncated) as a link to the chain's explorer from
+`EXPLORER_URLS`, annotated with its contract label / token symbol when known;
+chains with no configured explorer degrade to plain code spans.
+
+`format_address_links_block()` reuses the same renderer to give the LLM the exact
+markdown link for each address in the transaction — that's what makes the
+"always hyperlink addresses" rule reliable in the generated analysis.
+
+The header's **Contract** line links to `ReportContext.label_address`, which
+defaults to the executing timelock/Safe (`from_address`). Safe multisend batches
+label the *utility* contract instead, so `_explain_safe_tx()` passes the outer
+target as `label_address` in that path.
 
 ## Configuration
 
@@ -316,9 +436,14 @@ utils/llm/
 ├── anthropic_provider.py    # Anthropic (Claude) native API provider
 ├── base.py                  # Abstract LLMProvider base class + LLMError
 ├── factory.py               # Provider factory with env-based config + singleton
+├── infinifi_context.py      # Infinifi adapter: escrow → farm, accounting asset, whitelisted tokens
 ├── openai_compat.py         # OpenAI-compatible provider (Venice, OpenAI, etc.)
+├── protocol_context.py      # Registry fanning one call out to every protocol adapter
+├── report.py                # Gist report: metadata header + deterministic call flow + analysis
+├── threejane_context.py     # 3Jane adapter: hashed config keys/roles, rewards distribution mode
 └── README.md                # This file
 
+utils/related_tokens.py      # Token discovery from a contract's own zero-arg address getters
 utils/source_context.py      # Etherscan v2 source fetch + natspec extractor + proxy follow
 utils/on_chain_state.py      # Before-state reader (auto-generated getters, mappings, diamond storage)
 utils/proxy.py               # EIP-1967 impl slot read + proxy-upgrade detection (3 selectors)

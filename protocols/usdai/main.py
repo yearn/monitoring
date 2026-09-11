@@ -4,7 +4,14 @@ from web3 import Web3
 
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
-from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
+from utils.cache import (
+    HOURLY_CACHE_STALE_AFTER_SECONDS,
+    cache_filename,
+    get_fresh_last_value_for_key_from_file,
+    get_last_value_for_key_from_file,
+    write_last_value_to_file,
+    write_last_value_with_timestamp_to_file,
+)
 from utils.chains import Chain
 from utils.config import Config
 from utils.logger import get_logger
@@ -37,16 +44,16 @@ USDAI_PROXY_READ_ABI = [
 
 
 def send_breach_alert_once(cache_key, alert_message, severity=AlertSeverity.HIGH):
-    last_state = int(get_last_value_for_key_from_file(cache_filename, cache_key))
+    last_state = int(
+        get_fresh_last_value_for_key_from_file(cache_filename, cache_key, HOURLY_CACHE_STALE_AFTER_SECONDS)
+    )
     if last_state == 0:
         send_alert(Alert(severity, alert_message, PROTOCOL))
-        write_last_value_to_file(cache_filename, cache_key, 1)
+    write_last_value_with_timestamp_to_file(cache_filename, cache_key, 1)
 
 
 def clear_breach_state(cache_key):
-    last_state = int(get_last_value_for_key_from_file(cache_filename, cache_key))
-    if last_state == 1:
-        write_last_value_to_file(cache_filename, cache_key, 0)
+    write_last_value_with_timestamp_to_file(cache_filename, cache_key, 0)
 
 
 def get_loan_details(client, owner_addr):
@@ -56,22 +63,23 @@ def get_loan_details(client, owner_addr):
     """
     loans = []
     try:
+        block_number = int(client.eth.block_number)
         abi = load_abi("common-abi/LoanRouter.json")
         router = client.get_contract(LOAN_ROUTER_ADDR, abi)
-        count = router.functions.balanceOf(owner_addr).call()
+        count = router.functions.balanceOf(owner_addr).call(block_identifier=block_number)
 
         if count > 0:
             # 1. Get all token IDs
             with client.batch_requests() as batch:
                 for i in range(count):
-                    batch.add(router.functions.tokenOfOwnerByIndex(owner_addr, i))
+                    batch.add(router.functions.tokenOfOwnerByIndex(owner_addr, i).call(block_identifier=block_number))
 
                 token_ids = client.execute_batch(batch)
 
             # 2. Get Loan States
             with client.batch_requests() as batch:
                 for token_id in token_ids:
-                    batch.add(router.functions.loanState(token_id))
+                    batch.add(router.functions.loanState(token_id).call(block_identifier=block_number))
 
                 loan_states = client.execute_batch(batch)
 
@@ -101,11 +109,12 @@ def main():
     pyusd = client.get_contract(PYUSD_TOKEN_ADDR, erc20_abi)
 
     try:
+        block_number = int(client.eth.block_number)
         # --- 1) USDai Invariant Inputs ---
         with client.batch_requests() as batch:
-            batch.add(usdai.functions.totalSupply())
-            batch.add(usdai_read.functions.bridgedSupply())
-            batch.add(pyusd.functions.balanceOf(USDAI_VAULT_ADDR))
+            batch.add(usdai.functions.totalSupply().call(block_identifier=block_number))
+            batch.add(usdai_read.functions.bridgedSupply().call(block_identifier=block_number))
+            batch.add(pyusd.functions.balanceOf(USDAI_VAULT_ADDR).call(block_identifier=block_number))
             usdai_supply_raw, bridged_supply_raw, pyusd_assets_raw = client.execute_batch(batch)
 
         usdai_supply_fmt = usdai_supply_raw / (10**USDAI_DECIMALS)

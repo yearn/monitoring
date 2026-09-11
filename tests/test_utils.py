@@ -11,13 +11,17 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import requests
+from web3 import Web3
 
 from utils.alert import Alert, AlertSeverity, register_alert_hook, send_alert
 from utils.config import Config, ProtocolConfig
-from utils.telegram import TelegramError, send_error_message, send_telegram_message
+from utils.telegram import TelegramError, send_envio_error_message, send_error_message, send_telegram_message
 from utils.web3_wrapper import (
     MAX_BACKOFF_SECONDS,
+    MultiHTTPProvider,
     ProviderConnectionError,
+    RetryProviders,
+    Web3Client,
     retry_with_provider_rotation,
 )
 
@@ -383,6 +387,86 @@ class TestSendErrorMessage(unittest.TestCase):
         self.assertEqual(json_body["text"], "GraphQL boom")  # no [label] prefix on fallback
         self.assertTrue(json_body["disable_notification"])
         self.assertNotIn("parse_mode", json_body)  # plain text
+
+
+class TestSendEnvioErrorMessage(unittest.TestCase):
+    """Tests for utils.telegram.send_envio_error_message (dedicated envio channel)."""
+
+    @staticmethod
+    def _ok_response(mock_post):
+        mock_response = unittest.mock.Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_post.return_value = mock_response
+
+    @patch("utils.telegram.requests.post")
+    def test_routes_to_envio_chat_with_label_silent_plain(self, mock_post):
+        """With an envio chat configured, the message goes there labelled, silent, plain."""
+        self._ok_response(mock_post)
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TEST_CHAT_ID": "",
+                "TELEGRAM_CHAT_ID_ENVIO": "envio_chat_id",
+                # The errors channel must not win — envio problems have their own chat.
+                "TELEGRAM_CHAT_ID_ERRORS": "errors_chat_id",
+                "TELEGRAM_BOT_TOKEN_DEFAULT": "default_token",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_envio_error_message("Indexer stale on Mainnet", "yearn")
+
+        url = mock_post.call_args[0][0]
+        json_body = mock_post.call_args[1]["json"]
+        self.assertIn("default_token", url)
+        self.assertEqual(json_body["chat_id"], "envio_chat_id")
+        self.assertNotIn("message_thread_id", json_body)  # standalone chat, no topic
+        self.assertEqual(json_body["text"], "[yearn] Indexer stale on Mainnet")
+        self.assertTrue(json_body["disable_notification"])
+        self.assertNotIn("parse_mode", json_body)  # plain text
+
+    @patch("utils.telegram.requests.post")
+    def test_labels_originating_protocol(self, mock_post):
+        """Every monitor's envio problems land in one chat, labelled by origin."""
+        self._ok_response(mock_post)
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TEST_CHAT_ID": "",
+                "TELEGRAM_CHAT_ID_ENVIO": "envio_chat_id",
+                "TELEGRAM_BOT_TOKEN_DEFAULT": "default_token",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_envio_error_message("GraphQL boom", "timelock")
+
+        json_body = mock_post.call_args[1]["json"]
+        self.assertEqual(json_body["chat_id"], "envio_chat_id")
+        self.assertEqual(json_body["text"], "[timelock] GraphQL boom")
+
+    @patch("utils.telegram.requests.post")
+    def test_falls_back_to_errors_channel_when_unconfigured(self, mock_post):
+        """With TELEGRAM_CHAT_ID_ENVIO unset, the alert routes to the errors channel."""
+        self._ok_response(mock_post)
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TEST_CHAT_ID": "",
+                "TELEGRAM_CHAT_ID_ENVIO": "",
+                "TELEGRAM_TOPIC_ID_ERRORS": "",
+                "TELEGRAM_CHAT_ID_ERRORS": "errors_chat_id",
+                "TELEGRAM_BOT_TOKEN_DEFAULT": "default_token",
+                "LOG_LEVEL": "INFO",
+            },
+        ):
+            send_envio_error_message("GraphQL boom", "yearn")
+
+        json_body = mock_post.call_args[1]["json"]
+        self.assertEqual(json_body["chat_id"], "errors_chat_id")
+        self.assertEqual(json_body["text"], "[yearn] GraphQL boom")
 
 
 class TestAlert(unittest.TestCase):
@@ -905,6 +989,33 @@ class TestRetryWithProviderRotation(unittest.TestCase):
         slept = [call.args[0] for call in mock_sleep.call_args_list]
         self.assertTrue(slept)
         self.assertTrue(all(s <= MAX_BACKOFF_SECONDS for s in slept))
+
+    def test_batch_rpc_error_rotates_underlying_web3_provider(self):
+        """Batch-level retries must switch the provider that sends the request."""
+
+        class _FailOnceBatch:
+            def __init__(self):
+                self.call_count = 0
+
+            def execute(self):
+                self.call_count += 1
+                if self.call_count == 1:
+                    raise RuntimeError("header not found")
+                return ["ok"]
+
+        provider_urls = ["https://rpc-a.example", "https://rpc-b.example"]
+        provider = MultiHTTPProvider(provider_urls, max_retries=1, backoff_factor=0)
+        client = Web3Client.__new__(Web3Client)
+        RetryProviders.__init__(client, provider_urls, max_retries=1, backoff_factor=0)
+        client.w3 = Web3(provider)
+        batch = _FailOnceBatch()
+
+        with patch("utils.web3_wrapper.time.sleep"):
+            self.assertEqual(client.execute_batch(batch), ["ok"])
+
+        self.assertEqual(batch.call_count, 2)
+        self.assertEqual(provider.endpoint_uri, provider_urls[1])
+        self.assertEqual(client.endpoint_uri, provider_urls[1])
 
 
 class TestUstbCachePath(unittest.TestCase):

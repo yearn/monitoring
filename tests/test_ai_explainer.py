@@ -3,8 +3,9 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from utils.calldata.decoder import DecodedCall
+from utils.calldata.decoder import DecodedCall, decode_calldata
 from utils.erc20_metadata import ERC20Metadata
+from utils.formatting import format_decimal_amount, normalize_token_amount
 from utils.llm.ai_explainer import (
     SYSTEM_INSTRUCTIONS,
     Explanation,
@@ -12,11 +13,13 @@ from utils.llm.ai_explainer import (
     _collect_safety_checks,
     _collect_token_flows,
     _explanation_from_json,
-    _format_decimal,
     _parse_explanation,
+    _sole_token_by_target,
+    collect_unique_addresses,
     explain_transaction,
     format_explanation_line,
 )
+from utils.related_tokens import RelatedToken
 from utils.source_context import SourceContext
 from utils.tenderly.simulation import SimulationResult
 
@@ -247,6 +250,14 @@ class TestStructuredOutput(unittest.TestCase):
 class TestParseExplanation(unittest.TestCase):
     """Tests for _parse_explanation."""
 
+    def test_heading_containing_keyword_is_not_a_marker(self) -> None:
+        """'## Detailed Analysis' must not match the DETAIL marker and get sliced."""
+        raw = "## Detailed Analysis\n\nThe call registers a farm."
+        result = _parse_explanation(raw)
+        self.assertEqual(result.detail, "")
+        self.assertIn("Detailed Analysis", result.summary)
+        self.assertIn("registers a farm", result.summary)
+
     def test_both_sections(self) -> None:
         raw = "TLDR: Short summary here.\n\nDETAIL:\nDetailed analysis here."
         result = _parse_explanation(raw)
@@ -279,8 +290,123 @@ class TestParseExplanation(unittest.TestCase):
         self.assertIn("Risk: HIGH", result.detail)
 
 
+class TestAddressLinksSection(unittest.TestCase):
+    """The prompt hands the LLM ready-made explorer links to copy."""
+
+    def test_links_block_included(self) -> None:
+        calls = [DecodedCall(function_name="pause", signature="pause()")]
+        links = "- [`0xAbc`](https://etherscan.io/address/0xAbc)"
+        result = _build_prompt(target="0xTarget", value=0, decoded_calls=calls, simulation=None, address_links=links)
+        self.assertIn("--- Address Links", result)
+        self.assertIn(links, result)
+
+    def test_section_omitted_when_no_links(self) -> None:
+        calls = [DecodedCall(function_name="pause", signature="pause()")]
+        result = _build_prompt(target="0xTarget", value=0, decoded_calls=calls, simulation=None)
+        self.assertNotIn("--- Address Links", result)
+
+    def test_hyperlink_rule_in_system_prompt(self) -> None:
+        self.assertIn("markdown link to the block explorer", SYSTEM_INSTRUCTIONS)
+
+
+class TestRelatedTokensSection(unittest.TestCase):
+    """The prompt tells the LLM which token a target's amounts are denominated in."""
+
+    def test_section_included(self) -> None:
+        calls = [DecodedCall(function_name="setEpochEmissions", signature="setEpochEmissions(uint256,uint256)")]
+        block = "0xT (RewardsDistributor):\n  jane() -> 0xJ (JANE, 18 decimals)"
+        result = _build_prompt(target="0xT", value=0, decoded_calls=calls, simulation=None, related_tokens=block)
+        self.assertIn("--- Related Tokens", result)
+        self.assertIn("jane() -> 0xJ (JANE, 18 decimals)", result)
+
+    def test_section_omitted_when_nothing_resolved(self) -> None:
+        calls = [DecodedCall(function_name="pause", signature="pause()")]
+        result = _build_prompt(target="0xT", value=0, decoded_calls=calls, simulation=None)
+        self.assertNotIn("--- Related Tokens", result)
+
+    def test_single_token_rule_in_system_prompt(self) -> None:
+        self.assertIn("EXACTLY ONE token", SYSTEM_INSTRUCTIONS)
+
+    def test_sole_token_map_skips_ambiguous_targets(self) -> None:
+        one = RelatedToken(getter="jane", address="0xJ", symbol="JANE", decimals=18)
+        two = RelatedToken(getter="usdc", address="0xU", symbol="USDC", decimals=6)
+        mapping = _sole_token_by_target([("0xAaA", [one]), ("0xBbB", [one, two]), ("0xCcC", [])])
+        self.assertEqual(mapping, {"0xaaa": one})
+
+
+class TestProtocolContextSection(unittest.TestCase):
+    """Protocol adapters can add verified facts to the prompt."""
+
+    def test_section_included(self) -> None:
+        calls = [DecodedCall(function_name="setRate", signature="setRate(address,uint256)")]
+        result = _build_prompt(
+            target="0xT",
+            value=0,
+            decoded_calls=calls,
+            simulation=None,
+            protocol_context="Farm: New Silver 2 Senior\nAccounting asset: USDC",
+        )
+        self.assertIn("--- Protocol Context", result)
+        self.assertIn("Farm: New Silver 2 Senior", result)
+        self.assertIn("Accounting asset: USDC", result)
+
+    def test_system_prompt_distinguishes_whitelist_from_accounting_asset(self) -> None:
+        self.assertIn("Distinguish", SYSTEM_INSTRUCTIONS)
+        self.assertIn("non-accounting ERC20 targets", SYSTEM_INSTRUCTIONS)
+
+
+class TestCollectUniqueAddresses(unittest.TestCase):
+    """Targets and address args are gathered once, deduped, checksummed."""
+
+    def test_target_and_args_deduped(self) -> None:
+        farm = "0x79e1b8e45932a7c802ea3dab3844e5dea68d971f"
+        registry = "0xF5f2718708f471e43968271956CC01aaA8c46119"
+        call = DecodedCall(
+            function_name="addFarms",
+            signature="addFarms(uint256,address[])",
+            params=[("uint256", 2), ("address[]", (farm, farm))],
+        )
+        result = collect_unique_addresses([(registry, call)])
+        self.assertEqual(result, [registry, "0x79e1B8e45932A7C802eA3dAb3844e5DEa68d971f"])
+
+    def test_addresses_inside_tuple_args_collected(self) -> None:
+        """Struct args (e.g. MarketParams) must contribute their addresses."""
+        farm = "0x79e1b8e45932a7c802ea3dab3844e5dea68d971f"
+        registry = "0xF5f2718708f471e43968271956CC01aaA8c46119"
+        call = DecodedCall(
+            function_name="createMarket",
+            signature="createMarket((address,uint256))",
+            params=[("(address,uint256)", (farm, 5))],
+        )
+        self.assertEqual(
+            collect_unique_addresses([(registry, call)]),
+            [registry, "0x79e1B8e45932A7C802eA3dAb3844e5DEa68d971f"],
+        )
+
+    def test_zero_and_malformed_addresses_dropped(self) -> None:
+        call = DecodedCall(
+            function_name="transfer",
+            signature="transfer(address,uint256)",
+            params=[("address", "0x" + "00" * 20), ("uint256", 1)],
+        )
+        self.assertEqual(collect_unique_addresses([("0xnothex", call)]), [])
+
+
 class TestFormatExplanationLine(unittest.TestCase):
     """Tests for format_explanation_line."""
+
+    @patch("utils.llm.ai_explainer.upload_to_gist", return_value="https://gist.wavey.info/abc123")
+    def test_report_published_when_present(self, mock_gist: MagicMock) -> None:
+        """The full report (metadata + call flow + analysis) is what gets uploaded."""
+        explanation = Explanation(
+            summary="Pauses the vault. HIGH",
+            detail="Full detail here.",
+            report="## Call Flow\n\n1. pause()",
+            title="Yearn Timelock - 11/08/2026 10:00 - HIGH",
+        )
+        result = format_explanation_line(explanation)
+        mock_gist.assert_called_once_with(explanation.report, title=explanation.title)
+        self.assertIn("https://gist.wavey.info/abc123", result)
 
     @patch("utils.llm.ai_explainer.upload_to_gist", return_value="https://gist.wavey.info/abc123")
     def test_format_with_detail(self, mock_gist: MagicMock) -> None:
@@ -648,7 +774,7 @@ class TestNestedBytesDecoding(unittest.TestCase):
             signature="initialize(bytes)",
             params=[("bytes", garbage)],
         )
-        with patch("utils.llm.ai_explainer.decode_calldata", return_value=None):
+        with patch("utils.calldata.decoder.decode_calldata", return_value=None):
             result = _format_decoded_calls([outer])
         self.assertIn(f"bytes: {garbage}", result)
 
@@ -666,7 +792,7 @@ class TestNestedBytesDecoding(unittest.TestCase):
             signature="exec(bytes)",
             params=[("bytes", unknown)],
         )
-        with patch("utils.llm.ai_explainer.decode_calldata") as mock_decode:
+        with patch("utils.calldata.decoder.decode_calldata") as mock_decode:
             result = _format_decoded_calls([outer])
             mock_decode.assert_not_called()
         self.assertIn(f"bytes: {unknown}", result)
@@ -681,15 +807,16 @@ class TestNestedBytesDecoding(unittest.TestCase):
             signature="execTx(bytes)",
             params=[("bytes", sigs_blob)],
         )
-        with patch("utils.llm.ai_explainer.decode_calldata") as mock_decode:
+        with patch("utils.calldata.decoder.decode_calldata") as mock_decode:
             result = _format_decoded_calls([outer])
             mock_decode.assert_not_called()
         self.assertIn(sigs_blob, result)
 
     def test_recursion_depth_capped(self) -> None:
-        from utils.llm.ai_explainer import _MAX_BYTES_RECURSION_DEPTH, _format_decoded_calls
+        from utils.calldata.decoder import MAX_BYTES_RECURSION_DEPTH
+        from utils.llm.ai_explainer import _format_decoded_calls
 
-        # Mock _try_decode_inner_bytes so it always returns a self-referential
+        # Mock try_decode_inner_calldata so it always returns a self-referential
         # call, bypassing the selector/alignment guard. Without the depth cap
         # this would recurse forever.
         self_referential = DecodedCall(
@@ -697,9 +824,9 @@ class TestNestedBytesDecoding(unittest.TestCase):
             signature="wrap(bytes)",
             params=[("bytes", "0xfeedfacefeedfacefeedfacefeedfacefeedface")],
         )
-        with patch("utils.llm.ai_explainer._try_decode_inner_bytes", return_value=self_referential):
+        with patch("utils.llm.ai_explainer.try_decode_inner_calldata", return_value=self_referential):
             result = _format_decoded_calls([self_referential])
-        self.assertEqual(result.count("↳"), _MAX_BYTES_RECURSION_DEPTH)
+        self.assertEqual(result.count("↳"), MAX_BYTES_RECURSION_DEPTH)
 
 
 class TestAddressLabels(unittest.TestCase):
@@ -938,9 +1065,24 @@ class TestTokenFlows(unittest.TestCase):
         from decimal import Decimal
 
         # 50_780000 raw / 1e6 == exactly 50.78, not 50.78000001 or 50.8k.
-        self.assertEqual(_format_decimal(Decimal(50_780000) / Decimal(10**6)), "50.78")
-        self.assertEqual(_format_decimal(Decimal(1_000_000_000000) / Decimal(10**6)), "1,000,000")
-        self.assertEqual(_format_decimal(Decimal(0)), "0")
+        self.assertEqual(format_decimal_amount(Decimal(50_780000) / Decimal(10**6)), "50.78")
+        self.assertEqual(format_decimal_amount(Decimal(1_000_000_000000) / Decimal(10**6)), "1,000,000")
+        self.assertEqual(format_decimal_amount(Decimal(0)), "0")
+
+    def test_normalize_is_immune_to_global_decimal_precision(self) -> None:
+        """utils/defillama.py sets getcontext().prec = 18 process-wide on import.
+
+        Division would silently truncate a 25-digit raw amount under that
+        context; exponent construction must not.
+        """
+        from decimal import getcontext, localcontext
+
+        with localcontext() as ctx:
+            ctx.prec = 18
+            amount = normalize_token_amount(5369214230155537376952673, 18)
+        self.assertEqual(format_decimal_amount(amount), "5,369,214.230155537376952673")
+        self.assertEqual(format_decimal_amount(normalize_token_amount(-50_780000, 6)), "-50.78")
+        self.assertGreater(getcontext().prec, 0)  # context left untouched
 
     @patch("utils.llm.ai_explainer.fetch_erc20_metadata")
     def test_transfer_amounts_normalized_with_total(self, mock_meta: MagicMock) -> None:
@@ -1007,3 +1149,128 @@ class TestTokenFlows(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCollectRoleNames(unittest.TestCase):
+    """Tests for _collect_role_names (bytes32 role → name resolution).
+
+    The call is built with the real `decode_calldata` rather than hand-written
+    params on purpose: `eth_abi` hands back a bytes32 as 32 raw bytes, and an
+    earlier version of this collector stringified that into a Python repr, so
+    every role silently failed to resolve while string-based tests passed.
+    """
+
+    MINTER_HASH = "0x615a688d53344290b742a2e72e4f187e5b88227c01f9d77ce2406d32f8bd0eda"
+
+    # Real call 0 of tx 0xcfa148be… — grantRole(RECEIPT_TOKEN_MINTER, OutlandVault).
+    GRANT = decode_calldata(
+        "0x2f2ff15d"
+        "615a688d53344290b742a2e72e4f187e5b88227c01f9d77ce2406d32f8bd0eda"
+        "000000000000000000000000a69e4155f62c097ce92daadef7a925dd40907c0c"
+    )
+
+    def test_decoded_role_param_is_raw_bytes(self) -> None:
+        """Guards the assumption the collector depends on."""
+        type_str, value = self.GRANT.params[0]
+        self.assertEqual(type_str, "bytes32")
+        self.assertIsInstance(value, bytes)
+
+    @patch("utils.llm.ai_explainer.resolve_role_names")
+    def test_passes_normalized_hash_from_decoded_bytes(self, mock_resolve: MagicMock) -> None:
+        """The hash handed to the resolver must be hex, not a bytes repr."""
+        from utils.llm.ai_explainer import _collect_role_names
+
+        mock_resolve.return_value = {}
+        _collect_role_names([("0xCore", self.GRANT)], chain_id=1)
+
+        passed = mock_resolve.call_args[0][0]
+        self.assertEqual(passed, [self.MINTER_HASH])
+
+    @patch("utils.llm.ai_explainer.resolve_role_names")
+    def test_resolves_role_arguments(self, mock_resolve: MagicMock) -> None:
+        from utils.llm.ai_explainer import _collect_role_names, _format_role_name_notes
+
+        mock_resolve.return_value = {self.MINTER_HASH: "RECEIPT_TOKEN_MINTER"}
+        resolved = _collect_role_names([("0xCore", self.GRANT)], chain_id=1)
+
+        self.assertEqual(resolved["0xcore"][self.MINTER_HASH], "RECEIPT_TOKEN_MINTER")
+        self.assertIn("is the role RECEIPT_TOKEN_MINTER", "\n".join(_format_role_name_notes(resolved)))
+
+    @patch("utils.llm.ai_explainer.resolve_role_names")
+    def test_ignores_bytes32_on_non_role_functions(self, mock_resolve: MagicMock) -> None:
+        """A timelock's all-zero predecessor/salt must not become DEFAULT_ADMIN_ROLE."""
+        from utils.llm.ai_explainer import _collect_role_names
+
+        schedule = DecodedCall(
+            function_name="scheduleBatch",
+            signature="scheduleBatch(address[],uint256[],bytes[],bytes32,bytes32,uint256)",
+            params=[("bytes32", b"\x00" * 32), ("bytes32", b"\x00" * 32), ("uint256", 604800)],
+        )
+        self.assertEqual(_collect_role_names([("0xTimelock", schedule)], chain_id=1), {})
+        mock_resolve.assert_not_called()
+
+    @patch("utils.llm.ai_explainer.resolve_role_names")
+    def test_unresolved_roles_are_omitted(self, mock_resolve: MagicMock) -> None:
+        from utils.llm.ai_explainer import _collect_role_names
+
+        mock_resolve.return_value = {}
+        self.assertEqual(_collect_role_names([("0xCore", self.GRANT)], chain_id=1), {})
+
+    @patch("utils.llm.ai_explainer.resolve_role_names")
+    def test_resolution_failure_never_raises(self, mock_resolve: MagicMock) -> None:
+        from utils.llm.ai_explainer import _collect_role_names
+
+        mock_resolve.side_effect = RuntimeError("etherscan down")
+        self.assertEqual(_collect_role_names([("0xCore", self.GRANT)], chain_id=1), {})
+
+
+class TestUnpublishedReportSpill(unittest.TestCase):
+    """A report that can't reach the gist is written to CACHE_DIR.
+
+    It exists only in memory at that point, so without this the LLM output is
+    lost and a recovery means regenerating it against a chain state that has
+    since moved.
+    """
+
+    @patch("utils.llm.ai_explainer.upload_to_gist", return_value="")
+    def test_failed_upload_spills_report_to_disk(self, _mock_gist: MagicMock) -> None:
+        import os
+
+        from utils.cache import cache_path
+        from utils.llm.ai_explainer import UNPUBLISHED_REPORTS_DIRNAME, Explanation, format_explanation_line
+
+        explanation = Explanation(
+            summary="Grants mint rights.",
+            detail="Full detail here.",
+            report="# Call flow\n\nEverything worth keeping.",
+            title="InfiniFi LongTimelock - MEDIUM",
+        )
+        result = format_explanation_line(explanation)
+        self.assertIn("Couldn't post full report", result)
+
+        directory = cache_path(UNPUBLISHED_REPORTS_DIRNAME)
+        spilled = os.listdir(directory)
+        self.assertEqual(len(spilled), 1)
+        contents = open(os.path.join(directory, spilled[0])).read()
+        self.assertIn("Everything worth keeping.", contents)
+        self.assertIn("InfiniFi LongTimelock - MEDIUM", contents)
+
+    @patch("utils.llm.ai_explainer.upload_to_gist", return_value="https://gist.wavey.info/abc123")
+    def test_successful_upload_spills_nothing(self, _mock_gist: MagicMock) -> None:
+        import os
+
+        from utils.cache import cache_path
+        from utils.llm.ai_explainer import UNPUBLISHED_REPORTS_DIRNAME, Explanation, format_explanation_line
+
+        format_explanation_line(Explanation(summary="ok", detail="d", report="r"))
+        self.assertFalse(os.path.exists(cache_path(UNPUBLISHED_REPORTS_DIRNAME)))
+
+    @patch("utils.llm.ai_explainer.upload_to_gist", return_value="")
+    @patch("utils.llm.ai_explainer.os.makedirs", side_effect=OSError("read-only filesystem"))
+    def test_spill_failure_still_returns_alert_line(self, _mock_mkdir: MagicMock, _mock_gist: MagicMock) -> None:
+        """A failed spill must never take down the alert, which still has the summary."""
+        from utils.llm.ai_explainer import Explanation, format_explanation_line
+
+        result = format_explanation_line(Explanation(summary="Grants mint rights.", detail="d", report="r"))
+        self.assertIn("Grants mint rights.", result)
+        self.assertIn("Couldn't post full report", result)

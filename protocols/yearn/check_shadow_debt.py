@@ -128,9 +128,13 @@ def get_vault_strategies_onchain(
     """
     client = ChainManager.get_client(chain)
     vault = client.get_contract(Web3.to_checksum_address(vault_address), VAULT_ABI)
+    block_number = int(client.eth.block_number)
 
     # Get default queue
-    default_queue_raw = client.execute(vault.functions.get_default_queue().call)
+    default_queue_raw = client.execute(
+        vault.functions.get_default_queue().call,
+        block_identifier=block_number,
+    )
     default_queue: Set[str] = {addr.lower() for addr in default_queue_raw}
 
     logger.debug(
@@ -144,7 +148,9 @@ def get_vault_strategies_onchain(
 
     with client.batch_requests() as batch:
         for strategy_addr in known_strategies:
-            batch.add(vault.functions.strategies(Web3.to_checksum_address(strategy_addr)))
+            batch.add(
+                vault.functions.strategies(Web3.to_checksum_address(strategy_addr)).call(block_identifier=block_number)
+            )
         results = batch.execute()
 
     for strategy_addr, result in zip(known_strategies, results):

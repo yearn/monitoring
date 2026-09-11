@@ -177,14 +177,16 @@ def _parse_param_types(signature: str) -> list[str]:
         return []
 
     inner = signature[start + 1 : end].strip()
-    return _split_top_level(inner) if inner else []
+    return split_top_level_types(inner) if inner else []
 
 
-def _split_top_level(types: str) -> list[str]:
+def split_top_level_types(types: str) -> list[str]:
     """Split a comma-separated type list on top-level commas only.
 
     Commas inside ``(...)`` tuples or ``[...]`` array sizes are preserved so a
-    type like ``(address,uint256)[]`` stays intact.
+    type like ``(address,uint256)[]`` stays intact. Public so consumers that
+    walk decoded values (e.g. the gist report renderer) can decompose a tuple
+    type into its component types.
     """
     parts: list[str] = []
     depth = 0
@@ -290,6 +292,58 @@ def decode_calldata(data_hex: str, chain_id: int | None = None, target: str | No
                 logger.debug("Failed to decode params for %s with types %s", selector, param_types)
 
     return DecodedCall(function_name=func_name, signature=signature, params=params)
+
+
+# How many levels of `bytes` parameters holding inner calldata we unwrap. Two is
+# enough for the shapes we see (governor execute → upgradeToAndCall → initializer)
+# and bounds the work on adversarial or self-referential payloads.
+MAX_BYTES_RECURSION_DEPTH = 2
+
+
+def looks_like_calldata(byte_len: int) -> bool:
+    """True if a `bytes` blob's length matches the calldata shape (selector + ABI words).
+
+    Real calldata is either a bare 4-byte selector (e.g. `pause()`) or
+    selector + N 32-byte words. Anything else — packed Safe `signatures`
+    blobs, EIP-712 hashes, Universal-Router-style packed paths — fails
+    this check and is left as opaque hex.
+    """
+    return byte_len == 4 or (byte_len >= 36 and (byte_len - 4) % 32 == 0)
+
+
+def try_decode_inner_calldata(value: object) -> DecodedCall | None:
+    """If ``value`` looks like calldata for an offline-known function, decode it.
+
+    Gated on (1) length matching the calldata shape and (2) the selector
+    being resolvable without a network call. Without these guards we'd
+    spam the Sourcify 4byte API on every `signatures`/hash/packed-bytes
+    parameter, paying a 30s timeout each miss to maybe get a false positive.
+
+    Args:
+        value: A decoded ``bytes`` parameter, either as ``bytes`` or hex string.
+
+    Returns:
+        The decoded inner call, or None when the blob isn't recognizable calldata.
+    """
+    if isinstance(value, bytes):
+        if not looks_like_calldata(len(value)):
+            return None
+        hex_str = "0x" + value.hex()
+    elif isinstance(value, str):
+        hex_str = value if value.startswith("0x") else "0x" + value
+        # Each hex char is 4 bits, so byte_len = (len(hex_str) - 2) // 2.
+        if len(hex_str) < 10 or not looks_like_calldata((len(hex_str) - 2) // 2):
+            return None
+    else:
+        return None
+
+    if not is_selector_resolvable_offline(hex_str[:10]):
+        return None
+
+    try:
+        return decode_calldata(hex_str)
+    except (ValueError, TypeError):
+        return None
 
 
 def format_call_lines(data_hex: str) -> list[str]:

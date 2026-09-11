@@ -16,7 +16,7 @@ from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import EXPLORER_URLS, Chain
 from utils.defillama import fetch_prices
-from utils.telegram import send_error_message
+from utils.telegram import send_envio_error_message
 from utils.web3_wrapper import ChainManager
 
 load_dotenv()
@@ -208,7 +208,7 @@ def gql_request(query: str, variables: dict) -> dict | None:
     try:
         return http_json(ENVIO_GRAPHQL_URL, method="POST", body=payload)
     except urllib.error.HTTPError as exc:
-        send_error_message(
+        send_envio_error_message(
             f"⚠️ Large Flow Alert: Envio GraphQL error (HTTP {exc.code}). Skipping this run.",
             PROTOCOL,
         )

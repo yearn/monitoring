@@ -38,3 +38,7 @@ Reference report: https://curation.yearn.fi/report/strata-srusde/
 - Senior coverage ratio: daily
 - Strategy sUSDe balance: daily
 - Protocol TVL changes: daily
+
+Daily TVL, junior-assets, and strategy-ratio baselines expire after 36 hours and initialize from the next valid
+observation. Senior-coverage dedupe is re-armed after the same monitoring gap. Share-rate monotonicity and cooldown
+history remain persistent.
