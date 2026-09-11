@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from utils.calldata.decoder import DecodedCall
+from utils.calldata.decoder import DecodedCall, decode_calldata
 from utils.erc20_metadata import ERC20Metadata
 from utils.formatting import format_decimal_amount, normalize_token_amount
 from utils.llm.ai_explainer import (
@@ -1152,25 +1152,48 @@ if __name__ == "__main__":
 
 
 class TestCollectRoleNames(unittest.TestCase):
-    """Tests for _collect_role_names (bytes32 role → name resolution)."""
+    """Tests for _collect_role_names (bytes32 role → name resolution).
 
-    GRANT = DecodedCall(
-        function_name="grantRole",
-        signature="grantRole(bytes32,address)",
-        params=[
-            ("bytes32", "0x615a688d53344290b742a2e72e4f187e5b88227c01f9d77ce2406d32f8bd0eda"),
-            ("address", "0xa69e4155F62C097cE92DaAdeF7A925dD40907C0C"),
-        ],
+    The call is built with the real `decode_calldata` rather than hand-written
+    params on purpose: `eth_abi` hands back a bytes32 as 32 raw bytes, and an
+    earlier version of this collector stringified that into a Python repr, so
+    every role silently failed to resolve while string-based tests passed.
+    """
+
+    MINTER_HASH = "0x615a688d53344290b742a2e72e4f187e5b88227c01f9d77ce2406d32f8bd0eda"
+
+    # Real call 0 of tx 0xcfa148be… — grantRole(RECEIPT_TOKEN_MINTER, OutlandVault).
+    GRANT = decode_calldata(
+        "0x2f2ff15d"
+        "615a688d53344290b742a2e72e4f187e5b88227c01f9d77ce2406d32f8bd0eda"
+        "000000000000000000000000a69e4155f62c097ce92daadef7a925dd40907c0c"
     )
+
+    def test_decoded_role_param_is_raw_bytes(self) -> None:
+        """Guards the assumption the collector depends on."""
+        type_str, value = self.GRANT.params[0]
+        self.assertEqual(type_str, "bytes32")
+        self.assertIsInstance(value, bytes)
+
+    @patch("utils.llm.ai_explainer.resolve_role_names")
+    def test_passes_normalized_hash_from_decoded_bytes(self, mock_resolve: MagicMock) -> None:
+        """The hash handed to the resolver must be hex, not a bytes repr."""
+        from utils.llm.ai_explainer import _collect_role_names
+
+        mock_resolve.return_value = {}
+        _collect_role_names([("0xCore", self.GRANT)], chain_id=1)
+
+        passed = mock_resolve.call_args[0][0]
+        self.assertEqual(passed, [self.MINTER_HASH])
 
     @patch("utils.llm.ai_explainer.resolve_role_names")
     def test_resolves_role_arguments(self, mock_resolve: MagicMock) -> None:
         from utils.llm.ai_explainer import _collect_role_names, _format_role_name_notes
 
-        mock_resolve.return_value = {self.GRANT.params[0][1]: "RECEIPT_TOKEN_MINTER"}
+        mock_resolve.return_value = {self.MINTER_HASH: "RECEIPT_TOKEN_MINTER"}
         resolved = _collect_role_names([("0xCore", self.GRANT)], chain_id=1)
 
-        self.assertEqual(resolved["0xcore"][self.GRANT.params[0][1]], "RECEIPT_TOKEN_MINTER")
+        self.assertEqual(resolved["0xcore"][self.MINTER_HASH], "RECEIPT_TOKEN_MINTER")
         self.assertIn("is the role RECEIPT_TOKEN_MINTER", "\n".join(_format_role_name_notes(resolved)))
 
     @patch("utils.llm.ai_explainer.resolve_role_names")
@@ -1181,7 +1204,7 @@ class TestCollectRoleNames(unittest.TestCase):
         schedule = DecodedCall(
             function_name="scheduleBatch",
             signature="scheduleBatch(address[],uint256[],bytes[],bytes32,bytes32,uint256)",
-            params=[("bytes32", "0x" + "00" * 32), ("bytes32", "0x" + "00" * 32), ("uint256", 604800)],
+            params=[("bytes32", b"\x00" * 32), ("bytes32", b"\x00" * 32), ("uint256", 604800)],
         )
         self.assertEqual(_collect_role_names([("0xTimelock", schedule)], chain_id=1), {})
         mock_resolve.assert_not_called()

@@ -16,7 +16,7 @@ from eth_utils import function_signature_to_4byte_selector, to_checksum_address
 
 from utils.cache import cache_path
 from utils.calldata.decoder import MAX_BYTES_RECURSION_DEPTH, DecodedCall, decode_calldata, try_decode_inner_calldata
-from utils.calldata.role_names import resolve_role_names
+from utils.calldata.role_names import normalize_role_hash, resolve_role_names
 from utils.erc20_metadata import fetch_erc20_metadata
 from utils.formatting import format_decimal_amount, normalize_token_amount
 from utils.impl_diff import diff_implementations, format_impl_diff
@@ -469,8 +469,11 @@ def _collect_role_names(
         if not target or "role" not in (decoded.function_name or "").lower():
             continue
         for type_str, value in decoded.params:
-            if type_str == "bytes32":
-                hashes_by_target.setdefault(target, set()).add(str(value))
+            # `decode_calldata` keeps raw eth_abi output, so this is 32 raw bytes
+            # for a real call. Normalize here rather than stringifying, which
+            # would produce an unparseable Python repr.
+            if type_str == "bytes32" and (role_hash := normalize_role_hash(value)):
+                hashes_by_target.setdefault(target, set()).add(role_hash)
 
     if not hashes_by_target:
         return {}

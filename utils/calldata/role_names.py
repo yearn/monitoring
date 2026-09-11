@@ -14,13 +14,16 @@ Two sources recover the pre-image, cheapest first:
   ``bytes32 constant NAME = keccak256("NAME")``. ``fetch_source`` already
   returns every file of a multi-file verified contract concatenated, and it is
   memoized and disk-cached, so harvesting these costs no extra HTTP when source
-  context was already pulled for the same target.
+  context was already pulled for the same target. When the target is a proxy,
+  the implementation's source is consulted too — that is where the constants
+  are declared.
 
 ``DEFAULT_ADMIN_ROLE`` is the one role that is not a pre-image: OpenZeppelin
 defines it as ``bytes32(0)``, so it is mapped explicitly.
 """
 
 import re
+from collections.abc import Iterator
 
 from eth_utils import keccak
 
@@ -71,12 +74,17 @@ _STATIC_ROLES: dict[str, str] = {DEFAULT_ADMIN_ROLE: "DEFAULT_ADMIN_ROLE"}
 _STATIC_ROLES.update({_hash_of(name): name for name in _COMMON_ROLE_NAMES})
 
 
-def normalize_role_hash(value: str) -> str:
+def normalize_role_hash(value: object) -> str:
     """Return ``value`` as a lowercase 0x-prefixed 32-byte hex string, or ``""``.
 
-    Decoded ``bytes32`` params arrive already formatted as ``0x``-prefixed hex,
-    but callers may pass an unprefixed digest or mixed case.
+    ``decode_calldata`` stores raw ``eth_abi`` output, so a real ``bytes32``
+    argument arrives as **32 raw bytes** — not hex. Stringifying those yields a
+    Python repr (``b'aZh\\x8d…'``) that no amount of hex parsing will recover,
+    so ``bytes`` is handled first. Hex strings are still accepted, with or
+    without the ``0x`` prefix and in any casing, for callers that pre-format.
     """
+    if isinstance(value, (bytes, bytearray)):
+        return f"0x{bytes(value).hex()}" if len(value) == 32 else ""
     if not isinstance(value, str):
         return ""
     candidate = value.strip().lower()
@@ -111,15 +119,16 @@ def harvest_role_names(source: str) -> dict[str, str]:
 
 
 def resolve_role_names(
-    role_hashes: list[str], chain_id: int | None = None, target: str | None = None
+    role_hashes: list[object], chain_id: int | None = None, target: str | None = None
 ) -> dict[str, str]:
     """Resolve role hashes to names, consulting the static table then ``target``'s source.
 
     Args:
-        role_hashes: Candidate ``bytes32`` values, in any casing.
+        role_hashes: Candidate ``bytes32`` values as raw bytes or hex strings.
         chain_id: Chain to look ``target`` up on. Source harvesting is skipped
             when either this or ``target`` is missing.
-        target: Contract whose verified source declares the roles.
+        target: Contract whose verified source declares the roles. When it is a
+            proxy, the implementation's source is consulted too.
 
     Returns:
         Mapping of normalized role hash to role name, containing only the
@@ -137,19 +146,41 @@ def resolve_role_names(
         return resolved
 
     try:
-        # Imported lazily: source_context pulls in the Etherscan/web3 stack, and
-        # the static table alone is enough for callers that never hit a chain.
-        from utils.source_context import fetch_source
-
-        record = fetch_source(chain_id, target)
+        for source in _candidate_sources(chain_id, target):
+            for role_hash, name in harvest_role_names(source).items():
+                if role_hash in unresolved:
+                    resolved[role_hash] = name
+            unresolved -= resolved.keys()
+            if not unresolved:
+                break
     except Exception as e:  # noqa: BLE001 - enrichment only; unresolved roles are reported as such
         logger.info("Role-name source lookup failed for %s on chain %s: %s", target, chain_id, e)
-        return resolved
 
-    if record is None:
-        return resolved
-
-    for role_hash, name in harvest_role_names(record[1]).items():
-        if role_hash in unresolved:
-            resolved[role_hash] = name
     return resolved
+
+
+def _candidate_sources(chain_id: int, target: str) -> Iterator[str]:
+    """Yield ``target``'s verified source, then its implementation's if it is a proxy.
+
+    Role constants are declared in the implementation, not the proxy, so a
+    ``grantRole`` on an upgradeable AccessControl contract resolves nothing
+    without this second hop. Mirrors the EIP-1967 fallback already used by
+    :func:`utils.source_context.get_source_context`.
+    """
+    # Imported lazily: source_context pulls in the Etherscan/web3 stack, and the
+    # static table alone is enough for callers that never hit a chain.
+    from utils.source_context import fetch_source
+
+    record = fetch_source(chain_id, target)
+    if record is not None:
+        yield record[1]
+
+    from utils.proxy import get_current_implementation
+
+    impl = get_current_implementation(target, chain_id)
+    if not impl or impl.lower() == target.lower():
+        return
+
+    impl_record = fetch_source(chain_id, impl)
+    if impl_record is not None:
+        yield impl_record[1]

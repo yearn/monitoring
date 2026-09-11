@@ -296,7 +296,7 @@ def _format_params(
         name = param_names[i] if param_names is not None and i < len(param_names) else None
         rendered = _render_param(_param_label(type_str, name), type_str, value, chain_id, labels, indent, depth, token)
         if role_names and type_str == "bytes32" and len(rendered) == 1:
-            role = role_names.get(normalize_role_hash(str(value)))
+            role = role_names.get(normalize_role_hash(value))
             if role:
                 rendered = [f"{rendered[0]} — role **{role}**"]
         lines.extend(rendered)

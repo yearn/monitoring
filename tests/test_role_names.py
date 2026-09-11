@@ -40,8 +40,11 @@ class TestNormalizeRoleHash(unittest.TestCase):
     def test_accepts_unprefixed(self) -> None:
         self.assertEqual(normalize_role_hash(RECEIPT_TOKEN_MINTER[2:]), RECEIPT_TOKEN_MINTER)
 
+    def test_accepts_raw_bytes(self) -> None:
+        self.assertEqual(normalize_role_hash(bytes.fromhex(RECEIPT_TOKEN_MINTER[2:])), RECEIPT_TOKEN_MINTER)
+
     def test_rejects_wrong_length_and_non_hex(self) -> None:
-        for bad in ("0xdeadbeef", "", "0x" + "zz" * 32, "not-a-hash"):
+        for bad in ("0xdeadbeef", "", "0x" + "zz" * 32, "not-a-hash", b"short", None, 42):
             self.assertEqual(normalize_role_hash(bad), "")
 
 
@@ -72,27 +75,67 @@ class TestResolveRoleNames(unittest.TestCase):
         self.assertEqual(resolved[minter], "MINTER_ROLE")
         self.assertEqual(resolved[DEFAULT_ADMIN_ROLE], "DEFAULT_ADMIN_ROLE")
 
+    @patch("utils.proxy.get_current_implementation", return_value=None)
     @patch("utils.source_context.fetch_source")
-    def test_falls_back_to_verified_source(self, mock_fetch: unittest.mock.MagicMock) -> None:
+    def test_falls_back_to_verified_source(self, mock_fetch, _mock_impl) -> None:
         mock_fetch.return_value = ("InfiniFiCore", CORE_ROLES_SOURCE)
 
         resolved = resolve_role_names([RECEIPT_TOKEN_MINTER, RECEIPT_TOKEN_BURNER], chain_id=1, target="0xF6d4")
         self.assertEqual(resolved[RECEIPT_TOKEN_MINTER], "RECEIPT_TOKEN_MINTER")
         self.assertEqual(resolved[RECEIPT_TOKEN_BURNER], "RECEIPT_TOKEN_BURNER")
 
+    @patch("utils.proxy.get_current_implementation", return_value=None)
+    @patch("utils.source_context.fetch_source")
+    def test_accepts_raw_bytes_from_decoded_calldata(self, mock_fetch, _mock_impl) -> None:
+        """`decode_calldata` yields 32 raw bytes, not hex — the common real case."""
+        mock_fetch.return_value = ("InfiniFiCore", CORE_ROLES_SOURCE)
+
+        raw = bytes.fromhex(RECEIPT_TOKEN_MINTER[2:])
+        resolved = resolve_role_names([raw], chain_id=1, target="0xF6d4")
+        self.assertEqual(resolved[RECEIPT_TOKEN_MINTER], "RECEIPT_TOKEN_MINTER")
+
+    @patch("utils.proxy.get_current_implementation")
+    @patch("utils.source_context.fetch_source")
+    def test_follows_proxy_to_implementation_source(self, mock_fetch, mock_impl) -> None:
+        """Role constants live in the implementation, not the proxy."""
+        proxy, impl = "0xProxy", "0xImpl"
+        mock_impl.return_value = impl
+        mock_fetch.side_effect = lambda _chain, addr: {
+            proxy: ("TransparentUpgradeableProxy", "contract Proxy { fallback() external {} }"),
+            impl: ("InfiniFiCore", CORE_ROLES_SOURCE),
+        }[addr]
+
+        resolved = resolve_role_names([RECEIPT_TOKEN_MINTER], chain_id=1, target=proxy)
+        self.assertEqual(resolved[RECEIPT_TOKEN_MINTER], "RECEIPT_TOKEN_MINTER")
+
+    @patch("utils.proxy.get_current_implementation")
+    @patch("utils.source_context.fetch_source")
+    def test_skips_proxy_hop_when_target_source_resolves(self, mock_fetch, mock_impl) -> None:
+        """A non-proxy target must not pay an RPC call to read an implementation slot."""
+        mock_fetch.return_value = ("InfiniFiCore", CORE_ROLES_SOURCE)
+
+        resolve_role_names([RECEIPT_TOKEN_MINTER], chain_id=1, target="0xF6d4")
+        mock_impl.assert_not_called()
+
     @patch("utils.source_context.fetch_source")
     def test_skips_source_lookup_when_static_table_suffices(self, mock_fetch: unittest.mock.MagicMock) -> None:
         resolve_role_names(["0x" + keccak(text="PAUSER_ROLE").hex()], chain_id=1, target="0xF6d4")
         mock_fetch.assert_not_called()
 
+    @patch("utils.proxy.get_current_implementation", return_value=None)
     @patch("utils.source_context.fetch_source")
-    def test_unverified_contract_leaves_role_unresolved(self, mock_fetch: unittest.mock.MagicMock) -> None:
+    def test_unverified_contract_leaves_role_unresolved(self, mock_fetch, _mock_impl) -> None:
         mock_fetch.return_value = None
         self.assertEqual(resolve_role_names([RECEIPT_TOKEN_MINTER], chain_id=1, target="0xF6d4"), {})
 
     @patch("utils.source_context.fetch_source")
     def test_source_failure_never_raises(self, mock_fetch: unittest.mock.MagicMock) -> None:
         mock_fetch.side_effect = RuntimeError("etherscan down")
+        self.assertEqual(resolve_role_names([RECEIPT_TOKEN_MINTER], chain_id=1, target="0xF6d4"), {})
+
+    @patch("utils.proxy.get_current_implementation", side_effect=RuntimeError("rpc down"))
+    @patch("utils.source_context.fetch_source", return_value=("Proxy", "contract Proxy {}"))
+    def test_proxy_lookup_failure_never_raises(self, _mock_fetch, _mock_impl) -> None:
         self.assertEqual(resolve_role_names([RECEIPT_TOKEN_MINTER], chain_id=1, target="0xF6d4"), {})
 
     def test_no_chain_context_returns_static_matches_only(self) -> None:

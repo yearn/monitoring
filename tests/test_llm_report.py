@@ -419,10 +419,11 @@ class TestRoleNameAnnotation(unittest.TestCase):
     VAULT = "0xa69e4155F62C097cE92DaAdeF7A925dD40907C0C"
 
     def _flow(self, role_names: dict[str, str]) -> str:
+        # Raw bytes, matching what `decode_calldata` actually stores for bytes32.
         call = DecodedCall(
             function_name="grantRole",
             signature="grantRole(bytes32,address)",
-            params=[("bytes32", self.MINTER), ("address", self.VAULT)],
+            params=[("bytes32", bytes.fromhex(self.MINTER[2:])), ("address", self.VAULT)],
         )
         return format_call_flow(
             _add_farms_ctx(
