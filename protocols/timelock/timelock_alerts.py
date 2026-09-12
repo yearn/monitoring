@@ -38,10 +38,12 @@ YEARN_TIMELOCK_INTERNAL_PROTOCOL = "YEARN_TIMELOCK_INTERNAL"
 # but the alert store must use the protocol key the website queries
 # (`GET /v1/alerts?protocol=<key>`, exact match) or the alert never shows on the
 # protocol's page. Keys default to the lowercased routing key; list exceptions here.
+# LRT has no mapping: the website's lrt-pegs page has no alert key (its scripts
+# emit mixed values), so LRT timelock alerts show only in the overview feed as "lrt".
 ALERT_HISTORY_PROTOCOLS: dict[str, str] = {
     "YEARN_TIMELOCK": "yearn",
+    # rtoken page queries "ethplus", matching protocols/rtoken/monitor_rtoken.py.
     "RTOKEN": "ethplus",
-    "LRT": "pegs",
 }
 
 
