@@ -15,7 +15,6 @@ INDEXED_BLOCKS: dict[Chain, int] = {
     Chain.BASE: 49220190,
     Chain.MAINNET: 24150245,
     Chain.KATANA: 38465232,
-    Chain.OPTIMISM: 154815667,
     Chain.POLYGON: 91016489,
     Chain.ARBITRUM: 488554295,
 }
@@ -78,7 +77,6 @@ def test_collect_freshness_computes_lag_and_sorts_by_chain(monkeypatch: pytest.M
     # Gnosis (100) and Berachain (80094) are indexed but unused here, so they drop out.
     assert [entry.chain for entry in result] == [
         Chain.MAINNET,
-        Chain.OPTIMISM,
         Chain.POLYGON,
         Chain.BASE,
         Chain.ARBITRUM,
@@ -143,7 +141,7 @@ def test_build_alert_message_lists_lagging_and_missing_chains() -> None:
     assert "Katana (chain 747474): 2h 15m behind, last block 38465232" in message
     assert "Base (chain 8453): no sync state reported by the indexer" in message
     assert "Threshold: 1h" in message
-    assert freshness.DASHBOARD_URL in message
+    assert "envio-monitoring" not in message
 
 
 def test_fetch_chain_metadata_returns_rows(monkeypatch: pytest.MonkeyPatch, envio_url: str) -> None:

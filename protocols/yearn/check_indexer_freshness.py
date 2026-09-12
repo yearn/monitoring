@@ -16,8 +16,7 @@ never be mistaken for "everything is fresh".
 The RPC round-trip is what makes the check meaningful: envio parks
 `chain_metadata.block_height` at the last processed block once a chain looks
 caught up, so a stalled indexer keeps reporting itself as zero blocks behind.
-The same trap is documented in the indexer's own dashboard
-(https://envio-monitoring.yearn.dev/).
+The same trap is documented by the indexer itself.
 
 Usage:
     python protocols/yearn/check_indexer_freshness.py [--max-lag-minutes 60]
@@ -46,7 +45,6 @@ logger = get_logger("yearn.check_indexer_freshness")
 PROTOCOL = "yearn"
 
 ENVIO_GRAPHQL_URL = os.getenv("ENVIO_GRAPHQL_URL")
-DASHBOARD_URL = "https://envio-monitoring.yearn.dev/"
 
 # A chain is stale once its newest indexed block is older than this. One hour is
 # generous for every indexed chain: the slowest of them (Mainnet) produces a
@@ -73,7 +71,6 @@ CACHE_KEY_LAST_ALERT_PREFIX = "YEARN_INDEXER_STALE_ALERT_"
 # feeding a monitor.
 EXPECTED_CHAINS: tuple[Chain, ...] = (
     Chain.MAINNET,
-    Chain.OPTIMISM,
     Chain.POLYGON,
     Chain.BASE,
     Chain.ARBITRUM,
@@ -236,7 +233,6 @@ def build_alert_message(stale: list[ChainFreshness], missing: list[Chain], max_l
     lines += [
         "",
         f"Threshold: {format_duration(max_lag_seconds)}",
-        f"Dashboard: {DASHBOARD_URL}",
     ]
     return "\n".join(lines)
 
@@ -300,7 +296,7 @@ def main() -> None:
         # alerts on every run rather than riding the per-chain cooldown.
         logger.error("Indexer unavailable: %s", exc)
         send_envio_error_message(
-            f"Envio indexer unavailable: {exc}\nDashboard: {DASHBOARD_URL}",
+            f"Envio indexer unavailable: {exc}",
             PROTOCOL,
             source="indexer_freshness",
         )
