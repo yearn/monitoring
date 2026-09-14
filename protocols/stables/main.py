@@ -22,6 +22,7 @@ MONITORED_TOKENS: list[tuple[str, str, str, Decimal]] = [
     # maple
     ("syrupUSDC", "ethereum:0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b", "maple", Decimal("1.1")),
     ("syrupUSDT", "ethereum:0x356b8d89c1e1239cbbb9de4815c39a1474d5ba7d", "maple", Decimal("1.1")),
+    ("syrupUSDG", "ethereum:0x87b65c4aaffa76881f9e96f3e7ed945ddfc3cd7a", "maple", Decimal("1.1")),
     # ustb (superstate)
     ("USTB", "ethereum:0x43415eB6ff9DB7E26A15b704e7A3eDCe97d31C4e", "ustb", Decimal("10.5")),
     # cap

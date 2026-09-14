@@ -1,13 +1,14 @@
 """
 Maple Finance Syrup collateral monitoring.
 
-Fetches collateral breakdown from the Maple Finance GraphQL API across both
-syrupUSDC and syrupUSDT pools, and calculates a weighted risk score based on
-predefined asset risk ratings.
+Fetches collateral breakdown from the Maple Finance GraphQL API across
+syrupUSDC, syrupUSDT, and syrupUSDG pools, and calculates a weighted risk score
+based on predefined asset risk ratings.
 
 Uses syrupGlobals for the official combined collateralization ratio across all
-Syrup pools (syrupUSDC + syrupUSDT). The ratio uses only overcollateralized loans
-as the denominator, excluding DeFi strategy deployments (Sky, Aave, etc.).
+Syrup pools (syrupUSDC + syrupUSDT + syrupUSDG). The ratio uses only
+overcollateralized loans as the denominator, excluding DeFi strategy deployments
+(Sky, Aave, etc.).
 See: https://docs.maple.finance/integrate/technical-resources/collateral-and-yield-disclosure
 
 Monitors:
@@ -35,6 +36,7 @@ logger = get_logger(PROTOCOL)
 MAPLE_GRAPHQL_URL = "https://api.maple.finance/v2/graphql"
 SYRUP_USDC_POOL_ID = "0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b"
 SYRUP_USDT_POOL_ID = "0x356b8d89c1e1239cbbb9de4815c39a1474d5ba7d"
+SYRUP_USDG_POOL_ID = "0x87b65c4aaffa76881f9e96f3e7ed945ddfc3cd7a"
 
 # Asset risk scores from issue #147
 # 1 = low risk, 2 = medium risk, 3 = high risk
@@ -105,7 +107,7 @@ COLLATERAL_QUERY = """
       timestamp
     }
   }
-  poolV2S(where: {id_in: ["%s", "%s"]}) {
+  poolV2S(where: {id_in: ["%s", "%s", "%s"]}) {
     id
     name
     totalAssets
@@ -114,14 +116,14 @@ COLLATERAL_QUERY = """
     accountedInterest
   }
 }
-""" % (SYRUP_USDC_POOL_ID, SYRUP_USDT_POOL_ID)
+""" % (SYRUP_USDC_POOL_ID, SYRUP_USDT_POOL_ID, SYRUP_USDG_POOL_ID)
 
 # collateralDisclosure lists the assets backing each pool. Unlike poolCollaterals,
 # it does not provide USD values, but its resolver does not fail on unregistered
 # native assets, so we use it to detect new/unknown collateral types.
 COLLATERAL_DISCLOSURE_QUERY = """
 {
-  poolV2S(where: {id_in: ["%s", "%s"]}) {
+  poolV2S(where: {id_in: ["%s", "%s", "%s"]}) {
     id
     name
     poolMeta {
@@ -131,7 +133,7 @@ COLLATERAL_DISCLOSURE_QUERY = """
     }
   }
 }
-""" % (SYRUP_USDC_POOL_ID, SYRUP_USDT_POOL_ID)
+""" % (SYRUP_USDC_POOL_ID, SYRUP_USDT_POOL_ID, SYRUP_USDG_POOL_ID)
 
 
 def _format_graphql_errors(errors: Any) -> str:
@@ -226,7 +228,7 @@ def _alert_maple_graphql_skip(check_name: str, error: Exception) -> None:
 
 
 def fetch_pools_data() -> list[dict]:
-    """Fetch per-pool data for syrupUSDC and syrupUSDT from Maple GraphQL API.
+    """Fetch per-pool data for syrupUSDC, syrupUSDT, and syrupUSDG from Maple GraphQL API.
 
     The valued `poolCollaterals` resolver is currently broken for unregistered
     native assets (e.g. PT_sUSDE), so this query no longer requests it.
@@ -255,9 +257,9 @@ def fetch_pools_data() -> list[dict]:
     if not pools:
         raise ValueError("No Syrup pools found in Maple API response")
 
-    if len(pools) < 2:
+    if len(pools) < 3:
         logger.warning(
-            "Expected 2 Syrup pools (syrupUSDC + syrupUSDT), got %d — subgraph may be incomplete",
+            "Expected 3 Syrup pools (syrupUSDC + syrupUSDT + syrupUSDG), got %d — subgraph may be incomplete",
             len(pools),
         )
 
@@ -278,10 +280,11 @@ def fetch_pools_data() -> list[dict]:
 
 
 def fetch_collateral_disclosure() -> set[str]:
-    """Fetch the list of disclosed collateral assets for both Syrup pools.
+    """Fetch the list of disclosed collateral assets for all Syrup pools.
 
     Returns:
-        Set of unique asset symbols disclosed across syrupUSDC and syrupUSDT.
+        Set of unique asset symbols disclosed across syrupUSDC, syrupUSDT,
+        and syrupUSDG.
 
     Raises:
         ValueError: If the API response is malformed or pools not found.
