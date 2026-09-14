@@ -1,31 +1,35 @@
-# Maple Finance syrupUSDC Monitoring
+# Maple Finance Syrup Pool Monitoring
 
 ## What it monitors
 
-- **PPS (Price Per Share):** `convertToAssets(1e6)` on the syrupUSDC pool vs the value cached from the last run. Alerts on any decrease (HIGH); cache updates whenever PPS changes.
+- **PPS (Price Per Share):** `convertToAssets(1e6)` on each pool vs the value cached from the last run. Alerts on any decrease (HIGH); cache updates whenever PPS changes.
 - **TVL (Total Value Locked):** `totalAssets()` vs cached prior run. Alerts when absolute change is **≥15%** (HIGH).
-- **Unrealized Losses (on-chain):** Batched `unrealizedLosses()` on FixedTermLoanManager and OpenTermLoanManager. Alerts on any non-zero total (HIGH).
-- **Unrealized Losses vs Pool Size (subgraph):** Maple GraphQL `poolV2S` per syrupUSDC and syrupUSDT. Alerts when unrealized losses are **≥0.5%** of that pool's `totalAssets` (HIGH).
-- **Strategy AUM:** Logs `assetsUnderManagement()` on Aave and Sky strategies (visibility). Same figures define “liquid funds” for the withdrawal-queue ratio below.
-- **Withdrawal Queue vs TVL:** Pending withdrawal exit value (`totalShares` → `convertToExitAssets`) vs pool TVL. Alerts when pending **>** **1%** of TVL (LOW). Aave + Sky AUM logged for context.
-- **Pool Liquidity:** USDC `balanceOf` the pool vs pending withdrawal exit value (`totalShares` → `convertToExitAssets`). Alerts when pending withdrawals **>** pool cash, i.e. the delegate cannot satisfy the queue from idle cash (MEDIUM). Queue depth is fetched only when alerting and included as context.
+- **Unrealized Losses (on-chain):** Batched `unrealizedLosses()` on FixedTermLoanManager and OpenTermLoanManager (syrupUSDC only). Alerts on any non-zero total (HIGH).
+- **Unrealized Losses vs Pool Size (subgraph):** Maple GraphQL `poolV2S` per syrupUSDC, syrupUSDT, and syrupUSDG. Alerts when unrealized losses are **≥0.5%** of that pool's `totalAssets` (HIGH).
+- **Strategy AUM:** Logs `assetsUnderManagement()` on configured strategies (visibility). Same figures define "liquid funds" for the withdrawal-queue ratio below.
+- **Withdrawal Queue vs TVL:** Pending withdrawal exit value (`totalShares` → `convertToExitAssets`) vs pool TVL. Alerts when pending **>** **1%** of TVL (LOW). Strategy AUM logged for context.
+- **Pool Liquidity:** Asset `balanceOf` the pool vs pending withdrawal exit value (`totalShares` → `convertToExitAssets`). Alerts when pending withdrawals **>** pool cash, i.e. the delegate cannot satisfy the queue from idle cash (MEDIUM). Queue depth is fetched only when alerting and included as context.
 - **Unknown Collateral Asset:** `collateralDisclosure { asset }` is used to detect collateral symbols not present in `ASSET_RISK_SCORES`. Alerts when a newly disclosed asset appears (MEDIUM).
 - **Collateralization Ratio:** [`syrupGlobals`](https://docs.maple.finance/integrate/technical-resources/collateral-and-yield-disclosure) combined ratio (OC loans only; strategies excluded). Alerts when `collateralRatio` **<** **135%** (MEDIUM).
-- **Proof of Reserves Divergence:** Maple's third-party PoR attestation (`proofOfReserves.totalCollateralValue`) is cross-checked against `syrupGlobals.collateralValue`. Alerts when `syrupGlobals.collateralValue` is more than **0.1%** above PoR (MEDIUM); no alert when PoR is above `syrupGlobals`.
-- **Pool Delegate Cover:** USDC `balanceOf` on PoolDelegateCover vs cached prior. Alerts if balance hits **$0** after a non-zero cached value, or on any decrease vs that cached prior (MEDIUM).
-- **Stablecoin Peg (DeFiLlama):** `syrupUSDC` and `syrupUSDT` prices monitored via [`stables/main.py`](../stables/main.py) (runs every 10 min). Depeg alert below **$0.97** (CRITICAL); fetch failure alerts LOW.
+- **Proof of Reserves Divergence:** Maple's third-party PoR attestation (`proofOfReserves.totalCollateralValue`) is cross-checked against `syrupGlobals.collateralValue`. Alerts when `syrupGlobals.collateralValue` is more than **10%** above PoR (MEDIUM); no alert when PoR is above `syrupGlobals`.
+- **Pool Delegate Cover:** Asset `balanceOf` on PoolDelegateCover vs cached prior. Alerts if balance hits **$0** after a non-zero cached value, or on any decrease vs that cached prior (MEDIUM).
+- **Stablecoin Peg (DeFiLlama):** `syrupUSDC`, `syrupUSDT`, and `syrupUSDG` prices monitored via [`stables/main.py`](../stables/main.py) (runs every 10 min). Depeg alert below **$0.97** (CRITICAL); fetch failure alerts LOW.
 
 ## Key Contracts
 
 | Contract | Address | Purpose |
 |----------|---------|---------|
 | syrupUSDC Pool | [`0x80ac24aA929eaF5013f6436cdA2a7ba190f5Cc0b`](https://etherscan.io/address/0x80ac24aA929eaF5013f6436cdA2a7ba190f5Cc0b) | ERC-4626 vault |
-| FixedTermLoanManager | [`0x4A1c3F0D9aD0b3f9dA085bEBfc22dEA54263371b`](https://etherscan.io/address/0x4A1c3F0D9aD0b3f9dA085bEBfc22dEA54263371b) | Loan health |
-| OpenTermLoanManager | [`0x6ACEb4cAbA81Fa6a8065059f3A944fb066A10fAc`](https://etherscan.io/address/0x6ACEb4cAbA81Fa6a8065059f3A944fb066A10fAc) | Loan health |
-| AaveStrategy | [`0x560B3A85Af1cEF113BB60105d0Cf21e1d05F91d4`](https://etherscan.io/address/0x560B3A85Af1cEF113BB60105d0Cf21e1d05F91d4) | DeFi allocation |
-| SkyStrategy | [`0x859C9980931fa0A63765fD8EF2e29918Af5b038C`](https://etherscan.io/address/0x859C9980931fa0A63765fD8EF2e29918Af5b038C) | DeFi allocation |
-| WithdrawalManagerQueue | [`0x1bc47a0Dd0FdaB96E9eF982fdf1F34DC6207cfE3`](https://etherscan.io/address/0x1bc47a0Dd0FdaB96E9eF982fdf1F34DC6207cfE3) | Withdrawal processing |
-| PoolDelegateCover | [`0x9e62FE15d0E99cE2b30CE0D256e9Ab7b6893AfF5`](https://etherscan.io/address/0x9e62FE15d0E99cE2b30CE0D256e9Ab7b6893AfF5) | Delegate skin-in-the-game |
+| FixedTermLoanManager | [`0x4A1c3F0D9aD0b3f9dA085bEBfc22dEA54263371b`](https://etherscan.io/address/0x4A1c3F0D9aD0b3f9dA085bEBfc22dEA54263371b) | Loan health (syrupUSDC) |
+| OpenTermLoanManager | [`0x6ACEb4cAbA81Fa6a8065059f3A944fb066A10fAc`](https://etherscan.io/address/0x6ACEb4cAbA81Fa6a8065059f3A944fb066A10fAc) | Loan health (syrupUSDC) |
+| AaveStrategy | [`0x560B3A85Af1cEF113BB60105d0Cf21e1d05F91d4`](https://etherscan.io/address/0x560B3A85Af1cEF113BB60105d0Cf21e1d05F91d4) | DeFi allocation (syrupUSDC) |
+| SkyStrategy | [`0x859C9980931fa0A63765fD8EF2e29918Af5b038C`](https://etherscan.io/address/0x859C9980931fa0A63765fD8EF2e29918Af5b038C) | DeFi allocation (syrupUSDC) |
+| WithdrawalManagerQueue (USDC) | [`0x1bc47a0Dd0FdaB96E9eF982fdf1F34DC6207cfE3`](https://etherscan.io/address/0x1bc47a0Dd0FdaB96E9eF982fdf1F34DC6207cfE3) | Withdrawal processing |
+| PoolDelegateCover (USDC) | [`0x9e62FE15d0E99cE2b30CE0D256e9Ab7b6893AfF5`](https://etherscan.io/address/0x9e62FE15d0E99cE2b30CE0D256e9Ab7b6893AfF5) | Delegate skin-in-the-game |
+| syrupUSDG Pool | [`0x87b65c4aaffa76881f9e96f3e7ed945ddfc3cd7a`](https://etherscan.io/address/0x87b65c4aaffa76881f9e96f3e7ed945ddfc3cd7a) | ERC-4626 vault |
+| Strategy (USDG) | [`0x7bE9A1FA4CD69F7a077692d4AFA52bD09531920A`](https://etherscan.io/address/0x7bE9A1FA4CD69F7a077692d4AFA52bD09531920A) | DeFi allocation (syrupUSDG) |
+| WithdrawalManagerQueue (USDG) | [`0xAf63C06970086d535F338565D77c5fA3bDC5fD79`](https://etherscan.io/address/0xAf63C06970086d535F338565D77c5fA3bDC5fD79) | Withdrawal processing |
+| PoolDelegateCover (USDG) | [`0xFdc1b5A10f4da87b459dfc3bF1313b33a2F6bfA9`](https://etherscan.io/address/0xFdc1b5A10f4da87b459dfc3bF1313b33a2F6bfA9) | Delegate skin-in-the-game (unfunded, not monitored) |
 
 ## Alert Thresholds
 
@@ -36,14 +40,14 @@ Severities match `AlertSeverity` in code (`utils.alert`): **CRITICAL** / **HIGH*
 | PPS decrease | Any decrease vs cached prior (`convertToAssets(1e6)`) | HIGH |
 | TVL change | ≥15% absolute change vs prior run (`totalAssets`) | HIGH |
 | Unrealized losses (on-chain) | Any non-zero on FixedTerm + OpenTerm loan managers | HIGH |
-| Unrealized losses vs pool | ≥0.5% of `totalAssets` per pool (subgraph; syrupUSDC + syrupUSDT) | HIGH |
+| Unrealized losses vs pool | ≥0.5% of `totalAssets` per pool (subgraph; syrupUSDC + syrupUSDT + syrupUSDG) | HIGH |
 | Withdrawal queue vs TVL | Pending withdrawal exit value **>** 1% of pool TVL (`totalAssets`) | LOW |
 | Pending withdrawals vs cash | Pending withdrawal exit value **>** pool cash | MEDIUM |
 | Unknown collateral asset | Collateral asset from `collateralDisclosure` not in `ASSET_RISK_SCORES` | MEDIUM |
 | Collateralization ratio | `syrupGlobals.collateralRatio` **<** 135% (combined Syrup pools; OC loans only) | MEDIUM |
-| Proof of Reserves divergence | `syrupGlobals.collateralValue` exceeds `proofOfReserves.totalCollateralValue` by >0.1% | MEDIUM |
-| Delegate cover | USDC balance → $0 from cached non-zero, or any decrease vs cached prior | MEDIUM |
-| Stablecoin peg (DeFiLlama) | `syrupUSDC` / `syrupUSDT` price **<** $0.97 — see [`stables/main.py`](../stables/main.py) | CRITICAL |
+| Proof of Reserves divergence | `syrupGlobals.collateralValue` exceeds `proofOfReserves.totalCollateralValue` by >10% | MEDIUM |
+| Delegate cover | Asset balance → $0 from cached non-zero, or any decrease vs cached prior | MEDIUM |
+| Stablecoin peg (DeFiLlama) | `syrupUSDC` / `syrupUSDT` / `syrupUSDG` price **<** $0.97 — see [`stables/main.py`](../stables/main.py) | CRITICAL |
 | DeFiLlama price fetch | Request fails — see [`stables/main.py`](../stables/main.py) | LOW |
 | Monitoring run failure | Uncaught exception in `main()` | LOW |
 
