@@ -29,7 +29,7 @@
 | syrupUSDG Pool | [`0x87b65c4aaffa76881f9e96f3e7ed945ddfc3cd7a`](https://etherscan.io/address/0x87b65c4aaffa76881f9e96f3e7ed945ddfc3cd7a) | ERC-4626 vault |
 | Strategy (USDG) | [`0x7bE9A1FA4CD69F7a077692d4AFA52bD09531920A`](https://etherscan.io/address/0x7bE9A1FA4CD69F7a077692d4AFA52bD09531920A) | DeFi allocation (syrupUSDG) |
 | WithdrawalManagerQueue (USDG) | [`0xAf63C06970086d535F338565D77c5fA3bDC5fD79`](https://etherscan.io/address/0xAf63C06970086d535F338565D77c5fA3bDC5fD79) | Withdrawal processing |
-| PoolDelegateCover (USDG) | [`0xFdc1b5A10f4da87b459dfc3bF1313b33a2F6bfA9`](https://etherscan.io/address/0xFdc1b5A10f4da87b459dfc3bF1313b33a2F6bfA9) | Delegate skin-in-the-game |
+| PoolDelegateCover (USDG) | [`0xFdc1b5A10f4da87b459dfc3bF1313b33a2F6bfA9`](https://etherscan.io/address/0xFdc1b5A10f4da87b459dfc3bF1313b33a2F6bfA9) | Delegate skin-in-the-game (unfunded, not monitored) |
 
 ## Alert Thresholds
 

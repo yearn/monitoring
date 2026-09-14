@@ -108,10 +108,10 @@ SYRUP_USDG = PoolConfig(
     asset_decimals=6,
     withdrawal_manager="0xAf63C06970086d535F338565D77c5fA3bDC5fD79",
     strategies=("0x7bE9A1FA4CD69F7a077692d4AFA52bD09531920A",),
-    delegate_cover="0xFdc1b5A10f4da87b459dfc3bF1313b33a2F6bfA9",
+    # PoolDelegateCover 0xFdc1b5A10f4da87b459dfc3bF1313b33a2F6bfA9 holds no USDG, so cover monitoring is disabled
+    # to avoid meaningless "Cover Empty" alerts. Re-add delegate_cover once the delegate funds it.
     pps_cache_key="MAPLE_USDG_PPS",
     tvl_cache_key="MAPLE_USDG_TVL",
-    cover_cache_key="MAPLE_USDG_DELEGATE_COVER",
 )
 
 POOLS: tuple[PoolConfig, ...] = (SYRUP_USDC, SYRUP_USDG)
