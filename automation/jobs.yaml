@@ -67,6 +67,7 @@ profiles:
       # proposals scripts must run AFTER timelock-alerts (cache dedupe ordering).
       - { name: "aave-proposals",         script: protocols/aave/proposals.py }
       - { name: "ustb",                   script: protocols/ustb/main.py }
+      - { name: "unibtc",                 script: protocols/unibtc/main.py }
       - { name: "compound-proposals",     script: protocols/compound/proposals.py }
       - { name: "fluid-proposals",        script: protocols/fluid/proposals.py }
       - { name: "maker-proposals",        script: protocols/maker/proposals.py }

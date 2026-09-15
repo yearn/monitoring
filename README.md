@@ -8,6 +8,7 @@ Monitoring scripts for DeFi protocols to track key metrics and send alerts. Join
 
 - [Aave V3](./protocols/aave/README.md)
 - [APYUSD](./protocols/apyusd/README.md)
+- [Bedrock uniBTC](./protocols/unibtc/README.md)
 - [Cap](./protocols/cap/README.md)
 - [Compound V3](./protocols/compound/README.md)
 - [Ethena](./protocols/ethena/README.md)
