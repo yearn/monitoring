@@ -17,7 +17,7 @@ The script checks if there are any new values pending in the timelock for a give
 
 Add a `VaultConfig` to `VAULTS_V1_BY_CHAIN` in [config.py](./config.py). Every configured V1 vault receives both market and governance monitoring. `governance.py` iterates every chain in that mapping, so a new chain needs no script change; a failure on one chain is logged and the remaining chains are still checked before the run fails.
 
-Monitored chains: Mainnet, Base, Katana, and HyperEVM (OUSD). HyperEVM uses `PROVIDER_URL_HYPEREVM` when set; if no `PROVIDER_URL_HYPEREVM*` variable exists it falls back to the public `https://rpc.hyperliquid.xyz/evm` (`PUBLIC_RPC_URLS` in [utils/chains.py](../../utils/chains.py)). RPC requests time out after 60 seconds so a stalled public endpoint cannot hang the daily profile.
+Monitored chains: Mainnet, Base, Katana, and HyperEVM. HyperEVM uses `PROVIDER_URL_HYPEREVM` when set; if no `PROVIDER_URL_HYPEREVM*` variable exists it falls back to the public `https://rpc.hyperliquid.xyz/evm` (`PUBLIC_RPC_URLS` in [utils/chains.py](../../utils/chains.py)). RPC requests time out after 60 seconds so a stalled public endpoint cannot hang the daily profile.
 
 ## Vaults & Markets
 
