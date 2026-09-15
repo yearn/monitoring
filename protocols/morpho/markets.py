@@ -7,6 +7,8 @@ This module checks Morpho markets for:
 3. Low liquidity
 """
 
+from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any, Dict, List
 
 from protocols.morpho._shared import (
@@ -52,6 +54,22 @@ YV_COLLATERAL_VOLATILE_PRICE_SHOCK = 0.15
 YV_COLLATERAL_FALLBACK_PRICE_SHOCK = 0.10
 
 
+@dataclass
+class LiquidityGroup:
+    """Combined v1/v2 withdrawable liquidity for one YV-collateral underlying asset on a chain."""
+
+    asset_symbol: str
+    asset_address: str  # lowercase
+    combined_total_assets: float
+    combined_liquidity: float
+    vault_names: List[str]
+
+
+def market_name(market: Dict[str, Any]) -> str:
+    """Return a 'COLLATERAL/LOAN' label for a GraphQL market with a collateral asset."""
+    return f"{market['collateralAsset']['symbol']}/{market['loanAsset']['symbol']}"
+
+
 def bad_debt_alert(
     markets: List[Dict[str, Any]],
     vault_name: str,
@@ -85,11 +103,10 @@ def bad_debt_alert(
         if is_bad_debt_excessive(bad_debt, borrowed_tvl):
             alerted_markets.add(market_id)
             market_url = get_market_url(market_id, chain)
-            market_name = f"{market['collateralAsset']['symbol']}/{market['loanAsset']['symbol']}"
 
             message = (
                 f"🚨 Bad debt detected in [{vault_name}]({vault_url}) on {chain.name}\n"
-                f"💹 Market: [{market_name}]({market_url})\n"
+                f"💹 Market: [{market_name(market)}]({market_url})\n"
                 f"💸 Bad debt: ${bad_debt:,.2f} ({(bad_debt / borrowed_tvl):.2%} of borrowed)\n"
             )
 
@@ -101,11 +118,9 @@ def check_allocation_and_risk(vault_data: Dict[str, Any]) -> None:
     Check per-market allocation and total vault risk level.
     Sends a consolidated alert if any markets exceed allocation thresholds.
     Sends a separate alert if total risk level exceeds the vault's maximum.
+    Callers must skip vaults below ``MIN_VAULT_ASSETS_USD`` (see ``main``).
     """
-    total_assets = vault_data.get("state", {}).get("totalAssetsUsd", 0) or 0
-    if total_assets < MIN_VAULT_ASSETS_USD:
-        return
-
+    total_assets = vault_data["state"]["totalAssetsUsd"]
     vault_name = vault_data["name"]
     chain = Chain.from_chain_id(vault_data["chain"]["id"])
     vault_address = vault_data["address"]
@@ -132,9 +147,8 @@ def check_allocation_and_risk(vault_data: Dict[str, Any]) -> None:
 
         if assessment.allocation_exceeded:
             market_url = get_market_url(market_id, chain)
-            market_name = f"{market['collateralAsset']['symbol']}/{market['loanAsset']['symbol']}"
             allocation_violations.append(
-                f"- [{market_name}]({market_url}) (risk {market_risk_level}): "
+                f"- [{market_name(market)}]({market_url}) (risk {market_risk_level}): "
                 f"{assessment.allocation_ratio:.1%} (max: {assessment.allocation_threshold:.1%})"
             )
 
@@ -164,13 +178,10 @@ def check_allocation_and_risk(vault_data: Dict[str, Any]) -> None:
 
 def group_vaults_by_chain(vaults_data: List[Dict[str, Any]]) -> Dict[Chain, List[Dict[str, Any]]]:
     """Group vaults by their chain."""
-    vaults_by_chain: Dict[Chain, List[Dict[str, Any]]] = {}
+    vaults_by_chain: Dict[Chain, List[Dict[str, Any]]] = defaultdict(list)
     for vault_data in vaults_data:
-        chain = Chain.from_chain_id(vault_data["chain"]["id"])
-        if chain not in vaults_by_chain:
-            vaults_by_chain[chain] = []
-        vaults_by_chain[chain].append(vault_data)
-    return vaults_by_chain
+        vaults_by_chain[Chain.from_chain_id(vault_data["chain"]["id"])].append(vault_data)
+    return dict(vaults_by_chain)
 
 
 def find_yv_vaults_for_asset(
@@ -282,12 +293,13 @@ def get_yv_collateral_liquidity_by_asset(
     chain: Chain,
     chain_vaults: List[Dict[str, Any]],
     chain_v2_vaults: List[Dict[str, Any]],
-) -> Dict[str, Dict[str, Any]]:
+) -> Dict[str, LiquidityGroup]:
     """Build withdrawable liquidity groups for Yearn-vault collateral underlying assets."""
     yv_vaults_by_asset = get_collateral_vaults_by_asset(chain, version=1)
     yv_v2_vaults_by_asset = get_collateral_vaults_by_asset(chain, version=2)
-    liquidity_by_asset: Dict[str, Dict[str, Any]] = {}
+    liquidity_by_asset: Dict[str, LiquidityGroup] = {}
 
+    # Keys are lowercase asset addresses, so each asset gets exactly one group.
     asset_addresses = yv_vaults_by_asset.keys() | yv_v2_vaults_by_asset.keys()
     for asset_address in asset_addresses:
         asset_yv_vaults = find_yv_vaults_for_asset(
@@ -307,11 +319,7 @@ def get_yv_collateral_liquidity_by_asset(
             continue
 
         asset_symbol = asset_yv_vaults[0].get("asset", {}).get("symbol", "UNKNOWN")
-        (
-            combined_total_assets,
-            combined_liquidity,
-            vault_names,
-        ) = calculate_combined_metrics(asset_yv_vaults)
+        combined_total_assets, combined_liquidity, vault_names = calculate_combined_metrics(asset_yv_vaults)
 
         if combined_total_assets < MIN_VAULT_ASSETS_USD:
             logger.info(
@@ -320,29 +328,13 @@ def get_yv_collateral_liquidity_by_asset(
                 f"{combined_total_assets:,.2f}",
             )
 
-        asset_key = asset_address.lower()
-        group_data = {
-            "asset_symbol": asset_symbol,
-            "asset_address": asset_key,
-            "combined_total_assets": combined_total_assets,
-            "combined_liquidity": combined_liquidity,
-            "vault_names": vault_names,
-            "vault_count": len(vault_names),
-        }
-        if asset_key in liquidity_by_asset:
-            existing = liquidity_by_asset[asset_key]
-            logger.warning(
-                "Duplicate YV collateral liquidity group for %s on %s; aggregating %s into existing group",
-                asset_symbol,
-                chain.name,
-                asset_address,
-            )
-            existing["combined_total_assets"] += group_data["combined_total_assets"]
-            existing["combined_liquidity"] += group_data["combined_liquidity"]
-            existing["vault_names"].extend(group_data["vault_names"])
-            existing["vault_count"] += group_data["vault_count"]
-        else:
-            liquidity_by_asset[asset_key] = group_data
+        liquidity_by_asset[asset_address] = LiquidityGroup(
+            asset_symbol=asset_symbol,
+            asset_address=asset_address,
+            combined_total_assets=combined_total_assets,
+            combined_liquidity=combined_liquidity,
+            vault_names=vault_names,
+        )
 
         liquidity_ratio = combined_liquidity / combined_total_assets if combined_total_assets else 0
         logger.info(
@@ -361,8 +353,8 @@ def get_yv_collateral_liquidity_by_asset(
 def collect_yv_collateral_markets(
     chain: Chain,
     configured_markets: List[Dict[str, Any]],
-    liquidity_by_asset: Dict[str, Dict[str, Any]],
-) -> Dict[str, tuple[Dict[str, Any], Dict[str, Any]]]:
+    liquidity_by_asset: Dict[str, LiquidityGroup],
+) -> Dict[str, tuple[Dict[str, Any], LiquidityGroup]]:
     """Collect configured direct Yearn vault collateral markets."""
     configured_markets_by_asset = YV_COLLATERAL_MARKETS_BY_ASSET.get(chain, {})
     market_to_asset = {
@@ -370,7 +362,7 @@ def collect_yv_collateral_markets(
         for asset_address, market_ids in configured_markets_by_asset.items()
         for market_id in market_ids
     }
-    markets: Dict[str, tuple[Dict[str, Any], Dict[str, Any]]] = {}
+    markets: Dict[str, tuple[Dict[str, Any], LiquidityGroup]] = {}
 
     for market in configured_markets:
         collateral_asset = market.get("collateralAsset")
@@ -452,7 +444,7 @@ def get_markets_collateral_at_risk_usd(market_shocks: Dict[str, float], chain: C
 def check_yv_collateral_market_liquidity(
     chain: Chain,
     configured_markets: List[Dict[str, Any]],
-    liquidity_by_asset: Dict[str, Dict[str, Any]],
+    liquidity_by_asset: Dict[str, LiquidityGroup],
 ) -> None:
     """Alert only when underlying liquidity cannot cover risky direct YV collateral liquidations."""
     markets = collect_yv_collateral_markets(chain, configured_markets, liquidity_by_asset)
@@ -467,9 +459,6 @@ def check_yv_collateral_market_liquidity(
 
     checks_by_asset: Dict[str, Dict[str, Any]] = {}
     for market_id, (market, liquidity_group) in markets.items():
-        collateral_asset = market["collateralAsset"]
-        loan_asset = market["loanAsset"]
-        asset_symbol = liquidity_group["asset_symbol"]
         price_shock = market_shocks[market_id]
         collateral_at_risk = collateral_at_risk_by_market.get(market_id)
 
@@ -477,18 +466,16 @@ def check_yv_collateral_market_liquidity(
             continue
         if collateral_at_risk < YV_COLLATERAL_MIN_AT_RISK_USD:
             logger.info(
-                "Skipping %s/%s YV liquidity check on %s: collateral at risk $%s below threshold",
-                collateral_asset["symbol"],
-                loan_asset["symbol"],
+                "Skipping %s YV liquidity check on %s: collateral at risk $%s below threshold",
+                market_name(market),
                 chain.name,
                 f"{collateral_at_risk:,.2f}",
             )
             continue
 
-        asset_address = liquidity_group["asset_address"]
         required_liquidity = collateral_at_risk * YV_COLLATERAL_LIQUIDATION_BUFFER
         group_check = checks_by_asset.setdefault(
-            asset_address,
+            liquidity_group.asset_address,
             {
                 "liquidity_group": liquidity_group,
                 "total_collateral_at_risk": 0.0,
@@ -499,18 +486,17 @@ def check_yv_collateral_market_liquidity(
         group_check["total_collateral_at_risk"] += collateral_at_risk
         group_check["total_required_liquidity"] += required_liquidity
         market_url = get_market_url(market_id, chain)
-        market_name = f"{collateral_asset['symbol']}/{loan_asset['symbol']}"
         group_check["market_lines"].append(
-            f"- [{market_name}]({market_url}): ${collateral_at_risk:,.2f} at risk "
+            f"- [{market_name(market)}]({market_url}): ${collateral_at_risk:,.2f} at risk "
             f"({price_shock:.0%} shock, LLTV {parse_lltv(market.get('lltv')):.1%})"
         )
 
     for group_check in checks_by_asset.values():
         liquidity_group = group_check["liquidity_group"]
-        combined_liquidity = liquidity_group["combined_liquidity"]
+        combined_liquidity = liquidity_group.combined_liquidity
         required_liquidity = group_check["total_required_liquidity"]
         coverage = combined_liquidity / required_liquidity
-        asset_symbol = liquidity_group["asset_symbol"]
+        asset_symbol = liquidity_group.asset_symbol
 
         logger.info(
             "YV collateral liquidity check for %s on %s: $%s liquidity, $%s collateral at risk, %sx coverage",
@@ -524,7 +510,7 @@ def check_yv_collateral_market_liquidity(
         if combined_liquidity >= required_liquidity:
             continue
 
-        vault_list = ", ".join(liquidity_group["vault_names"])
+        vault_list = ", ".join(liquidity_group.vault_names)
         market_lines = "\n".join(group_check["market_lines"])
         message = (
             f"⚠️ Insufficient {asset_symbol} unwind liquidity for YV collateral markets on {chain.name}\n"
@@ -623,8 +609,6 @@ _VAULTS_QUERY = """
                         supplyCap
                         supplyAssetsUsd
                         withdrawQueueIndex
-                        pendingSupplyCapUsd
-                        pendingSupplyCapValidAt
                         market {
                             marketId
                             lltv

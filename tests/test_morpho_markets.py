@@ -18,6 +18,7 @@ from protocols.morpho.config import VAULTS_V2_BY_CHAIN, VaultConfig, get_collate
 from protocols.morpho.markets import (
     YV_COLLATERAL_AT_RISK_POINTS,
     YV_COLLATERAL_STABLE_PRICE_SHOCK,
+    LiquidityGroup,
     calculate_combined_metrics,
     check_yv_collateral_market_liquidity,
     collect_yv_collateral_markets,
@@ -33,6 +34,7 @@ from protocols.morpho.markets_v2 import (
     main,
     score_market_allocations,
 )
+from protocols.morpho.risk import MARKETS_RISK_2, get_market_risk_level
 from utils.chains import Chain
 from utils.telegram import CURATION_CHANNEL
 
@@ -290,7 +292,7 @@ class TestMorphoCollateralLiquidity(unittest.TestCase):
             "collateralAsset": {"chain": {"id": Chain.KATANA.chain_id}},
             "state": {"borrowAssetsUsd": 100_000},
         }
-        liquidity_group = {"asset_address": asset_address}
+        liquidity_group = LiquidityGroup("USDC", asset_address, 0.0, 0.0, [])
 
         result = collect_yv_collateral_markets(
             Chain.KATANA,
@@ -312,12 +314,13 @@ class TestMorphoCollateralLiquidity(unittest.TestCase):
             "state": {"borrowAssetsUsd": 1_000_000},
         }
         liquidity_by_asset = {
-            asset_address: {
-                "asset_address": asset_address,
-                "asset_symbol": "vbUSDT",
-                "combined_liquidity": 425_077.48,
-                "vault_names": ["Gauntlet USDT", "Yearn OG USDT (V2)"],
-            }
+            asset_address: LiquidityGroup(
+                asset_symbol="vbUSDT",
+                asset_address=asset_address,
+                combined_total_assets=1_000_000,
+                combined_liquidity=425_077.48,
+                vault_names=["Gauntlet USDT", "Yearn OG USDT (V2)"],
+            )
         }
 
         with (
@@ -340,6 +343,11 @@ class TestMorphoCollateralLiquidity(unittest.TestCase):
         # protocol stays morpho so the emergency-withdrawal dispatch hook still fires.
         self.assertEqual(alert.protocol, PROTOCOL)
         self.assertIn("Insufficient vbUSDT unwind liquidity", alert.message)
+        self.assertIn(
+            "- [yvvbUSDT/vbUSDC](https://app.morpho.org/katana/market/"
+            "0x6691cdcadd5d23ac68d2c1cf54dc97ab8242d2a888230de411094480252c2ed3/): $516,853.61 at risk",
+            alert.message,
+        )
 
     def test_unwind_alert_falls_back_to_morpho_chat_when_curation_unset(self) -> None:
         with patch.dict(os.environ, {"TELEGRAM_CHAT_ID_CURATION": ""}):
@@ -450,8 +458,17 @@ class TestMorphoCollateralLiquidity(unittest.TestCase):
         groups = get_yv_collateral_liquidity_by_asset(Chain.KATANA, v1_vaults, [])
         wbtc_group = groups["0x0913da6da4b42f538b445599b46bb4622342cf52"]
 
-        self.assertEqual(wbtc_group["combined_total_assets"], 0)
-        self.assertEqual(wbtc_group["combined_liquidity"], 0)
+        self.assertEqual(wbtc_group.combined_total_assets, 0)
+        self.assertEqual(wbtc_group.combined_liquidity, 0)
+
+
+class TestMorphoRiskLookup(unittest.TestCase):
+    def test_market_risk_level_is_case_insensitive_and_defaults_to_5(self) -> None:
+        market_id = MARKETS_RISK_2[Chain.HYPEREVM][0]
+
+        self.assertEqual(get_market_risk_level(market_id.upper().replace("0X", "0x"), Chain.HYPEREVM), 2)
+        self.assertEqual(get_market_risk_level(market_id, Chain.MAINNET), 5)
+        self.assertEqual(get_market_risk_level("0x" + "00" * 32, Chain.HYPEREVM), 5)
 
 
 if __name__ == "__main__":
