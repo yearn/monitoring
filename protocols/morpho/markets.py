@@ -487,7 +487,7 @@ def check_yv_collateral_market_liquidity(
         group_check["total_required_liquidity"] += required_liquidity
         market_url = get_market_url(market_id, chain)
         group_check["market_lines"].append(
-            f"- [{market_name(market)}]({market_url}):${collateral_at_risk:,.2f} at risk "
+            f"- [{market_name(market)}]({market_url}): ${collateral_at_risk:,.2f} at risk "
             f"({price_shock:.0%} shock, LLTV {parse_lltv(market.get('lltv')):.1%})"
         )
 

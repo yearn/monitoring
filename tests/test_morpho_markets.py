@@ -343,6 +343,11 @@ class TestMorphoCollateralLiquidity(unittest.TestCase):
         # protocol stays morpho so the emergency-withdrawal dispatch hook still fires.
         self.assertEqual(alert.protocol, PROTOCOL)
         self.assertIn("Insufficient vbUSDT unwind liquidity", alert.message)
+        self.assertIn(
+            "- [yvvbUSDT/vbUSDC](https://app.morpho.org/katana/market/"
+            "0x6691cdcadd5d23ac68d2c1cf54dc97ab8242d2a888230de411094480252c2ed3/): $516,853.61 at risk",
+            alert.message,
+        )
 
     def test_unwind_alert_falls_back_to_morpho_chat_when_curation_unset(self) -> None:
         with patch.dict(os.environ, {"TELEGRAM_CHAT_ID_CURATION": ""}):
