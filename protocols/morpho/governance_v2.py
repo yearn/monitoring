@@ -295,26 +295,6 @@ def _vault_header(snapshot: V2GovernanceSnapshot) -> str:
     return f"V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) on {snapshot.chain.name}"
 
 
-def _split_body(body: str, budget: int) -> List[str]:
-    """Split one oversized section, preferring boundaries between lines."""
-    if budget <= 0:
-        raise ValueError(f"Message body budget must be positive, got {budget}")
-
-    chunks: List[str] = []
-    remaining = body
-    while len(remaining) > budget:
-        split_at = remaining.rfind("\n", 0, budget + 1)
-        if split_at <= 0:
-            split_at = budget
-        else:
-            split_at += 1
-        chunks.append(remaining[:split_at])
-        remaining = remaining[split_at:]
-    if remaining or not chunks:
-        chunks.append(remaining)
-    return chunks
-
-
 def _alert_pending_new(
     snapshot: V2GovernanceSnapshot,
     pending: List[tuple[PendingConfig, str]],

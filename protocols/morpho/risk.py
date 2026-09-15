@@ -290,8 +290,9 @@ def get_market_allocation_threshold(market_risk_level: int, vault_risk_level: in
     return ALLOCATION_TIERS[adjusted_risk]
 
 
-def get_market_risk_level(market_id: str, chain: Chain) -> int:
-    """Return the configured 1-5 risk tier for a Morpho market."""
+def _build_market_risk_levels() -> dict[tuple[Chain, str], int]:
+    """Index every configured market by (chain, lowercase id); the lowest tier wins on duplicates."""
+    levels: dict[tuple[Chain, str], int] = {}
     for risk_level, markets_by_chain in (
         (1, MARKETS_RISK_1),
         (2, MARKETS_RISK_2),
@@ -299,10 +300,18 @@ def get_market_risk_level(market_id: str, chain: Chain) -> int:
         (4, MARKETS_RISK_4),
         (5, MARKETS_RISK_5),
     ):
-        configured = {configured_id.lower() for configured_id in markets_by_chain.get(chain, [])}
-        if market_id.lower() in configured:
-            return risk_level
-    return 5
+        for chain, market_ids in markets_by_chain.items():
+            for market_id in market_ids:
+                levels.setdefault((chain, market_id.lower()), risk_level)
+    return levels
+
+
+_MARKET_RISK_LEVELS = _build_market_risk_levels()
+
+
+def get_market_risk_level(market_id: str, chain: Chain) -> int:
+    """Return the configured 1-5 risk tier for a Morpho market, or 5 if unlisted."""
+    return _MARKET_RISK_LEVELS.get((chain, market_id.lower()), 5)
 
 
 def assess_exposure(

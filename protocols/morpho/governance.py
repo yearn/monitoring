@@ -297,7 +297,7 @@ def check_timelock_and_guardian(
         batch.add(morpho_contract.functions.pendingGuardian().call(block_identifier=block_number))
         responses = client.execute_batch(batch)
         if len(responses) != 2:
-            raise ValueError("Expected 2 responses from batch, got: ", len(responses))
+            raise ValueError(f"Expected 2 responses from batch, got {len(responses)}")
 
         timelock = responses[0][1]  # [1] to get the timestamp
         guardian = responses[1][1]  # [1] to get the timestamp
