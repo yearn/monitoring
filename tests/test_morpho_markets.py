@@ -14,7 +14,7 @@ from protocols.morpho._shared import (
     MorphoMonitoringError,
     MorphoV2MonitoringError,
 )
-from protocols.morpho.config import VAULTS_V2_BY_CHAIN, get_collateral_vaults_by_asset
+from protocols.morpho.config import VAULTS_V2_BY_CHAIN, VaultConfig, get_collateral_vaults_by_asset
 from protocols.morpho.markets import (
     YV_COLLATERAL_AT_RISK_POINTS,
     YV_COLLATERAL_STABLE_PRICE_SHOCK,
@@ -84,6 +84,23 @@ class TestMorphoV2Configuration(unittest.TestCase):
             self.assertRaisesRegex(MorphoV2MonitoringError, "omitted configured Vault V2"),
         ):
             discover_v2_vaults_by_chain()
+
+    def test_discovery_skips_vaults_without_market_monitoring(self) -> None:
+        wrapper = VaultConfig("Wrapper", "0x" + "55" * 20, 2, monitor_markets=False)
+        response = MagicMock()
+        response.json.return_value = {"data": {"vaultV2s": {"items": []}}}
+
+        with (
+            patch("protocols.morpho.markets_v2.VAULTS_V2_BY_CHAIN", {Chain.HYPEREVM: (wrapper,)}),
+            patch("protocols.morpho._shared.request_with_retry", return_value=response) as request,
+        ):
+            self.assertEqual(discover_v2_vaults_by_chain(), {})
+        request.assert_not_called()
+
+    def test_hyperevm_ousd_v2_wrapper_is_governance_only(self) -> None:
+        (wrapper,) = VAULTS_V2_BY_CHAIN[Chain.HYPEREVM]
+        self.assertEqual(wrapper.address, "0xE90959cbE7E56b5eBFF9AD12de611A4976F2d2B1")
+        self.assertFalse(wrapper.monitor_markets)
 
     def test_discovery_rejects_non_market_adapters(self) -> None:
         item = {

@@ -109,5 +109,24 @@ class TestMorphoV1GovernanceGrouping(unittest.TestCase):
         self.assertEqual(message.count("Adding new market"), 2)
 
 
+class TestMorphoV1GovernanceMain(unittest.TestCase):
+    def test_main_checks_every_configured_chain_and_continues_after_failure(self) -> None:
+        checked: list[Chain] = []
+
+        def fake_get_data_for_chain(chain: Chain) -> None:
+            checked.append(chain)
+            if chain == Chain.MAINNET:
+                raise RuntimeError("rpc down")
+
+        with (
+            patch("protocols.morpho.governance.get_data_for_chain", side_effect=fake_get_data_for_chain),
+            self.assertRaisesRegex(governance.MorphoMonitoringError, "MAINNET: RuntimeError: rpc down"),
+        ):
+            governance.main()
+
+        self.assertEqual(checked, list(governance.VAULTS_V1_BY_CHAIN))
+        self.assertIn(Chain.HYPEREVM, checked)
+
+
 if __name__ == "__main__":
     unittest.main()
