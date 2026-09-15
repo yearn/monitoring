@@ -127,6 +127,18 @@ ALL_SAFE_ADDRESSES = [
         "0xA27cA9292268ee0f0258B749f1D5740c9Bb68B50",
         "Strata Admin Multisig (3/4)",
     ],
+    [
+        "unibtc",
+        "mainnet",
+        "0xC9dA980fFABbE2bbe15d4734FDae5761B86b5Fc3",
+        "uniBTC ops Safe (3/5)",
+    ],
+    [
+        "unibtc",
+        "mainnet",
+        "0xAeE017052DF6Ac002647229D58B786E380B9721A",
+        "Bedrock admin Safe (3/5)",
+    ],
     # [
     #     "INFINIFI",
     #     "mainnet",

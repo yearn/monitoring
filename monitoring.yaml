@@ -415,6 +415,32 @@ protocols:
       - name: "Timelock Events"
         description: "CallScheduled/ProposalQueued/QueueTransaction/StartVote/ProposalScheduled events across monitored timelocks via Envio"
 
+  unibtc:
+    display_name: "Bedrock uniBTC"
+    description: "Bedrock uniBTC minting, PoR, feeder, redemption, and peg monitoring on Mainnet"
+    cadence: "Hourly"
+    tasks:
+      - protocols/unibtc/main.py
+    monitors:
+      - name: "Unexpected Minting"
+        description: "uniBTC totalSupply delta +10 in ~1h (CRITICAL) or +2 in ~24h (HIGH); no event scanning"
+      - name: "Reserve Gate"
+        description: "Any change to Vault adequacyRatio, chainlinkReserveFeeder, uniBTCSupplyFeeder, or feederHeartbeat"
+      - name: "Vault or Router Paused"
+        description: "Vault outOfService()/paused() or live DelayRedeemRouter paused() is true"
+      - name: "Proof of Reserves"
+        description: "Chainlink PoR / Bedrock API supply <100% (CRITICAL) or <101% (HIGH)"
+      - name: "PoR Staleness"
+        description: "Chainlink PoR updatedAt older than 86,400s"
+      - name: "Supply Feeder"
+        description: "On-chain feeder vs Bedrock API gap >2%, or feeder value unchanged for 48h"
+      - name: "Redemptions Underfunded"
+        description: "Uncleared WBTC router debt exceeds Vault WBTC for >24h and is growing"
+      - name: "Peg"
+        description: "uniBTC price < 0.98 BTC"
+      - name: "Safe Multisigs"
+        description: "uniBTC ops Safe and Bedrock admin Safe queues"
+
   ustb:
     display_name: "Superstate USTB"
     description: "Superstate USTB fund and oracle monitoring"
