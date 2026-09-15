@@ -146,6 +146,12 @@ MARKETS_RISK_2 = {
         "0x61fcb4d6d1534eedeb0e0bea361745f727d73f14569d231c4a2b39232b6b7312",  # yvvbUSDT/vbWBTC -> lltv 77%, oracle: yearn vault exchange rate. Chainlink WBTC/USD and Chainlink USDT/USD.
         "0x09c2ecea0580698a91be0cff2bad3648b00744453c14a9bfb6be5ca7b9950908",  # PT-yvvbUSDC/vbUSDT -> lltv 86%, oracle: Spectra PriceFeedCurvePTAssetBounded (not Pendle) — min(max(Curve StableSwap-NG TWAP, ZCB model at 25% implied rate), redemption value), so the ZCB floor bounds a downward TWAP push. Chainlink USDC/USD and Chainlink USDT/USD.
     ],
+    Chain.HYPEREVM: [
+        "0xd13b1bad542045a8dc729fa0ffcc4f538b9771592c2666e1f09667dcf85804fc",  # WHYPE/USDC -> lltv 62.5%, oracle: MorphoChainlinkOracleV2 — RedStone Price Feed for HYPE; no quote feed (USDC = $1). Same oracle as 77% WHYPE/USDC.
+        "0xd7d38220652d19c87099c3b23de9a70a1893620a050c635d1a94bd947c9c59a8",  # WHYPE/USDC -> lltv 77%, oracle: MorphoChainlinkOracleV2 — RedStone Price Feed for HYPE; no quote feed (USDC = $1). Same oracle as 62.5% WHYPE/USDC.
+        "0xe7aa046832007a975d4619260d221229e99cc27da2e6ef162881202b4cd2349b",  # kHYPE/USDC -> lltv 62.5%, oracle: MorphoChainlinkOracleV2 — RedStone kHYPE_FUNDAMENTAL (kHYPE/HYPE) × RedStone HYPE/USD; no quote feed (USDC = $1).
+        "0x96c47d3797394dd25e33f814216793a89d2e6edcc54d1dac3ab4c2b2d82a73b9",  # kHYPE/USDC -> lltv 77%, oracle: MorphoChainlinkOracleV2 — RedStone kHYPE/USD ÷ RedStone USDC/USD (spot).
+    ],
 }
 
 MARKETS_RISK_3 = {

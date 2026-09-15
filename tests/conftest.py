@@ -22,7 +22,9 @@ def _isolate_from_live_apis(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     Strips `ETHERSCAN_TOKEN`, every `PROVIDER_URL_*`, every `TELEGRAM_*`
     credential, and emergency webhook credentials so a missing mock short-circuits cheaply via
     the "no token / no provider / no credentials" code paths that already exist
-    for production use. Forces `LOG_LEVEL=INFO` so a developer's `.env`
+    for production use. Also clears `DEFAULT_PROVIDER_URLS` so a public HyperEVM
+    fallback cannot become a live RPC when a test forgets to mock ChainManager.
+    Forces `LOG_LEVEL=INFO` so a developer's `.env`
     `LOG_LEVEL=DEBUG` (which skips Telegram sends) can't change tested behavior.
     Tests that intentionally exercise those code paths opt back in via
     monkeypatch / @patch.dict. This keeps local runs deterministic and matching
@@ -57,5 +59,8 @@ def _isolate_from_live_apis(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
             from utils.web3_wrapper import ChainManager
 
         ChainManager._instances.clear()
+        # HyperEVM (and any future public defaults) must not become live RPCs
+        # when a test forgets to mock ChainManager.
+        monkeypatch.setattr("utils.web3_wrapper.DEFAULT_PROVIDER_URLS", {})
     except Exception:  # noqa: BLE001 - test setup is best-effort
         pass

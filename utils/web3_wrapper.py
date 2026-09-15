@@ -19,6 +19,11 @@ load_dotenv()
 
 logger = get_logger("utils.web3")
 
+# Used when PROVIDER_URL_{CHAIN} is unset so public chains can run without a VPS env change.
+DEFAULT_PROVIDER_URLS: Dict[Chain, str] = {
+    Chain.HYPEREVM: "https://rpc.hyperliquid.xyz/evm",
+}
+
 T = TypeVar("T")  # Generic type for return values
 
 # Cap on the per-attempt backoff sleep so exponential growth cannot stall a run
@@ -151,7 +156,7 @@ class Web3Client(RetryProviders):
         self.endpoint_uri = endpoint_uri
 
     def _get_provider_urls(self) -> List[str]:
-        """Get provider URLs for the chain from environment variables"""
+        """Get provider URLs for the chain from environment variables, then public defaults."""
         urls = []
         # Get default provider
         env_key = f"PROVIDER_URL_{self.chain.name.upper()}"
@@ -165,6 +170,12 @@ class Web3Client(RetryProviders):
             url = os.getenv(env_key)
             if url:
                 urls.append(url)
+
+        default = DEFAULT_PROVIDER_URLS.get(self.chain)
+        if default:
+            # Env RPCs stay first; the public default is always the last fallback.
+            urls = [url for url in urls if url != default]
+            urls.append(default)
 
         if not urls:
             raise ValueError(f"No providers found for chain {self.chain.name}")

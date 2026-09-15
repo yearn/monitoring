@@ -14,6 +14,7 @@ import requests
 from web3 import Web3
 
 from utils.alert import Alert, AlertSeverity, register_alert_hook, send_alert
+from utils.chains import Chain
 from utils.config import Config, ProtocolConfig
 from utils.telegram import TelegramError, send_envio_error_message, send_error_message, send_telegram_message
 from utils.web3_wrapper import (
@@ -1016,6 +1017,74 @@ class TestRetryWithProviderRotation(unittest.TestCase):
         self.assertEqual(batch.call_count, 2)
         self.assertEqual(provider.endpoint_uri, provider_urls[1])
         self.assertEqual(client.endpoint_uri, provider_urls[1])
+
+
+class TestDefaultProviderUrls(unittest.TestCase):
+    """Public RPC fallbacks used when PROVIDER_URL_{CHAIN} is unset."""
+
+    def test_hyperevm_falls_back_to_public_rpc(self):
+        client = Web3Client.__new__(Web3Client)
+        client.chain = Chain.HYPEREVM
+        env = {key: value for key, value in os.environ.items() if not key.startswith("PROVIDER_URL_")}
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch.dict(
+                "utils.web3_wrapper.DEFAULT_PROVIDER_URLS",
+                {Chain.HYPEREVM: "https://rpc.hyperliquid.xyz/evm"},
+                clear=True,
+            ),
+        ):
+            self.assertEqual(client._get_provider_urls(), ["https://rpc.hyperliquid.xyz/evm"])
+
+    def test_env_provider_is_tried_before_public_default(self):
+        client = Web3Client.__new__(Web3Client)
+        client.chain = Chain.HYPEREVM
+        with (
+            patch.dict(os.environ, {"PROVIDER_URL_HYPEREVM": "https://custom.example/evm"}, clear=False),
+            patch.dict(
+                "utils.web3_wrapper.DEFAULT_PROVIDER_URLS",
+                {Chain.HYPEREVM: "https://rpc.hyperliquid.xyz/evm"},
+                clear=True,
+            ),
+        ):
+            self.assertEqual(
+                client._get_provider_urls(),
+                ["https://custom.example/evm", "https://rpc.hyperliquid.xyz/evm"],
+            )
+
+    def test_public_default_is_always_last_even_if_listed_in_env(self):
+        client = Web3Client.__new__(Web3Client)
+        client.chain = Chain.HYPEREVM
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PROVIDER_URL_HYPEREVM": "https://rpc.hyperliquid.xyz/evm",
+                    "PROVIDER_URL_HYPEREVM_1": "https://custom.example/evm",
+                },
+                clear=False,
+            ),
+            patch.dict(
+                "utils.web3_wrapper.DEFAULT_PROVIDER_URLS",
+                {Chain.HYPEREVM: "https://rpc.hyperliquid.xyz/evm"},
+                clear=True,
+            ),
+        ):
+            self.assertEqual(
+                client._get_provider_urls(),
+                ["https://custom.example/evm", "https://rpc.hyperliquid.xyz/evm"],
+            )
+
+    def test_chain_without_default_still_requires_env(self):
+        client = Web3Client.__new__(Web3Client)
+        client.chain = Chain.MAINNET
+        env = {key: value for key, value in os.environ.items() if not key.startswith("PROVIDER_URL_")}
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch.dict("utils.web3_wrapper.DEFAULT_PROVIDER_URLS", {}, clear=True),
+        ):
+            with self.assertRaisesRegex(ValueError, "No providers found for chain MAINNET"):
+                client._get_provider_urls()
 
 
 class TestUstbCachePath(unittest.TestCase):

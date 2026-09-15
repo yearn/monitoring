@@ -336,6 +336,7 @@ def main() -> None:
     get_data_for_chain(Chain.MAINNET)
     get_data_for_chain(Chain.KATANA)
     get_data_for_chain(Chain.BASE)
+    get_data_for_chain(Chain.HYPEREVM)
 
 
 if __name__ == "__main__":

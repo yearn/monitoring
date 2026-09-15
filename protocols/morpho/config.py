@@ -40,6 +40,9 @@ VAULTS_V1_BY_CHAIN: dict[Chain, tuple[VaultConfig, ...]] = {
         VaultConfig("Yearn OG WETH", "0x1D795E29044A62Da42D927c4b179269139A28A6B", 2),
         VaultConfig("OUSD", "0x581Cc9a73Ec7431723A4a80699B8f801205841F1", 2),
     ),
+    # OUSD V2 0xE90959cbE7E56b5eBFF9AD12de611A4976F2d2B1 wraps this V1 via a MetaMorpho
+    # adapter. markets_v2 rejects that adapter type, so HyperEVM OUSD is monitored here.
+    Chain.HYPEREVM: (VaultConfig("OUSD", "0x0fb7e41A0A85Eb0BcA55172b73942cc6685e2B2E", 2),),
     Chain.KATANA: (
         VaultConfig("Yearn OG WETH", "0xFaDe0C546f44e33C134c4036207B314AC643dc2E", 1, KATANA_WETH),
         VaultConfig("Yearn OG USDC", "0xCE2b8e464Fc7b5E58710C24b7e5EBFB6027f29D7", 1, KATANA_USDC),
