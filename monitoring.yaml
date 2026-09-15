@@ -273,7 +273,7 @@ protocols:
 
   morpho:
     display_name: "Morpho"
-    description: "Morpho market, vault, and governance monitoring"
+    description: "Morpho market, vault, and governance monitoring on Mainnet, Base, Katana, and HyperEVM"
     cadence: "Hourly / Daily"
     tasks:
       - protocols/morpho/markets.py
@@ -292,7 +292,7 @@ protocols:
       - name: "V1 Governance"
         description: "Pending supply caps, market removals, timelock changes, guardian changes"
       - name: "V2 Governance"
-        description: "Pending timelocked operations, owner/curator changes, sentinel/allocator/adapter changes"
+        description: "Pending timelocked operations, owner/curator changes, sentinel/allocator/adapter changes (incl. MetaMorpho-wrapper vaults such as OUSD V2 on HyperEVM)"
       - name: "V2 Wrapped V1 Coverage"
         description: "V2 vault wrapping a v1 vault not in config.py:VAULTS_V1_BY_CHAIN"
       - name: "Safe Multisig"

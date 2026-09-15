@@ -10,6 +10,12 @@ EXPLORER_URLS: dict[int, str] = {
     747474: "https://katanascan.com",
 }
 
+# Public RPCs used only when no PROVIDER_URL_{CHAIN} / PROVIDER_URL_{CHAIN}_{i} env var is set.
+# Setting any of those env vars disables the public fallback for that chain.
+PUBLIC_RPC_URLS: dict[int, str] = {
+    999: "https://rpc.hyperliquid.xyz/evm",
+}
+
 
 class Chain(Enum):
     MAINNET = (1, "mainnet", "eth")

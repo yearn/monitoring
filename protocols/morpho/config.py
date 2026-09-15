@@ -19,6 +19,10 @@ class VaultConfig:
     address: str
     risk_level: int
     collateral_asset: str | None = None
+    # False for V2 vaults whose allocations live in a wrapped V1 vault (MetaMorpho adapter):
+    # governance is still monitored, but markets_v2 skips them because the wrapped V1
+    # vault's markets are already covered by the V1 market checks.
+    monitor_markets: bool = True
 
 
 VAULTS_V1_BY_CHAIN: dict[Chain, tuple[VaultConfig, ...]] = {
@@ -40,8 +44,7 @@ VAULTS_V1_BY_CHAIN: dict[Chain, tuple[VaultConfig, ...]] = {
         VaultConfig("Yearn OG WETH", "0x1D795E29044A62Da42D927c4b179269139A28A6B", 2),
         VaultConfig("OUSD", "0x581Cc9a73Ec7431723A4a80699B8f801205841F1", 2),
     ),
-    # OUSD V2 0xE90959cbE7E56b5eBFF9AD12de611A4976F2d2B1 wraps this V1 via a MetaMorpho
-    # adapter. markets_v2 rejects that adapter type, so HyperEVM OUSD is monitored here.
+    # Wrapped by OUSD V2 on HyperEVM (see VAULTS_V2_BY_CHAIN); market risk is checked here.
     Chain.HYPEREVM: (VaultConfig("OUSD", "0x0fb7e41A0A85Eb0BcA55172b73942cc6685e2B2E", 2),),
     Chain.KATANA: (
         VaultConfig("Yearn OG WETH", "0xFaDe0C546f44e33C134c4036207B314AC643dc2E", 1, KATANA_WETH),
@@ -80,6 +83,10 @@ VAULTS_V2_BY_CHAIN: dict[Chain, tuple[VaultConfig, ...]] = {
     Chain.BASE: (
         VaultConfig("Yearn OG USDC V2", "0xe7D0DBE3493830e2Ab62619211A2BfF0Fc60dB42", 2),
         VaultConfig("Yearn OG WETH V2", "0x2EfD54529329AD364B8Df988CE3BAb5Ff256ab3E", 2),
+    ),
+    Chain.HYPEREVM: (
+        # Allocates only through a MetaMorpho adapter into the HyperEVM OUSD V1 vault.
+        VaultConfig("OUSD V2", "0xE90959cbE7E56b5eBFF9AD12de611A4976F2d2B1", 2, monitor_markets=False),
     ),
     Chain.KATANA: (
         VaultConfig("Yearn OG USDC", "0xca44cbe1FB03691d43d2d93AA460e2fCB03878fE", 1, KATANA_USDC),

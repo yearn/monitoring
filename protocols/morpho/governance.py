@@ -333,10 +333,17 @@ def get_data_for_chain(chain: Chain) -> None:
 
 
 def main() -> None:
-    get_data_for_chain(Chain.MAINNET)
-    get_data_for_chain(Chain.KATANA)
-    get_data_for_chain(Chain.BASE)
-    get_data_for_chain(Chain.HYPEREVM)
+    """Check V1 governance on every configured chain, continuing past per-chain failures."""
+    failures: list[str] = []
+    for chain in VAULTS_V1_BY_CHAIN:
+        try:
+            get_data_for_chain(chain)
+        except Exception as e:
+            logger.exception("Failed to check Morpho V1 governance on %s", chain.name)
+            failures.append(f"{chain.name}: {type(e).__name__}: {e}")
+
+    if failures:
+        raise MorphoMonitoringError("Failed Morpho V1 governance checks: " + "; ".join(failures))
 
 
 if __name__ == "__main__":
