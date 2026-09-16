@@ -24,7 +24,7 @@ EOA [`0x3eea50ba10952e5e0dfaa50ecfcc5ab19ad591ef`](https://etherscan.io/address/
 | Supply feeder wrong | Feeder `totalTokenSupply()` / API `total_supply` ratio | Ratio moves > 5% off its anchor | HIGH |
 | Supply feeder stale | Feeder `totalTokenSupply()` | Unchanged for 48h (normally updates daily) | HIGH |
 | Redemptions underfunded | Router `tokenDebts(WBTC)` vs WBTC `balanceOf(Vault)` | Uncleared > Vault WBTC for > 24h and growing | HIGH |
-| Peg | DeFiLlama `coingecko:universal-btc` (fallback: Ethereum token) in BTC | < 0.98 BTC | HIGH |
+| Peg | DeFiLlama uniBTC/USD (`coingecko:universal-btc`, fallback: Ethereum token) divided by Ethereum WBTC/USD | < 0.98 WBTC per uniBTC | HIGH |
 
 PoR-staleness, feeder-ratio, feeder-stale, and peg alerts fire once while the condition holds and re-arm on recovery. Pause and reserve-gate alerts are keyed on *which* components are flagged, so a second tampered field or a newly paused component re-alerts instead of being hidden by the first alert. PoR coverage alerts on entering a worse band (HIGH then CRITICAL). Minting alerts fire once per mint and repeat only once supply grows by another full threshold; a missing baseline re-arms the marker, so a stale one cannot suppress a real mint after a polling gap.
 

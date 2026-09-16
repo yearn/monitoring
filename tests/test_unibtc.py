@@ -611,6 +611,7 @@ def test_peg_alerts_below_floor(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert len(alerts) == 2
     assert all(alert.severity == AlertSeverity.HIGH for alert in alerts)
+    assert all("WBTC" in alert.message for alert in alerts)
 
 
 def test_peg_skips_missing_price(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -632,20 +633,24 @@ def test_fetch_api_total_supply_parses_data(monkeypatch: pytest.MonkeyPatch) -> 
     assert unibtc.fetch_api_total_supply() == Decimal("4546.67793")
 
 
-def test_fetch_price_in_btc_prefers_coingecko_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        unibtc,
-        "fetch_prices",
-        lambda _keys: {
+def test_fetch_price_in_wbtc_prefers_coingecko_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    requested_keys: list[str] = []
+
+    def prices_for_keys(keys: list[str]) -> dict[str, Decimal]:
+        requested_keys.extend(keys)
+        return {
             "coingecko:universal-btc": Decimal("59545"),
-            unibtc.BTC_USD_DEFILLAMA_KEY: Decimal("60000"),
-        },
-    )
-    assert unibtc.fetch_price_in_btc() == Decimal("59545") / Decimal("60000")
+            unibtc.WBTC_PRICE_KEY: Decimal("59000"),
+        }
+
+    monkeypatch.setattr(unibtc, "fetch_prices", prices_for_keys)
+
+    assert unibtc.fetch_price_in_wbtc() == Decimal("59545") / Decimal("59000")
+    assert requested_keys == [*unibtc.UNIBTC_PRICE_KEYS, unibtc.WBTC_PRICE_KEY]
 
 
-def test_fetch_price_in_btc_skips_zero_quote(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A zero quote is a bad feed, not a depeg — fall through to the next key."""
+def test_fetch_price_in_wbtc_skips_zero_quote(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A zero uniBTC quote is a bad feed, so use the Ethereum token quote."""
     errors: list[str] = []
     monkeypatch.setattr(unibtc, "send_error_message", lambda message, _protocol: errors.append(message))
     monkeypatch.setattr(
@@ -654,26 +659,40 @@ def test_fetch_price_in_btc_skips_zero_quote(monkeypatch: pytest.MonkeyPatch) ->
         lambda _keys: {
             "coingecko:universal-btc": Decimal("0"),
             f"ethereum:{unibtc.UNIBTC}": Decimal("59545"),
-            unibtc.BTC_USD_DEFILLAMA_KEY: Decimal("60000"),
+            unibtc.WBTC_PRICE_KEY: Decimal("59000"),
         },
     )
 
-    assert unibtc.fetch_price_in_btc() == Decimal("59545") / Decimal("60000")
+    assert unibtc.fetch_price_in_wbtc() == Decimal("59545") / Decimal("59000")
     assert errors == []
 
 
-def test_fetch_price_in_btc_none_when_all_quotes_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_price_in_wbtc_none_when_all_quotes_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(unibtc, "send_error_message", lambda _message, _protocol: None)
     monkeypatch.setattr(
         unibtc,
         "fetch_prices",
         lambda _keys: {
             "coingecko:universal-btc": Decimal("0"),
-            unibtc.BTC_USD_DEFILLAMA_KEY: Decimal("60000"),
+            unibtc.WBTC_PRICE_KEY: Decimal("59000"),
         },
     )
 
-    assert unibtc.fetch_price_in_btc() is None
+    assert unibtc.fetch_price_in_wbtc() is None
+
+
+@pytest.mark.parametrize("wbtc_usd", [None, Decimal("0"), Decimal("-1")])
+def test_fetch_price_in_wbtc_skips_invalid_reference(monkeypatch: pytest.MonkeyPatch, wbtc_usd: Decimal | None) -> None:
+    errors: list[str] = []
+    monkeypatch.setattr(unibtc, "send_error_message", lambda message, _protocol: errors.append(message))
+    monkeypatch.setattr(
+        unibtc,
+        "fetch_prices",
+        lambda _keys: {"coingecko:universal-btc": Decimal("59545"), unibtc.WBTC_PRICE_KEY: wbtc_usd},
+    )
+
+    assert unibtc.fetch_price_in_wbtc() is None
+    assert errors == ["WBTC/USD price unavailable from DeFiLlama"]
 
 
 def test_load_state_batches_all_calls_at_one_block() -> None:
@@ -724,7 +743,7 @@ def test_main_runs_every_check(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(unibtc.ChainManager, "get_client", lambda _chain: object())
     monkeypatch.setattr(unibtc, "load_state", lambda _client: state)
     monkeypatch.setattr(unibtc, "fetch_api_total_supply", lambda: Decimal("4546.67793"))
-    monkeypatch.setattr(unibtc, "fetch_price_in_btc", lambda: Decimal("0.992417"))
+    monkeypatch.setattr(unibtc, "fetch_price_in_wbtc", lambda: Decimal("0.992417"))
     monkeypatch.setattr(unibtc, "check_unexpected_minting", lambda _state: observed.append("mint"))
     monkeypatch.setattr(unibtc, "check_reserve_gate", lambda _state: observed.append("gate"))
     monkeypatch.setattr(unibtc, "check_paused", lambda _state: observed.append("pause"))

@@ -24,7 +24,6 @@ from utils.defillama import fetch_prices
 from utils.formatting import format_decimal_amount, format_duration, normalize_token_amount
 from utils.http_client import fetch_json
 from utils.logger import get_logger
-from utils.pegged_assets import BTC_USD_DEFILLAMA_KEY
 from utils.telegram import send_error_message
 from utils.web3_wrapper import ChainManager
 
@@ -75,6 +74,7 @@ UNIBTC_PRICE_KEYS = (
     "coingecko:universal-btc",
     f"ethereum:{UNIBTC}",
 )
+WBTC_PRICE_KEY = f"ethereum:{WBTC}"
 
 CACHE_KEY_SNAPSHOTS = "UNIBTC_SUPPLY_SNAPSHOTS"
 CACHE_KEY_MINT_1H_ALERTED = "UNIBTC_MINT_1H_ALERTED_SUPPLY"
@@ -432,25 +432,25 @@ def fetch_api_total_supply() -> Decimal | None:
     return supply
 
 
-def fetch_price_in_btc() -> Decimal | None:
-    """Return uniBTC priced in BTC via DeFiLlama, or None on failure."""
-    keys = [*UNIBTC_PRICE_KEYS, BTC_USD_DEFILLAMA_KEY]
+def fetch_price_in_wbtc() -> Decimal | None:
+    """Return the market price of uniBTC in WBTC via DeFiLlama, or None on failure."""
+    keys = [*UNIBTC_PRICE_KEYS, WBTC_PRICE_KEY]
     try:
-        prices = fetch_prices(list(keys))
+        prices = fetch_prices(keys)
     except Exception as exc:
-        logger.error("Failed to fetch uniBTC/BTC prices: %s", exc)
-        send_error_message(f"Failed to fetch uniBTC/BTC prices: {exc}", PROTOCOL)
+        logger.error("Failed to fetch uniBTC/WBTC prices: %s", exc)
+        send_error_message(f"Failed to fetch uniBTC/WBTC prices: {exc}", PROTOCOL)
         return None
-    btc_usd = prices.get(BTC_USD_DEFILLAMA_KEY)
-    if btc_usd is None or btc_usd <= 0:
-        send_error_message("BTC/USD price unavailable from DeFiLlama", PROTOCOL)
+    wbtc_usd = prices.get(WBTC_PRICE_KEY)
+    if wbtc_usd is None or wbtc_usd <= 0:
+        send_error_message("WBTC/USD price unavailable from DeFiLlama", PROTOCOL)
         return None
     for key in UNIBTC_PRICE_KEYS:
         usd = prices.get(key)
         # A zero or negative quote is a bad feed, not a depeg: returning it would
-        # raise a false CRITICAL peg alert.
+        # raise a false peg alert.
         if usd is not None and usd > 0:
-            return usd / btc_usd
+            return usd / wbtc_usd
     send_error_message("uniBTC USD price unavailable from DeFiLlama", PROTOCOL)
     return None
 
@@ -867,19 +867,19 @@ def check_redemptions_underfunded(state: UnibtcState) -> None:
     _set_cache(CACHE_KEY_REDEEM_UNCLEARED, uncleared)
 
 
-def check_peg(price_in_btc: Decimal | None) -> None:
-    """Alert once while uniBTC trades below 0.98 BTC.
+def check_peg(price_in_wbtc: Decimal | None) -> None:
+    """Alert once while uniBTC trades below 0.98 WBTC.
 
     Args:
-        price_in_btc: uniBTC/BTC ratio, or None to skip.
+        price_in_wbtc: uniBTC/WBTC ratio, or None to skip.
     """
-    if price_in_btc is None:
+    if price_in_wbtc is None:
         return
-    depegged = price_in_btc < PEG_FLOOR
-    logger.info("uniBTC peg=%s depegged=%s", price_in_btc, depegged)
+    depegged = price_in_wbtc < PEG_FLOOR
+    logger.info("uniBTC/WBTC peg=%s depegged=%s", price_in_wbtc, depegged)
     message = (
-        "*uniBTC peg below 0.98 BTC*\n"
-        f"Price: {format_decimal_amount(price_in_btc)} BTC (threshold {PEG_FLOOR} BTC)\n"
+        "*uniBTC peg below 0.98 WBTC*\n"
+        f"Price: {format_decimal_amount(price_in_wbtc)} WBTC (threshold {PEG_FLOOR} WBTC)\n"
         f"🔗 Token {_etherscan(UNIBTC)}"
     )
     _alert_while_true(CACHE_KEY_PEG, depegged, Alert(AlertSeverity.HIGH, message, PROTOCOL))
@@ -890,7 +890,7 @@ def main() -> None:
     client = ChainManager.get_client(Chain.MAINNET)
     state = load_state(client)
     api_total_supply = fetch_api_total_supply()
-    price_in_btc = fetch_price_in_btc()
+    price_in_wbtc = fetch_price_in_wbtc()
 
     check_unexpected_minting(state)
     check_reserve_gate(state)
@@ -899,7 +899,7 @@ def main() -> None:
     check_por_stale(state)
     check_supply_feeder(state, api_total_supply)
     check_redemptions_underfunded(state)
-    check_peg(price_in_btc)
+    check_peg(price_in_wbtc)
 
     logger.info(
         "uniBTC monitoring complete at block=%s supply=%s",

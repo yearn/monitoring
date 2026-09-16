@@ -437,7 +437,7 @@ protocols:
       - name: "Redemptions Underfunded"
         description: "Uncleared WBTC router debt exceeds Vault WBTC for >24h and is growing"
       - name: "Peg"
-        description: "uniBTC price < 0.98 BTC"
+        description: "DeFiLlama uniBTC/USD divided by Ethereum WBTC/USD < 0.98 WBTC per uniBTC"
       - name: "Safe Multisigs"
         description: "uniBTC ops Safe and Bedrock admin Safe queues"
 
