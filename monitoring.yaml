@@ -433,7 +433,7 @@ protocols:
       - name: "PoR Staleness"
         description: "Chainlink PoR updatedAt older than the Vault feederHeartbeat, capped at 86,400s"
       - name: "Supply Feeder"
-        description: "On-chain feeder / Bedrock API ratio moves >5% off its anchor (re-taken at most weekly), or feeder value unchanged for 48h"
+        description: "Feeder totalTokenSupply() is 0 (CRITICAL); feeder / Bedrock API ratio moves >5% off its anchor (re-taken at most weekly), or feeder value unchanged for 48h (HIGH)"
       - name: "Redemptions Underfunded"
         description: "Uncleared WBTC router debt exceeds Vault WBTC for >24h and is growing"
       - name: "Peg"

@@ -89,6 +89,7 @@ CACHE_KEY_FEEDER_RATIO_TS = "UNIBTC_FEEDER_RATIO_BASELINE_TS"
 CACHE_KEY_FEEDER_VALUE = "UNIBTC_FEEDER_VALUE"
 CACHE_KEY_FEEDER_CHANGED_TS = "UNIBTC_FEEDER_CHANGED_TS"
 CACHE_KEY_FEEDER_STALE = "UNIBTC_FEEDER_STALE_ALERTED"
+CACHE_KEY_FEEDER_ZERO = "UNIBTC_FEEDER_ZERO_ALERTED"
 CACHE_KEY_REDEEM_SINCE = "UNIBTC_REDEEM_UNDERFUNDED_SINCE"
 CACHE_KEY_REDEEM_UNCLEARED = "UNIBTC_REDEEM_UNCLEARED"
 CACHE_KEY_REDEEM_ALERTED = "UNIBTC_REDEEM_ALERTED"
@@ -791,13 +792,34 @@ def check_feeder_ratio(state: UnibtcState, api_total_supply: Decimal) -> None:
         _set_feeder_anchor(ratio, state.block_timestamp)
 
 
+def check_feeder_zero(state: UnibtcState) -> None:
+    """Alert once while the supply feeder reports a zero ``totalTokenSupply``.
+
+    A zero supply satisfies the Vault reserve check for any mint amount, so this
+    fires on the first run and needs no Bedrock API, unlike the ratio check.
+
+    Args:
+        state: Current on-chain snapshot.
+    """
+    zero = state.feeder_supply == 0
+    logger.info("uniBTC feeder zero=%s", zero)
+    message = (
+        "*uniBTC supply feeder reports zero*\n"
+        "totalTokenSupply() is 0, so the Vault reserve check passes for any mint amount.\n"
+        f"🔗 Feeder {_etherscan(SUPPLY_FEEDER)}\n"
+        f"🔗 Vault {_etherscan(VAULT)}"
+    )
+    _alert_while_true(CACHE_KEY_FEEDER_ZERO, zero, Alert(AlertSeverity.CRITICAL, message, PROTOCOL))
+
+
 def check_supply_feeder(state: UnibtcState, api_total_supply: Decimal | None) -> None:
-    """Alert when the supply feeder diverges from the dashboard or stops updating.
+    """Alert when the supply feeder reports zero, diverges from the dashboard, or stops updating.
 
     Args:
         state: Current on-chain snapshot.
         api_total_supply: Bedrock dashboard total supply, or None to skip the ratio check.
     """
+    check_feeder_zero(state)
     if api_total_supply is not None:
         check_feeder_ratio(state, api_total_supply)
 

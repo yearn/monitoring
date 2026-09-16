@@ -544,8 +544,43 @@ def test_supply_feeder_zero_value_still_goes_stale(monkeypatch: pytest.MonkeyPat
     for day in range(4):
         unibtc.check_supply_feeder(make_state(feeder_supply=0, block_timestamp=now + day * 86_400), None)
 
+    stale = [alert for alert in alerts if "supply feeder stale" in alert.message]
+    assert len(stale) == 1
+
+
+def test_feeder_zero_is_critical_on_first_run_without_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+
+    unibtc.check_supply_feeder(make_state(feeder_supply=0), None)
+    unibtc.check_supply_feeder(make_state(feeder_supply=0, block_timestamp=1_700_003_600), None)
+
     assert len(alerts) == 1
-    assert "supply feeder stale" in alerts[0].message
+    assert alerts[0].severity == AlertSeverity.CRITICAL
+    assert "reports zero" in alerts[0].message
+
+
+def test_feeder_zero_rearms_after_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+
+    unibtc.check_feeder_zero(make_state(feeder_supply=0))
+    unibtc.check_feeder_zero(make_state())
+    unibtc.check_feeder_zero(make_state(feeder_supply=0))
+
+    assert [alert.severity for alert in alerts] == [AlertSeverity.CRITICAL, AlertSeverity.CRITICAL]
+
+
+def test_feeder_zero_quiet_for_normal_supply(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+
+    unibtc.check_feeder_zero(make_state())
+
+    assert alerts == []
 
 
 def test_load_state_rejects_truncated_batch() -> None:
