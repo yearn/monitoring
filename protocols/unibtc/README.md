@@ -21,14 +21,14 @@ EOA [`0x3eea50ba10952e5e0dfaa50ecfcc5ab19ad591ef`](https://etherscan.io/address/
 | Reserves below supply | Chainlink PoR `latestRoundData().answer` / Bedrock API `data.total_supply` | < 100% | CRITICAL |
 | Reserves thin | Same ratio | < 101% | HIGH |
 | PoR stale | `latestRoundData().updatedAt` | Older than the live Vault `feederHeartbeat`, capped at 86,400s (Vault `mint()` reverts) | HIGH |
-| Supply feeder wrong | Feeder `totalTokenSupply()` / API `total_supply` ratio | Ratio moves > 5% off its learned baseline | HIGH |
+| Supply feeder wrong | Feeder `totalTokenSupply()` / API `total_supply` ratio | Ratio moves > 5% off its anchor | HIGH |
 | Supply feeder stale | Feeder `totalTokenSupply()` | Unchanged for 48h (normally updates daily) | HIGH |
 | Redemptions underfunded | Router `tokenDebts(WBTC)` vs WBTC `balanceOf(Vault)` | Uncleared > Vault WBTC for > 24h and growing | HIGH |
 | Peg | DeFiLlama `coingecko:universal-btc` (fallback: Ethereum token) in BTC | < 0.98 BTC | HIGH |
 
-PoR-staleness, feeder-ratio, feeder-stale, and peg alerts fire once while the condition holds and re-arm on recovery. Pause and reserve-gate alerts are keyed on *which* components are flagged, so a second tampered field or a newly paused component re-alerts instead of being hidden by the first alert. PoR coverage alerts on entering a worse band (HIGH then CRITICAL). Minting alerts fire once per mint and repeat only once supply grows by another full threshold.
+PoR-staleness, feeder-ratio, feeder-stale, and peg alerts fire once while the condition holds and re-arm on recovery. Pause and reserve-gate alerts are keyed on *which* components are flagged, so a second tampered field or a newly paused component re-alerts instead of being hidden by the first alert. PoR coverage alerts on entering a worse band (HIGH then CRITICAL). Minting alerts fire once per mint and repeat only once supply grows by another full threshold; a missing baseline re-arms the marker, so a stale one cannot suppress a real mint after a polling gap.
 
-The feeder and the Bedrock dashboard cover different chain sets, so their absolute levels differ by a large steady-state factor (~0.85 at the time of writing) — only a *move* in that ratio signals a wrong or hijacked feeder. The baseline is learned from the cache on first run and relearned only while the ratio sits inside the band, so an anomalous reading cannot quietly become the new normal.
+The feeder and the Bedrock dashboard cover different chain sets, so their absolute levels differ by a large steady-state factor (~0.85 at the time of writing) — only a *move* in that ratio signals a wrong or hijacked feeder. Comparison is against an anchor taken on first run and re-taken at most weekly, and only from a reading inside the band. Re-anchoring to every in-band reading instead would let the ratio ratchet: repeated sub-threshold steps each move the anchor, accumulating unlimited drift without ever tripping.
 
 ## Safe monitor
 

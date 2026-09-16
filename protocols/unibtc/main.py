@@ -62,6 +62,10 @@ POR_STALE_SECONDS = 86_400
 # Only a *move* in that ratio signals a wrong or hijacked feeder, so the baseline is
 # learned from the cache rather than hardcoded.
 FEEDER_RATIO_DRIFT_THRESHOLD = Decimal("0.05")
+# The anchor is refreshed on a slow clock, never per run. Re-anchoring to every
+# in-band reading would let the ratio ratchet: repeated sub-threshold steps each
+# move the anchor, so an unlimited drift accumulates without ever tripping.
+FEEDER_ANCHOR_REFRESH_SECONDS = 7 * 24 * 60 * 60
 FEEDER_STALE_SECONDS = 48 * 60 * 60
 REDEMPTION_UNDERFUNDED_SECONDS = 24 * 60 * 60
 PEG_FLOOR = Decimal("0.98")
@@ -81,6 +85,7 @@ CACHE_KEY_POR_BAND = "UNIBTC_POR_BAND"
 CACHE_KEY_POR_STALE = "UNIBTC_POR_STALE_ALERTED"
 CACHE_KEY_FEEDER_GAP = "UNIBTC_FEEDER_GAP_ALERTED"
 CACHE_KEY_FEEDER_RATIO = "UNIBTC_FEEDER_RATIO_BASELINE"
+CACHE_KEY_FEEDER_RATIO_TS = "UNIBTC_FEEDER_RATIO_BASELINE_TS"
 CACHE_KEY_FEEDER_VALUE = "UNIBTC_FEEDER_VALUE"
 CACHE_KEY_FEEDER_CHANGED_TS = "UNIBTC_FEEDER_CHANGED_TS"
 CACHE_KEY_FEEDER_STALE = "UNIBTC_FEEDER_STALE_ALERTED"
@@ -455,16 +460,21 @@ def fetch_price_in_btc() -> Decimal | None:
 # ---------------------------------------------------------------------------
 
 
-def mint_alert_due(key: str, triggered: bool, current_supply: int, threshold: int) -> bool:
+def mint_alert_due(key: str, delta: int | None, current_supply: int, threshold: int) -> bool:
     """Return whether a mint alert should fire, deduping repeats of the same mint.
 
     A single large mint stays inside the lookback window for many hourly runs. The
     supply level that last alerted is cached, so the alert repeats only once supply
     has grown by another full threshold; falling back under the threshold re-arms.
 
+    A missing baseline (``delta is None``) also re-arms. The cached level is only
+    meaningful relative to an unbroken series of observations: after a polling gap
+    supply may have fallen back well below it, and holding the stale marker would
+    silently suppress the next genuine mint.
+
     Args:
         key: Cache key holding the ``totalSupply`` at the last alert.
-        triggered: Whether the window delta is at or above the threshold.
+        delta: Window supply delta, or None when no baseline is available.
         current_supply: Current ``totalSupply``.
         threshold: Raw mint threshold for this window.
 
@@ -472,7 +482,7 @@ def mint_alert_due(key: str, triggered: bool, current_supply: int, threshold: in
         True when the alert should be sent now.
     """
     last_alert_supply = _cache_int(key)
-    if not triggered:
+    if delta is None or delta < threshold:
         if last_alert_supply:
             _set_cache(key, 0)
         return False
@@ -508,9 +518,22 @@ def check_unexpected_minting(state: UnibtcState) -> None:
             len(snapshots),
         )
 
-    if delta_1h is not None and mint_alert_due(
-        CACHE_KEY_MINT_1H_ALERTED, delta_1h[0] >= MINT_1H_CRITICAL_RAW, state.total_supply, MINT_1H_CRITICAL_RAW
-    ):
+    # Called unconditionally: a missing baseline must re-arm the marker, not leave
+    # a stale one standing.
+    due_1h = mint_alert_due(
+        CACHE_KEY_MINT_1H_ALERTED,
+        delta_1h[0] if delta_1h is not None else None,
+        state.total_supply,
+        MINT_1H_CRITICAL_RAW,
+    )
+    due_24h = mint_alert_due(
+        CACHE_KEY_MINT_24H_ALERTED,
+        delta_24h[0] if delta_24h is not None else None,
+        state.total_supply,
+        MINT_24H_HIGH_RAW,
+    )
+
+    if due_1h and delta_1h is not None:
         send_alert(
             Alert(
                 AlertSeverity.CRITICAL,
@@ -523,9 +546,7 @@ def check_unexpected_minting(state: UnibtcState) -> None:
                 PROTOCOL,
             )
         )
-    if delta_24h is not None and mint_alert_due(
-        CACHE_KEY_MINT_24H_ALERTED, delta_24h[0] >= MINT_24H_HIGH_RAW, state.total_supply, MINT_24H_HIGH_RAW
-    ):
+    if due_24h and delta_24h is not None:
         send_alert(
             Alert(
                 AlertSeverity.HIGH,
@@ -704,13 +725,20 @@ def feeder_ratio_drift(ratio: Decimal, baseline: Decimal) -> Decimal:
     return abs(ratio - baseline) / baseline
 
 
+def _set_feeder_anchor(ratio: Decimal, timestamp: int) -> None:
+    """Pin the feeder-ratio anchor and the time it was taken."""
+    _set_cache(CACHE_KEY_FEEDER_RATIO, str(ratio))
+    _set_cache(CACHE_KEY_FEEDER_RATIO_TS, timestamp)
+
+
 def check_feeder_ratio(state: UnibtcState, api_total_supply: Decimal) -> None:
-    """Alert when the feeder-to-dashboard ratio moves off its learned baseline.
+    """Alert when the feeder-to-dashboard ratio moves off its anchor.
 
     The two figures cover different chain sets, so their absolute gap is large and
     uninformative; what signals a wrong or hijacked feeder is the ratio between them
-    jumping. The baseline is relearned only while the ratio is inside the band, so an
-    anomalous reading cannot quietly become the new normal.
+    jumping. Comparison is against a long-term anchor that is re-taken at most once
+    per ``FEEDER_ANCHOR_REFRESH_SECONDS`` and only while inside the band, so neither
+    an anomalous reading nor a run of sub-threshold steps can walk the reference.
 
     Args:
         state: Current on-chain snapshot.
@@ -718,32 +746,38 @@ def check_feeder_ratio(state: UnibtcState, api_total_supply: Decimal) -> None:
     """
     ratio = feeder_ratio(state.feeder_supply, api_total_supply)
     baseline = _cache_decimal(CACHE_KEY_FEEDER_RATIO)
+    anchored_at = _cache_int(CACHE_KEY_FEEDER_RATIO_TS)
     if baseline is None or baseline <= 0:
-        logger.info("uniBTC feeder ratio baseline initialised at %s", ratio)
-        _set_cache(CACHE_KEY_FEEDER_RATIO, str(ratio))
+        logger.info("uniBTC feeder ratio anchor initialised at %s", ratio)
+        _set_feeder_anchor(ratio, state.block_timestamp)
         return
 
     drift = feeder_ratio_drift(ratio, baseline)
     off_baseline = drift > FEEDER_RATIO_DRIFT_THRESHOLD
+    anchor_age = state.block_timestamp - anchored_at
     logger.info(
-        "uniBTC feeder ratio=%s baseline=%s drift=%s feeder=%s api=%s",
+        "uniBTC feeder ratio=%s anchor=%s anchor_age=%ss drift=%s feeder=%s api=%s",
         ratio,
         baseline,
+        anchor_age,
         drift,
         state.feeder_supply,
         api_total_supply,
     )
     message = (
         "*uniBTC supply feeder wrong*\n"
-        f"Feeder / Bedrock API ratio moved {drift:.2%} off its {baseline:.4f} baseline "
+        f"Feeder / Bedrock API ratio moved {drift:.2%} off its {baseline:.4f} anchor "
         f"(threshold {FEEDER_RATIO_DRIFT_THRESHOLD:.0%}), now {ratio:.4f}.\n"
         f"Feeder totalTokenSupply: {_fmt_btc(state.feeder_supply)} uniBTC\n"
         f"API total_supply: {format_decimal_amount(api_total_supply)} uniBTC\n"
         f"🔗 Feeder {_etherscan(SUPPLY_FEEDER)}"
     )
     _alert_while_true(CACHE_KEY_FEEDER_GAP, off_baseline, Alert(AlertSeverity.HIGH, message, PROTOCOL))
-    if not off_baseline:
-        _set_cache(CACHE_KEY_FEEDER_RATIO, str(ratio))
+    # Only re-anchor from a quiet reading, and only once the anchor is old enough.
+    # anchored_at <= 0 covers a cache written before the anchor timestamp existed.
+    if not off_baseline and (anchored_at <= 0 or anchor_age >= FEEDER_ANCHOR_REFRESH_SECONDS):
+        logger.info("uniBTC feeder ratio anchor refreshed to %s", ratio)
+        _set_feeder_anchor(ratio, state.block_timestamp)
 
 
 def check_supply_feeder(state: UnibtcState, api_total_supply: Decimal | None) -> None:

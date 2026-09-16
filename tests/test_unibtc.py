@@ -279,6 +279,35 @@ def test_unexpected_minting_realerts_after_further_growth(monkeypatch: pytest.Mo
     assert len(alerts) == 2
 
 
+def test_unexpected_minting_rearms_after_baseline_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stale alert marker must not suppress a real mint after a polling gap."""
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+    now = 1_700_000_000
+    btc = 10**8
+    base = 300 * btc
+    unibtc.store_supply_snapshots([(now - 3600, base)])
+
+    unibtc.check_unexpected_minting(make_state(total_supply=base + 11 * btc, block_timestamp=now))
+    # Polling gap past the retention window, and supply falls back via redemptions.
+    gap = now + 40 * 3600
+    unibtc.check_unexpected_minting(make_state(total_supply=base, block_timestamp=gap))
+    # A genuinely new mint, below the stale marker's level.
+    unibtc.check_unexpected_minting(make_state(total_supply=base + 10 * btc, block_timestamp=gap + 3600))
+
+    assert len(alerts) == 2
+    assert all(alert.severity == AlertSeverity.CRITICAL for alert in alerts)
+
+
+def test_mint_alert_due_rearms_on_missing_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
+    cache = stub_cache(monkeypatch)
+    cache[unibtc.CACHE_KEY_MINT_1H_ALERTED] = "31100000000"
+
+    assert unibtc.mint_alert_due(unibtc.CACHE_KEY_MINT_1H_ALERTED, None, 30_000_000_000, 10**9) is False
+    assert cache[unibtc.CACHE_KEY_MINT_1H_ALERTED] == "0"
+
+
 def test_reserve_gate_alerts_on_each_distinct_change(monkeypatch: pytest.MonkeyPatch) -> None:
     """A second tampered field must not be swallowed by the first alert's latch."""
     alerts: list[Alert] = []
@@ -428,6 +457,47 @@ def test_supply_feeder_ratio_jump_alerts_once(monkeypatch: pytest.MonkeyPatch) -
     assert len(alerts) == 1
     assert alerts[0].severity == AlertSeverity.HIGH
     assert "supply feeder wrong" in alerts[0].message
+
+
+def test_supply_feeder_ratio_cannot_ratchet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Repeated sub-threshold steps must not walk the anchor into unlimited drift."""
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+    api = Decimal("4546.67793")
+    feeder = 384_574_449_304
+
+    unibtc.check_supply_feeder(make_state(feeder_supply=feeder), api)
+    for step in range(4):
+        feeder = feeder * 97 // 100
+        unibtc.check_supply_feeder(
+            make_state(feeder_supply=feeder, block_timestamp=1_700_000_000 + (step + 1) * 3600), api
+        )
+
+    assert len(alerts) == 1
+    assert "supply feeder wrong" in alerts[0].message
+
+
+def test_supply_feeder_anchor_refreshes_only_on_slow_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[Alert] = []
+    cache = stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+    api = Decimal("4546.67793")
+    now = 1_700_000_000
+    nudged = 384_574_449_304 * 98 // 100
+
+    unibtc.check_supply_feeder(make_state(block_timestamp=now), api)
+    anchor = cache[unibtc.CACHE_KEY_FEEDER_RATIO]
+    unibtc.check_supply_feeder(make_state(feeder_supply=nudged, block_timestamp=now + 3600), api)
+    assert cache[unibtc.CACHE_KEY_FEEDER_RATIO] == anchor, "in-band reading moved a fresh anchor"
+
+    unibtc.check_supply_feeder(
+        make_state(feeder_supply=nudged, block_timestamp=now + unibtc.FEEDER_ANCHOR_REFRESH_SECONDS), api
+    )
+    assert cache[unibtc.CACHE_KEY_FEEDER_RATIO] != anchor, "anchor never refreshes"
+    # Advancing 7 days leaves feeder_supply unchanged, which legitimately trips the
+    # separate 48h staleness check; only the ratio check must stay quiet here.
+    assert not any("supply feeder wrong" in alert.message for alert in alerts)
 
 
 def test_supply_feeder_baseline_not_relearned_while_alerting(monkeypatch: pytest.MonkeyPatch) -> None:
