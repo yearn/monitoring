@@ -5,6 +5,9 @@ from typing import Any, Dict, List
 import requests
 
 from utils.chains import Chain
+from utils.logger import get_logger
+
+logger = get_logger("yearn.kong")
 
 KONG_GQL_URL = "https://kong.yearn.fi/api/gql"
 KONG_VAULTS_QUERY = """
@@ -15,6 +18,25 @@ query YearnVaults($chainId: Int) {
     decimals
     strategies
     get_default_queue
+    meta {
+      isRetired
+    }
+  }
+}
+"""
+KONG_PARENT_VAULTS_QUERY = """
+query YearnParentVaults($chainId: Int) {
+  vaults(chainId: $chainId, v3: true, yearn: true, vaultType: 1) {
+    address
+    name
+    symbol
+    decimals
+    vaultType
+    asset {
+      address
+      symbol
+      decimals
+    }
     meta {
       isRetired
     }
@@ -134,6 +156,65 @@ def fetch_kong_vaults(
                 "decimals": _parse_decimals(vault.get("decimals")),
                 "strategies": _strategy_objects(strategy_addresses),
                 "known_strategies": strategy_addresses,
+            }
+        )
+
+    return result
+
+
+def fetch_kong_parent_vaults(chain: Chain) -> List[Dict[str, object]]:
+    """Fetch non-retired Yearn v3 parent/allocator vault metadata from Kong.
+
+    Kong's ``vaultType: 1`` identifies parent/allocator vaults, while
+    ``vaultType: 2`` identifies strategy vaults. Only retired vaults are
+    excluded: ``isHidden`` is a UI-visibility flag, and hidden vaults can still
+    hold meaningful TVL. Rows missing required metadata are logged and skipped
+    so one malformed Kong entry cannot stop monitoring of every other vault.
+
+    Args:
+        chain: Chain to fetch.
+
+    Returns:
+        Parent vault dicts containing vault and underlying-asset metadata.
+
+    Raises:
+        KongRequestError: If the Kong request fails or omits the vaults list.
+    """
+    data = _post_graphql(KONG_PARENT_VAULTS_QUERY, {"chainId": chain.chain_id})
+    vaults = data.get("vaults")
+    if not isinstance(vaults, list):
+        raise KongRequestError("Kong response missing vaults list")
+
+    result: List[Dict[str, object]] = []
+    for vault in vaults:
+        if not isinstance(vault, dict) or _is_retired(vault):
+            continue
+
+        address = vault.get("address")
+        if not isinstance(address, str):
+            logger.warning("Skipping Kong parent vault on %s without an address: %s", chain.network_name, vault)
+            continue
+
+        asset = vault.get("asset")
+        asset_address = asset.get("address") if isinstance(asset, dict) else None
+        asset_decimals = _parse_decimals(asset.get("decimals")) if isinstance(asset, dict) else None
+        if not isinstance(asset, dict) or not isinstance(asset_address, str) or asset_decimals is None:
+            logger.warning(
+                "Skipping Kong parent vault %s on %s: missing asset address or decimals",
+                address,
+                chain.network_name,
+            )
+            continue
+
+        result.append(
+            {
+                "address": address,
+                "name": vault.get("name") or vault.get("symbol") or "UNKNOWN",
+                "symbol": vault.get("symbol") or "UNKNOWN",
+                "decimals": _parse_decimals(vault.get("decimals")),
+                "asset_address": asset_address,
+                "asset_symbol": asset.get("symbol") or "UNKNOWN",
+                "asset_decimals": asset_decimals,
             }
         )
 

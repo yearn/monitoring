@@ -171,9 +171,9 @@ def fetch_block_timestamp(chain: Chain, block_number: int) -> int | None:
 def collect_freshness(rows: list[dict], now: int) -> list[ChainFreshness]:
     """Resolve how far behind wall-clock time each expected chain is.
 
-    The indexer covers chains this repo doesn't read from (Gnosis, Berachain).
-    Nothing here consumes their events, so they are skipped rather than alerted
-    on. Expected chains absent from `rows` produce no entry — see
+    The indexer may cover chains this repo doesn't read from. Nothing here
+    consumes their events, so they are skipped rather than alerted on.
+    Expected chains absent from `rows` produce no entry — see
     `missing_chains`.
 
     Args:
@@ -293,11 +293,14 @@ def main() -> None:
         rows = fetch_chain_metadata()
     except IndexerUnavailableError as exc:
         # The endpoint being down is itself the outage we are watching for, so it
-        # alerts on every run rather than riding the per-chain cooldown.
+        # alerts on every run rather than riding the per-chain cooldown. Unlike
+        # routine Envio errors it notifies: every Envio-backed monitor is blind
+        # until it recovers, and a silent message went unnoticed in practice.
         logger.error("Indexer unavailable: %s", exc)
         send_envio_error_message(
             f"Envio indexer unavailable: {exc}",
             PROTOCOL,
+            disable_notification=False,
             source="indexer_freshness",
         )
         return

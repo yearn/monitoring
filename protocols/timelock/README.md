@@ -99,11 +99,10 @@ For complete field mapping details, see [`detils.md`](./detils.md).
 | [0x88ba032be87d5ef1fbe87336b7090767f367bf73](https://arbiscan.io/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) | Arbitrum | YEARN | Yearn TimelockController |
 | [0x88ba032be87d5ef1fbe87336b7090767f367bf73](https://polygonscan.com/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) | Polygon | YEARN | Yearn TimelockController |
 | [0x88ba032be87d5ef1fbe87336b7090767f367bf73](https://katanascan.com/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) | Katana | YEARN | Yearn TimelockController |
-| [0x88ba032be87d5ef1fbe87336b7090767f367bf73](https://optimistic.etherscan.io/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) | Optimism | YEARN | Yearn TimelockController |
 
 ## How to Add a New Timelock
 
-1. **Add the address to the Envio indexer config.** The address must be indexed before this script can query events for it. Open the [Envio config.yaml](https://github.com/chain-events/yearn-indexing-test/blob/main/config.yaml), add the address under the correct chain's `TimelockController` contract list, and deploy the updated indexer.
+1. **Add the address to the Envio indexer config.** The address must be indexed before this script can query events for it. Open the [Envio config.yaml](https://github.com/yearn/yearn-envio/blob/main/config.yaml), add the address under the correct chain's `TimelockController` contract list, and deploy the updated indexer.
 
 2. **Add a `TimelockConfig` entry** in [`timelock_alerts.py`](./timelock_alerts.py) in the `TIMELOCK_LIST` list:
 
