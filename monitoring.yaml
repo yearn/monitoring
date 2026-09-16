@@ -242,22 +242,22 @@ protocols:
 
   maple:
     display_name: "Maple Finance"
-    description: "Maple syrupUSDC pool monitoring"
+    description: "Maple syrupUSDC and syrupUSDG pool monitoring"
     cadence: "Hourly"
     disabled: true
     tasks:
       - protocols/maple/main.py
     monitors:
       - name: "Price Per Share"
-        description: "Any PPS decrease"
+        description: "Any PPS decrease per pool"
       - name: "TVL"
-        description: "Absolute TVL change >=15% using a baseline no older than 3 hours"
+        description: "Absolute TVL change >=15% per pool using a baseline no older than 3 hours"
       - name: "Unrealized Losses"
-        description: "Any non-zero on-chain unrealized losses; >=0.5% of pool assets via subgraph"
+        description: "Any non-zero on-chain unrealized losses (syrupUSDC); >=0.5% of pool assets via subgraph (all pools)"
       - name: "Withdrawal Queue"
-        description: "Pending exit value >1% of TVL"
+        description: "Pending exit value >1% of TVL per pool"
       - name: "Pool Liquidity"
-        description: "Pending withdrawals exceed pool cash"
+        description: "Pending withdrawals exceed pool cash per pool"
       - name: "Collateralization Ratio"
         description: "syrupGlobals collateralRatio <135%"
       - name: "Proof of Reserves Divergence"
@@ -265,7 +265,7 @@ protocols:
       - name: "Unknown Collateral"
         description: "Collateral assets not in risk mapping"
       - name: "Pool Delegate Cover"
-        description: "Cover balance drops to $0 or decreases vs cached prior; zero state re-armed after >3 hours"
+        description: "Cover balance drops to $0 or decreases vs cached prior per pool; zero state re-armed after >3 hours"
       - name: "Timelock"
         description: "Maple GovernorTimelock events via Envio"
       - name: "Safe Multisig"
