@@ -529,6 +529,57 @@ def test_supply_feeder_stale_after_48h(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cache[unibtc.CACHE_KEY_FEEDER_VALUE] == "100"
 
 
+def test_supply_feeder_zero_value_still_goes_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A feeder pinned at 0 must not read as a fresh observation every run.
+
+    Zero is what the cache returns for an unset key, and it is also the single most
+    dangerous reading: it satisfies the Vault mint gate outright. With the API down
+    the ratio check is skipped, so staleness is the only thing watching.
+    """
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+    now = 1_700_000_000
+
+    for day in range(4):
+        unibtc.check_supply_feeder(make_state(feeder_supply=0, block_timestamp=now + day * 86_400), None)
+
+    assert len(alerts) == 1
+    assert "supply feeder stale" in alerts[0].message
+
+
+def test_load_state_rejects_truncated_batch() -> None:
+    client, _ = make_client([298_112_556_288, 900])
+
+    with pytest.raises(RuntimeError, match="2 of 13 expected responses"):
+        unibtc.load_state(client)
+
+
+def test_batch_call_count_matches_load_state() -> None:
+    """BATCH_CALL_COUNT is asserted against the real batch so it cannot drift."""
+    por_round = (1, 4_640_515_622_996_713_140_279, 1, 1_699_961_466, 1)
+    responses = [
+        298_112_556_288,
+        900,
+        unibtc.POR_FEED,
+        unibtc.SUPPLY_FEEDER,
+        86_400,
+        False,
+        False,
+        False,
+        por_round,
+        18,
+        384_574_449_304,
+        (75_152_598, 0),
+        46_065_725,
+    ]
+    client, added_calls = make_client(responses)
+
+    unibtc.load_state(client)
+
+    assert len(added_calls) == unibtc.BATCH_CALL_COUNT
+
+
 def test_redemptions_underfunded_waits_24h_and_growth(monkeypatch: pytest.MonkeyPatch) -> None:
     alerts: list[Alert] = []
     stub_cache(monkeypatch)

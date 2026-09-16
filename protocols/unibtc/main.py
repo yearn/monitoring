@@ -147,6 +147,9 @@ ABI_ROUTER = [
         "type": "function",
     },
 ]
+# Number of calls added to the batch in load_state; keep in step with that block.
+BATCH_CALL_COUNT = 13
+
 ABI_FEEDER = [
     {
         "inputs": [],
@@ -386,6 +389,14 @@ def load_state(client: Any) -> UnibtcState:
         batch.add(router.functions.tokenDebts(WBTC).call(block_identifier=block_number))
         batch.add(wbtc.functions.balanceOf(VAULT).call(block_identifier=block_number))
         responses = client.execute_batch(batch)
+
+    # A truncated batch would otherwise surface as a bare IndexError below, with no
+    # indication of which call the RPC dropped.
+    if responses is None or len(responses) < BATCH_CALL_COUNT:
+        raise RuntimeError(
+            f"uniBTC RPC batch returned {0 if responses is None else len(responses)} "
+            f"of {BATCH_CALL_COUNT} expected responses"
+        )
 
     por_round = responses[8]
     if por_round is None or len(por_round) < 4:
@@ -792,7 +803,11 @@ def check_supply_feeder(state: UnibtcState, api_total_supply: Decimal | None) ->
 
     previous_value = _cache_int(CACHE_KEY_FEEDER_VALUE)
     changed_ts = _cache_int(CACHE_KEY_FEEDER_CHANGED_TS)
-    if previous_value == 0 or previous_value != state.feeder_supply:
+    # The timestamp, not the value, marks "never seen". The cache reads 0 for an unset
+    # key, so testing previous_value == 0 would treat a feeder genuinely reporting 0 as
+    # a fresh observation on every run and never report it stale — the one reading that
+    # most needs reporting, since a zero supply satisfies the Vault mint gate outright.
+    if changed_ts <= 0 or previous_value != state.feeder_supply:
         _set_cache(CACHE_KEY_FEEDER_VALUE, state.feeder_supply)
         _set_cache(CACHE_KEY_FEEDER_CHANGED_TS, state.block_timestamp)
         if _cache_int(CACHE_KEY_FEEDER_STALE):
@@ -800,7 +815,7 @@ def check_supply_feeder(state: UnibtcState, api_total_supply: Decimal | None) ->
         return
 
     unchanged_for = state.block_timestamp - changed_ts
-    stale = changed_ts > 0 and unchanged_for > FEEDER_STALE_SECONDS
+    stale = unchanged_for > FEEDER_STALE_SECONDS
     logger.info("uniBTC feeder unchanged_for=%ss stale=%s", unchanged_for, stale)
     message = (
         "*uniBTC supply feeder stale*\n"
