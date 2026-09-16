@@ -778,19 +778,57 @@ def test_redemptions_recover_rearms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(alerts) == 2
 
 
-def test_peg_alerts_below_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("price", "band"),
+    [
+        (Decimal("0.9942"), "ok"),
+        (Decimal("0.985"), "ok"),
+        (Decimal("0.9849"), "high"),
+        (Decimal("0.97"), "high"),
+        (Decimal("0.9699"), "critical"),
+    ],
+)
+def test_peg_band_boundaries(price: Decimal, band: str) -> None:
+    assert unibtc.severity_band(price, unibtc.PEG_CRITICAL_FLOOR, unibtc.PEG_HIGH_FLOOR) == band
+
+
+def test_peg_quiet_at_current_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    """0.9942 was the live price on 2026-09-16 and sits in the normal range."""
     alerts: list[Alert] = []
     stub_cache(monkeypatch)
     monkeypatch.setattr(unibtc, "send_alert", alerts.append)
 
-    unibtc.check_peg(Decimal("0.979"))
-    unibtc.check_peg(Decimal("0.979"))
-    unibtc.check_peg(Decimal("0.99"))
-    unibtc.check_peg(Decimal("0.97"))
+    unibtc.check_peg(Decimal("0.994160279174270683"))
 
-    assert len(alerts) == 2
-    assert all(alert.severity == AlertSeverity.HIGH for alert in alerts)
-    assert all("WBTC" in alert.message for alert in alerts)
+    assert alerts == []
+
+
+def test_peg_high_once_then_escalates_to_critical(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+
+    unibtc.check_peg(Decimal("0.98"))
+    unibtc.check_peg(Decimal("0.978"))
+    unibtc.check_peg(Decimal("0.9616"))
+    unibtc.check_peg(Decimal("0.9616"))
+
+    assert [alert.severity for alert in alerts] == [AlertSeverity.HIGH, AlertSeverity.CRITICAL]
+    assert "0.985 WBTC" in alerts[0].message
+    assert "0.97 WBTC" in alerts[1].message
+
+
+def test_peg_partial_recovery_is_quiet_full_recovery_rearms(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+
+    unibtc.check_peg(Decimal("0.96"))
+    unibtc.check_peg(Decimal("0.98"))
+    unibtc.check_peg(Decimal("0.995"))
+    unibtc.check_peg(Decimal("0.98"))
+
+    assert [alert.severity for alert in alerts] == [AlertSeverity.CRITICAL, AlertSeverity.HIGH]
 
 
 def test_peg_skips_missing_price(monkeypatch: pytest.MonkeyPatch) -> None:

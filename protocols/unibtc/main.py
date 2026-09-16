@@ -62,7 +62,10 @@ FEEDER_GAP_THRESHOLD = Decimal("0.02")
 FEEDER_CHAIN_MATCH_TOLERANCE = Decimal("0.05")
 FEEDER_STALE_SECONDS = 48 * 60 * 60
 REDEMPTION_UNDERFUNDED_SECONDS = 24 * 60 * 60
-PEG_FLOOR = Decimal("0.98")
+# uniBTC/WBTC over 2025-09 → 2026-09 (4h samples): median 0.9945, <0.99 9% of the time
+# (~130 dips/yr, routine), <0.985 ~36 dips/yr, <0.97 4 dips (Dec-16, Apr-26, May-9/10 stress).
+PEG_HIGH_FLOOR = Decimal("0.985")
+PEG_CRITICAL_FLOOR = Decimal("0.97")
 
 # Undocumented backend of Bedrock's own dashboard (app.bedrock.technology). It is the
 # issuer's figure, not independent, and has been observed dropping whole chains from
@@ -102,7 +105,7 @@ CACHE_KEY_FEEDER_ZERO = "UNIBTC_FEEDER_ZERO_ALERTED"
 CACHE_KEY_REDEEM_SINCE = "UNIBTC_REDEEM_UNDERFUNDED_SINCE"
 CACHE_KEY_REDEEM_UNCLEARED = "UNIBTC_REDEEM_UNCLEARED"
 CACHE_KEY_REDEEM_ALERTED = "UNIBTC_REDEEM_ALERTED"
-CACHE_KEY_PEG = "UNIBTC_PEG_ALERTED"
+CACHE_KEY_PEG_BAND = "UNIBTC_PEG_BAND"
 
 ABI_ERC20 = load_abi("common-abi/ERC20.json")
 ABI_CHAINLINK = load_abi("common-abi/ChainlinkAggregator.json")
@@ -275,6 +278,38 @@ def _alert_on_change(key: str, fingerprint: str, alert: Alert) -> None:
 def _alert_while_true(key: str, active: bool, alert: Alert) -> None:
     """Send ``alert`` once while ``active`` is true; recovery re-arms."""
     _alert_on_change(key, "1" if active else "", alert)
+
+
+BAND_RANK = {"ok": 0, "high": 1, "critical": 2}
+
+
+def severity_band(value: Decimal, critical_below: Decimal, high_below: Decimal) -> str:
+    """Return ``"critical"``, ``"high"`` or ``"ok"`` for a value with lower-is-worse floors."""
+    if value < critical_below:
+        return "critical"
+    if value < high_below:
+        return "high"
+    return "ok"
+
+
+def _alert_on_band_escalation(key: str, band: str, alerts: dict[str, Alert]) -> None:
+    """Send the alert for ``band`` when it is worse than the cached band.
+
+    Moving to a better band updates the cache silently, so HIGH → CRITICAL alerts
+    again but CRITICAL → HIGH does not; recovering to ``"ok"`` re-arms both.
+
+    Args:
+        key: Cache key holding the last band.
+        band: Current band.
+        alerts: Alert to send for ``"high"`` and ``"critical"``.
+    """
+    previous = str(_cache_raw(key))
+    if previous not in BAND_RANK:
+        previous = "ok"
+    if BAND_RANK[band] > BAND_RANK[previous]:
+        send_alert(alerts[band])
+    if band != previous:
+        _set_cache(key, band)
 
 
 def _to_int(value: Any, label: str) -> int:
@@ -759,34 +794,21 @@ def check_por_coverage(state: UnibtcState, api_total_supply: Decimal | None) -> 
     reserves = normalize_token_amount(state.por_answer, state.por_decimals)
     logger.info("uniBTC PoR coverage ratio=%s reserves=%s api_supply=%s", ratio, reserves, api_total_supply)
 
-    if ratio < POR_CRITICAL_RATIO:
-        band = "critical"
-    elif ratio < POR_HIGH_RATIO:
-        band = "high"
-    else:
-        band = "ok"
-
-    previous = str(_cache_raw(CACHE_KEY_POR_BAND))
-    if previous not in {"ok", "high", "critical"}:
-        previous = "ok"
-    band_rank = {"ok": 0, "high": 1, "critical": 2}
-    if band_rank[band] > band_rank[previous]:
-        severity = AlertSeverity.CRITICAL if band == "critical" else AlertSeverity.HIGH
-        title = "*uniBTC reserves below supply*" if band == "critical" else "*uniBTC reserves thin versus supply*"
-        send_alert(
-            Alert(
-                severity,
-                f"{title}\n"
-                f"PoR / API supply = {ratio:.4%} "
-                f"(CRITICAL < {POR_CRITICAL_RATIO:.0%}, HIGH < {POR_HIGH_RATIO:.0%})\n"
-                f"Chainlink PoR: {format_decimal_amount(reserves)} BTC\n"
-                f"API total_supply: {format_decimal_amount(api_total_supply)} uniBTC\n"
-                f"🔗 PoR {_etherscan(POR_FEED)}",
-                PROTOCOL,
-            )
-        )
-    if band != previous:
-        _set_cache(CACHE_KEY_POR_BAND, band)
+    body = (
+        f"PoR / API supply = {ratio:.4%} "
+        f"(CRITICAL < {POR_CRITICAL_RATIO:.0%}, HIGH < {POR_HIGH_RATIO:.0%})\n"
+        f"Chainlink PoR: {format_decimal_amount(reserves)} BTC\n"
+        f"API total_supply: {format_decimal_amount(api_total_supply)} uniBTC\n"
+        f"🔗 PoR {_etherscan(POR_FEED)}"
+    )
+    _alert_on_band_escalation(
+        CACHE_KEY_POR_BAND,
+        severity_band(ratio, POR_CRITICAL_RATIO, POR_HIGH_RATIO),
+        {
+            "critical": Alert(AlertSeverity.CRITICAL, f"*uniBTC reserves below supply*\n{body}", PROTOCOL),
+            "high": Alert(AlertSeverity.HIGH, f"*uniBTC reserves thin versus supply*\n{body}", PROTOCOL),
+        },
+    )
 
 
 def por_stale_threshold(state: UnibtcState) -> int:
@@ -1000,21 +1022,32 @@ def check_redemptions_underfunded(state: UnibtcState) -> None:
 
 
 def check_peg(price_in_wbtc: Decimal | None) -> None:
-    """Alert once while uniBTC trades below 0.98 WBTC.
+    """Alert when uniBTC trades below 0.985 WBTC (HIGH) or 0.97 WBTC (CRITICAL).
+
+    Alerts on entering a worse band, like PoR coverage.
 
     Args:
         price_in_wbtc: uniBTC/WBTC ratio, or None to skip.
     """
     if price_in_wbtc is None:
         return
-    depegged = price_in_wbtc < PEG_FLOOR
-    logger.info("uniBTC/WBTC peg=%s depegged=%s", price_in_wbtc, depegged)
-    message = (
-        "*uniBTC peg below 0.98 WBTC*\n"
-        f"Price: {format_decimal_amount(price_in_wbtc)} WBTC (threshold {PEG_FLOOR} WBTC)\n"
+    band = severity_band(price_in_wbtc, PEG_CRITICAL_FLOOR, PEG_HIGH_FLOOR)
+    logger.info("uniBTC/WBTC peg=%s band=%s", price_in_wbtc, band)
+    body = (
+        f"Price: {format_decimal_amount(price_in_wbtc)} WBTC "
+        f"(CRITICAL < {PEG_CRITICAL_FLOOR}, HIGH < {PEG_HIGH_FLOOR})\n"
         f"🔗 Token {_etherscan(UNIBTC)}"
     )
-    _alert_while_true(CACHE_KEY_PEG, depegged, Alert(AlertSeverity.HIGH, message, PROTOCOL))
+    _alert_on_band_escalation(
+        CACHE_KEY_PEG_BAND,
+        band,
+        {
+            "critical": Alert(
+                AlertSeverity.CRITICAL, f"*uniBTC peg below {PEG_CRITICAL_FLOOR} WBTC*\n{body}", PROTOCOL
+            ),
+            "high": Alert(AlertSeverity.HIGH, f"*uniBTC peg below {PEG_HIGH_FLOOR} WBTC*\n{body}", PROTOCOL),
+        },
+    )
 
 
 def main() -> None:
