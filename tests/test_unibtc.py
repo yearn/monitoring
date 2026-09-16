@@ -51,6 +51,49 @@ def make_state(**overrides: object) -> unibtc.UnibtcState:
     return unibtc.UnibtcState(**values)  # type: ignore[arg-type]
 
 
+# Bedrock API per-chain supplies captured 2026-09-16 09:20Z, before the API dropped BOB.
+API_SNAPSHOT_SUPPLIES = (
+    ("Ethereum-uniBTC", 1, "2981.445271"),
+    ("Optimism-uniBTC", 10, "3.66435741"),
+    ("RootStock-uniBTC", 30, "1.6561039"),
+    ("Binance-uniBTC", 56, "187.2519388"),
+    ("B2-uniBTC", 223, "5.66818735"),
+    ("Tac-uniBTC", 239, "0.11673062"),
+    ("Merlin-uniBTC", 4200, "4.76274063"),
+    ("IoTeX-uniBTC", 4689, "0.0011"),
+    ("Mantle-uniBTC", 5000, "3.35804978"),
+    ("Zeta-uniBTC", 7000, "0.02461641"),
+    ("Base-uniBTC", 8453, "496.3873782"),
+    ("Arbitrum-uniBTC", 42161, "1.30307482"),
+    ("Hemi-uniBTC", 43111, "0.111336"),
+    ("BOB-uniBTC", 60808, "701.5560332"),
+    ("Bera-uniBTC", 80094, "151.6242213"),
+    ("Taiko-uniBTC", 167000, "0.042935"),
+    ("Aptos-uniBTC", 981141, "0.15403966"),
+    ("Solana-uniBTC", 98114115, "7.57326742"),
+)
+
+
+def make_api(
+    *,
+    updated_at: int = 1_700_000_000,
+    drop_chain: int | None = None,
+    zero_chain: int | None = None,
+) -> unibtc.ApiStats:
+    """Build ApiStats from the 2026-09-16 snapshot, optionally dropping or zeroing a chain.
+
+    ``total_supply`` is recomputed from the kept entries, matching how the real API
+    understated its total when it dropped BOB.
+    """
+    supplies = tuple(
+        unibtc.ChainSupply(name, chain_id, Decimal("0") if chain_id == zero_chain else Decimal(supply))
+        for name, chain_id, supply in API_SNAPSHOT_SUPPLIES
+        if chain_id != drop_chain
+    )
+    total = sum((entry.supply for entry in supplies), Decimal("0"))
+    return unibtc.ApiStats(total_supply=total, updated_at=updated_at, chain_supplies=supplies)
+
+
 def make_client(responses: Sequence[object]) -> tuple[SimpleNamespace, list[object]]:
     """Build a batch-capable fake client and capture submitted calls."""
     added_calls: list[object] = []
@@ -172,13 +215,20 @@ def test_por_coverage_ratio_matches_snapshot() -> None:
     assert Decimal("1.020") < ratio < Decimal("1.021")
 
 
-def test_feeder_ratio_matches_snapshot() -> None:
-    ratio = unibtc.feeder_ratio(384_574_449_304, Decimal("4546.67793"))
-    assert Decimal("0.845") < ratio < Decimal("0.846")
+def test_feeder_shortfall_matches_snapshot() -> None:
+    """2026-09-16: feeder 3,845.33 vs API 4,546.70 — the feeder omits BOB."""
+    shortfall = unibtc.feeder_shortfall(384_533_051_367, Decimal("4546.701382"))
+    assert shortfall == Decimal("701.37086833")
 
 
-def test_feeder_ratio_drift() -> None:
-    assert unibtc.feeder_ratio_drift(Decimal("0.9"), Decimal("1.0")) == Decimal("0.1")
+def test_chain_matching_gap_names_bob_on_snapshot() -> None:
+    match = unibtc.chain_matching_gap(Decimal("701.37086833"), make_api().chain_supplies)
+    assert match is not None
+    assert match.chain_id == 60808
+
+
+def test_chain_matching_gap_none_when_no_chain_fits() -> None:
+    assert unibtc.chain_matching_gap(Decimal("300"), make_api().chain_supplies) is None
 
 
 def test_uncleared_wbtc_debt() -> None:
@@ -431,87 +481,130 @@ def test_por_stale_uses_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:
     assert alerts[0].severity == AlertSeverity.HIGH
 
 
-def test_supply_feeder_steady_state_is_quiet(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The live feeder sits ~15% under the dashboard total; that must not alert."""
+def test_supply_feeder_healthy_is_quiet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A feeder tracking API supply (as through 2026-09-12) must not alert."""
     alerts: list[Alert] = []
     stub_cache(monkeypatch)
     monkeypatch.setattr(unibtc, "send_alert", alerts.append)
 
-    unibtc.check_supply_feeder(make_state(), Decimal("4546.67793"))
-    unibtc.check_supply_feeder(make_state(), Decimal("4546.67793"))
-    unibtc.check_supply_feeder(make_state(feeder_supply=390_000_000_000), Decimal("4600"))
+    unibtc.check_supply_feeder(make_state(feeder_supply=454_649_306_457), make_api())
 
     assert alerts == []
 
 
-def test_supply_feeder_ratio_jump_alerts_once(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_supply_feeder_gap_alerts_once_and_names_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 2026-09-16 fault: feeder 3,845.33 vs API 4,546.70."""
     alerts: list[Alert] = []
     stub_cache(monkeypatch)
     monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+    broken = make_state(feeder_supply=384_533_051_367)
 
-    unibtc.check_supply_feeder(make_state(), Decimal("4546.67793"))
-    hijacked = make_state(feeder_supply=384_574_449_304 // 2)
-    unibtc.check_supply_feeder(hijacked, Decimal("4546.67793"))
-    unibtc.check_supply_feeder(hijacked, Decimal("4546.67793"))
+    unibtc.check_supply_feeder(broken, make_api())
+    unibtc.check_supply_feeder(broken, make_api())
 
     assert len(alerts) == 1
     assert alerts[0].severity == AlertSeverity.HIGH
     assert "supply feeder wrong" in alerts[0].message
+    assert "below" in alerts[0].message
+    assert "BOB-uniBTC (chain 60808)" in alerts[0].message
+    assert "omits" in alerts[0].message
 
 
-def test_supply_feeder_ratio_cannot_ratchet(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Repeated sub-threshold steps must not walk the anchor into unlimited drift."""
+def test_supply_feeder_gap_without_matching_chain(monkeypatch: pytest.MonkeyPatch) -> None:
     alerts: list[Alert] = []
     stub_cache(monkeypatch)
     monkeypatch.setattr(unibtc, "send_alert", alerts.append)
-    api = Decimal("4546.67793")
-    feeder = 384_574_449_304
 
-    unibtc.check_supply_feeder(make_state(feeder_supply=feeder), api)
-    for step in range(4):
-        feeder = feeder * 97 // 100
-        unibtc.check_supply_feeder(
-            make_state(feeder_supply=feeder, block_timestamp=1_700_000_000 + (step + 1) * 3600), api
-        )
+    unibtc.check_supply_feeder(make_state(feeder_supply=430_000_000_000), make_api())
 
     assert len(alerts) == 1
-    assert "supply feeder wrong" in alerts[0].message
+    assert "No single chain's supply matches the gap" in alerts[0].message
 
 
-def test_supply_feeder_anchor_refreshes_only_on_slow_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_supply_feeder_gap_rearms_after_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
     alerts: list[Alert] = []
-    cache = stub_cache(monkeypatch)
-    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
-    api = Decimal("4546.67793")
-    now = 1_700_000_000
-    nudged = 384_574_449_304 * 98 // 100
-
-    unibtc.check_supply_feeder(make_state(block_timestamp=now), api)
-    anchor = cache[unibtc.CACHE_KEY_FEEDER_RATIO]
-    unibtc.check_supply_feeder(make_state(feeder_supply=nudged, block_timestamp=now + 3600), api)
-    assert cache[unibtc.CACHE_KEY_FEEDER_RATIO] == anchor, "in-band reading moved a fresh anchor"
-
-    unibtc.check_supply_feeder(
-        make_state(feeder_supply=nudged, block_timestamp=now + unibtc.FEEDER_ANCHOR_REFRESH_SECONDS), api
-    )
-    assert cache[unibtc.CACHE_KEY_FEEDER_RATIO] != anchor, "anchor never refreshes"
-    # Advancing 7 days leaves feeder_supply unchanged, which legitimately trips the
-    # separate 48h staleness check; only the ratio check must stay quiet here.
-    assert not any("supply feeder wrong" in alert.message for alert in alerts)
-
-
-def test_supply_feeder_baseline_not_relearned_while_alerting(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An anomalous ratio must not quietly become the new baseline."""
-    alerts: list[Alert] = []
-    cache = stub_cache(monkeypatch)
+    stub_cache(monkeypatch)
     monkeypatch.setattr(unibtc, "send_alert", alerts.append)
 
-    unibtc.check_supply_feeder(make_state(), Decimal("4546.67793"))
-    baseline = cache[unibtc.CACHE_KEY_FEEDER_RATIO]
-    unibtc.check_supply_feeder(make_state(feeder_supply=384_574_449_304 // 2), Decimal("4546.67793"))
+    unibtc.check_supply_feeder(make_state(feeder_supply=384_533_051_367), make_api())
+    unibtc.check_supply_feeder(make_state(feeder_supply=454_649_306_457), make_api())
+    unibtc.check_supply_feeder(make_state(feeder_supply=384_533_051_367), make_api())
 
-    assert cache[unibtc.CACHE_KEY_FEEDER_RATIO] == baseline
-    assert len(alerts) == 1
+    wrong = [alert for alert in alerts if "supply feeder wrong" in alert.message]
+    assert len(wrong) == 2
+
+
+def test_supply_feeder_gap_skipped_without_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+
+    unibtc.check_supply_feeder(make_state(feeder_supply=384_533_051_367), None)
+
+    assert alerts == []
+
+
+# ---------------------------------------------------------------------------
+# API safeguards
+# ---------------------------------------------------------------------------
+
+
+def test_api_snapshot_passes_safeguards() -> None:
+    assert unibtc.api_stats_problems(make_api(), make_state()) == []
+
+
+def test_api_rejected_when_required_chain_missing() -> None:
+    """The observed 2026-09-16 failure: BOB dropped from supplies, total understated."""
+    api = make_api(drop_chain=60808)
+
+    problems = unibtc.api_stats_problems(api, make_state())
+
+    assert problems == ["BOB (chain 60808) missing from supplies"]
+
+
+def test_api_rejected_when_required_chain_zero() -> None:
+    problems = unibtc.api_stats_problems(make_api(zero_chain=8453), make_state())
+    assert problems == ["Base (chain 8453) supply is 0"]
+
+
+def test_api_rejected_when_stale() -> None:
+    state = make_state()
+    api = make_api(updated_at=state.block_timestamp - unibtc.API_MAX_AGE_SECONDS - 1)
+
+    problems = unibtc.api_stats_problems(api, state)
+
+    assert len(problems) == 1
+    assert "old" in problems[0]
+
+
+def test_api_accepts_timestamp_slightly_ahead_of_block() -> None:
+    state = make_state()
+    assert unibtc.api_stats_problems(make_api(updated_at=state.block_timestamp + 30), state) == []
+
+
+def test_api_rejected_when_mainnet_disagrees_with_chain() -> None:
+    state = make_state(total_supply=250_000_000_000)
+
+    problems = unibtc.api_stats_problems(make_api(), state)
+
+    assert len(problems) == 1
+    assert "differs from on-chain totalSupply" in problems[0]
+
+
+def test_validate_api_stats_reports_and_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    errors: list[str] = []
+    monkeypatch.setattr(unibtc, "send_error_message", lambda message, _protocol: errors.append(message))
+
+    assert unibtc.validate_api_stats(make_api(drop_chain=60808), make_state()) is None
+    assert len(errors) == 1
+    assert "BOB (chain 60808) missing" in errors[0]
+
+
+def test_validate_api_stats_passes_through_valid(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(unibtc, "send_error_message", lambda _message, _protocol: pytest.fail("unexpected error"))
+    api = make_api()
+    assert unibtc.validate_api_stats(api, make_state()) is api
+    assert unibtc.validate_api_stats(None, make_state()) is None
 
 
 def test_supply_feeder_stale_after_48h(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -710,13 +803,49 @@ def test_peg_skips_missing_price(monkeypatch: pytest.MonkeyPatch) -> None:
     assert alerts == []
 
 
-def test_fetch_api_total_supply_parses_data(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_api_stats_parses_data(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         unibtc,
         "fetch_json",
-        lambda _url: {"code": 200, "data": {"total_supply": "4546.67793"}},
+        lambda _url: {
+            "code": 200,
+            "data": {
+                "time": 1_789_550_408_224,
+                "total_supply": "4546.701382",
+                "supplies": [
+                    {"chain_id": 1, "name": "Ethereum-uniBTC", "supply": "2981.445271"},
+                    {"chain_id": 60808, "name": "BOB-uniBTC", "supply": "701.5560332"},
+                    {"chain_id": 8453, "name": "broken"},
+                ],
+            },
+        },
     )
-    assert unibtc.fetch_api_total_supply() == Decimal("4546.67793")
+
+    stats = unibtc.fetch_api_stats()
+
+    assert stats is not None
+    assert stats.total_supply == Decimal("4546.701382")
+    assert stats.updated_at == 1_789_550_408
+    assert [entry.chain_id for entry in stats.chain_supplies] == [1, 60808]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {"code": 500},
+        {"data": {"total_supply": "4546.7"}},
+        {"data": {"time": 1, "total_supply": "0", "supplies": []}},
+        {"data": {"time": 1, "total_supply": "4546.7"}},
+    ],
+)
+def test_fetch_api_stats_rejects_malformed(monkeypatch: pytest.MonkeyPatch, payload: object) -> None:
+    errors: list[str] = []
+    monkeypatch.setattr(unibtc, "fetch_json", lambda _url: payload)
+    monkeypatch.setattr(unibtc, "send_error_message", lambda message, _protocol: errors.append(message))
+
+    assert unibtc.fetch_api_stats() is None
+    assert len(errors) == 1
 
 
 def test_fetch_price_in_wbtc_prefers_coingecko_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -823,22 +952,53 @@ def test_load_state_batches_all_calls_at_one_block() -> None:
     assert state.vault_wbtc_balance == 46_065_725
 
 
-def test_main_runs_every_check(monkeypatch: pytest.MonkeyPatch) -> None:
+def _stub_main(monkeypatch: pytest.MonkeyPatch, api: unibtc.ApiStats) -> dict[str, object]:
+    """Stub main()'s I/O and record what the API-dependent checks receive."""
     state = make_state()
-    observed: list[str] = []
+    received: dict[str, object] = {"observed": []}
+    observed = received["observed"]
+    assert isinstance(observed, list)
     monkeypatch.setattr(unibtc.ChainManager, "get_client", lambda _chain: object())
     monkeypatch.setattr(unibtc, "load_state", lambda _client: state)
-    monkeypatch.setattr(unibtc, "fetch_api_total_supply", lambda: Decimal("4546.67793"))
+    monkeypatch.setattr(unibtc, "fetch_api_stats", lambda: api)
+    monkeypatch.setattr(unibtc, "send_error_message", lambda _message, _protocol: None)
     monkeypatch.setattr(unibtc, "fetch_price_in_wbtc", lambda: Decimal("0.992417"))
     monkeypatch.setattr(unibtc, "check_unexpected_minting", lambda _state: observed.append("mint"))
     monkeypatch.setattr(unibtc, "check_reserve_gate", lambda _state: observed.append("gate"))
     monkeypatch.setattr(unibtc, "check_paused", lambda _state: observed.append("pause"))
-    monkeypatch.setattr(unibtc, "check_por_coverage", lambda _state, _api: observed.append("por"))
+
+    def por(_state: object, supply: object) -> None:
+        received["por_supply"] = supply
+        observed.append("por")
+
+    def feeder(_state: object, feeder_api: object) -> None:
+        received["feeder_api"] = feeder_api
+        observed.append("feeder")
+
+    monkeypatch.setattr(unibtc, "check_por_coverage", por)
     monkeypatch.setattr(unibtc, "check_por_stale", lambda _state: observed.append("stale"))
-    monkeypatch.setattr(unibtc, "check_supply_feeder", lambda _state, _api: observed.append("feeder"))
+    monkeypatch.setattr(unibtc, "check_supply_feeder", feeder)
     monkeypatch.setattr(unibtc, "check_redemptions_underfunded", lambda _state: observed.append("redeem"))
     monkeypatch.setattr(unibtc, "check_peg", lambda _price: observed.append("peg"))
+    return received
+
+
+def test_main_runs_every_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = make_api()
+    received = _stub_main(monkeypatch, api)
 
     unibtc.main()
 
-    assert observed == ["mint", "gate", "pause", "por", "stale", "feeder", "redeem", "peg"]
+    assert received["observed"] == ["mint", "gate", "pause", "por", "stale", "feeder", "redeem", "peg"]
+    assert received["por_supply"] == api.total_supply
+    assert received["feeder_api"] is api
+
+
+def test_main_withholds_rejected_api_from_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A response missing BOB must reach neither PoR coverage nor the feeder gap check."""
+    received = _stub_main(monkeypatch, make_api(drop_chain=60808))
+
+    unibtc.main()
+
+    assert received["por_supply"] is None
+    assert received["feeder_api"] is None

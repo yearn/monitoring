@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
 
 from web3 import Web3
@@ -56,20 +56,31 @@ SNAPSHOT_RETENTION = MINT_24H_MAX_BASELINE_AGE
 POR_CRITICAL_RATIO = Decimal("1.00")
 POR_HIGH_RATIO = Decimal("1.01")
 POR_STALE_SECONDS = 86_400
-# The on-chain feeder and the Bedrock dashboard cover different chain sets, so their
-# absolute levels differ by a large steady-state factor (~0.85 at time of writing).
-# Only a *move* in that ratio signals a wrong or hijacked feeder, so the baseline is
-# learned from the cache rather than hardcoded.
-FEEDER_RATIO_DRIFT_THRESHOLD = Decimal("0.05")
-# The anchor is refreshed on a slow clock, never per run. Re-anchoring to every
-# in-band reading would let the ratio ratchet: repeated sub-threshold steps each
-# move the anchor, so an unlimited drift accumulates without ever tripping.
-FEEDER_ANCHOR_REFRESH_SECONDS = 7 * 24 * 60 * 60
+# A healthy feeder tracks the API total supply (ratio ~1.00 through 2026-09-12).
+FEEDER_GAP_THRESHOLD = Decimal("0.02")
+# A chain whose supply is within this fraction of the feeder gap is named as the likely omission.
+FEEDER_CHAIN_MATCH_TOLERANCE = Decimal("0.05")
 FEEDER_STALE_SECONDS = 48 * 60 * 60
 REDEMPTION_UNDERFUNDED_SECONDS = 24 * 60 * 60
 PEG_FLOOR = Decimal("0.98")
 
+# Undocumented backend of Bedrock's own dashboard (app.bedrock.technology). It is the
+# issuer's figure, not independent, and has been observed dropping whole chains from
+# ``supplies`` (BOB, ~700 uniBTC, on 2026-09-16), so every response is validated before use.
 RESERVE_API_URL = "https://affiliate-api-eosin.vercel.app/api/v1/third/stats/unibtc"
+API_MAX_AGE_SECONDS = 60 * 60
+# The API's Ethereum entry must match our block-pinned totalSupply within this fraction.
+API_MAINNET_SUPPLY_TOLERANCE = Decimal("0.01")
+MAINNET_CHAIN_ID = 1
+# Chains holding >= ~100 uniBTC (99.4% of supply on 2026-09-16). A response missing any
+# of these, or reporting zero for one, understates total supply and is rejected.
+API_REQUIRED_CHAINS = {
+    MAINNET_CHAIN_ID: "Ethereum",
+    56: "BSC",
+    8453: "Base",
+    60808: "BOB",
+    80094: "Berachain",
+}
 UNIBTC_PRICE_KEYS = (
     "coingecko:universal-btc",
     f"ethereum:{UNIBTC}",
@@ -84,8 +95,6 @@ CACHE_KEY_PAUSED = "UNIBTC_PAUSED_ALERTED"
 CACHE_KEY_POR_BAND = "UNIBTC_POR_BAND"
 CACHE_KEY_POR_STALE = "UNIBTC_POR_STALE_ALERTED"
 CACHE_KEY_FEEDER_GAP = "UNIBTC_FEEDER_GAP_ALERTED"
-CACHE_KEY_FEEDER_RATIO = "UNIBTC_FEEDER_RATIO_BASELINE"
-CACHE_KEY_FEEDER_RATIO_TS = "UNIBTC_FEEDER_RATIO_BASELINE_TS"
 CACHE_KEY_FEEDER_VALUE = "UNIBTC_FEEDER_VALUE"
 CACHE_KEY_FEEDER_CHANGED_TS = "UNIBTC_FEEDER_CHANGED_TS"
 CACHE_KEY_FEEDER_STALE = "UNIBTC_FEEDER_STALE_ALERTED"
@@ -185,6 +194,24 @@ class UnibtcState:
     vault_wbtc_balance: int
 
 
+@dataclass(frozen=True)
+class ChainSupply:
+    """One per-chain uniBTC supply entry from the Bedrock API."""
+
+    name: str
+    chain_id: int
+    supply: Decimal
+
+
+@dataclass(frozen=True)
+class ApiStats:
+    """Parsed Bedrock API supply figures."""
+
+    total_supply: Decimal
+    updated_at: int
+    chain_supplies: tuple[ChainSupply, ...]
+
+
 # ---------------------------------------------------------------------------
 # Formatting / cache
 # ---------------------------------------------------------------------------
@@ -211,18 +238,6 @@ def _cache_int(key: str) -> int:
         return int(_cache_raw(key))
     except (TypeError, ValueError):
         return 0
-
-
-def _cache_decimal(key: str) -> Decimal | None:
-    """Read a cache value as Decimal, returning None when unset or unparsable."""
-    raw = _cache_raw(key)
-    if raw in (0, "0", ""):
-        return None
-    try:
-        return Decimal(str(raw))
-    except (TypeError, ValueError, InvalidOperation):
-        logger.warning("Ignoring invalid uniBTC decimal cache for %s: %s", key, raw)
-        return None
 
 
 def _set_cache(key: str, value: int | str) -> None:
@@ -425,23 +440,109 @@ def load_state(client: Any) -> UnibtcState:
     )
 
 
-def fetch_api_total_supply() -> Decimal | None:
-    """Return Bedrock dashboard ``data.total_supply``, or None on failure."""
+def _parse_chain_supplies(raw: Any) -> tuple[ChainSupply, ...] | None:
+    """Parse ``data.supplies``, skipping malformed entries; None when the list is absent."""
+    if not isinstance(raw, list):
+        return None
+    supplies: list[ChainSupply] = []
+    for item in raw:
+        try:
+            supplies.append(ChainSupply(str(item["name"]), int(item["chain_id"]), Decimal(str(item["supply"]))))
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            logger.warning("Ignoring malformed Bedrock API supply entry: %s", item)
+    return tuple(supplies)
+
+
+def fetch_api_stats() -> ApiStats | None:
+    """Fetch and parse Bedrock API supply figures, or None on failure.
+
+    Parsing only; use :func:`validate_api_stats` before trusting the figures.
+    """
     payload = fetch_json(RESERVE_API_URL)
     if not payload:
         send_error_message(f"Bedrock reserve API unavailable: {RESERVE_API_URL}", PROTOCOL)
         return None
     data = payload.get("data") if isinstance(payload, dict) else None
-    raw = data.get("total_supply") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        send_error_message(f"Bedrock reserve API response has no data object: {payload!r}", PROTOCOL)
+        return None
     try:
-        supply = Decimal(str(raw))
-    except (TypeError, ValueError, ArithmeticError):
-        send_error_message(f"Bedrock reserve API missing total_supply: {payload!r}", PROTOCOL)
+        total_supply = Decimal(str(data["total_supply"]))
+        updated_at = int(data["time"]) // 1000
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        send_error_message("Bedrock reserve API missing total_supply or time", PROTOCOL)
         return None
-    if supply <= 0:
-        send_error_message(f"Bedrock reserve API returned non-positive total_supply: {supply}", PROTOCOL)
+    chain_supplies = _parse_chain_supplies(data.get("supplies"))
+    if total_supply <= 0 or chain_supplies is None:
+        send_error_message(
+            f"Bedrock reserve API returned total_supply={total_supply} and supplies={data.get('supplies')!r}",
+            PROTOCOL,
+        )
         return None
-    return supply
+    return ApiStats(total_supply=total_supply, updated_at=updated_at, chain_supplies=chain_supplies)
+
+
+def api_stats_problems(stats: ApiStats, state: UnibtcState) -> list[str]:
+    """Return reasons the API figures cannot be trusted this run; empty when usable.
+
+    Args:
+        stats: Parsed API figures.
+        state: Current on-chain snapshot, used as the independent reference.
+
+    Returns:
+        Human-readable problems, one per failed safeguard.
+    """
+    problems: list[str] = []
+    age = state.block_timestamp - stats.updated_at
+    if age > API_MAX_AGE_SECONDS:
+        problems.append(f"data is {format_duration(age)} old (max {format_duration(API_MAX_AGE_SECONDS)})")
+
+    by_chain = {entry.chain_id: entry for entry in stats.chain_supplies}
+    for chain_id, name in API_REQUIRED_CHAINS.items():
+        entry = by_chain.get(chain_id)
+        if entry is None:
+            problems.append(f"{name} (chain {chain_id}) missing from supplies")
+        elif entry.supply <= 0:
+            problems.append(f"{name} (chain {chain_id}) supply is {entry.supply}")
+
+    mainnet = by_chain.get(MAINNET_CHAIN_ID)
+    onchain = normalize_token_amount(state.total_supply, UNIBTC_DECIMALS)
+    if mainnet is not None and mainnet.supply > 0 and onchain > 0:
+        mismatch = abs(mainnet.supply - onchain) / onchain
+        if mismatch > API_MAINNET_SUPPLY_TOLERANCE:
+            problems.append(
+                f"Ethereum supply {format_decimal_amount(mainnet.supply)} differs from on-chain totalSupply "
+                f"{format_decimal_amount(onchain)} by {mismatch:.2%}"
+            )
+    return problems
+
+
+def validate_api_stats(stats: ApiStats | None, state: UnibtcState) -> ApiStats | None:
+    """Return ``stats`` only when every safeguard passes; otherwise report and return None.
+
+    A rejected response skips the PoR-coverage and feeder-gap checks for this run.
+    Using it instead would be worse than skipping: a dropped chain understates total
+    supply, which inflates PoR coverage and hides a feeder that omits the same chain.
+
+    Args:
+        stats: Parsed API figures, or None when the fetch failed.
+        state: Current on-chain snapshot.
+
+    Returns:
+        The validated figures, or None.
+    """
+    if stats is None:
+        return None
+    problems = api_stats_problems(stats, state)
+    if not problems:
+        return stats
+    logger.warning("Rejecting Bedrock reserve API response: %s", problems)
+    send_error_message(
+        "Bedrock reserve API response rejected; PoR coverage and feeder gap checks skipped:\n"
+        + "\n".join(f"- {problem}" for problem in problems),
+        PROTOCOL,
+    )
+    return None
 
 
 def fetch_price_in_wbtc() -> Decimal | None:
@@ -726,77 +827,71 @@ def check_por_stale(state: UnibtcState) -> None:
     _alert_while_true(CACHE_KEY_POR_STALE, stale, Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
 
-def feeder_ratio(feeder_supply_raw: int, api_total_supply: Decimal) -> Decimal:
-    """Return the on-chain feeder supply as a fraction of the Bedrock API supply."""
-    feeder = normalize_token_amount(feeder_supply_raw, UNIBTC_DECIMALS)
-    return feeder / api_total_supply
+def feeder_shortfall(feeder_supply_raw: int, api_total_supply: Decimal) -> Decimal:
+    """Return API total supply minus feeder supply; positive when the feeder under-reports."""
+    return api_total_supply - normalize_token_amount(feeder_supply_raw, UNIBTC_DECIMALS)
 
 
-def feeder_ratio_drift(ratio: Decimal, baseline: Decimal) -> Decimal:
-    """Return the relative move of ``ratio`` away from its cached ``baseline``."""
-    return abs(ratio - baseline) / baseline
+def chain_matching_gap(gap: Decimal, chain_supplies: tuple[ChainSupply, ...]) -> ChainSupply | None:
+    """Return the chain whose supply best explains ``gap``, if within tolerance.
+
+    The feeder has been observed omitting exactly one chain's supply (BOB), so naming
+    the matching chain turns a bare percentage into an actionable alert.
+    """
+    size = abs(gap)
+    if size <= 0 or not chain_supplies:
+        return None
+    best = min(chain_supplies, key=lambda entry: abs(entry.supply - size))
+    if abs(best.supply - size) <= size * FEEDER_CHAIN_MATCH_TOLERANCE:
+        return best
+    return None
 
 
-def _set_feeder_anchor(ratio: Decimal, timestamp: int) -> None:
-    """Pin the feeder-ratio anchor and the time it was taken."""
-    _set_cache(CACHE_KEY_FEEDER_RATIO, str(ratio))
-    _set_cache(CACHE_KEY_FEEDER_RATIO_TS, timestamp)
-
-
-def check_feeder_ratio(state: UnibtcState, api_total_supply: Decimal) -> None:
-    """Alert when the feeder-to-dashboard ratio moves off its anchor.
-
-    The two figures cover different chain sets, so their absolute gap is large and
-    uninformative; what signals a wrong or hijacked feeder is the ratio between them
-    jumping. Comparison is against a long-term anchor that is re-taken at most once
-    per ``FEEDER_ANCHOR_REFRESH_SECONDS`` and only while inside the band, so neither
-    an anomalous reading nor a run of sub-threshold steps can walk the reference.
+def check_feeder_gap(state: UnibtcState, api: ApiStats) -> None:
+    """Alert once while the supply feeder differs from validated API total supply by >2%.
 
     Args:
         state: Current on-chain snapshot.
-        api_total_supply: Bedrock dashboard total supply.
+        api: Validated Bedrock API figures.
     """
-    ratio = feeder_ratio(state.feeder_supply, api_total_supply)
-    baseline = _cache_decimal(CACHE_KEY_FEEDER_RATIO)
-    anchored_at = _cache_int(CACHE_KEY_FEEDER_RATIO_TS)
-    if baseline is None or baseline <= 0:
-        logger.info("uniBTC feeder ratio anchor initialised at %s", ratio)
-        _set_feeder_anchor(ratio, state.block_timestamp)
-        return
-
-    drift = feeder_ratio_drift(ratio, baseline)
-    off_baseline = drift > FEEDER_RATIO_DRIFT_THRESHOLD
-    anchor_age = state.block_timestamp - anchored_at
+    shortfall = feeder_shortfall(state.feeder_supply, api.total_supply)
+    gap = abs(shortfall) / api.total_supply
+    wrong = gap > FEEDER_GAP_THRESHOLD
+    match = chain_matching_gap(shortfall, api.chain_supplies) if wrong else None
     logger.info(
-        "uniBTC feeder ratio=%s anchor=%s anchor_age=%ss drift=%s feeder=%s api=%s",
-        ratio,
-        baseline,
-        anchor_age,
-        drift,
+        "uniBTC feeder gap=%s shortfall=%s feeder=%s api=%s match=%s",
+        gap,
+        shortfall,
         state.feeder_supply,
-        api_total_supply,
+        api.total_supply,
+        match,
     )
+    direction = "below" if shortfall > 0 else "above"
+    if match is not None:
+        hint = (
+            f"Gap matches {match.name} (chain {match.chain_id}) supply of "
+            f"{format_decimal_amount(match.supply)} uniBTC; the feeder likely "
+            f"{'omits' if shortfall > 0 else 'double-counts'} that chain.\n"
+        )
+    else:
+        hint = "No single chain's supply matches the gap.\n"
     message = (
         "*uniBTC supply feeder wrong*\n"
-        f"Feeder / Bedrock API ratio moved {drift:.2%} off its {baseline:.4f} anchor "
-        f"(threshold {FEEDER_RATIO_DRIFT_THRESHOLD:.0%}), now {ratio:.4f}.\n"
+        f"Feeder is {format_decimal_amount(abs(shortfall))} uniBTC ({gap:.2%}) {direction} Bedrock API "
+        f"total supply (threshold {FEEDER_GAP_THRESHOLD:.0%}).\n"
+        f"{hint}"
         f"Feeder totalTokenSupply: {_fmt_btc(state.feeder_supply)} uniBTC\n"
-        f"API total_supply: {format_decimal_amount(api_total_supply)} uniBTC\n"
+        f"API total_supply: {format_decimal_amount(api.total_supply)} uniBTC\n"
         f"🔗 Feeder {_etherscan(SUPPLY_FEEDER)}"
     )
-    _alert_while_true(CACHE_KEY_FEEDER_GAP, off_baseline, Alert(AlertSeverity.HIGH, message, PROTOCOL))
-    # Only re-anchor from a quiet reading, and only once the anchor is old enough.
-    # anchored_at <= 0 covers a cache written before the anchor timestamp existed.
-    if not off_baseline and (anchored_at <= 0 or anchor_age >= FEEDER_ANCHOR_REFRESH_SECONDS):
-        logger.info("uniBTC feeder ratio anchor refreshed to %s", ratio)
-        _set_feeder_anchor(ratio, state.block_timestamp)
+    _alert_while_true(CACHE_KEY_FEEDER_GAP, wrong, Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
 
 def check_feeder_zero(state: UnibtcState) -> None:
     """Alert once while the supply feeder reports a zero ``totalTokenSupply``.
 
     A zero supply satisfies the Vault reserve check for any mint amount, so this
-    fires on the first run and needs no Bedrock API, unlike the ratio check.
+    fires on the first run and needs no Bedrock API, unlike the gap check.
 
     Args:
         state: Current on-chain snapshot.
@@ -812,16 +907,16 @@ def check_feeder_zero(state: UnibtcState) -> None:
     _alert_while_true(CACHE_KEY_FEEDER_ZERO, zero, Alert(AlertSeverity.CRITICAL, message, PROTOCOL))
 
 
-def check_supply_feeder(state: UnibtcState, api_total_supply: Decimal | None) -> None:
-    """Alert when the supply feeder reports zero, diverges from the dashboard, or stops updating.
+def check_supply_feeder(state: UnibtcState, api: ApiStats | None) -> None:
+    """Alert when the supply feeder reports zero, diverges from the API, or stops updating.
 
     Args:
         state: Current on-chain snapshot.
-        api_total_supply: Bedrock dashboard total supply, or None to skip the ratio check.
+        api: Validated Bedrock API figures, or None to skip the gap check.
     """
     check_feeder_zero(state)
-    if api_total_supply is not None:
-        check_feeder_ratio(state, api_total_supply)
+    if api is not None:
+        check_feeder_gap(state, api)
 
     previous_value = _cache_int(CACHE_KEY_FEEDER_VALUE)
     changed_ts = _cache_int(CACHE_KEY_FEEDER_CHANGED_TS)
@@ -926,15 +1021,15 @@ def main() -> None:
     """Run all Bedrock uniBTC state-polling checks."""
     client = ChainManager.get_client(Chain.MAINNET)
     state = load_state(client)
-    api_total_supply = fetch_api_total_supply()
+    api = validate_api_stats(fetch_api_stats(), state)
     price_in_wbtc = fetch_price_in_wbtc()
 
     check_unexpected_minting(state)
     check_reserve_gate(state)
     check_paused(state)
-    check_por_coverage(state, api_total_supply)
+    check_por_coverage(state, api.total_supply if api is not None else None)
     check_por_stale(state)
-    check_supply_feeder(state, api_total_supply)
+    check_supply_feeder(state, api)
     check_redemptions_underfunded(state)
     check_peg(price_in_wbtc)
 
