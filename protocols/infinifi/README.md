@@ -14,7 +14,7 @@ This folder contains monitoring scripts for the Infinifi protocol.
 - **Liquid Reserves**: A Telegram alert is triggered if liquid reserves drop below $8M.
 - **Reserve Ratio Breach**: Alert if liquid ratio falls below protocol `reserveRatio` target.
 - **Illiquid Ratio Breach**: Alert if illiquid ratio rises above protocol `illiquidTargetRatio`.
-- **Backing Per iUSD**: Alert if `totalTVL / iUSD supply` drops below `0.999`.
+- **Backing Per iUSD**: Alert if API `totalTVL / iUSD supply` drops below `0.999`. The supply is pinned to and reported with an Ethereum block. The API does not expose a block identifier to this monitor, so this cross-source comparison cannot be atomic.
 - **Redemption Pressure**: Alert if `pending redemptions / liquid reserves` exceeds `80%`.
 - **Farm Allocation Shift**: Alert if any farm allocation ratio (`farm assets / total TVL`) changes by more than `FARM_RATIO_CHANGE_ALERT_THRESHOLD` versus cached ratio. Farms below 1% of total TVL are excluded.
 - **Farm Activation**: Alert if a farm previously at `0` cached ratio moves above `FARM_RATIO_ACTIVATION_ALERT_THRESHOLD` of total TVL.

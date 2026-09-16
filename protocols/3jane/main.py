@@ -8,18 +8,20 @@ sUSD3 is the junior (first-loss) tranche created by staking USD3.
 Monitors:
 - PPS (Price Per Share) for USD3 and sUSD3 — alerts on any decrease
 - TVL (Total Value Locked) via totalAssets() — alerts on >15% change
-- Junior tranche buffer — alerts when sUSD3 coverage drops below threshold
-- USD3 OC — alerts when senior-tranche overcollateralization drops below thresholds
+- USD3 protection — alerts when senior-tranche OC / equivalent junior buffer drops below thresholds
 - Insurance fund — alerts on waUSDC outflows of at least $50k
 - Withdraw liquidity — alerts when USD3 availableWithdrawLimit falls below $4M
 
-Threshold alerts (junior buffer, USD3 OC, withdraw liquidity) are deduped via
+Threshold alerts (USD3 protection, withdraw liquidity) are deduped via
 cache: the alerted value is stored and no new alert is sent until the value
 drops below it; recovering above the threshold re-arms the alert.
 - Vault shutdown status — alerts once if either vault enters emergency shutdown
 - Debt cap changes — alerts when ProtocolConfig debt cap is modified
 - Nominal sUSD3 backing floor — alerts on change and when floor > sUSD3 backing
 - Protocol-wide pause — alerts once when ProtocolConfig IS_PAUSED flips to true
+- Accountable Proof of Solvency — collateral ratio thresholds plus feed freshness
+  and availability. HIGH and CRITICAL use the same ``3jane`` protocol key as the
+  onchain checks, so they dispatch the same way.
 """
 
 import json
@@ -28,11 +30,13 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from web3 import Web3
 
 from utils.abi import load_abi
+from utils.accountable import AccountableFeedConfig, AccountableReport, AccountableStatus, fetch_report
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import (
     HOURLY_CACHE_STALE_AFTER_SECONDS,
@@ -43,7 +47,7 @@ from utils.cache import (
     write_last_value_with_timestamp_to_file,
 )
 from utils.chains import Chain
-from utils.formatting import format_duration, format_usd
+from utils.formatting import format_duration, format_usd, format_with_suffix
 from utils.logger import get_logger
 from utils.telegram import escape_markdown
 from utils.web3_wrapper import ChainManager
@@ -88,21 +92,48 @@ CACHE_KEY_FLOOR_BREACH = "3JANE_FLOOR_BREACH"
 CACHE_KEY_IS_PAUSED = "3JANE_IS_PAUSED"
 CACHE_KEY_INSURANCE_FUND_SHARES = "3JANE_INSURANCE_FUND_SHARES"
 CACHE_KEY_BORROWER_DEFAULT_WATCH_PREFIX = "3JANE_BORROWER_DEFAULT_WATCH"
-CACHE_KEY_JUNIOR_BUFFER_ALERTED = "3JANE_JUNIOR_BUFFER_ALERTED"
 CACHE_KEY_USD3_OC_ALERTED = "3JANE_USD3_OC_ALERTED"
 CACHE_KEY_WITHDRAW_LIMIT_ALERTED = "3JANE_WITHDRAW_LIMIT_ALERTED"
+CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED = "3JANE_ACCOUNTABLE_HIGH_ALERTED"
+CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED = "3JANE_ACCOUNTABLE_CRITICAL_ALERTED"
+CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK = "3JANE_ACCOUNTABLE_FAILURE_STREAK"
+CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED = "3JANE_ACCOUNTABLE_HEALTH_ALERTED"
+CACHE_KEY_ACCOUNTABLE_STALE_ALERTED = "3JANE_ACCOUNTABLE_STALE_ALERTED"
 
 # --- ProtocolConfig keys (keccak256 of the string label) ---
 CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR = Web3.keccak(text="SUSD3_NOMINAL_BACKING_FLOOR")
 CFG_KEY_IS_PAUSED = Web3.keccak(text="IS_PAUSED")
+CFG_KEY_GRACE_PERIOD = Web3.keccak(text="GRACE_PERIOD")
+CFG_KEY_DELINQUENCY_PERIOD = Web3.keccak(text="DELINQUENCY_PERIOD")
 
 # --- Thresholds ---
 TVL_CHANGE_THRESHOLD = 0.15  # 15% TVL change alert
-JUNIOR_BUFFER_THRESHOLD = 0.15  # Alert when sUSD3 backing < 15% of deployed credit
 USD3_OC_HIGH_THRESHOLD = 1.11  # Alert when USD3 OC drops below the 111% target
 USD3_OC_CRITICAL_THRESHOLD = 1.06  # Alert when USD3 OC drops below 106%
 INSURANCE_FUND_OUTFLOW_THRESHOLD = 50_000  # USDC
 WITHDRAW_LIMIT_THRESHOLD = 4_000_000  # USDC, alert when USD3 availableWithdrawLimit falls below
+
+# --- Accountable Proof of Solvency ---
+ACCOUNTABLE_FEED = AccountableFeedConfig(
+    dfid="100000026",
+    protocol=PROTOCOL,
+    dashboard_url=os.getenv("THREE_JANE_ACCOUNTABLE_URL", "https://accountable.3jane.xyz/dashboard"),
+    message_url=os.getenv("THREE_JANE_ACCOUNTABLE_MESSAGE_URL", "https://accountable.3jane.xyz/"),
+    dashboard_type="three-jane",
+    required_sources=(
+        "LendSwift - Warehouse Senior Note",
+        "USD3 Minted Liabilities",
+        "Slope - Forward Flows",
+        "USD3 On-Chain Reserves",
+    ),
+    # The dashboard UI declares Slope as Weekly, while older JSON responses
+    # reported Daily. Bind the operator-confirmed cadence to avoid false alerts.
+    source_frequency_overrides=(("Slope - Forward Flows", "WEEKLY"),),
+)
+# TODO: Recalibrate both thresholds after Accountable includes 3Jane's idle
+# funds in the reported reserve totals. These values are temporary test bands.
+ACCOUNTABLE_CRITICAL_RATIO = Decimal("0.95")
+ACCOUNTABLE_HIGH_RATIO = Decimal("0.99")
 
 THREE_JANE_BORROWER_DEFAULT_WATCH_QUERY = """
 query GetThreeJaneBorrowerDefaultWatch($limit: Int!, $offset: Int!) {
@@ -120,9 +151,6 @@ query GetThreeJaneBorrowerDefaultWatch($limit: Int!, $offset: Int!) {
     cycleId
     cycleEnd
     endingBalance
-    gracePeriod
-    delinquencyPeriod
-    defaultAt
     defaultStarted
     settled
     lastSeenBlock
@@ -170,8 +198,8 @@ def get_cache_int(key: str) -> int:
             return 0
 
 
-def set_cache_value(key: str, value: int | float) -> None:
-    """Write a numeric value to cache."""
+def set_cache_value(key: str, value: int | float | str) -> None:
+    """Write a value to cache (numeric, or a label such as an alert band)."""
     write_last_value_to_file(CACHE_FILENAME, key, value)
 
 
@@ -358,9 +386,12 @@ def _extract_envio_borrower_default_watch_rows(payload: dict[str, Any]) -> list[
 
 
 def parse_envio_borrower_default_watch_rows(
-    rows: list[dict[str, Any]], now_timestamp: int | None = None
+    rows: list[dict[str, Any]],
+    grace_period_seconds: int,
+    delinquency_period_seconds: int,
+    now_timestamp: int | None = None,
 ) -> list[BorrowerRepaymentSnapshot]:
-    """Parse Envio 3Jane borrower rows and compute current default risk."""
+    """Parse Envio rows and compute risk using live on-chain timing."""
     if now_timestamp is None:
         now_timestamp = current_unix_timestamp()
 
@@ -374,14 +405,12 @@ def parse_envio_borrower_default_watch_rows(
         borrower = _normalize_borrower(row.get("borrower") or row.get("onBehalf"))
         amount_due_raw = _as_int(row.get("amountDue"))
         cycle_end = _as_int(row.get("cycleEnd"))
-        grace_period = _as_int(row.get("gracePeriod"), 7 * SECONDS_PER_DAY)
-        delinquency_period = _as_int(row.get("delinquencyPeriod"), 23 * SECONDS_PER_DAY)
         default_started = _as_bool(row.get("defaultStarted"))
         default_watch_status = compute_default_watch_status(
             amount_due_raw,
             cycle_end,
-            grace_period,
-            delinquency_period,
+            grace_period_seconds,
+            delinquency_period_seconds,
             default_started,
             now_timestamp,
         )
@@ -406,7 +435,7 @@ def parse_envio_borrower_default_watch_rows(
                 credit_raw=_as_int(row.get("credit")),
                 default_started=default_started,
                 repayment_status=repayment_status,
-                default_at=cycle_end + grace_period + delinquency_period,
+                default_at=cycle_end + grace_period_seconds + delinquency_period_seconds,
                 seconds_to_default=seconds_to_default,
                 seconds_since_default=seconds_since_default,
                 default_bucket=bucket,
@@ -416,7 +445,10 @@ def parse_envio_borrower_default_watch_rows(
     return parsed
 
 
-def load_borrower_default_watch_snapshots_from_envio() -> list[BorrowerRepaymentSnapshot]:
+def load_borrower_default_watch_snapshots_from_envio(
+    grace_period_seconds: int,
+    delinquency_period_seconds: int,
+) -> list[BorrowerRepaymentSnapshot]:
     """Load Envio 3Jane borrower rows and compute current default watch candidates."""
     snapshots: list[BorrowerRepaymentSnapshot] = []
     seen: set[tuple[str, str]] = set()
@@ -432,7 +464,12 @@ def load_borrower_default_watch_snapshots_from_envio() -> list[BorrowerRepayment
             return snapshots
 
         rows = _extract_envio_borrower_default_watch_rows(payload)
-        page = parse_envio_borrower_default_watch_rows(rows, now_timestamp)
+        page = parse_envio_borrower_default_watch_rows(
+            rows,
+            grace_period_seconds,
+            delinquency_period_seconds,
+            now_timestamp,
+        )
         for snapshot in page:
             key = (snapshot.market_id, snapshot.borrower.lower())
             if key not in seen:
@@ -449,10 +486,17 @@ def format_utc_timestamp(timestamp: int) -> str:
 
 
 def _borrower_default_cache_key(snapshot: BorrowerRepaymentSnapshot, bucket: str) -> str:
+    """Build the dedupe key for one borrower/cycle/milestone.
+
+    Deliberately excludes default_at: it is derived from the live GRACE_PERIOD
+    and DELINQUENCY_PERIOD config, so including it would invalidate every stored
+    marker whenever governance changes either period and re-send milestones that
+    were already delivered. The cycle id already scopes the key to one obligation.
+    """
     return (
         f"{CACHE_KEY_BORROWER_DEFAULT_WATCH_PREFIX}:"
         f"{snapshot.market_id}:{snapshot.borrower.lower()}:"
-        f"{snapshot.cycle_id}:{snapshot.default_at}:{bucket}"
+        f"{snapshot.cycle_id}:{bucket}"
     )
 
 
@@ -498,9 +542,12 @@ def check_borrower_default_watch_snapshot(snapshot: BorrowerRepaymentSnapshot) -
     _mark_default_watch_bucket_sent(snapshot, bucket)
 
 
-def check_borrower_default_watch(_client, _protocol_config) -> None:  # type: ignore[no-untyped-def]
+def check_borrower_default_watch(grace_period_seconds: int, delinquency_period_seconds: int) -> None:
     """Alert on 3Jane borrower default buckets computed from Envio rows."""
-    snapshots = load_borrower_default_watch_snapshots_from_envio()
+    snapshots = load_borrower_default_watch_snapshots_from_envio(
+        grace_period_seconds,
+        delinquency_period_seconds,
+    )
     if not snapshots:
         return
 
@@ -604,51 +651,14 @@ def check_tvl(usd3_tvl: float, susd3_tvl: float) -> None:
     set_fresh_cache_value(CACHE_KEY_SUSD3_TVL, susd3_tvl)
 
 
-def check_junior_buffer(susd3_backing: float, deployed_credit: float) -> None:
-    """Check if sUSD3 junior tranche provides adequate first-loss coverage.
-
-    The sUSD3 junior tranche absorbs losses before the senior USD3 tranche.
-    A thin buffer means USD3 holders are closer to bearing losses directly.
-    This matches the protocol's backing metric: sUSD3 backing value divided by
-    deployed credit. The caller supplies both values converted to USDC.
-    Deduped via cache: re-alerts only when the ratio drops further.
-
-    Args:
-        susd3_backing: USD3 held by sUSD3, valued in USDC.
-        deployed_credit: Borrowed waUSDC in the credit market, converted to USDC.
-    """
-    if deployed_credit <= 0:
-        # No deployed credit means nothing at risk: clear any outstanding alert.
-        clear_alerted_value(CACHE_KEY_JUNIOR_BUFFER_ALERTED)
-        return
-
-    buffer_ratio = susd3_backing / deployed_credit
-    logger.info(
-        "Junior buffer ratio: %.2f%% (sUSD3 backing: %s / deployed credit: %s)",
-        buffer_ratio * 100,
-        format_usd(susd3_backing),
-        format_usd(deployed_credit),
-    )
-
-    if should_alert_value_drop(CACHE_KEY_JUNIOR_BUFFER_ALERTED, buffer_ratio, JUNIOR_BUFFER_THRESHOLD):
-        message = (
-            f"⚠️ *3Jane Junior Buffer Low*\n"
-            f"📊 sUSD3 buffer: {buffer_ratio:.2%} of deployed credit\n"
-            f"💰 sUSD3 backing: {format_usd(susd3_backing)} | Deployed: {format_usd(deployed_credit)}\n"
-            f"⚠️ First-loss coverage is thin — USD3 holders at higher risk\n"
-            f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
-        )
-        send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
-        mark_alerted_value(CACHE_KEY_JUNIOR_BUFFER_ALERTED, buffer_ratio)
-
-
 def check_usd3_oc(susd3_backing: float, deployed_credit: float) -> None:
-    """Check senior-tranche overcollateralization from sUSD3 subordination.
+    """Check USD3 protection using equivalent OC and junior-buffer metrics.
 
     USD3 OC is deployed credit divided by senior at-risk credit after sUSD3
     absorbs first losses: deployed / (deployed - sUSD3). Alert thresholds use
-    the direct OC ratio, so 111% means OC is below 1.11x. Deduped via cache:
-    re-alerts only when the ratio drops further (e.g. crossing into critical).
+    the direct OC ratio, so 111% means OC is below 1.11x. The junior-buffer
+    percentage is included in the same alert so the two equivalent views cannot
+    disagree. Deduped via cache: re-alerts only when OC drops further.
 
     Args:
         susd3_backing: USD3 held by sUSD3, valued in USDC.
@@ -670,13 +680,13 @@ def check_usd3_oc(susd3_backing: float, deployed_credit: float) -> None:
         clear_alerted_value(CACHE_KEY_USD3_OC_ALERTED)
         return
 
+    buffer_ratio = susd3_backing / deployed_credit
     oc_ratio = deployed_credit / senior_at_risk
     oc_excess = oc_ratio - 1
     logger.info(
-        "USD3 OC: %.2f%% (%.4fx; %.2f%% excess; deployed: %s / senior at-risk: %s)",
+        "USD3 protection: %.2f%% OC / %.2f%% junior buffer (deployed: %s / senior at-risk: %s)",
         oc_ratio * 100,
-        oc_ratio,
-        oc_excess * 100,
+        buffer_ratio * 100,
         format_usd(deployed_credit),
         format_usd(senior_at_risk),
     )
@@ -686,19 +696,22 @@ def check_usd3_oc(susd3_backing: float, deployed_credit: float) -> None:
 
     if oc_ratio < USD3_OC_CRITICAL_THRESHOLD:
         severity = AlertSeverity.CRITICAL
-        title = "3Jane USD3 OC Critical"
+        title = "3Jane USD3 Protection Critical"
         threshold = USD3_OC_CRITICAL_THRESHOLD
     else:
         severity = AlertSeverity.HIGH
-        title = "3Jane USD3 OC Low"
+        title = "3Jane USD3 Protection Low"
         threshold = USD3_OC_HIGH_THRESHOLD
+
+    threshold_buffer = 1 - 1 / threshold
 
     message = (
         f"🚨 *{title}*\n"
         f"📊 USD3 OC: {oc_ratio:.2%} ({oc_ratio:.4f}x; {oc_excess:.2%} excess)\n"
+        f"🛡️ Junior buffer: {buffer_ratio:.2%} of deployed credit\n"
         f"💰 Deployed: {format_usd(deployed_credit)} | Senior at-risk: {format_usd(senior_at_risk)}\n"
         f"🛡️ sUSD3 subordination: {format_usd(susd3_backing)}\n"
-        f"⚠️ Threshold: {threshold:.0%} OC\n"
+        f"⚠️ Threshold: {threshold:.0%} OC / {threshold_buffer:.2%} junior buffer\n"
         f"🔗 [USD3](https://etherscan.io/address/{USD3_ADDRESS})"
     )
     send_alert(Alert(severity, message, PROTOCOL))
@@ -808,7 +821,7 @@ def check_vault_shutdown(client, usd3_vault, susd3_vault) -> None:  # type: igno
     set_fresh_cache_value(CACHE_KEY_SHUTDOWN_SUSD3, float(susd3_shutdown))
 
 
-def check_debt_cap(client) -> None:  # type: ignore[no-untyped-def]
+def check_debt_cap(debt_cap_raw: int, wausdc_assets_per_scale: int) -> None:
     """Check ProtocolConfig debt cap for changes.
 
     The debt cap limits how much can be borrowed via unsecured credit lines.
@@ -816,27 +829,36 @@ def check_debt_cap(client) -> None:  # type: ignore[no-untyped-def]
     up or down.
 
     Args:
-        client: Web3Client instance.
+        debt_cap_raw: Governed debt cap in raw waUSDC share units.
+        wausdc_assets_per_scale: Raw USDC assets represented by RATE_SCALE waUSDC shares.
     """
-    config = client.eth.contract(address=PROTOCOL_CONFIG_ADDRESS, abi=ABI_PROTOCOL_CONFIG)
-    debt_cap_raw = client.execute(config.functions.getDebtCap().call)
-    debt_cap = debt_cap_raw / ONE_SHARE
+    debt_cap_wausdc = debt_cap_raw / ONE_SHARE
+    debt_cap_usdc = debt_cap_wausdc * wausdc_assets_per_scale / RATE_SCALE
 
-    previous_debt_cap = get_cache_value(CACHE_KEY_DEBT_CAP)
-    logger.info("Debt cap: %s (previous: %s)", format_usd(debt_cap), format_usd(previous_debt_cap))
+    previous_debt_cap_wausdc = get_cache_value(CACHE_KEY_DEBT_CAP)
+    previous_debt_cap_usdc = previous_debt_cap_wausdc * wausdc_assets_per_scale / RATE_SCALE
+    logger.info(
+        "Debt cap: %s waUSDC shares / %s USDC equivalent (previous: %s waUSDC shares)",
+        format_with_suffix(debt_cap_wausdc),
+        format_usd(debt_cap_usdc),
+        format_with_suffix(previous_debt_cap_wausdc),
+    )
 
-    if previous_debt_cap > 0 and debt_cap != previous_debt_cap:
-        direction = "increased" if debt_cap > previous_debt_cap else "decreased"
+    if previous_debt_cap_wausdc > 0 and debt_cap_wausdc != previous_debt_cap_wausdc:
+        direction = "increased" if debt_cap_wausdc > previous_debt_cap_wausdc else "decreased"
         message = (
             f"⚠️ *3Jane Debt Cap Change*\n"
             f"📊 Debt cap {direction}\n"
-            f"💰 {format_usd(previous_debt_cap)} → {format_usd(debt_cap)}\n"
+            f"🏦 waUSDC shares: {format_with_suffix(previous_debt_cap_wausdc)} → "
+            f"{format_with_suffix(debt_cap_wausdc)}\n"
+            f"💰 USDC equivalent at current rate: {format_usd(previous_debt_cap_usdc)} → "
+            f"{format_usd(debt_cap_usdc)}\n"
             f"🔗 [ProtocolConfig](https://etherscan.io/address/{PROTOCOL_CONFIG_ADDRESS})"
         )
         send_alert(Alert(AlertSeverity.LOW, message, PROTOCOL))
 
-    if debt_cap != previous_debt_cap:
-        set_cache_value(CACHE_KEY_DEBT_CAP, debt_cap)
+    if debt_cap_wausdc != previous_debt_cap_wausdc:
+        set_cache_value(CACHE_KEY_DEBT_CAP, debt_cap_wausdc)
 
 
 def check_nominal_backing_floor(nominal_floor: float, susd3_backing: float) -> None:
@@ -917,9 +939,185 @@ def check_protocol_paused(is_paused: bool) -> None:
     set_fresh_cache_value(CACHE_KEY_IS_PAUSED, float(is_paused))
 
 
+def _accountable_alert(severity: AlertSeverity, message: str) -> None:
+    """Send an Accountable alert using the feed's owning protocol key."""
+    send_alert(Alert(severity, message, ACCOUNTABLE_FEED.protocol))
+
+
+def _clear_accountable_ratio_alerts() -> None:
+    """Re-arm HIGH/CRITICAL ratio alerts after recovery above the warning threshold."""
+    if get_cache_int(CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED):
+        set_cache_value(CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED, 0)
+    if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED):
+        set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED, 0)
+
+
+def _format_accountable_report(report: AccountableReport) -> str:
+    """Render the shared report body used by every Accountable alert."""
+    return (
+        f"📊 Collateral ratio: {report.collateralization:.4%}\n"
+        f"💰 Reserves: {format_usd(float(report.total_reserves))} | "
+        f"Liabilities: {format_usd(float(report.total_supply))}\n"
+        f"🧮 Net: {format_usd(float(report.net))} | Verifiability: {report.verifiability}%\n"
+        f"🕒 Report: {report.report_timestamp:%Y-%m-%d %H:%M:%S UTC} "
+        f"({format_duration(report.report_age_seconds)} old)"
+    )
+
+
+def _alert_accountable_high(report: AccountableReport) -> None:
+    """Alert once while ratio is below the HIGH threshold."""
+    if get_cache_int(CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED):
+        return
+    message = (
+        f"🚨 *3Jane Proof of Solvency Low*\n"
+        f"{_format_accountable_report(report)}\n"
+        f"⚠️ Collateral ratio below the {ACCOUNTABLE_HIGH_RATIO:.0%} warning threshold\n"
+        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.message_url})"
+    )
+    _accountable_alert(AlertSeverity.HIGH, message)
+    set_cache_value(CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED, 1)
+
+
+def _alert_accountable_critical(report: AccountableReport) -> None:
+    """Alert once while ratio is below the critical threshold."""
+    if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED):
+        return
+    message = (
+        f"🚨 *3Jane Proof of Solvency CRITICAL*\n"
+        f"{_format_accountable_report(report)}\n"
+        f"⚠️ Collateral ratio below the {ACCOUNTABLE_CRITICAL_RATIO:.0%} critical threshold\n"
+        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.message_url})"
+    )
+    _accountable_alert(AlertSeverity.CRITICAL, message)
+    set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED, 1)
+    # Avoid a follow-up HIGH once CRITICAL clears but ratio is still under the HIGH threshold.
+    set_cache_value(CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED, 1)
+
+
+def check_accountable_collateral(report: AccountableReport) -> None:
+    """Alert when Accountable collateral ratio breaches thresholds.
+
+    HIGH when ratio < 99%; CRITICAL on the first reading below 95%. Each
+    severity alerts once until the ratio recovers above its threshold.
+
+    Args:
+        report: Validated Proof of Solvency report.
+    """
+    ratio = report.collateralization
+    logger.info("Accountable collateral ratio: %.6f%%", ratio * 100)
+
+    if ratio < ACCOUNTABLE_CRITICAL_RATIO:
+        _alert_accountable_critical(report)
+        return
+
+    if ratio < ACCOUNTABLE_HIGH_RATIO:
+        if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED):
+            set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED, 0)
+        _alert_accountable_high(report)
+        return
+
+    _clear_accountable_ratio_alerts()
+
+
+def check_accountable_staleness(report: AccountableReport, reason: str) -> None:
+    """Alert once when the Accountable feed or one of its sources goes stale.
+
+    A fresh aggregate timestamp does not prove every input is fresh, and the
+    reserves side leans heavily on manually uploaded document reports. Deduped
+    until the feed recovers.
+
+    Args:
+        report: Report the staleness was detected on.
+        reason: Human-readable description of what is stale.
+    """
+    logger.warning("Accountable feed %s is stale: %s", ACCOUNTABLE_FEED.dfid, reason)
+
+    if get_cache_int(CACHE_KEY_ACCOUNTABLE_STALE_ALERTED):
+        return
+
+    message = (
+        f"⚠️ *3Jane Proof of Solvency Stale*\n"
+        f"{_format_accountable_report(report)}\n"
+        f"🕳️ {escape_markdown(reason)}\n"
+        f"⚠️ Collateral ratio may not reflect current positions\n"
+        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.message_url})"
+    )
+    _accountable_alert(AlertSeverity.MEDIUM, message)
+    set_cache_value(CACHE_KEY_ACCOUNTABLE_STALE_ALERTED, 1)
+
+
+def check_accountable_availability(reason: str) -> None:
+    """Track feed failures: HIGH on the first miss, CRITICAL on the second.
+
+    ``fetch_report`` has already exhausted bounded retries before reporting a
+    request failure. A success clears the streak. Further misses after
+    CRITICAL stay quiet until recovery.
+
+    Args:
+        reason: Why the feed was unusable this run.
+    """
+    streak = get_cache_int(CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK) + 1
+    set_cache_value(CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK, streak)
+    logger.warning("Accountable feed unusable (%d consecutive): %s", streak, reason)
+
+    if streak == 1:
+        severity = AlertSeverity.HIGH
+    elif streak == 2:
+        severity = AlertSeverity.CRITICAL
+    else:
+        return
+
+    message = (
+        f"⚠️ *3Jane Proof of Solvency Unavailable*\n"
+        f"📡 Retrieval failed after all retry attempts ({streak} consecutive run"
+        f"{'s' if streak > 1 else ''})\n"
+        f"❌ {escape_markdown(reason)}\n"
+        f"⚠️ Collateral ratio is not being monitored\n"
+        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.message_url})"
+    )
+    _accountable_alert(severity, message)
+    set_cache_value(CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED, 1)
+
+
+def check_accountable_solvency() -> None:
+    """Fetch and evaluate the Accountable Proof of Solvency feed.
+
+    Runs in its own failure boundary: any error here is logged and swallowed so
+    the onchain 3Jane checks always complete.
+    """
+    try:
+        result = fetch_report(ACCOUNTABLE_FEED)
+
+        if result.status is AccountableStatus.UNAVAILABLE or result.report is None:
+            check_accountable_availability(result.reason or "unknown error")
+            return
+
+        # Reachable and parseable: clear any outstanding availability alert.
+        if get_cache_int(CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK):
+            set_cache_value(CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK, 0)
+        if get_cache_int(CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED):
+            set_cache_value(CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED, 0)
+
+        report = result.report
+        if result.status is AccountableStatus.STALE:
+            check_accountable_staleness(report, result.reason)
+        elif get_cache_int(CACHE_KEY_ACCOUNTABLE_STALE_ALERTED):
+            set_cache_value(CACHE_KEY_ACCOUNTABLE_STALE_ALERTED, 0)
+
+        # The ratio is still evaluated on a stale report: a low-ratio
+        # reading matters even when the inputs behind it have aged.
+        check_accountable_collateral(report)
+    except Exception as e:
+        logger.error("Error during Accountable Proof of Solvency check: %s", e)
+
+
 def main() -> None:
     """Run all 3Jane monitoring checks."""
     logger.info("Starting 3Jane monitoring...")
+
+    # Runs before the onchain reads and inside its own failure boundary, so the
+    # solvency feed is checked even when RPC access is degraded.
+    check_accountable_solvency()
 
     client = ChainManager.get_client(Chain.MAINNET)
     usd3_vault = client.eth.contract(address=USD3_ADDRESS, abi=ABI_VAULT)
@@ -928,23 +1126,31 @@ def main() -> None:
     protocol_config = client.eth.contract(address=PROTOCOL_CONFIG_ADDRESS, abi=ABI_PROTOCOL_CONFIG)
 
     try:
+        block_number = int(client.eth.block_number)
         # Batch all core vault reads in a single RPC call
         with client.batch_requests() as batch:
-            batch.add(usd3_vault.functions.totalAssets())
-            batch.add(usd3_vault.functions.totalSupply())
-            batch.add(usd3_vault.functions.convertToAssets(ONE_SHARE))
-            batch.add(susd3_vault.functions.totalAssets())
-            batch.add(susd3_vault.functions.totalSupply())
-            batch.add(susd3_vault.functions.convertToAssets(ONE_SHARE))
-            batch.add(usd3_vault.functions.balanceOf(SUSD3_ADDRESS))
-            batch.add(usd3_vault.functions.getMarketLiquidity())
-            batch.add(protocol_config.functions.config(CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR))
-            batch.add(protocol_config.functions.config(CFG_KEY_IS_PAUSED))
-            batch.add(wausdc_vault.functions.balanceOf(INSURANCE_FUND_ADDRESS))
-            batch.add(usd3_vault.functions.availableWithdrawLimit(ZERO_ADDRESS))
+            batch.add(usd3_vault.functions.totalAssets().call(block_identifier=block_number))
+            batch.add(usd3_vault.functions.totalSupply().call(block_identifier=block_number))
+            batch.add(usd3_vault.functions.convertToAssets(ONE_SHARE).call(block_identifier=block_number))
+            batch.add(susd3_vault.functions.totalAssets().call(block_identifier=block_number))
+            batch.add(susd3_vault.functions.totalSupply().call(block_identifier=block_number))
+            batch.add(susd3_vault.functions.convertToAssets(ONE_SHARE).call(block_identifier=block_number))
+            batch.add(usd3_vault.functions.balanceOf(SUSD3_ADDRESS).call(block_identifier=block_number))
+            batch.add(usd3_vault.functions.getMarketLiquidity().call(block_identifier=block_number))
+            batch.add(
+                protocol_config.functions.config(CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR).call(
+                    block_identifier=block_number
+                )
+            )
+            batch.add(protocol_config.functions.config(CFG_KEY_IS_PAUSED).call(block_identifier=block_number))
+            batch.add(wausdc_vault.functions.balanceOf(INSURANCE_FUND_ADDRESS).call(block_identifier=block_number))
+            batch.add(usd3_vault.functions.availableWithdrawLimit(ZERO_ADDRESS).call(block_identifier=block_number))
+            batch.add(protocol_config.functions.config(CFG_KEY_GRACE_PERIOD).call(block_identifier=block_number))
+            batch.add(protocol_config.functions.config(CFG_KEY_DELINQUENCY_PERIOD).call(block_identifier=block_number))
+            batch.add(protocol_config.functions.getDebtCap().call(block_identifier=block_number))
             responses = client.execute_batch(batch)
-            if len(responses) != 12:
-                raise ValueError(f"Expected 12 responses, got {len(responses)}")
+            if len(responses) != 15:
+                raise ValueError(f"Expected 15 responses, got {len(responses)}")
 
         usd3_total_assets = responses[0]
         usd3_total_supply = responses[1]
@@ -958,6 +1164,9 @@ def main() -> None:
         is_paused = bool(responses[9])
         insurance_fund_shares = responses[10]
         withdraw_limit_raw = responses[11]
+        grace_period_seconds = int(responses[12])
+        delinquency_period_seconds = int(responses[13])
+        debt_cap_raw = int(responses[14])
 
         if len(market_liquidity) != 4:
             raise ValueError(f"Expected 4 market liquidity values, got {len(market_liquidity)}")
@@ -968,8 +1177,8 @@ def main() -> None:
         # Value the USD3 shares held by sUSD3 and fetch one high-precision waUSDC
         # conversion rate. All waUSDC values below use that same rate and block.
         with client.batch_requests() as batch:
-            batch.add(usd3_vault.functions.convertToAssets(susd3_usd3_balance))
-            batch.add(wausdc_vault.functions.convertToAssets(RATE_SCALE))
+            batch.add(usd3_vault.functions.convertToAssets(susd3_usd3_balance).call(block_identifier=block_number))
+            batch.add(wausdc_vault.functions.convertToAssets(RATE_SCALE).call(block_identifier=block_number))
             backing_responses = client.execute_batch(batch)
             if len(backing_responses) != 2:
                 raise ValueError(f"Expected 2 backing responses, got {len(backing_responses)}")
@@ -1011,11 +1220,15 @@ def main() -> None:
             format_usd(susd3_backing),
             format_usd(deployed_credit),
         )
+        logger.info(
+            "Borrower timing — grace: %s, delinquency: %s",
+            format_duration(grace_period_seconds),
+            format_duration(delinquency_period_seconds),
+        )
 
         # Run all checks
         check_pps(usd3_pps, susd3_pps)
         check_tvl(usd3_tvl, susd3_tvl)
-        check_junior_buffer(susd3_backing, deployed_credit)
         check_usd3_oc(susd3_backing, deployed_credit)
         check_insurance_fund(
             previous_insurance_shares,
@@ -1025,10 +1238,10 @@ def main() -> None:
         )
         check_withdraw_limit(withdraw_limit)
         check_vault_shutdown(client, usd3_vault, susd3_vault)
-        check_debt_cap(client)
+        check_debt_cap(debt_cap_raw, wausdc_assets_per_scale)
         check_nominal_backing_floor(nominal_floor, susd3_backing)
         check_protocol_paused(is_paused)
-        check_borrower_default_watch(client, protocol_config)
+        check_borrower_default_watch(grace_period_seconds, delinquency_period_seconds)
 
         logger.info(
             "Monitoring complete — USD3 PPS: %.8f, TVL: %s | sUSD3 PPS: %.8f, TVL: %s",

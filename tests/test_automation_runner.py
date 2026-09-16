@@ -175,3 +175,51 @@ class TestTelegramSummary(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSuccessfulTaskWarnings(unittest.TestCase):
+    """A task can exit 0 while logging a problem it handled internally.
+
+    Those lines used to land only in the DEBUG dump, so at the service's default
+    LOG_LEVEL=INFO a broken integration could run unnoticed. They are now
+    re-emitted at INFO.
+    """
+
+    @staticmethod
+    def _result(stdout: str):
+        class _Result:
+            returncode = 0
+            stderr = ""
+
+        _Result.stdout = stdout
+        return _Result()
+
+    def _run(self, stdout: str) -> list[str]:
+        profile = _profile([Task(name="timelock-alerts", script="t.py")])
+        with (
+            patch("automation.runner.subprocess.run", return_value=self._result(stdout)),
+            self.assertLogs("automation.runner", level="INFO") as logs,
+        ):
+            run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
+        return logs.output
+
+    def test_warning_from_passing_task_is_surfaced(self):
+        output = "\n".join(
+            [
+                "[2026-09-10 16:09:00] INFO utils.llm: generated summary",
+                "[2026-09-10 16:09:01] WARNING utils.wavey_gist: Failed to upload to Wavey Gist: 400 Client Error",
+            ]
+        )
+        logs = "\n".join(self._run(output))
+        self.assertIn("exited 0 but logged 1 warning(s)", logs)
+        self.assertIn("Failed to upload to Wavey Gist", logs)
+
+    def test_clean_task_logs_no_warning_block(self):
+        logs = "\n".join(self._run("[2026-09-10 16:09:00] INFO utils.llm: all good"))
+        self.assertNotIn("exited 0 but logged", logs)
+        self.assertIn("task timelock-alerts ok", logs)
+
+    def test_surfaced_warnings_are_capped(self):
+        logs = "\n".join(self._run("\n".join(f"WARNING line {i}" for i in range(25))))
+        self.assertIn("exited 0 but logged 25 warning(s)", logs)
+        self.assertIn("15 more suppressed", logs)

@@ -7,7 +7,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-09-03T11:23:05.506090221Z"
 exclude-newer-span = "P1W"
 
 [[package]]
@@ -605,28 +605,6 @@ wheels = [
 ]
 
 [[package]]
-name = "dune-client"
-version = "1.7.10"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "aiohttp" },
-    { name = "dataclasses-json" },
-    { name = "deprecated" },
-    { name = "ndjson" },
-    { name = "python-dateutil" },
-    { name = "requests" },
-    { name = "types-deprecated" },
-    { name = "types-python-dateutil" },
-    { name = "types-pyyaml" },
-    { name = "types-requests" },
-    { name = "types-setuptools" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/8d/f9/63ccb0fe75e4c5e261f4ccff46908bdd11fd11036ddbabb0a2a4d34582e2/dune_client-1.7.10.tar.gz", hash = "sha256:88a9315eae68dc7c0fd89e42b77e28e99a5317e477f014f8291280b04adeba1e", size = 43531, upload-time = "2025-07-10T08:26:49.316Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/dc/1d/ac85be00ba1808e3031f85d192633648581fe7569ee016e03634cc0a5313/dune_client-1.7.10-py3-none-any.whl", hash = "sha256:f0754cc73e59cd4c406505c3a3d0b6b2f9cfedf72ee643af6ded846a7cd00345", size = 37843, upload-time = "2025-07-10T08:26:47.726Z" },
-]
-
-[[package]]
 name = "eth-abi"
 version = "5.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1090,7 +1068,6 @@ dependencies = [
     { name = "dataclasses-json" },
     { name = "defillama-sdk" },
     { name = "deprecated" },
-    { name = "dune-client" },
     { name = "eth-abi" },
     { name = "eth-account" },
     { name = "eth-hash" },
@@ -1167,7 +1144,6 @@ requires-dist = [
     { name = "dataclasses-json", specifier = "==0.6.7" },
     { name = "defillama-sdk", specifier = "==0.1.4" },
     { name = "deprecated", specifier = "==1.3.1" },
-    { name = "dune-client", specifier = "==1.7.10" },
     { name = "eth-abi", specifier = "==5.2.0" },
     { name = "eth-account", specifier = "==0.13.7" },
     { name = "eth-hash", specifier = "==0.8.0" },

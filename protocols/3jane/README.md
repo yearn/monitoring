@@ -6,15 +6,15 @@
 
 - **PPS (Price Per Share):** `convertToAssets(1e6)` on USD3 and sUSD3 vs cached prior run. Alerts on any decrease — indicates loan markdowns or defaults (critical since loans are unsecured).
 - **TVL (Total Value Locked):** `totalAssets()` on both vaults vs cached prior run. Alerts when absolute change is **≥15%**.
-- **Junior Buffer Ratio:** USD3 held by sUSD3, valued in USDC, as a percentage of deployed credit (`getMarketLiquidity().totalBorrowAssets` converted from waUSDC to USDC). Alerts below **15%** — thin first-loss coverage puts the senior tranche at risk. Deduped: re-alerts only when the ratio drops below the last alerted value; recovery above 15% re-arms. This matches the 3Jane backing UI's `sUSD3 / Deployed` loss-buffer metric.
-- **USD3 OC:** Deployed credit divided by senior at-risk credit after sUSD3 absorbs first loss: `Deployed / (Deployed - sUSD3)`. Alerts below the **111%** target as HIGH and below **106%** as CRITICAL. Deduped: re-alerts only when OC drops below the last alerted value (e.g. crossing into critical); recovery above 111% re-arms. This excludes indirect enhancement from underlying credit-line assets and warehouse equity slices.
+- **USD3 Protection (OC + Junior Buffer):** A single consistent protection check derived from sUSD3 backing and deployed credit. OC is `Deployed / (Deployed - sUSD3)` and the equivalent junior buffer is `sUSD3 / Deployed`. Alerts below **111% OC / 9.91% buffer** as HIGH and below **106% OC / 5.66% buffer** as CRITICAL. Both values appear in one alert, eliminating contradictory thresholds for the same first-loss protection. Deduped: re-alerts only when OC drops below the last alerted value; recovery above 111% re-arms. This excludes indirect enhancement from underlying credit-line assets and warehouse equity slices.
 - **Insurance Fund:** Tracks the fund's raw waUSDC share balance and alerts when an outflow is worth **≥$50k USDC**. Caching shares instead of asset value prevents waUSDC yield from masking withdrawals.
 - **Withdraw Liquidity:** `availableWithdrawLimit()` on the USD3 vault. Alerts when it falls below **$4M** — low withdraw liquidity means senior-tranche withdrawals may queue or stall. Deduped: re-alerts only when the limit drops below the last alerted value; recovery above $4M re-arms.
 - **Vault Shutdown:** `isShutdown()` on both vaults. Alert-once when either vault enters emergency shutdown.
-- **Debt Cap:** `ProtocolConfig.getDebtCap()` vs cached prior. Alerts on any change — signals governance scaling the protocol up or down.
+- **Debt Cap:** `ProtocolConfig.getDebtCap()` vs cached prior. The governed value is shown in waUSDC shares alongside its USDC equivalent at the current waUSDC conversion rate. Alerts on any change — signals governance scaling the protocol up or down.
 - **Nominal sUSD3 Backing Floor:** `ProtocolConfig.config(keccak256("SUSD3_NOMINAL_BACKING_FLOOR"))` vs cached prior. Alerts on any change (governance lever). Separate alert-once when the floor exceeds sUSD3's USD3 holdings valued in USDC — sUSD3 redemptions can be blocked while floor > backing.
 - **Protocol Pause:** `ProtocolConfig.config(keccak256("IS_PAUSED"))`. Alert-once on transition to true. Distinct from per-vault `isShutdown()` — pauses the underlying credit market.
 - **Borrower Default Watch:** optional Envio-backed borrower default risk feed. The Envio indexer maintains `ThreeJaneBorrowerMarket` rows from MorphoCredit events, and the monitor computes the current delinquent/default status at runtime. Alerts are **MEDIUM only** and deduped per borrower/cycle/default milestone.
+- **Proof of Solvency:** [Accountable](https://accountable.3jane.xyz/) collateral ratio (reserves / liabilities). Alerts **CRITICAL below 95%** and **HIGH below 99%**, plus freshness and availability alerts. See [Proof of Solvency](#proof-of-solvency) below.
 
 ## Key Contracts
 
@@ -32,9 +32,8 @@
 | USD3 PPS decrease | Any decrease vs cached prior | CRITICAL |
 | sUSD3 PPS decrease | Any decrease vs cached prior | HIGH |
 | TVL change | ≥15% absolute change vs prior run | LOW |
-| Junior buffer ratio | sUSD3 backing < 15% of deployed credit | HIGH |
-| USD3 OC low | OC < 111% | HIGH |
-| USD3 OC critical | OC < 106% | CRITICAL |
+| USD3 protection low | OC < 111% (equivalent junior buffer < 9.91%) | HIGH |
+| USD3 protection critical | OC < 106% (equivalent junior buffer < 5.66%) | CRITICAL |
 | Insurance fund outflow | ≥$50k USDC since prior run | MEDIUM |
 | Withdraw liquidity low | `availableWithdrawLimit()` < $4M | MEDIUM |
 | Vault shutdown | `isShutdown()` transitions to true (alert-once) | CRITICAL |
@@ -43,12 +42,16 @@
 | Nominal floor breach | Floor > sUSD3 backing valued in USDC (alert-once) | MEDIUM |
 | Protocol paused | `IS_PAUSED` transitions to true (alert-once) | CRITICAL |
 | Borrower delinquent/default watch | New milestone: delinquent, ≤14d, ≤7d, ≤3d, ≤1d, default | MEDIUM |
+| Accountable collateral ratio | < 95% (band transition) | CRITICAL |
+| Accountable collateral ratio | < 99% (band transition) | HIGH |
+| Accountable feed stale | Short cadence >2 periods; long cadence >1 period (alert-once) | MEDIUM |
+| Accountable feed unavailable | First consecutive miss HIGH; second CRITICAL (then quiet until recovery) | HIGH / CRITICAL |
 | Monitoring run failure | Uncaught exception in `main()` | LOW |
 
 ## Cache Freshness
 
 TVL delta baselines expire after 3 hours and initialize from the next valid observation. Current-state and threshold
-dedupe for junior buffer, USD3 OC, withdraw liquidity, vault shutdown, nominal-floor breach, and protocol pause is
+dedupe for USD3 protection, withdraw liquidity, vault shutdown, nominal-floor breach, and protocol pause is
 re-armed after the same monitoring gap. PPS, insurance-fund, governance-value, and borrower-event history does not
 expire.
 
@@ -63,7 +66,7 @@ Borrowers move through repayment states based on the active repayment obligation
 - `Delinquent`: the grace window has passed and `amountDue > 0`, but the default timestamp has not been reached yet. This is the proactive warning period, and the monitor alerts at `delinquent`, `14d`, `7d`, `3d`, and `1d` buckets.
 - `Default`: the default timestamp has passed, or the protocol emitted `DefaultStarted`. The monitor sends a MEDIUM alert and includes how long the borrower has been defaulted.
 
-By default, `defaultAt = cycleEnd + 7 days grace + 23 days delinquency`. These windows come from `gracePeriod` and `delinquencyPeriod` on the indexed borrower row.
+`defaultAt = cycleEnd + GRACE_PERIOD + DELINQUENCY_PERIOD`. The monitor reads both periods directly from `ProtocolConfig` at the same Ethereum block as the core vault snapshot on every run, matching `MorphoCredit.getRepaymentStatus()`. Envio supplies borrower obligations and cycle timestamps, but its stored timing fields are not used for status calculations.
 
 The monitor expects Envio to expose a `ThreeJaneBorrowerMarket` entity with at least:
 
@@ -76,24 +79,49 @@ The monitor expects Envio to expose a `ThreeJaneBorrowerMarket` entity with at l
 | `cycleId` | Payment cycle id for the current obligation |
 | `cycleEnd` | Indexed cycle end timestamp |
 | `endingBalance` | Borrower balance at cycle close |
-| `gracePeriod` | Grace period in seconds |
-| `delinquencyPeriod` | Delinquency period in seconds |
-| `defaultAt` | Event-derived default timestamp |
 | `defaultStarted` | Whether `DefaultStarted` has been emitted for the borrower |
 | `settled` | Whether the account was settled and should be skipped |
 | `lastSeenBlock` | Ordering/pagination |
 
 The indexer should populate/update that entity from `SetCreditLine`, `Borrow`, `Repay`, `PaymentCycleCreated`, `RepaymentObligationPosted`, `RepaymentTracked`, `DefaultStarted`, `DefaultCleared`, and `AccountSettled` events on `MorphoCredit`.
 
-The current countdown and alert bucket are intentionally computed in this monitoring script, not in Envio, because they depend on wall-clock time. Grace and delinquency windows default to 7 days and 23 days respectively in the indexer, and can be overridden there with `THREE_JANE_GRACE_PERIOD_SECONDS` and `THREE_JANE_DELINQUENCY_PERIOD_SECONDS`.
+The current countdown and alert bucket are intentionally computed in this monitoring script, not in Envio, because they depend on wall-clock time and governance-controlled timing. This also prevents an indexer environment value from drifting away from the live contract configuration.
+
+## Proof of Solvency
+
+[Accountable](https://docs.accountable.capital/accountable-documentation/proof-of-solvency) publishes a TEE-attested Proof of Solvency dashboard for 3Jane (feed id `100000026`). The human-readable UI is at `https://accountable.3jane.xyz/` (override with `THREE_JANE_ACCOUNTABLE_MESSAGE_URL`); the JSON report is at `https://accountable.3jane.xyz/dashboard` (override with `THREE_JANE_ACCOUNTABLE_URL`). No API key is required.
+
+The client lives in [`utils/accountable.py`](../../utils/accountable.py) and is keyed by data feed id (DFID), so other Accountable feeds can be added without a rewrite. The request is URL/type-based and neither sends nor echoes the DFID, so feed identity is bound explicitly in config.
+
+### Ratio is recomputed, not read
+
+The API rounds `collateralization` to six decimals. Near the alert boundary that is a missed-critical-alert path: a true ratio of `0.9499996` would present as `0.95` and pass a `< 0.95` test. The monitor therefore computes the ratio from `total_reserves / total_supply` at full precision and uses the reported field only as a consistency cross-check (tolerance ≥1e-6, since the server's own rounding sets the floor).
+
+`net` and `collateralization` are defined against *liabilities*, which equal `total_supply` only for a USD-pegged feed. The client asserts `total_supply.fx == 1` when the field is present. The live response currently omits it, so that path independently derives liabilities from `total_reserves - net` and requires them to match raw supply; a non-pegged feed still fails loudly instead of silently comparing against the wrong denominator.
+
+### Freshness is per source, not global
+
+A fresh aggregate timestamp does not prove every input is fresh, and this matters more than usual here: `reserves_split` is essentially all "Morpho Credit", of which the bulk is off-chain loan receivables priced by manually uploaded document reports. Those routinely run past their declared cadence.
+
+The aggregate report and each required source use their declared cadence. Cadences of one hour or less get one missed-period allowance and become stale after two periods; longer cadences become stale as soon as the first expected update is late. The aggregate cadence comes from `reserves.interval`; source cadences come from each source's `frequency`. This means `15 MIN` becomes stale after 30 minutes, hourly after 2 hours, daily after 24 hours, and weekly after 7 days. A source whose `lastUpdated` is in the future is treated as unusable rather than clamped to "fresh", which would defeat the check. Unknown additional sources with an unrecognised cadence are skipped rather than flagged, so a schema addition on Accountable's side cannot spuriously page us.
+
+The 3Jane dashboard UI declares `Slope - Forward Flows` as weekly, while older `/dashboard` JSON responses reported it as daily. The feed configuration therefore binds that source to `WEEKLY`; stale alerts display the effective cadence used by the monitor.
+
+The four known 3Jane sources are required, and a missing or malformed freshness record for one of them makes the feed **stale**, not unavailable. Freshness can no longer be established, but the collateral ratio itself is unaffected — so the report is still returned and the sub-95% check still runs. An upstream source rename degrades the feed to a MEDIUM staleness alert; it cannot silently disable the CRITICAL solvency check.
+
+### Ratio alerts
+
+HIGH fires once when the ratio drops below 99%; CRITICAL fires once on the first reading below 95%. Each severity stays quiet until the ratio recovers above its threshold. Recovering from below 95% into the 95–99% band re-arms CRITICAL without a second HIGH. Re-polling a frozen report cannot re-alert.
+
+The 95%/99% bands are temporary test thresholds while Accountable's report excludes 3Jane idle funds. Recalibrate both thresholds when idle funds are included in the reported reserve totals.
 
 ## Alert dispatch
 
-Alerts use the structured `send_alert` path. HIGH and CRITICAL alerts invoke the default emergency-dispatch hook after Telegram delivery, and `3jane` is enabled in `utils.dispatch.DISPATCHABLE_PROTOCOLS`.
+Alerts use the structured `send_alert` path. HIGH and CRITICAL alerts invoke the default emergency-dispatch hook after Telegram delivery, and `3jane` is enabled in `utils.dispatch.DISPATCHABLE_PROTOCOLS`. Accountable ratio, freshness, and availability alerts use the same `3jane` protocol key as the onchain checks — a second Accountable feed is a new `AccountableFeedConfig` with that protocol's key, not a special-case name.
 
 The sender posts a signed `emergency_withdrawal` webhook using protocol key `3jane`. Dispatch requires `LIQUIDITY_WEBHOOK_SECRET`, is skipped in `LOG_LEVEL=DEBUG`, and has a 60-minute per-protocol cooldown. The receiving liquidity-monitoring deployment must independently map `3jane` to the vaults, collateral names, and markets whose caps should be zeroed.
 
-Only HIGH and CRITICAL alerts dispatch. LOW and MEDIUM alerts—including insurance-fund outflows—remain Telegram/database alerts only.
+Only HIGH and CRITICAL alerts dispatch. LOW and MEDIUM alerts—including insurance-fund outflows and Accountable staleness—remain Telegram/database alerts only.
 
 ## Governance
 

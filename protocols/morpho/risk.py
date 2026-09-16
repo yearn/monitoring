@@ -18,6 +18,7 @@ MARKETS_RISK_1 = {
         "0x2cbfb38723a8d9a2ad1607015591a78cfe3a5949561b39bde42c242b22874ec0",  # cbBTC/WETH -> lltv 91.5%, oracle: chainlink BTC/USD and chainlink ETH/USD
         "0xa921ef34e2fc7a27ccc50ae7e4b154e16c9799d3387076c421423ef52ac4df99",  # WBTC/USDT -> lltv 86%, oracle: chainlink WBTC/BTC, chainlink BTC/USD and chainlink USDT/USD
         "0x3274643db77a064abd3bc851de77556a4ad2e2f502f4f0c80845fa8f909ecf0b",  # sUSDS/USDT -> lltv 96.5%, oracle: chainlink USDT/USD, chainlink DAI/USD and sUSDS vault
+        "0x26b178d49895f80ca3c39b2745efc4cd9adcddfcc73dae93e531e86977ec4d96",  # sUSDS/USDT -> lltv 96.5%, oracle: MorphoChainlinkOracleV2 — sUSDS vault + Chainlink USDS/USD; quote CappedOracleFeed wrapping Chainlink USDT/USD.
         "0xe7e9694b754c4d4f7e21faf7223f6fa71abaeb10296a4c43a54a7977149687d2",  # wstETH/USDT -> lltv 86%, oracle: compound oracle wstETH/ETH, chainlink ETH/USD and chainlink USDT/USD
         "0x37e7484d642d90f14451f1910ba4b7b8e4c3ccdd0ec28f8b2bdb35479e472ba7",  # weETH/WETH -> lltv 94.5%, oracle: origami weETH/ETH which calls WEETH.getRate(). Alike assets.
         "0x45671fb8d5dea1c4fbca0b8548ad742f6643300eeb8dbd34ad64a658b2b05bca",  # cbBTC/USDT -> lltv 86%, oracle: chainlink BTC/USD, hardcoded USDT=USD.
@@ -144,6 +145,12 @@ MARKETS_RISK_2 = {
         "0x2c4f26c76b4de51d3c9260c15a796cd2a35efab17786d0aa78ca2e638b0f8ba8",  # yvvbUSDC/vbETH -> lltv 77%, oracle: yearn vault exchange rate. Chainlink ETH/USD and Chainlink USDC/USD.
         "0x61fcb4d6d1534eedeb0e0bea361745f727d73f14569d231c4a2b39232b6b7312",  # yvvbUSDT/vbWBTC -> lltv 77%, oracle: yearn vault exchange rate. Chainlink WBTC/USD and Chainlink USDT/USD.
         "0x09c2ecea0580698a91be0cff2bad3648b00744453c14a9bfb6be5ca7b9950908",  # PT-yvvbUSDC/vbUSDT -> lltv 86%, oracle: Spectra PriceFeedCurvePTAssetBounded (not Pendle) — min(max(Curve StableSwap-NG TWAP, ZCB model at 25% implied rate), redemption value), so the ZCB floor bounds a downward TWAP push. Chainlink USDC/USD and Chainlink USDT/USD.
+    ],
+    Chain.HYPEREVM: [
+        "0xd13b1bad542045a8dc729fa0ffcc4f538b9771592c2666e1f09667dcf85804fc",  # WHYPE/USDC -> lltv 62.5%, oracle: MorphoChainlinkOracleV2 — RedStone Price Feed for HYPE; no quote feed (USDC = $1). Same oracle as 77% WHYPE/USDC.
+        "0xd7d38220652d19c87099c3b23de9a70a1893620a050c635d1a94bd947c9c59a8",  # WHYPE/USDC -> lltv 77%, oracle: MorphoChainlinkOracleV2 — RedStone Price Feed for HYPE; no quote feed (USDC = $1). Same oracle as 62.5% WHYPE/USDC.
+        "0xe7aa046832007a975d4619260d221229e99cc27da2e6ef162881202b4cd2349b",  # kHYPE/USDC -> lltv 62.5%, oracle: MorphoChainlinkOracleV2 — RedStone kHYPE_FUNDAMENTAL (kHYPE/HYPE) × RedStone HYPE/USD; no quote feed (USDC = $1).
+        "0x96c47d3797394dd25e33f814216793a89d2e6edcc54d1dac3ab4c2b2d82a73b9",  # kHYPE/USDC -> lltv 77%, oracle: MorphoChainlinkOracleV2 — RedStone kHYPE/USD ÷ RedStone USDC/USD (spot).
     ],
 }
 
@@ -283,8 +290,9 @@ def get_market_allocation_threshold(market_risk_level: int, vault_risk_level: in
     return ALLOCATION_TIERS[adjusted_risk]
 
 
-def get_market_risk_level(market_id: str, chain: Chain) -> int:
-    """Return the configured 1-5 risk tier for a Morpho market."""
+def _build_market_risk_levels() -> dict[tuple[Chain, str], int]:
+    """Index every configured market by (chain, lowercase id); the lowest tier wins on duplicates."""
+    levels: dict[tuple[Chain, str], int] = {}
     for risk_level, markets_by_chain in (
         (1, MARKETS_RISK_1),
         (2, MARKETS_RISK_2),
@@ -292,10 +300,18 @@ def get_market_risk_level(market_id: str, chain: Chain) -> int:
         (4, MARKETS_RISK_4),
         (5, MARKETS_RISK_5),
     ):
-        configured = {configured_id.lower() for configured_id in markets_by_chain.get(chain, [])}
-        if market_id.lower() in configured:
-            return risk_level
-    return 5
+        for chain, market_ids in markets_by_chain.items():
+            for market_id in market_ids:
+                levels.setdefault((chain, market_id.lower()), risk_level)
+    return levels
+
+
+_MARKET_RISK_LEVELS = _build_market_risk_levels()
+
+
+def get_market_risk_level(market_id: str, chain: Chain) -> int:
+    """Return the configured 1-5 risk tier for a Morpho market, or 5 if unlisted."""
+    return _MARKET_RISK_LEVELS.get((chain, market_id.lower()), 5)
 
 
 def assess_exposure(

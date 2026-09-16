@@ -1,5 +1,6 @@
 import importlib
 import os
+import re
 import unittest
 from unittest.mock import Mock, patch
 
@@ -326,3 +327,23 @@ class TestPendingFilterDiag(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSafeProtocolLabels(unittest.TestCase):
+    """The protocol field in ALL_SAFE_ADDRESSES doubles as the Telegram channel key.
+
+    ``send_telegram_message`` resolves credentials via
+    ``TELEGRAM_TOPIC_ID_{protocol.upper()}`` / ``TELEGRAM_CHAT_ID_{protocol.upper()}``.
+    A label that is not a legal env-var suffix can never resolve, and the alert is
+    dropped with only a "Missing Telegram credentials" warning — silent to operators.
+    """
+
+    def test_protocol_labels_are_valid_env_var_suffixes(self):
+        from protocols.safe.addresses import ALL_SAFE_ADDRESSES
+
+        invalid = [entry[0] for entry in ALL_SAFE_ADDRESSES if not re.fullmatch(r"[A-Za-z0-9_]+", entry[0])]
+        self.assertEqual(
+            invalid,
+            [],
+            f"Safe protocol labels must be usable as env-var suffixes, got: {invalid}",
+        )

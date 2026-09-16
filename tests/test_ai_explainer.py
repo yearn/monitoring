@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from utils.calldata.decoder import DecodedCall
+from utils.calldata.decoder import DecodedCall, decode_calldata
 from utils.erc20_metadata import ERC20Metadata
 from utils.formatting import format_decimal_amount, normalize_token_amount
 from utils.llm.ai_explainer import (
@@ -1149,3 +1149,128 @@ class TestTokenFlows(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCollectRoleNames(unittest.TestCase):
+    """Tests for _collect_role_names (bytes32 role → name resolution).
+
+    The call is built with the real `decode_calldata` rather than hand-written
+    params on purpose: `eth_abi` hands back a bytes32 as 32 raw bytes, and an
+    earlier version of this collector stringified that into a Python repr, so
+    every role silently failed to resolve while string-based tests passed.
+    """
+
+    MINTER_HASH = "0x615a688d53344290b742a2e72e4f187e5b88227c01f9d77ce2406d32f8bd0eda"
+
+    # Real call 0 of tx 0xcfa148be… — grantRole(RECEIPT_TOKEN_MINTER, OutlandVault).
+    GRANT = decode_calldata(
+        "0x2f2ff15d"
+        "615a688d53344290b742a2e72e4f187e5b88227c01f9d77ce2406d32f8bd0eda"
+        "000000000000000000000000a69e4155f62c097ce92daadef7a925dd40907c0c"
+    )
+
+    def test_decoded_role_param_is_raw_bytes(self) -> None:
+        """Guards the assumption the collector depends on."""
+        type_str, value = self.GRANT.params[0]
+        self.assertEqual(type_str, "bytes32")
+        self.assertIsInstance(value, bytes)
+
+    @patch("utils.llm.ai_explainer.resolve_role_names")
+    def test_passes_normalized_hash_from_decoded_bytes(self, mock_resolve: MagicMock) -> None:
+        """The hash handed to the resolver must be hex, not a bytes repr."""
+        from utils.llm.ai_explainer import _collect_role_names
+
+        mock_resolve.return_value = {}
+        _collect_role_names([("0xCore", self.GRANT)], chain_id=1)
+
+        passed = mock_resolve.call_args[0][0]
+        self.assertEqual(passed, [self.MINTER_HASH])
+
+    @patch("utils.llm.ai_explainer.resolve_role_names")
+    def test_resolves_role_arguments(self, mock_resolve: MagicMock) -> None:
+        from utils.llm.ai_explainer import _collect_role_names, _format_role_name_notes
+
+        mock_resolve.return_value = {self.MINTER_HASH: "RECEIPT_TOKEN_MINTER"}
+        resolved = _collect_role_names([("0xCore", self.GRANT)], chain_id=1)
+
+        self.assertEqual(resolved["0xcore"][self.MINTER_HASH], "RECEIPT_TOKEN_MINTER")
+        self.assertIn("is the role RECEIPT_TOKEN_MINTER", "\n".join(_format_role_name_notes(resolved)))
+
+    @patch("utils.llm.ai_explainer.resolve_role_names")
+    def test_ignores_bytes32_on_non_role_functions(self, mock_resolve: MagicMock) -> None:
+        """A timelock's all-zero predecessor/salt must not become DEFAULT_ADMIN_ROLE."""
+        from utils.llm.ai_explainer import _collect_role_names
+
+        schedule = DecodedCall(
+            function_name="scheduleBatch",
+            signature="scheduleBatch(address[],uint256[],bytes[],bytes32,bytes32,uint256)",
+            params=[("bytes32", b"\x00" * 32), ("bytes32", b"\x00" * 32), ("uint256", 604800)],
+        )
+        self.assertEqual(_collect_role_names([("0xTimelock", schedule)], chain_id=1), {})
+        mock_resolve.assert_not_called()
+
+    @patch("utils.llm.ai_explainer.resolve_role_names")
+    def test_unresolved_roles_are_omitted(self, mock_resolve: MagicMock) -> None:
+        from utils.llm.ai_explainer import _collect_role_names
+
+        mock_resolve.return_value = {}
+        self.assertEqual(_collect_role_names([("0xCore", self.GRANT)], chain_id=1), {})
+
+    @patch("utils.llm.ai_explainer.resolve_role_names")
+    def test_resolution_failure_never_raises(self, mock_resolve: MagicMock) -> None:
+        from utils.llm.ai_explainer import _collect_role_names
+
+        mock_resolve.side_effect = RuntimeError("etherscan down")
+        self.assertEqual(_collect_role_names([("0xCore", self.GRANT)], chain_id=1), {})
+
+
+class TestUnpublishedReportSpill(unittest.TestCase):
+    """A report that can't reach the gist is written to CACHE_DIR.
+
+    It exists only in memory at that point, so without this the LLM output is
+    lost and a recovery means regenerating it against a chain state that has
+    since moved.
+    """
+
+    @patch("utils.llm.ai_explainer.upload_to_gist", return_value="")
+    def test_failed_upload_spills_report_to_disk(self, _mock_gist: MagicMock) -> None:
+        import os
+
+        from utils.cache import cache_path
+        from utils.llm.ai_explainer import UNPUBLISHED_REPORTS_DIRNAME, Explanation, format_explanation_line
+
+        explanation = Explanation(
+            summary="Grants mint rights.",
+            detail="Full detail here.",
+            report="# Call flow\n\nEverything worth keeping.",
+            title="InfiniFi LongTimelock - MEDIUM",
+        )
+        result = format_explanation_line(explanation)
+        self.assertIn("Couldn't post full report", result)
+
+        directory = cache_path(UNPUBLISHED_REPORTS_DIRNAME)
+        spilled = os.listdir(directory)
+        self.assertEqual(len(spilled), 1)
+        contents = open(os.path.join(directory, spilled[0])).read()
+        self.assertIn("Everything worth keeping.", contents)
+        self.assertIn("InfiniFi LongTimelock - MEDIUM", contents)
+
+    @patch("utils.llm.ai_explainer.upload_to_gist", return_value="https://gist.wavey.info/abc123")
+    def test_successful_upload_spills_nothing(self, _mock_gist: MagicMock) -> None:
+        import os
+
+        from utils.cache import cache_path
+        from utils.llm.ai_explainer import UNPUBLISHED_REPORTS_DIRNAME, Explanation, format_explanation_line
+
+        format_explanation_line(Explanation(summary="ok", detail="d", report="r"))
+        self.assertFalse(os.path.exists(cache_path(UNPUBLISHED_REPORTS_DIRNAME)))
+
+    @patch("utils.llm.ai_explainer.upload_to_gist", return_value="")
+    @patch("utils.llm.ai_explainer.os.makedirs", side_effect=OSError("read-only filesystem"))
+    def test_spill_failure_still_returns_alert_line(self, _mock_mkdir: MagicMock, _mock_gist: MagicMock) -> None:
+        """A failed spill must never take down the alert, which still has the summary."""
+        from utils.llm.ai_explainer import Explanation, format_explanation_line
+
+        result = format_explanation_line(Explanation(summary="Grants mint rights.", detail="d", report="r"))
+        self.assertIn("Grants mint rights.", result)
+        self.assertIn("Couldn't post full report", result)

@@ -92,6 +92,7 @@ def print_stuff(chain_name: str, token_name: str, ur: float) -> None:
 def process_assets(chain: Chain) -> None:
     client = ChainManager.get_client(chain)
     addresses = ADDRESSES_BY_CHAIN[chain]
+    block_number = int(client.eth.block_number)
 
     # Prepare all contracts and batch calls
     contracts = []
@@ -101,8 +102,8 @@ def process_assets(chain: Chain) -> None:
             underlying_token = client.eth.contract(address=underlying_token_address, abi=ABI_ATOKEN)
             contracts.append((atoken, underlying_token))
 
-            batch.add(atoken.functions.totalSupply())
-            batch.add(underlying_token.functions.balanceOf(atoken_address))
+            batch.add(atoken.functions.totalSupply().call(block_identifier=block_number))
+            batch.add(underlying_token.functions.balanceOf(atoken_address).call(block_identifier=block_number))
 
         responses = client.execute_batch(batch)
         num_pairs = len(addresses)

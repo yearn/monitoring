@@ -64,16 +64,17 @@ USTB_DECIMALS: int = 6
 def main() -> None:
     """Run all USTB monitoring checks."""
     client = ChainManager.get_client(Chain.MAINNET)
+    block_number = int(client.eth.block_number)
 
     oracle = client.eth.contract(address=CONTINUOUS_ORACLE, abi=ABI_ORACLE)
     ustb = client.eth.contract(address=USTB_TOKEN, abi=ABI_ERC20)
-    chainlink_reading = read_feeds(client, [CHAINLINK_ORACLE])[CHAINLINK_ORACLE]
+    chainlink_reading = read_feeds(client, [CHAINLINK_ORACLE], block_identifier=block_number)[CHAINLINK_ORACLE]
 
     # --- Batch 1: all independent reads ------------------------------------------------
     with client.batch_requests() as batch:
-        batch.add(oracle.functions.latestRoundData())
-        batch.add(oracle.functions.decimals())
-        batch.add(ustb.functions.totalSupply())
+        batch.add(oracle.functions.latestRoundData().call(block_identifier=block_number))
+        batch.add(oracle.functions.decimals().call(block_identifier=block_number))
+        batch.add(ustb.functions.totalSupply().call(block_identifier=block_number))
         responses = client.execute_batch(batch)
 
     oracle_round_data = responses[0]
@@ -88,12 +89,12 @@ def main() -> None:
 
     # --- Batch 2: checkpoint data (needs roundId from batch 1) -------------------------
     with client.batch_requests() as batch:
-        batch.add(oracle.functions.checkpoints(oracle_round_id))
+        batch.add(oracle.functions.checkpoints(oracle_round_id).call(block_identifier=block_number))
         if oracle_round_id > 0:
-            batch.add(oracle.functions.checkpoints(oracle_round_id - 1))
+            batch.add(oracle.functions.checkpoints(oracle_round_id - 1).call(block_identifier=block_number))
         checkpoint_responses = client.execute_batch(batch)
 
-    current_timestamp = int(client.eth.get_block("latest")["timestamp"])
+    current_timestamp = int(client.eth.get_block(block_number)["timestamp"])
 
     latest_checkpoint = checkpoint_responses[0]
     effective_at = int(latest_checkpoint[1])

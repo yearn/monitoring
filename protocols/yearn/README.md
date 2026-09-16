@@ -4,12 +4,12 @@ This folder contains monitoring scripts for Yearn vault activity, Safe multisig 
 
 ## Lender-Borrower Risk
 
-The script `yearn/lender_borrower.py` monitors the active Katana Morpho `vbWBTC/yvUSDC` lender-borrower strategy. The strategy deposits vbWBTC as Morpho collateral, borrows vbUSDC, and lends the borrowed vbUSDC into the Yearn vbUSDC vault.
+The script `yearn/lender_borrower.py` monitors configured Morpho and Aave-compatible lender-borrower strategies. It currently covers Katana Morpho `vbWBTC/vbUSDC`, Ethereum Spark `wstETH/USDS` reached through its WETH accumulator, and Ethereum Spark `WETH/USDS`; each strategy supplies collateral, borrows a stablecoin, and lends the borrowed balance into a Yearn vault.
 
 ### Checks
 
-1. **Liquidation risk**: reproduces the strategy warning LTV from Morpho's LLTV and `warningLTVMultiplier()`, then alerts when `getCurrentLTV()` exceeds it. The displayed vbWBTC and vbUSDC prices come from the strategy's Morpho and USD oracles. The borrow-token USD feed must have updated within 26 hours. Runs every 30 minutes.
-2. **Net spread**: derives Morpho's instantaneous borrow APR from the adaptive IRM's window-average rate and subtracts it from the lender vault APR returned by Yearn's APR oracle. A medium alert fires after at least three samples when the rolling 24-hour average is below `-1%`. A zero lender APR is treated as unavailable data, alerts, and is not stored as a rate sample. Runs every six hours.
+1. **Liquidation risk**: applies `warningLTVMultiplier()` to the protocol liquidation threshold, then alerts when `getCurrentLTV()` exceeds it. Morpho prices come from the configured Morpho and borrow-token USD oracles; Spark prices and its live liquidation threshold come from Spark. The Morpho borrow-token USD feed must have updated within 26 hours. Runs every 30 minutes.
+2. **Net spread**: derives the current borrow APR from Morpho's adaptive IRM or Spark's variable borrow rate and subtracts it from the lender vault APR returned by Yearn's APR oracle. A medium alert fires after at least three samples when the rolling 24-hour average is below `-1%`. A zero lender APR is treated as unavailable data, alerts, and is not stored as a rate sample. Runs every six hours.
 3. **Debt coverage**: compares `balanceOfLentAssets() + balanceOfBorrowToken()` with `balanceOfDebt()`. A medium alert fires when the deficit is both at least 10 basis points of debt and worth at least $100. Runs every six hours with the net-spread check.
 
 All breach, unavailable-data, and monitor-error alerts use `MEDIUM` severity and route to the internal curation Telegram channel, falling back to the Yearn channel when curation is not configured. MEDIUM sends Telegram without invoking the HIGH/CRITICAL emergency-dispatch hook. Persistent breaches and errors are deduplicated and reminded once per 24 hours. The monitor is read-only and does not initiate deleveraging.
@@ -307,11 +307,11 @@ An indexer stall is invisible to the monitors that depend on it: GraphQL keeps a
 2. Fetches that block's timestamp via `ChainManager` and compares it to wall-clock time.
 3. Alerts when a chain's newest indexed block is older than `--max-lag-minutes` (default `60`), or when an expected chain reports no sync state at all.
 
-Step 2 is what makes the check trustworthy. Envio parks `chain_metadata.block_height` at the last processed block once a chain looks caught up, so a stalled indexer keeps reporting itself as zero blocks behind — the same trap called out in the indexer's own [monitoring dashboard](https://envio-monitoring.yearn.dev/).
+Step 2 is what makes the check trustworthy. Envio parks `chain_metadata.block_height` at the last processed block once a chain looks caught up, so a stalled indexer keeps reporting itself as zero blocks behind.
 
 Step 3 covers the inverse trap: an empty result set is not good news. If a chain drops out of the indexer's config, or comes back from a restart with no processed block, it simply stops appearing in `chain_metadata` — and a check that only looks at what it was given would report every remaining chain fresh while that chain's monitors sit blind. `EXPECTED_CHAINS` is therefore the authority on what must be present, and anything absent from it alerts.
 
-`EXPECTED_CHAINS` lists the chains whose indexed events feed monitors here (Mainnet, Polygon, Base, Arbitrum, Katana). It is deliberately spelled out rather than derived from the `Chain` enum, so adding an enum member for an unrelated protocol doesn't start alerting that the indexer is missing a chain it was never asked to index — **add a chain here when its events start feeding a monitor.** Any other chain the indexer reports is one nothing here reads from; those are logged and skipped. A chain whose RPC is unreachable is skipped too rather than alerted on: a broken provider is not a stale indexer.
+`EXPECTED_CHAINS` lists the chains whose indexed events feed monitors here (Mainnet, Polygon, Base, Arbitrum, Katana). It is deliberately spelled out rather than derived from the `Chain` enum, so adding an enum member for an unrelated protocol doesn't start alerting that the indexer is missing a chain it was never asked to index — **add a chain here when its events start feeding a monitor.** Optimism is deliberately absent: the indexer no longer covers it, so it must not be expected. Any other chain the indexer reports is one nothing here reads from; those are logged and skipped. A chain whose RPC is unreachable is skipped too rather than alerted on: a broken provider is not a stale indexer.
 
 ### Alerts
 

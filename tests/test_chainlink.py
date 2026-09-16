@@ -25,11 +25,20 @@ class _FakeFeedFunctions:
     def __init__(self, address: str) -> None:
         self.address = address
 
-    def latestRoundData(self) -> tuple[str, str]:
-        return ("latestRoundData", self.address)
+    def latestRoundData(self) -> "_FakeCall":
+        return _FakeCall("latestRoundData", self.address)
 
-    def decimals(self) -> tuple[str, str]:
-        return ("decimals", self.address)
+    def decimals(self) -> "_FakeCall":
+        return _FakeCall("decimals", self.address)
+
+
+class _FakeCall:
+    def __init__(self, name: str, address: str) -> None:
+        self.name = name
+        self.address = address
+
+    def call(self, *, block_identifier: int | str) -> tuple[str, str, int | str]:
+        return self.name, self.address, block_identifier
 
 
 class _FakeContract:
@@ -39,7 +48,7 @@ class _FakeContract:
 
 class _FakeBatch:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[str, str, int | str]] = []
 
     def __enter__(self) -> "_FakeBatch":
         return self
@@ -52,7 +61,7 @@ class _FakeBatch:
     ) -> None:
         return None
 
-    def add(self, call: tuple[str, str]) -> None:
+    def add(self, call: tuple[str, str, int | str]) -> None:
         self.calls.append(call)
 
 
@@ -61,7 +70,7 @@ class _FakeClient:
         self.responses = responses
         self.contract_addresses: list[str] = []
         self.batch = _FakeBatch()
-        self.executed_calls: list[tuple[str, str]] = []
+        self.executed_calls: list[tuple[str, str, int | str]] = []
 
     def get_contract(self, address: str, _abi: Any) -> _FakeContract:
         self.contract_addresses.append(address)
@@ -119,16 +128,20 @@ class TestReadFeeds(unittest.TestCase):
             ]
         )
 
-        readings = read_feeds(cast(Web3Client, client), ["0xFeedA", "0xFeedB"])
+        readings = read_feeds(
+            cast(Web3Client, client),
+            ["0xFeedA", "0xFeedB"],
+            block_identifier=19_876_543,
+        )
 
         self.assertEqual(client.contract_addresses, ["0xFeedA", "0xFeedB"])
         self.assertEqual(
             client.executed_calls,
             [
-                ("latestRoundData", "0xFeedA"),
-                ("decimals", "0xFeedA"),
-                ("latestRoundData", "0xFeedB"),
-                ("decimals", "0xFeedB"),
+                ("latestRoundData", "0xFeedA", 19_876_543),
+                ("decimals", "0xFeedA", 19_876_543),
+                ("latestRoundData", "0xFeedB", 19_876_543),
+                ("decimals", "0xFeedB", 19_876_543),
             ],
         )
         self.assertEqual(readings["0xFeedA"].round_data.answer, 101_000_000)

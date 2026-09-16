@@ -13,11 +13,18 @@ from web3.types import RPCEndpoint, RPCResponse
 
 from utils.logger import get_logger
 
-from .chains import Chain
+from .chains import PUBLIC_RPC_URLS, Chain
 
 load_dotenv()
 
 logger = get_logger("utils.web3")
+
+# chain_id -> public RPC, used only when no PROVIDER_URL_{CHAIN}* env var is set.
+DEFAULT_PROVIDER_URLS: Dict[int, str] = PUBLIC_RPC_URLS
+
+# Per-request HTTP timeout in seconds. Bounds a stalled connection (e.g. a
+# rate-limited public RPC that accepts but never answers) so retries can rotate.
+REQUEST_TIMEOUT_SECONDS = 60
 
 T = TypeVar("T")  # Generic type for return values
 
@@ -98,7 +105,7 @@ class MultiHTTPProvider(HTTPProvider, RetryProviders):
         providers = self._validate_urls(providers)
         RetryProviders.__init__(self, providers, max_retries, backoff_factor)
         self.request_kwargs = request_kwargs or {}
-        self.request_kwargs.setdefault("timeout", 5000)
+        self.request_kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
         super().__init__(endpoint_uri=self.endpoint_uri, request_kwargs=self.request_kwargs)
 
     def _validate_urls(self, urls: List[str]) -> List[str]:
@@ -139,8 +146,19 @@ class Web3Client(RetryProviders):
         provider = MultiHTTPProvider(providers=provider_urls, max_retries=3, backoff_factor=2)
         return Web3(provider)
 
+    def _rotate_provider(self) -> None:
+        """Rotate the provider used by the underlying Web3 instance."""
+        provider = self.w3.provider
+        if not isinstance(provider, MultiHTTPProvider):
+            raise ProviderConnectionError(f"Cannot rotate unsupported provider type {type(provider).__name__}")
+        provider._rotate_provider()
+        endpoint_uri = provider.endpoint_uri
+        if endpoint_uri is None:
+            raise ProviderConnectionError("Rotated provider has no endpoint URI")
+        self.endpoint_uri = endpoint_uri
+
     def _get_provider_urls(self) -> List[str]:
-        """Get provider URLs for the chain from environment variables"""
+        """Get provider URLs for the chain from environment variables, or its public RPC if none are set."""
         urls = []
         # Get default provider
         env_key = f"PROVIDER_URL_{self.chain.name.upper()}"
@@ -154,6 +172,13 @@ class Web3Client(RetryProviders):
             url = os.getenv(env_key)
             if url:
                 urls.append(url)
+
+        if not urls:
+            # Only fall back to a public RPC when nothing is configured, so a broken env RPC
+            # fails loudly instead of being masked (and retries don't multiply per extra URL).
+            default = DEFAULT_PROVIDER_URLS.get(self.chain.chain_id)
+            if default:
+                urls.append(default)
 
         if not urls:
             raise ValueError(f"No providers found for chain {self.chain.name}")

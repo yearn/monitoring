@@ -115,10 +115,14 @@ def discover_v2_vaults_by_chain() -> Dict[Chain, List[V2Vault]]:
     """Load state + market allocations for every vault in ``VAULTS_V2_BY_CHAIN``.
 
     Issues a single GraphQL ``vaultV2s`` query with adapter positions, then joins
-    back to the static list for risk level. Raises if the API omits a configured
-    vault, returns a non-market adapter, or hits the positions page size.
+    back to the static list for risk level. Vaults with ``monitor_markets=False``
+    are skipped. Raises if the API omits a configured vault, returns a non-market
+    adapter, or hits the positions page size.
     """
-    addr_to_meta, addresses, _chain_ids = get_vault_query_config(VAULTS_V2_BY_CHAIN)
+    market_vaults_by_chain = {
+        chain: tuple(vault for vault in vaults if vault.monitor_markets) for chain, vaults in VAULTS_V2_BY_CHAIN.items()
+    }
+    addr_to_meta, addresses, _chain_ids = get_vault_query_config(market_vaults_by_chain)
 
     if not addresses:
         return {}
@@ -138,7 +142,7 @@ def discover_v2_vaults_by_chain() -> Dict[Chain, List[V2Vault]]:
         error_type=MorphoV2MonitoringError,
     )
 
-    result: Dict[Chain, List[V2Vault]] = {chain: [] for chain in VAULTS_V2_BY_CHAIN}
+    result: Dict[Chain, List[V2Vault]] = {chain: [] for chain, vaults in market_vaults_by_chain.items() if vaults}
     for addr_lc, (chain, config) in addr_to_meta.items():
         item = by_addr[addr_lc]
         result.setdefault(chain, []).append(

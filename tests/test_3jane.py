@@ -1,4 +1,5 @@
 import importlib.util
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 
@@ -32,32 +33,7 @@ def stub_cache(monkeypatch: pytest.MonkeyPatch, module: ModuleType) -> dict[str,
     return cache
 
 
-def test_junior_buffer_uses_backing_over_deployed_credit(monkeypatch: pytest.MonkeyPatch) -> None:
-    module = load_3jane_module()
-    alerts: list = []
-    stub_cache(monkeypatch, module)
-    monkeypatch.setattr(module, "send_alert", alerts.append)
-
-    module.check_junior_buffer(7_504_000, 37_776_000)
-
-    assert alerts == []
-
-
-def test_junior_buffer_alert_describes_deployed_credit(monkeypatch: pytest.MonkeyPatch) -> None:
-    module = load_3jane_module()
-    alerts: list = []
-    stub_cache(monkeypatch, module)
-    monkeypatch.setattr(module, "send_alert", alerts.append)
-
-    module.check_junior_buffer(5_000_000, 40_000_000)
-
-    assert len(alerts) == 1
-    assert alerts[0].severity == module.AlertSeverity.HIGH
-    assert "12.50% of deployed credit" in alerts[0].message
-    assert "sUSD3 backing: $5.00M | Deployed: $40.00M" in alerts[0].message
-
-
-def test_usd3_oc_does_not_alert_above_high_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_usd3_protection_does_not_alert_when_oc_and_buffer_are_healthy(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
     stub_cache(monkeypatch, module)
@@ -79,8 +55,9 @@ def test_usd3_oc_alerts_high_below_target(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(alerts) == 1
     assert alerts[0].severity == module.AlertSeverity.HIGH
     assert "USD3 OC: 109.89% (1.0989x; 9.89% excess)" in alerts[0].message
+    assert "Junior buffer: 9.00% of deployed credit" in alerts[0].message
     assert "Senior at-risk: $91.00M" in alerts[0].message
-    assert "Threshold: 111% OC" in alerts[0].message
+    assert "Threshold: 111% OC / 9.91% junior buffer" in alerts[0].message
 
 
 def test_usd3_oc_alerts_critical_below_critical_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -94,7 +71,8 @@ def test_usd3_oc_alerts_critical_below_critical_threshold(monkeypatch: pytest.Mo
     assert len(alerts) == 1
     assert alerts[0].severity == module.AlertSeverity.CRITICAL
     assert "USD3 OC: 105.26% (1.0526x; 5.26% excess)" in alerts[0].message
-    assert "Threshold: 106% OC" in alerts[0].message
+    assert "Junior buffer: 5.00% of deployed credit" in alerts[0].message
+    assert "Threshold: 106% OC / 5.66% junior buffer" in alerts[0].message
 
 
 def test_insurance_fund_alerts_on_large_share_outflow(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -229,20 +207,6 @@ def test_withdraw_limit_retries_when_send_fails(monkeypatch: pytest.MonkeyPatch)
     assert "Available withdraw limit: $3.50M" in alerts[0].message
 
 
-def test_junior_buffer_zero_deployed_credit_rearms(monkeypatch: pytest.MonkeyPatch) -> None:
-    module = load_3jane_module()
-    alerts: list = []
-    stub_cache(monkeypatch, module)
-    monkeypatch.setattr(module, "send_alert", alerts.append)
-
-    module.check_junior_buffer(4_000_000, 40_000_000)  # 10% → alert
-    module.check_junior_buffer(0, 0)  # book unwound → clears cache
-    module.check_junior_buffer(4_800_000, 40_000_000)  # 12%, above old cached 10% → alert
-
-    assert len(alerts) == 2
-    assert "12.00% of deployed credit" in alerts[1].message
-
-
 def test_usd3_oc_zero_deployed_credit_rearms(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
@@ -255,21 +219,6 @@ def test_usd3_oc_zero_deployed_credit_rearms(monkeypatch: pytest.MonkeyPatch) ->
 
     assert len(alerts) == 2
     assert alerts[1].severity == module.AlertSeverity.HIGH
-
-
-def test_junior_buffer_dedupes_same_ratio(monkeypatch: pytest.MonkeyPatch) -> None:
-    module = load_3jane_module()
-    alerts: list = []
-    stub_cache(monkeypatch, module)
-    monkeypatch.setattr(module, "send_alert", alerts.append)
-
-    module.check_junior_buffer(5_000_000, 40_000_000)  # 12.5% → alert
-    module.check_junior_buffer(5_000_000, 40_000_000)  # same → silent
-    module.check_junior_buffer(4_000_000, 40_000_000)  # 10% → alert
-
-    assert len(alerts) == 2
-    assert "12.50% of deployed credit" in alerts[0].message
-    assert "10.00% of deployed credit" in alerts[1].message
 
 
 def test_insurance_shares_round_trip_exactly_through_sqlite(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -327,6 +276,8 @@ def test_parse_envio_borrower_default_watch_rows_computes_bucket_and_dedupes() -
             {"marketId": "bad", "borrower": borrower, "amountDue": "1", "cycleEnd": str(cycle_end)},
             {"marketId": market_id, "borrower": "not-an-address", "amountDue": "1", "cycleEnd": str(cycle_end)},
         ],
+        7 * module.SECONDS_PER_DAY,
+        23 * module.SECONDS_PER_DAY,
         now,
     )
 
@@ -419,6 +370,54 @@ def test_borrower_default_watch_alert_is_medium_and_deduped(monkeypatch: pytest.
     assert len(cache) == 1
 
 
+def test_borrower_default_watch_dedupe_survives_config_period_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A governance change to the grace/delinquency periods must not re-send milestones."""
+    module = load_3jane_module()
+    alerts: list = []
+    cache: dict[str, str] = {}
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+    monkeypatch.setattr(
+        module,
+        "get_last_value_for_key_from_file",
+        lambda _filename, key: cache.get(key, 0),
+    )
+    monkeypatch.setattr(
+        module,
+        "write_last_value_to_file",
+        lambda _filename, key, value: cache.__setitem__(key, str(value)),
+    )
+
+    snapshot = module.BorrowerRepaymentSnapshot(
+        market_id="0x" + "78" * 32,
+        borrower="0x00000000000000000000000000000000000000A3",
+        cycle_id=6,
+        cycle_end=1_700_000_000,
+        amount_due_raw=250_000 * module.ONE_SHARE,
+        ending_balance_raw=1_000_000 * module.ONE_SHARE,
+        credit_raw=2_000_000 * module.ONE_SHARE,
+        default_started=False,
+        repayment_status="Delinquent",
+        default_at=1_700_000_000 + 30 * module.SECONDS_PER_DAY,
+        seconds_to_default=6 * module.SECONDS_PER_DAY,
+        seconds_since_default=0,
+        default_bucket="7d",
+    )
+    module.check_borrower_default_watch_snapshot(snapshot)
+
+    # Governance extends DELINQUENCY_PERIOD by a day: same borrower, same cycle,
+    # same milestone, only default_at moves.
+    module.check_borrower_default_watch_snapshot(
+        replace(
+            snapshot,
+            default_at=snapshot.default_at + module.SECONDS_PER_DAY,
+            seconds_to_default=snapshot.seconds_to_default + module.SECONDS_PER_DAY,
+        )
+    )
+
+    assert len(alerts) == 1
+    assert len(cache) == 1
+
+
 def test_borrower_default_watch_alert_shows_time_since_default(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_3jane_module()
     alerts: list = []
@@ -477,6 +476,8 @@ def test_parse_envio_borrower_default_watch_rows_skips_grace_period() -> None:
                 "delinquencyPeriod": str(23 * module.SECONDS_PER_DAY),
             },
         ],
+        7 * module.SECONDS_PER_DAY,
+        23 * module.SECONDS_PER_DAY,
         cycle_end + 3 * module.SECONDS_PER_DAY,
     )
 
@@ -501,6 +502,8 @@ def test_parse_envio_borrower_default_watch_rows_default_started_forces_default(
                 "defaultStarted": True,
             },
         ],
+        7 * module.SECONDS_PER_DAY,
+        23 * module.SECONDS_PER_DAY,
         default_at - module.SECONDS_PER_DAY,
     )
 
@@ -508,3 +511,338 @@ def test_parse_envio_borrower_default_watch_rows_default_started_forces_default(
     assert parsed[0].repayment_status == "Default"
     assert parsed[0].default_bucket == "default"
     assert parsed[0].seconds_since_default == 0
+
+
+# --- Accountable Proof of Solvency ---
+
+
+def make_accountable_report(
+    module: ModuleType,
+    ratio: str,
+    age_seconds: int = 300,
+    ts_ms: int = 1_785_490_814_726,
+):
+    """Build a report whose totals produce the requested collateral ratio."""
+    from decimal import Decimal
+
+    from utils.accountable import AccountableReport
+
+    supply = Decimal("75000000")
+    reserves = supply * Decimal(ratio)
+    return AccountableReport(
+        dfid="100000026",
+        collateralization=reserves / supply,
+        reported_collateralization=round(reserves / supply, 6),
+        net=reserves - supply,
+        total_reserves=reserves,
+        total_supply=supply,
+        verifiability=Decimal("100"),
+        ts_ms=ts_ms,
+        report_age_seconds=age_seconds,
+        report_interval="live",
+        report_cadence_seconds=15 * 60,
+        sources=(),
+    )
+
+
+def test_accountable_healthy_ratio_does_not_alert(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_accountable_collateral(make_accountable_report(module, "1.20"))
+
+    assert alerts == []
+
+
+def test_accountable_high_threshold_alerts(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_accountable_collateral(make_accountable_report(module, "0.98"))
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == module.AlertSeverity.HIGH
+    assert "98.0000%" in alerts[0].message
+
+
+def test_accountable_critical_alerts_on_first_crossing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A first sub-95% reading is CRITICAL, including after a HIGH warning."""
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_accountable_collateral(make_accountable_report(module, "0.94"))
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == module.AlertSeverity.CRITICAL
+    assert "95% critical threshold" in alerts[0].message
+
+
+def test_accountable_high_then_critical_crossing_alerts_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_accountable_collateral(make_accountable_report(module, "0.98"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.94"))
+
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.HIGH, module.AlertSeverity.CRITICAL]
+
+
+def test_accountable_frozen_report_does_not_realert_critical(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+    report = make_accountable_report(module, "0.94")
+
+    module.check_accountable_collateral(report)
+    module.check_accountable_collateral(report)
+
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.CRITICAL]
+
+
+def test_accountable_critical_recovery_rearms_alert(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_accountable_collateral(make_accountable_report(module, "0.94"))
+    module.check_accountable_collateral(make_accountable_report(module, "1.20"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.94"))
+
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.CRITICAL, module.AlertSeverity.CRITICAL]
+
+
+def test_accountable_critical_to_high_band_rearms_critical(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_accountable_collateral(make_accountable_report(module, "0.94"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.97"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.94"))
+
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.CRITICAL, module.AlertSeverity.CRITICAL]
+
+
+def test_accountable_does_not_realert_while_below_high(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_accountable_collateral(make_accountable_report(module, "0.98"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.981"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.982"))
+
+    assert len(alerts) == 1
+
+
+def test_accountable_recovery_rearms_alert(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_accountable_collateral(make_accountable_report(module, "0.98"))
+    module.check_accountable_collateral(make_accountable_report(module, "1.20"))
+    module.check_accountable_collateral(make_accountable_report(module, "0.98"))
+
+    assert len(alerts) == 2
+    assert all(alert.severity == module.AlertSeverity.HIGH for alert in alerts)
+
+
+def test_accountable_alerts_use_the_protocol_dispatch_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Accountable HIGH/CRITICAL share the 3jane key so they can zero caps."""
+    from utils.dispatch import DISPATCHABLE_PROTOCOLS
+
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_accountable_collateral(make_accountable_report(module, "0.94"))
+
+    assert alerts[-1].severity == module.AlertSeverity.CRITICAL
+    assert alerts[-1].protocol == module.PROTOCOL
+    assert module.ACCOUNTABLE_FEED.protocol == module.PROTOCOL
+    assert alerts[-1].protocol in DISPATCHABLE_PROTOCOLS
+
+
+def test_accountable_unavailable_run_does_not_rearm_critical(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+    first_ts = 1_785_490_814_726
+
+    module.check_accountable_collateral(make_accountable_report(module, "0.94", ts_ms=first_ts))
+    module.check_accountable_availability("connection refused")
+    module.check_accountable_collateral(make_accountable_report(module, "0.94", ts_ms=first_ts + 1))
+
+    assert [alert.severity for alert in alerts] == [
+        module.AlertSeverity.CRITICAL,
+        module.AlertSeverity.HIGH,  # Feed unavailable after retries.
+    ]
+
+
+def test_accountable_staleness_alerts_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+    report = make_accountable_report(module, "1.20")
+
+    module.check_accountable_staleness(report, "stale sources: Slope (99h)")
+    module.check_accountable_staleness(report, "stale sources: Slope (100h)")
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == module.AlertSeverity.MEDIUM
+    assert "Slope" in alerts[0].message
+
+
+def test_accountable_availability_alerts_after_retries_are_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_accountable_availability("connection refused")
+    assert len(alerts) == 1
+    assert alerts[0].severity == module.AlertSeverity.HIGH
+    assert "1 consecutive run" in alerts[0].message
+
+    module.check_accountable_availability("connection refused")
+    assert len(alerts) == 2
+    assert alerts[1].severity == module.AlertSeverity.CRITICAL
+    assert "2 consecutive runs" in alerts[1].message
+
+    module.check_accountable_availability("connection refused")
+    assert len(alerts) == 2
+
+
+def test_accountable_stale_report_still_evaluates_ratio(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A low collateralization reading matters even when its inputs have aged."""
+    from utils.accountable import AccountableFetchResult, AccountableStatus
+
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+    report = make_accountable_report(module, "0.98")
+    monkeypatch.setattr(
+        module,
+        "fetch_report",
+        lambda _config: AccountableFetchResult(AccountableStatus.STALE, report, "stale sources: Slope (99h)"),
+    )
+
+    module.check_accountable_solvency()
+
+    severities = [alert.severity for alert in alerts]
+    assert module.AlertSeverity.MEDIUM in severities  # staleness
+    assert module.AlertSeverity.HIGH in severities  # low-ratio reading
+
+
+def test_accountable_recovery_clears_health_alert(monkeypatch: pytest.MonkeyPatch) -> None:
+    from utils.accountable import AccountableFetchResult, AccountableStatus
+
+    module = load_3jane_module()
+    alerts: list = []
+    cache = stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+    monkeypatch.setattr(
+        module,
+        "fetch_report",
+        lambda _config: AccountableFetchResult(AccountableStatus.UNAVAILABLE, None, "boom"),
+    )
+
+    module.check_accountable_solvency()
+    assert len(alerts) == 1
+    assert cache[module.CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED] == "1"
+
+    monkeypatch.setattr(
+        module,
+        "fetch_report",
+        lambda _config: AccountableFetchResult(AccountableStatus.OK, make_accountable_report(module, "1.20")),
+    )
+    module.check_accountable_solvency()
+
+    assert cache[module.CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED] == "0"
+    assert cache[module.CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK] == "0"
+
+
+def test_accountable_failure_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The onchain checks must survive any Accountable-side explosion."""
+    module = load_3jane_module()
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", lambda _alert: None)
+
+    def boom(_config):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(module, "fetch_report", boom)
+
+    module.check_accountable_solvency()  # must not raise
+
+
+def test_borrower_watch_uses_live_onchain_timing_instead_of_envio_values() -> None:
+    module = load_3jane_module()
+    market_id = "0x" + "ab" * 32
+    borrower = "0x00000000000000000000000000000000000000a5"
+    cycle_end = 1_700_000_000
+    grace_period = module.SECONDS_PER_DAY
+    delinquency_period = 97 * module.SECONDS_PER_DAY
+
+    parsed = module.parse_envio_borrower_default_watch_rows(
+        [
+            {
+                "marketId": market_id,
+                "borrower": borrower,
+                "amountDue": str(100_000 * module.ONE_SHARE),
+                "cycleId": "9",
+                "cycleEnd": str(cycle_end),
+                "gracePeriod": str(7 * module.SECONDS_PER_DAY),
+                "delinquencyPeriod": str(23 * module.SECONDS_PER_DAY),
+                "defaultStarted": False,
+                "settled": False,
+            }
+        ],
+        grace_period,
+        delinquency_period,
+        cycle_end + 40 * module.SECONDS_PER_DAY,
+    )
+
+    assert len(parsed) == 1
+    assert parsed[0].repayment_status == "Delinquent"
+    assert parsed[0].default_bucket == "delinquent"
+    assert parsed[0].default_at == cycle_end + 98 * module.SECONDS_PER_DAY
+    assert parsed[0].seconds_to_default == 58 * module.SECONDS_PER_DAY
+
+
+def test_debt_cap_alert_displays_wausdc_shares_and_usdc_equivalent(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    cache = stub_cache(monkeypatch, module)
+    cache[module.CACHE_KEY_DEBT_CAP] = "60000000"
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_debt_cap(
+        63_000_000 * module.ONE_SHARE,
+        int(1.05 * module.RATE_SCALE),
+    )
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == module.AlertSeverity.LOW
+    assert "waUSDC shares: 60.00M → 63.00M" in alerts[0].message
+    assert "USDC equivalent at current rate: $63.00M → $66.15M" in alerts[0].message

@@ -141,7 +141,7 @@ def test_build_alert_message_lists_lagging_and_missing_chains() -> None:
     assert "Katana (chain 747474): 2h 15m behind, last block 38465232" in message
     assert "Base (chain 8453): no sync state reported by the indexer" in message
     assert "Threshold: 1h" in message
-    assert freshness.DASHBOARD_URL in message
+    assert "envio-monitoring" not in message
 
 
 def test_fetch_chain_metadata_returns_rows(monkeypatch: pytest.MonkeyPatch, envio_url: str) -> None:

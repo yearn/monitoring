@@ -57,7 +57,6 @@ profiles:
       - { name: "infinifi",               script: protocols/infinifi/main.py }
       - { name: "usdai",                  script: protocols/usdai/main.py }
       - { name: "usdai-large-mints",      script: protocols/usdai/large_mints.py }
-      - { name: "stables-dune-large-transfers", script: protocols/stables/dune_large_transfers.py }
       - { name: "stables-oracles",         script: protocols/stables/oracles.py }
       - { name: "cap-status",              script: protocols/cap/status.py }
       - { name: "yearn-alert-large-flows", script: protocols/yearn/alert_large_flows.py }

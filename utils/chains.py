@@ -5,8 +5,15 @@ EXPLORER_URLS: dict[int, str] = {
     10: "https://optimistic.etherscan.io",
     137: "https://polygonscan.com",
     8453: "https://basescan.org",
+    999: "https://hyperevmscan.io",
     42161: "https://arbiscan.io",
     747474: "https://katanascan.com",
+}
+
+# Public RPCs used only when no PROVIDER_URL_{CHAIN} / PROVIDER_URL_{CHAIN}_{i} env var is set.
+# Setting any of those env vars disables the public fallback for that chain.
+PUBLIC_RPC_URLS: dict[int, str] = {
+    999: "https://rpc.hyperliquid.xyz/evm",
 }
 
 
@@ -16,6 +23,7 @@ class Chain(Enum):
     BASE = (8453, "base", "base")
     ARBITRUM = (42161, "arbitrum", "arb")
     POLYGON = (137, "polygon", "matic")
+    HYPEREVM = (999, "hyperevm", "hype")
     KATANA = (747474, "katana", "kat")
 
     def __init__(self, chain_id: int, network_name: str, symbol: str):

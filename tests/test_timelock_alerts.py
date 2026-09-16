@@ -4,8 +4,17 @@ import unittest
 import unittest.mock
 from unittest.mock import patch
 
-from protocols.timelock.timelock_alerts import TIMELOCKS, TimelockConfig, build_alert_message
+from protocols.timelock.timelock_alerts import (
+    TIMELOCKS,
+    YEARN_TIMELOCK_INTERNAL_PROTOCOL,
+    TimelockConfig,
+    alert_history_protocol,
+    build_alert_message,
+    process_events,
+)
 from utils.telegram import MAX_MESSAGE_LENGTH
+
+YEARN_TIMELOCK_ADDRESS = "0x88ba032be87d5ef1fbe87336b7090767f367bf73"
 
 
 def test_3jane_seven_day_timelock_is_monitored() -> None:
@@ -13,6 +22,26 @@ def test_3jane_seven_day_timelock_is_monitored() -> None:
 
     assert timelock.protocol == "3JANE"
     assert timelock.label == "3Jane 7d TimelockController"
+
+
+def test_alert_history_protocol_matches_website_keys() -> None:
+    assert alert_history_protocol("YEARN_TIMELOCK") == "yearn"
+    assert alert_history_protocol("RTOKEN") == "ethplus"
+    assert alert_history_protocol("COMP") == "comp"
+    assert alert_history_protocol("3JANE") == "3jane"
+    assert alert_history_protocol("CAP") == "cap"
+
+
+@patch("protocols.timelock.timelock_alerts.send_telegram_message")
+@patch("protocols.timelock.timelock_alerts.build_alert_message", return_value="msg")
+def test_yearn_timelock_alert_recorded_under_yearn(_mock_build: object, mock_send: unittest.mock.MagicMock) -> None:
+    """Routing stays on YEARN_TIMELOCK, but the stored protocol must be `yearn` for the website."""
+    event = _make_event(id="1", timelockAddress=YEARN_TIMELOCK_ADDRESS)
+
+    process_events([event], use_cache=False)
+
+    calls = {c.args[1]: c.kwargs["origin_protocol"] for c in mock_send.call_args_list}
+    assert calls == {"YEARN_TIMELOCK": "yearn", YEARN_TIMELOCK_INTERNAL_PROTOCOL: None}
 
 
 def _make_event(

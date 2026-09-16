@@ -50,13 +50,13 @@ def get_cache_key(chain: Chain) -> str:
 # - Mainnet vault exposes priceUnitRedeem() for an explicit redeem quote.
 # - Base vault does not expose priceUnitRedeem(), so we use fixed 1e18 redeem value
 #   and validate health via totalValue/totalSupply backing ratio instead.
-def _fetch_base_metrics(client, chain: Chain, config: dict, wrapped_oeth):
+def _fetch_base_metrics(client, chain: Chain, config: dict, wrapped_oeth, block_number: int):
     vault = client.eth.contract(address=config["vault_address"], abi=ABI_ORIGIN_VAULT_BASE)
     o_token = client.eth.contract(address=config["oeth_address"], abi=ABI_ERC20)
     with client.batch_requests() as batch:
-        batch.add(vault.functions.totalValue())
-        batch.add(wrapped_oeth.functions.convertToAssets(REDEEM_VALUE))
-        batch.add(o_token.functions.totalSupply())
+        batch.add(vault.functions.totalValue().call(block_identifier=block_number))
+        batch.add(wrapped_oeth.functions.convertToAssets(REDEEM_VALUE).call(block_identifier=block_number))
+        batch.add(o_token.functions.totalSupply().call(block_identifier=block_number))
         responses = client.execute_batch(batch)
         if not len(responses) == 3:
             logger.error("Failed to fetch metrics on %s", chain.name)
@@ -75,15 +75,15 @@ def _fetch_base_metrics(client, chain: Chain, config: dict, wrapped_oeth):
     )
 
 
-def _fetch_mainnet_metrics(client, chain: Chain, config: dict, wrapped_oeth):
+def _fetch_mainnet_metrics(client, chain: Chain, config: dict, wrapped_oeth, block_number: int):
     # NOTE: priceUnitRedeem was removed from the mainnet vault contract.
     # Use the same approach as Base: fixed 1e18 redeem value + backing ratio.
     vault = client.eth.contract(address=config["vault_address"], abi=ABI_ORIGIN_VAULT)
     o_token = client.eth.contract(address=config["oeth_address"], abi=ABI_ERC20)
     with client.batch_requests() as batch:
-        batch.add(vault.functions.totalValue())
-        batch.add(wrapped_oeth.functions.convertToAssets(REDEEM_VALUE))
-        batch.add(o_token.functions.totalSupply())
+        batch.add(vault.functions.totalValue().call(block_identifier=block_number))
+        batch.add(wrapped_oeth.functions.convertToAssets(REDEEM_VALUE).call(block_identifier=block_number))
+        batch.add(o_token.functions.totalSupply().call(block_identifier=block_number))
         responses = client.execute_batch(batch)
         if not len(responses) == 3:
             logger.error("Failed to fetch metrics on %s", chain.name)
@@ -114,11 +114,12 @@ def process_origin(chain: Chain):
     """
     config = ORIGIN_CONFIGS[chain]
     client = ChainManager.get_client(chain)
+    block_number = int(client.eth.block_number)
     wrapped_oeth = client.eth.contract(address=config["wrapped_oeth_address"], abi=ABI_ORIGIN_WRAPPED_OETH)
     metrics = (
-        _fetch_base_metrics(client, chain, config, wrapped_oeth)
+        _fetch_base_metrics(client, chain, config, wrapped_oeth, block_number)
         if chain == Chain.BASE
-        else _fetch_mainnet_metrics(client, chain, config, wrapped_oeth)
+        else _fetch_mainnet_metrics(client, chain, config, wrapped_oeth, block_number)
     )
     if metrics is None:
         logger.error("Failed to fetch metrics on %s", chain.name)

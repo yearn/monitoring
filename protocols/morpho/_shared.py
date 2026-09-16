@@ -163,15 +163,6 @@ def fetch_asset_metadata(address: str, chain: Chain) -> dict[str, Any] | None:
         return None
 
 
-def fetch_market_name(market_id: str, chain: Chain) -> str:
-    """Fetch a human-readable name like 'WBTC/USDC' for a market_id.
-
-    Falls back to the raw market_id on error so alerts always render.
-    """
-    metadata = fetch_market_metadata(market_id, chain)
-    return metadata["name"] if metadata else market_id
-
-
 @dataclass(frozen=True)
 class Asset:
     """Token metadata as returned by Morpho GraphQL."""

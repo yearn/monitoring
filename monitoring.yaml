@@ -27,10 +27,8 @@ protocols:
         description: "USD3 PPS decrease (any drop vs cached prior, CRITICAL) and sUSD3 PPS decrease (HIGH)"
       - name: "TVL"
         description: "Absolute TVL change >=15% for USD3 or sUSD3 using a baseline no older than 3 hours"
-      - name: "Junior Buffer Ratio"
-        description: "sUSD3 backing <15% of deployed credit; re-armed after a monitoring gap >3 hours"
-      - name: "USD3 Overcollateralization"
-        description: "OC <111% (HIGH) or <106% (CRITICAL); re-armed after a monitoring gap >3 hours"
+      - name: "USD3 Protection"
+        description: "Combined OC and equivalent junior buffer: <111% OC / <9.91% buffer (HIGH), or <106% OC / <5.66% buffer (CRITICAL); re-armed after a monitoring gap >3 hours"
       - name: "Insurance Fund Outflow"
         description: "waUSDC outflow >=$50k since prior run"
       - name: "Withdraw Liquidity"
@@ -38,13 +36,17 @@ protocols:
       - name: "Vault Shutdown"
         description: "Alert-once when isShutdown() is true; re-armed after a monitoring gap >3 hours"
       - name: "Debt Cap"
-        description: "Any change to ProtocolConfig.getDebtCap()"
+        description: "Any change to ProtocolConfig.getDebtCap(), shown in waUSDC shares and USDC equivalent"
       - name: "Nominal sUSD3 Backing Floor"
         description: "Any floor change; floor-breach dedupe re-armed after a monitoring gap >3 hours"
       - name: "Protocol Pause"
         description: "Alert-once when IS_PAUSED is true; re-armed after a monitoring gap >3 hours"
       - name: "Borrower Default Watch"
-        description: "Envio-backed MorphoCredit borrower watch; MEDIUM alerts when unpaid obligations become delinquent after grace or reach default"
+        description: "Envio-backed MorphoCredit borrower watch using live ProtocolConfig timing; MEDIUM alerts when unpaid obligations become delinquent after grace or reach default"
+      - name: "Proof of Solvency"
+        description: "Accountable collateral ratio <95% (CRITICAL) or <99% (HIGH)"
+      - name: "Proof of Solvency Freshness"
+        description: "MEDIUM when a short-cadence report/source misses 2 periods or a >1h cadence misses 1; HIGH on first unavailable run, CRITICAL on the second consecutive miss"
       - name: "Timelock"
         description: "CallScheduled events from 24h and 7-day TimelockControllers via Envio"
 
@@ -84,7 +86,7 @@ protocols:
       - protocols/cap/liquidity.py
     monitors:
       - name: "stcUSD Backing"
-        description: "cUSD balance covers stcUSD totalAssets plus lockedProfit"
+        description: "Same-block cUSD balance covers stcUSD totalAssets plus lockedProfit"
       - name: "stcUSD Assets Per Share"
         description: "Critical alert if convertToAssets(1 stcUSD) decreases"
       - name: "Withdrawable Liquidity"
@@ -176,7 +178,7 @@ protocols:
       - name: "Liquid Reserves"
         description: "Liquid reserves < $8M; crossing detection re-armed after a monitoring gap >3 hours"
       - name: "Backing Per iUSD"
-        description: "totalTVL / iUSD supply < 0.999; re-armed after a monitoring gap >3 hours"
+        description: "API totalTVL / block-pinned iUSD supply < 0.999; supply block included in alerts"
       - name: "Redemption Pressure"
         description: "Pending redemptions / liquid reserves >80%; re-armed after a monitoring gap >3 hours"
       - name: "Large iUSD Mints"
@@ -271,7 +273,7 @@ protocols:
 
   morpho:
     display_name: "Morpho"
-    description: "Morpho market, vault, and governance monitoring"
+    description: "Morpho market, vault, and governance monitoring on Mainnet, Base, Katana, and HyperEVM"
     cadence: "Hourly / Daily"
     tasks:
       - protocols/morpho/markets.py
@@ -368,17 +370,14 @@ protocols:
 
   stables:
     display_name: "Stablecoins"
-    description: "Cross-protocol stablecoin peg, oracle, and large-transfer monitoring"
+    description: "Cross-protocol stablecoin peg and oracle monitoring"
     cadence: "Hourly / Every 10 minutes"
     tasks:
       - protocols/stables/main.py
-      - protocols/stables/dune_large_transfers.py
       - protocols/stables/oracles.py
     monitors:
       - name: "Stablecoin Prices"
         description: "Depeg alerts via DeFiLlama (USDe/sUSDe/iUSD/syrupUSDC/syrupUSDT/USTB thresholds)"
-      - name: "Large Transfers"
-        description: "Dune-backed large transfers >=$5M for cUSD and iUSD"
       - name: "Oracle Health"
         description: "Chainlink staleness, round health, peg deviation, oracle-market divergence; rate-oracle monotonicity/delta"
 
@@ -467,7 +466,7 @@ protocols:
       - name: "Indexer Freshness"
         description: "Envio indexer lag per chain; alerts the Envio channel when a chain's newest indexed block is older than 60 minutes or the GraphQL endpoint is down"
       - name: "Lender-Borrower Risk"
-        description: "Katana Morpho vbWBTC/yvUSDC: LTV every 30m; 24h net spread and debt coverage every 6h"
+        description: "All configured lender-borrower strategies: collateral and borrow-token prices plus LTV/liquidation risk every 30m; lender and borrow APR availability, 24h net spread, and debt coverage every 6h"
         severity: "MEDIUM"
       - name: "Large Flows"
         description: "Deposit/withdrawal flows >=$500k USD (Katana withdrawals >=$50k; or 10% of vault totalSupply fallback for unpriced tokens)"

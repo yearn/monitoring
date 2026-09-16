@@ -34,6 +34,18 @@ CACHE_KEY = "TIMELOCK_LAST_TS"
 # TELEGRAM_BOT_TOKEN_YEARN_TIMELOCK_INTERNAL / TELEGRAM_CHAT_ID_YEARN_TIMELOCK_INTERNAL.
 YEARN_TIMELOCK_INTERNAL_PROTOCOL = "YEARN_TIMELOCK_INTERNAL"
 
+# TimelockConfig.protocol is the Telegram routing key (TELEGRAM_TOPIC_ID_<KEY>),
+# but the alert store must use the protocol key the website queries
+# (`GET /v1/alerts?protocol=<key>`, exact match) or the alert never shows on the
+# protocol's page. Keys default to the lowercased routing key; list exceptions here.
+# LRT has no mapping: the website's lrt-pegs page has no alert key (its scripts
+# emit mixed values), so LRT timelock alerts show only in the overview feed as "lrt".
+ALERT_HISTORY_PROTOCOLS: dict[str, str] = {
+    "YEARN_TIMELOCK": "yearn",
+    # rtoken page queries "ethplus", matching protocols/rtoken/monitor_rtoken.py.
+    "RTOKEN": "ethplus",
+}
+
 
 @dataclass(frozen=True)
 class TimelockConfig:
@@ -83,6 +95,11 @@ TIMELOCKS: dict[tuple[str, int], TimelockConfig] = {(t.address, t.chain_id): t f
 SKIP_AI_SUMMARY_PROTOCOLS: frozenset[str] = frozenset({"AAVE", "COMP", "LIDO", "FLUID"})
 
 _logger = get_logger("timelock_alerts")
+
+
+def alert_history_protocol(routing_protocol: str) -> str:
+    """Return the protocol key the alert store and website use for a routing key."""
+    return ALERT_HISTORY_PROTOCOLS.get(routing_protocol, routing_protocol.lower())
 
 
 def http_json(url: str, method: str = "GET", body: dict | None = None, headers: dict | None = None) -> dict | None:
@@ -570,9 +587,12 @@ def process_events(events: list[dict], use_cache: bool) -> None:
         if current_parts:
             chunks.append(separator.join(current_parts))
 
+        # The internal mirror keeps its own key so the website doesn't list every
+        # Yearn timelock alert twice.
+        origin_protocol = None if protocol == YEARN_TIMELOCK_INTERNAL_PROTOCOL else alert_history_protocol(protocol)
         for chunk in chunks:
             try:
-                send_telegram_message(chunk, protocol)
+                send_telegram_message(chunk, protocol, origin_protocol=origin_protocol)
             except Exception:
                 _logger.exception("Failed to send Telegram alert for protocol %s", protocol)
                 all_sent = False
