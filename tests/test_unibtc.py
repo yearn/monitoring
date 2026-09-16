@@ -133,7 +133,7 @@ def make_client(responses: Sequence[object]) -> tuple[SimpleNamespace, list[obje
 def test_mint_delta_1h_uses_latest_fresh_snapshot() -> None:
     now = 1_000_000
     snapshots = [(now - 4 * 3600, 100), (now - 3600, 110)]
-    assert unibtc.mint_delta_1h(125, now, snapshots) == 15
+    assert unibtc.mint_delta_1h(125, now, snapshots) == (15, 3600)
 
 
 def test_mint_delta_1h_skips_stale_baseline() -> None:
@@ -145,7 +145,7 @@ def test_mint_delta_1h_skips_stale_baseline() -> None:
 def test_mint_delta_24h_picks_closest_to_one_day() -> None:
     now = 1_000_000
     snapshots = [(now - 21 * 3600, 100), (now - 24 * 3600, 90), (now - 35 * 3600, 50)]
-    assert unibtc.mint_delta_24h(120, now, snapshots) == 30
+    assert unibtc.mint_delta_24h(120, now, snapshots) == (30, 24 * 3600)
 
 
 def test_mint_delta_24h_none_without_window() -> None:
@@ -154,14 +154,31 @@ def test_mint_delta_24h_none_without_window() -> None:
     assert unibtc.mint_delta_24h(200, now, snapshots) is None
 
 
+def test_prune_snapshots_keeps_future_dated_entry() -> None:
+    """A lagging RPC provider can move block_timestamp backwards; keep the snapshot."""
+    now = 1_000_000
+    snapshots = [(now + 600, 120), (now - 3600, 110), (now - 40 * 3600, 90)]
+    assert unibtc.prune_snapshots(snapshots, now) == [(now + 600, 120), (now - 3600, 110)]
+
+
+def test_mint_delta_ignores_future_dated_snapshot() -> None:
+    now = 1_000_000
+    snapshots = [(now + 600, 999), (now - 3600, 110)]
+    assert unibtc.mint_delta_1h(125, now, snapshots) == (15, 3600)
+
+
 def test_por_coverage_ratio_matches_snapshot() -> None:
     ratio = unibtc.por_coverage_ratio(4_640_515_622_996_713_140_279, 18, Decimal("4546.67793"))
     assert Decimal("1.020") < ratio < Decimal("1.021")
 
 
-def test_feeder_gap_matches_snapshot() -> None:
-    gap = unibtc.feeder_gap(384_574_449_304, Decimal("4546.67793"))
-    assert Decimal("0.154") < gap < Decimal("0.155")
+def test_feeder_ratio_matches_snapshot() -> None:
+    ratio = unibtc.feeder_ratio(384_574_449_304, Decimal("4546.67793"))
+    assert Decimal("0.845") < ratio < Decimal("0.846")
+
+
+def test_feeder_ratio_drift() -> None:
+    assert unibtc.feeder_ratio_drift(Decimal("0.9"), Decimal("1.0")) == Decimal("0.1")
 
 
 def test_uncleared_wbtc_debt() -> None:
@@ -228,6 +245,84 @@ def test_unexpected_minting_initializes_without_alert(monkeypatch: pytest.Monkey
 
     assert alerts == []
     assert unibtc.load_supply_snapshots() == [(1_700_000_000, 298_112_556_288)]
+
+
+def test_unexpected_minting_24h_does_not_repeat_for_same_mint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One mint stays in the 24h window for ~20 runs; it must alert only once."""
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+    now = 1_700_000_000
+    base = 298_112_556_288
+    minted = base + 3 * 10**8
+    unibtc.store_supply_snapshots([(now - 24 * 3600 - hour * 3600, base) for hour in range(6)])
+
+    for hour in range(20):
+        unibtc.check_unexpected_minting(make_state(total_supply=minted, block_timestamp=now + hour * 3600))
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == AlertSeverity.HIGH
+
+
+def test_unexpected_minting_realerts_after_further_growth(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+    now = 1_700_000_000
+    base = 298_112_556_288
+    unibtc.store_supply_snapshots([(now - 24 * 3600, base)])
+
+    unibtc.check_unexpected_minting(make_state(total_supply=base + 2 * 10**8, block_timestamp=now))
+    unibtc.check_unexpected_minting(make_state(total_supply=base + 3 * 10**8, block_timestamp=now + 3600))
+    unibtc.check_unexpected_minting(make_state(total_supply=base + 5 * 10**8, block_timestamp=now + 7200))
+
+    assert len(alerts) == 2
+
+
+def test_reserve_gate_alerts_on_each_distinct_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second tampered field must not be swallowed by the first alert's latch."""
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+
+    unibtc.check_reserve_gate(make_state(adequacy_ratio=0))
+    unibtc.check_reserve_gate(make_state(adequacy_ratio=0))
+    unibtc.check_reserve_gate(
+        make_state(adequacy_ratio=0, unibtc_supply_feeder="0x0000000000000000000000000000000000000001")
+    )
+
+    assert len(alerts) == 2
+    assert "uniBTCSupplyFeeder" in alerts[1].message
+
+
+def test_paused_alerts_again_when_pause_set_shifts(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+
+    unibtc.check_paused(make_state(router_paused=True))
+    unibtc.check_paused(make_state(router_paused=True))
+    unibtc.check_paused(make_state(router_paused=True, vault_paused=True))
+
+    assert len(alerts) == 2
+    assert "Vault.paused" in alerts[1].message
+
+
+def test_por_stale_follows_tightened_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+    now = 1_700_000_000
+
+    unibtc.check_por_stale(make_state(block_timestamp=now, por_updated_at=now - 3_700, feeder_heartbeat=3_600))
+
+    assert len(alerts) == 1
+
+
+def test_por_stale_threshold_capped_at_default() -> None:
+    """A heartbeat widened by a compromised manager must not blind the check."""
+    assert unibtc.por_stale_threshold(make_state(feeder_heartbeat=10 * 86_400)) == unibtc.POR_STALE_SECONDS
+    assert unibtc.por_stale_threshold(make_state(feeder_heartbeat=0)) == unibtc.POR_STALE_SECONDS
 
 
 def test_reserve_gate_alerts_once_until_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -307,17 +402,46 @@ def test_por_stale_uses_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:
     assert alerts[0].severity == AlertSeverity.HIGH
 
 
-def test_supply_feeder_gap_alerts(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_supply_feeder_steady_state_is_quiet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The live feeder sits ~15% under the dashboard total; that must not alert."""
     alerts: list[Alert] = []
     stub_cache(monkeypatch)
     monkeypatch.setattr(unibtc, "send_alert", alerts.append)
 
     unibtc.check_supply_feeder(make_state(), Decimal("4546.67793"))
     unibtc.check_supply_feeder(make_state(), Decimal("4546.67793"))
+    unibtc.check_supply_feeder(make_state(feeder_supply=390_000_000_000), Decimal("4600"))
+
+    assert alerts == []
+
+
+def test_supply_feeder_ratio_jump_alerts_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+
+    unibtc.check_supply_feeder(make_state(), Decimal("4546.67793"))
+    hijacked = make_state(feeder_supply=384_574_449_304 // 2)
+    unibtc.check_supply_feeder(hijacked, Decimal("4546.67793"))
+    unibtc.check_supply_feeder(hijacked, Decimal("4546.67793"))
 
     assert len(alerts) == 1
     assert alerts[0].severity == AlertSeverity.HIGH
     assert "supply feeder wrong" in alerts[0].message
+
+
+def test_supply_feeder_baseline_not_relearned_while_alerting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An anomalous ratio must not quietly become the new baseline."""
+    alerts: list[Alert] = []
+    cache = stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+
+    unibtc.check_supply_feeder(make_state(), Decimal("4546.67793"))
+    baseline = cache[unibtc.CACHE_KEY_FEEDER_RATIO]
+    unibtc.check_supply_feeder(make_state(feeder_supply=384_574_449_304 // 2), Decimal("4546.67793"))
+
+    assert cache[unibtc.CACHE_KEY_FEEDER_RATIO] == baseline
+    assert len(alerts) == 1
 
 
 def test_supply_feeder_stale_after_48h(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -448,6 +572,38 @@ def test_fetch_price_in_btc_prefers_coingecko_key(monkeypatch: pytest.MonkeyPatc
         },
     )
     assert unibtc.fetch_price_in_btc() == Decimal("59545") / Decimal("60000")
+
+
+def test_fetch_price_in_btc_skips_zero_quote(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A zero quote is a bad feed, not a depeg — fall through to the next key."""
+    errors: list[str] = []
+    monkeypatch.setattr(unibtc, "send_error_message", lambda message, _protocol: errors.append(message))
+    monkeypatch.setattr(
+        unibtc,
+        "fetch_prices",
+        lambda _keys: {
+            "coingecko:universal-btc": Decimal("0"),
+            f"ethereum:{unibtc.UNIBTC}": Decimal("59545"),
+            unibtc.BTC_USD_DEFILLAMA_KEY: Decimal("60000"),
+        },
+    )
+
+    assert unibtc.fetch_price_in_btc() == Decimal("59545") / Decimal("60000")
+    assert errors == []
+
+
+def test_fetch_price_in_btc_none_when_all_quotes_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(unibtc, "send_error_message", lambda _message, _protocol: None)
+    monkeypatch.setattr(
+        unibtc,
+        "fetch_prices",
+        lambda _keys: {
+            "coingecko:universal-btc": Decimal("0"),
+            unibtc.BTC_USD_DEFILLAMA_KEY: Decimal("60000"),
+        },
+    )
+
+    assert unibtc.fetch_price_in_btc() is None
 
 
 def test_load_state_batches_all_calls_at_one_block() -> None:

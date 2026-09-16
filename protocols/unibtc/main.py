@@ -8,9 +8,10 @@ state.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from web3 import Web3
@@ -56,7 +57,11 @@ SNAPSHOT_RETENTION = MINT_24H_MAX_BASELINE_AGE
 POR_CRITICAL_RATIO = Decimal("1.00")
 POR_HIGH_RATIO = Decimal("1.01")
 POR_STALE_SECONDS = 86_400
-FEEDER_GAP_THRESHOLD = Decimal("0.02")
+# The on-chain feeder and the Bedrock dashboard cover different chain sets, so their
+# absolute levels differ by a large steady-state factor (~0.85 at time of writing).
+# Only a *move* in that ratio signals a wrong or hijacked feeder, so the baseline is
+# learned from the cache rather than hardcoded.
+FEEDER_RATIO_DRIFT_THRESHOLD = Decimal("0.05")
 FEEDER_STALE_SECONDS = 48 * 60 * 60
 REDEMPTION_UNDERFUNDED_SECONDS = 24 * 60 * 60
 PEG_FLOOR = Decimal("0.98")
@@ -68,11 +73,14 @@ UNIBTC_PRICE_KEYS = (
 )
 
 CACHE_KEY_SNAPSHOTS = "UNIBTC_SUPPLY_SNAPSHOTS"
+CACHE_KEY_MINT_1H_ALERTED = "UNIBTC_MINT_1H_ALERTED_SUPPLY"
+CACHE_KEY_MINT_24H_ALERTED = "UNIBTC_MINT_24H_ALERTED_SUPPLY"
 CACHE_KEY_RESERVE_GATE = "UNIBTC_RESERVE_GATE_ALERTED"
 CACHE_KEY_PAUSED = "UNIBTC_PAUSED_ALERTED"
 CACHE_KEY_POR_BAND = "UNIBTC_POR_BAND"
 CACHE_KEY_POR_STALE = "UNIBTC_POR_STALE_ALERTED"
 CACHE_KEY_FEEDER_GAP = "UNIBTC_FEEDER_GAP_ALERTED"
+CACHE_KEY_FEEDER_RATIO = "UNIBTC_FEEDER_RATIO_BASELINE"
 CACHE_KEY_FEEDER_VALUE = "UNIBTC_FEEDER_VALUE"
 CACHE_KEY_FEEDER_CHANGED_TS = "UNIBTC_FEEDER_CHANGED_TS"
 CACHE_KEY_FEEDER_STALE = "UNIBTC_FEEDER_STALE_ALERTED"
@@ -196,18 +204,53 @@ def _cache_int(key: str) -> int:
         return 0
 
 
+def _cache_decimal(key: str) -> Decimal | None:
+    """Read a cache value as Decimal, returning None when unset or unparsable."""
+    raw = _cache_raw(key)
+    if raw in (0, "0", ""):
+        return None
+    try:
+        return Decimal(str(raw))
+    except (TypeError, ValueError, InvalidOperation):
+        logger.warning("Ignoring invalid uniBTC decimal cache for %s: %s", key, raw)
+        return None
+
+
 def _set_cache(key: str, value: int | str) -> None:
     """Write a cache value."""
     write_last_value_to_file(cache_filename, key, value)
 
 
+def _fingerprint(parts: list[str]) -> str:
+    """Return a stable short digest of ``parts``, or "" when there is nothing to report.
+
+    ``hash()`` is salted per process, so alerts deduped across runs need an explicit
+    stable digest.
+    """
+    if not parts:
+        return ""
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
+
+
+def _alert_on_change(key: str, fingerprint: str, alert: Alert) -> None:
+    """Send ``alert`` whenever ``fingerprint`` changes to a new non-empty value.
+
+    Unlike a plain boolean latch this re-fires when the *contents* of a condition
+    change (a second reserve-gate field is tampered with, a different component is
+    paused) instead of silently holding the first alert's state.
+    """
+    previous = str(_cache_raw(key))
+    if previous in ("0", ""):
+        previous = ""
+    if fingerprint and fingerprint != previous:
+        send_alert(alert)
+    if fingerprint != previous:
+        _set_cache(key, fingerprint or 0)
+
+
 def _alert_while_true(key: str, active: bool, alert: Alert) -> None:
     """Send ``alert`` once while ``active`` is true; recovery re-arms."""
-    previous = _cache_int(key) == 1
-    if active and not previous:
-        send_alert(alert)
-    if active != previous:
-        _set_cache(key, int(active))
+    _alert_on_change(key, "1" if active else "", alert)
 
 
 def _to_int(value: Any, label: str) -> int:
@@ -269,28 +312,34 @@ def store_supply_snapshots(snapshots: list[tuple[int, int]]) -> None:
 
 
 def prune_snapshots(snapshots: list[tuple[int, int]], now: int) -> list[tuple[int, int]]:
-    """Drop snapshots older than the 24h lookback window."""
-    return [(ts, supply) for ts, supply in snapshots if 0 <= now - ts <= SNAPSHOT_RETENTION]
+    """Drop snapshots older than the 24h lookback window.
+
+    Snapshots dated after ``now`` are kept rather than dropped: ``block_timestamp``
+    can move backwards when the RPC pool rotates to a lagging provider, and
+    discarding the newest snapshot there would throw away the only baseline the
+    next run has. The delta helpers ignore future-dated entries on their own.
+    """
+    return [(ts, supply) for ts, supply in snapshots if now - ts <= SNAPSHOT_RETENTION]
 
 
-def mint_delta_1h(current_supply: int, now: int, snapshots: list[tuple[int, int]]) -> int | None:
-    """Return the supply increase versus the latest snapshot no older than 3 hours."""
+def mint_delta_1h(current_supply: int, now: int, snapshots: list[tuple[int, int]]) -> tuple[int, int] | None:
+    """Return ``(supply increase, baseline age)`` versus the latest snapshot under 3 hours old."""
     recent = [(ts, supply) for ts, supply in snapshots if 0 < now - ts <= MINT_1H_MAX_BASELINE_AGE]
     if not recent:
         return None
-    _ts, baseline = max(recent, key=lambda item: item[0])
-    return current_supply - baseline
+    ts, baseline = max(recent, key=lambda item: item[0])
+    return current_supply - baseline, now - ts
 
 
-def mint_delta_24h(current_supply: int, now: int, snapshots: list[tuple[int, int]]) -> int | None:
-    """Return the supply increase versus the snapshot closest to 24 hours ago."""
+def mint_delta_24h(current_supply: int, now: int, snapshots: list[tuple[int, int]]) -> tuple[int, int] | None:
+    """Return ``(supply increase, baseline age)`` versus the snapshot closest to 24 hours ago."""
     window = [
         (ts, supply) for ts, supply in snapshots if MINT_24H_MIN_BASELINE_AGE <= now - ts <= MINT_24H_MAX_BASELINE_AGE
     ]
     if not window:
         return None
-    _ts, baseline = min(window, key=lambda item: abs((now - item[0]) - 86_400))
-    return current_supply - baseline
+    ts, baseline = min(window, key=lambda item: abs((now - item[0]) - 86_400))
+    return current_supply - baseline, now - ts
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +442,9 @@ def fetch_price_in_btc() -> Decimal | None:
         return None
     for key in UNIBTC_PRICE_KEYS:
         usd = prices.get(key)
-        if usd is not None:
+        # A zero or negative quote is a bad feed, not a depeg: returning it would
+        # raise a false CRITICAL peg alert.
+        if usd is not None and usd > 0:
             return usd / btc_usd
     send_error_message("uniBTC USD price unavailable from DeFiLlama", PROTOCOL)
     return None
@@ -402,6 +453,33 @@ def fetch_price_in_btc() -> Decimal | None:
 # ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
+
+
+def mint_alert_due(key: str, triggered: bool, current_supply: int, threshold: int) -> bool:
+    """Return whether a mint alert should fire, deduping repeats of the same mint.
+
+    A single large mint stays inside the lookback window for many hourly runs. The
+    supply level that last alerted is cached, so the alert repeats only once supply
+    has grown by another full threshold; falling back under the threshold re-arms.
+
+    Args:
+        key: Cache key holding the ``totalSupply`` at the last alert.
+        triggered: Whether the window delta is at or above the threshold.
+        current_supply: Current ``totalSupply``.
+        threshold: Raw mint threshold for this window.
+
+    Returns:
+        True when the alert should be sent now.
+    """
+    last_alert_supply = _cache_int(key)
+    if not triggered:
+        if last_alert_supply:
+            _set_cache(key, 0)
+        return False
+    if last_alert_supply and current_supply < last_alert_supply + threshold:
+        return False
+    _set_cache(key, current_supply)
+    return True
 
 
 def check_unexpected_minting(state: UnibtcState) -> None:
@@ -420,27 +498,40 @@ def check_unexpected_minting(state: UnibtcState) -> None:
         delta_1h,
         delta_24h,
     )
+    if delta_1h is None or delta_24h is None:
+        # Expected on a first run; otherwise the window is blind (missed runs, or a
+        # gap longer than the retention window) and the mint check cannot fire.
+        logger.warning(
+            "uniBTC mint baseline missing (1h=%s 24h=%s) from %s cached snapshots",
+            delta_1h is not None,
+            delta_24h is not None,
+            len(snapshots),
+        )
 
-    if delta_1h is not None and delta_1h >= MINT_1H_CRITICAL_RAW:
+    if delta_1h is not None and mint_alert_due(
+        CACHE_KEY_MINT_1H_ALERTED, delta_1h[0] >= MINT_1H_CRITICAL_RAW, state.total_supply, MINT_1H_CRITICAL_RAW
+    ):
         send_alert(
             Alert(
                 AlertSeverity.CRITICAL,
                 "*uniBTC unexpected minting (1h)*\n"
-                f"Supply increased by {_fmt_btc(delta_1h)} uniBTC in about 1 hour "
-                f"(threshold {_fmt_btc(MINT_1H_CRITICAL_RAW)}).\n"
+                f"Supply increased by {_fmt_btc(delta_1h[0])} uniBTC over the last "
+                f"{format_duration(delta_1h[1])} (threshold {_fmt_btc(MINT_1H_CRITICAL_RAW)}).\n"
                 f"Current totalSupply: {_fmt_btc(state.total_supply)}\n"
                 "No mint attribution — check the token txs manually.\n"
                 f"🔗 Token {_etherscan(UNIBTC)}",
                 PROTOCOL,
             )
         )
-    if delta_24h is not None and delta_24h >= MINT_24H_HIGH_RAW:
+    if delta_24h is not None and mint_alert_due(
+        CACHE_KEY_MINT_24H_ALERTED, delta_24h[0] >= MINT_24H_HIGH_RAW, state.total_supply, MINT_24H_HIGH_RAW
+    ):
         send_alert(
             Alert(
                 AlertSeverity.HIGH,
                 "*uniBTC unexpected minting (24h)*\n"
-                f"Supply increased by {_fmt_btc(delta_24h)} uniBTC over ~24 hours "
-                f"(threshold {_fmt_btc(MINT_24H_HIGH_RAW)}).\n"
+                f"Supply increased by {_fmt_btc(delta_24h[0])} uniBTC over the last "
+                f"{format_duration(delta_24h[1])} (threshold {_fmt_btc(MINT_24H_HIGH_RAW)}).\n"
                 f"Current totalSupply: {_fmt_btc(state.total_supply)}\n"
                 "No mint attribution — check the token txs manually.\n"
                 f"🔗 Token {_etherscan(UNIBTC)}",
@@ -471,7 +562,10 @@ def reserve_gate_diffs(state: UnibtcState) -> list[str]:
 
 
 def check_reserve_gate(state: UnibtcState) -> None:
-    """Alert once while the Vault PoR gate differs from the known-good baseline.
+    """Alert while the Vault PoR gate differs from the known-good baseline.
+
+    Keyed on the diff contents, so a second tampered field re-alerts instead of
+    being swallowed by the first alert's latch.
 
     Args:
         state: Current on-chain snapshot.
@@ -484,15 +578,18 @@ def check_reserve_gate(state: UnibtcState) -> None:
         + "\n".join(f"- {line}" for line in diffs)
         + f"\n🔗 Vault {_etherscan(VAULT)}"
     )
-    _alert_while_true(
+    _alert_on_change(
         CACHE_KEY_RESERVE_GATE,
-        bool(diffs),
+        _fingerprint(diffs),
         Alert(AlertSeverity.CRITICAL, message, PROTOCOL),
     )
 
 
 def check_paused(state: UnibtcState) -> None:
-    """Alert once while the Vault or live router is stopped or paused.
+    """Alert while the Vault or live router is stopped or paused.
+
+    Keyed on which components are flagged, so a shift in the pause set re-alerts
+    instead of leaving the first alert's text standing.
 
     Args:
         state: Current on-chain snapshot.
@@ -506,7 +603,7 @@ def check_paused(state: UnibtcState) -> None:
         flags.append(f"Router.paused() = true {_etherscan(ROUTER)}")
     logger.info("uniBTC pause flags=%s", flags)
     message = "*uniBTC Vault or router paused*\n" + "\n".join(f"- {line}" for line in flags)
-    _alert_while_true(CACHE_KEY_PAUSED, bool(flags), Alert(AlertSeverity.HIGH, message, PROTOCOL))
+    _alert_on_change(CACHE_KEY_PAUSED, _fingerprint(flags), Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
 
 def por_coverage_ratio(por_answer: int, por_decimals: int, api_total_supply: Decimal) -> Decimal:
@@ -558,6 +655,25 @@ def check_por_coverage(state: UnibtcState, api_total_supply: Decimal | None) -> 
         _set_cache(CACHE_KEY_POR_BAND, band)
 
 
+def por_stale_threshold(state: UnibtcState) -> int:
+    """Return the PoR staleness threshold actually enforced by the Vault.
+
+    Tracks the live ``feederHeartbeat`` so the alert follows the window in which
+    ``mint()`` really reverts, but never above ``POR_STALE_SECONDS``: a heartbeat
+    widened by a compromised MANAGER_ROLE must not also blind this check. The
+    widening itself is reported by :func:`check_reserve_gate`.
+
+    Args:
+        state: Current on-chain snapshot.
+
+    Returns:
+        Staleness threshold in seconds.
+    """
+    if state.feeder_heartbeat <= 0:
+        return POR_STALE_SECONDS
+    return min(state.feeder_heartbeat, POR_STALE_SECONDS)
+
+
 def check_por_stale(state: UnibtcState) -> None:
     """Alert once while the Chainlink PoR feed is older than the Vault heartbeat.
 
@@ -565,21 +681,69 @@ def check_por_stale(state: UnibtcState) -> None:
         state: Current on-chain snapshot.
     """
     age = state.block_timestamp - state.por_updated_at
-    stale = age > POR_STALE_SECONDS
-    logger.info("uniBTC PoR age=%ss stale=%s", age, stale)
+    threshold = por_stale_threshold(state)
+    stale = age > threshold
+    logger.info("uniBTC PoR age=%ss threshold=%ss stale=%s", age, threshold, stale)
     message = (
         "*uniBTC PoR stale*\n"
         f"latestRoundData.updatedAt is {format_duration(age)} old "
-        f"(Vault mint() reverts after {format_duration(POR_STALE_SECONDS)}).\n"
+        f"(Vault mint() reverts after {format_duration(threshold)}).\n"
         f"🔗 PoR {_etherscan(POR_FEED)}"
     )
     _alert_while_true(CACHE_KEY_POR_STALE, stale, Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
 
-def feeder_gap(feeder_supply_raw: int, api_total_supply: Decimal) -> Decimal:
-    """Return absolute relative gap between the on-chain feeder and API supply."""
+def feeder_ratio(feeder_supply_raw: int, api_total_supply: Decimal) -> Decimal:
+    """Return the on-chain feeder supply as a fraction of the Bedrock API supply."""
     feeder = normalize_token_amount(feeder_supply_raw, UNIBTC_DECIMALS)
-    return abs(feeder - api_total_supply) / api_total_supply
+    return feeder / api_total_supply
+
+
+def feeder_ratio_drift(ratio: Decimal, baseline: Decimal) -> Decimal:
+    """Return the relative move of ``ratio`` away from its cached ``baseline``."""
+    return abs(ratio - baseline) / baseline
+
+
+def check_feeder_ratio(state: UnibtcState, api_total_supply: Decimal) -> None:
+    """Alert when the feeder-to-dashboard ratio moves off its learned baseline.
+
+    The two figures cover different chain sets, so their absolute gap is large and
+    uninformative; what signals a wrong or hijacked feeder is the ratio between them
+    jumping. The baseline is relearned only while the ratio is inside the band, so an
+    anomalous reading cannot quietly become the new normal.
+
+    Args:
+        state: Current on-chain snapshot.
+        api_total_supply: Bedrock dashboard total supply.
+    """
+    ratio = feeder_ratio(state.feeder_supply, api_total_supply)
+    baseline = _cache_decimal(CACHE_KEY_FEEDER_RATIO)
+    if baseline is None or baseline <= 0:
+        logger.info("uniBTC feeder ratio baseline initialised at %s", ratio)
+        _set_cache(CACHE_KEY_FEEDER_RATIO, str(ratio))
+        return
+
+    drift = feeder_ratio_drift(ratio, baseline)
+    off_baseline = drift > FEEDER_RATIO_DRIFT_THRESHOLD
+    logger.info(
+        "uniBTC feeder ratio=%s baseline=%s drift=%s feeder=%s api=%s",
+        ratio,
+        baseline,
+        drift,
+        state.feeder_supply,
+        api_total_supply,
+    )
+    message = (
+        "*uniBTC supply feeder wrong*\n"
+        f"Feeder / Bedrock API ratio moved {drift:.2%} off its {baseline:.4f} baseline "
+        f"(threshold {FEEDER_RATIO_DRIFT_THRESHOLD:.0%}), now {ratio:.4f}.\n"
+        f"Feeder totalTokenSupply: {_fmt_btc(state.feeder_supply)} uniBTC\n"
+        f"API total_supply: {format_decimal_amount(api_total_supply)} uniBTC\n"
+        f"🔗 Feeder {_etherscan(SUPPLY_FEEDER)}"
+    )
+    _alert_while_true(CACHE_KEY_FEEDER_GAP, off_baseline, Alert(AlertSeverity.HIGH, message, PROTOCOL))
+    if not off_baseline:
+        _set_cache(CACHE_KEY_FEEDER_RATIO, str(ratio))
 
 
 def check_supply_feeder(state: UnibtcState, api_total_supply: Decimal | None) -> None:
@@ -587,23 +751,10 @@ def check_supply_feeder(state: UnibtcState, api_total_supply: Decimal | None) ->
 
     Args:
         state: Current on-chain snapshot.
-        api_total_supply: Bedrock dashboard total supply, or None to skip the gap check.
+        api_total_supply: Bedrock dashboard total supply, or None to skip the ratio check.
     """
     if api_total_supply is not None:
-        gap = feeder_gap(state.feeder_supply, api_total_supply)
-        logger.info("uniBTC feeder gap=%s feeder=%s api=%s", gap, state.feeder_supply, api_total_supply)
-        message = (
-            "*uniBTC supply feeder wrong*\n"
-            f"On-chain feeder vs Bedrock API gap is {gap:.2%} (threshold {FEEDER_GAP_THRESHOLD:.0%}).\n"
-            f"Feeder totalTokenSupply: {_fmt_btc(state.feeder_supply)} uniBTC\n"
-            f"API total_supply: {format_decimal_amount(api_total_supply)} uniBTC\n"
-            f"🔗 Feeder {_etherscan(SUPPLY_FEEDER)}"
-        )
-        _alert_while_true(
-            CACHE_KEY_FEEDER_GAP,
-            gap > FEEDER_GAP_THRESHOLD,
-            Alert(AlertSeverity.HIGH, message, PROTOCOL),
-        )
+        check_feeder_ratio(state, api_total_supply)
 
     previous_value = _cache_int(CACHE_KEY_FEEDER_VALUE)
     changed_ts = _cache_int(CACHE_KEY_FEEDER_CHANGED_TS)
