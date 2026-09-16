@@ -318,7 +318,7 @@ Step 3 covers the inverse trap: an empty result set is not good news. If a chain
 This monitor only ever reports Envio indexer problems, so all of its alerts go to the Envio chat (`TELEGRAM_CHAT_ID_ENVIO`) labelled `[yearn]`, alongside the other indexer failures (large flows, timelock). Every other yearn monitor's operational error still goes to the errors channel. If `TELEGRAM_CHAT_ID_ENVIO` is unset these fall back to the errors channel, and from there to the protocol's own chat.
 
 - **Stale or missing chains** — one message listing every lagging chain with its lag and last indexed block, plus every expected chain the indexer reported no sync state for.
-- **Indexer unavailable** — the GraphQL endpoint is unset, unreachable, returned errors, or reported no chains. Sent on every run for as long as it lasts.
+- **Indexer unavailable** — the GraphQL endpoint is unset, unreachable, returned errors, or reported no chains. Sent on every run for as long as it lasts, and — unlike the other Envio messages, which are silent — with a notification, since every Envio-backed monitor is blind until it recovers.
 - **Recovered** — sent once when a previously alerting chain catches up.
 
 A re-sync can run for days, so each chain alerts on the way into trouble and then at most once per `--alert-cooldown-hours` (default `6`) instead of every hourly run. The cooldown is tracked per chain, so one lagging chain never suppresses another's first alert. The last-alert timestamp is cached under `YEARN_INDEXER_STALE_ALERT_<chain_id>`.

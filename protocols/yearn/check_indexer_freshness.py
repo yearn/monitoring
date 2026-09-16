@@ -293,11 +293,14 @@ def main() -> None:
         rows = fetch_chain_metadata()
     except IndexerUnavailableError as exc:
         # The endpoint being down is itself the outage we are watching for, so it
-        # alerts on every run rather than riding the per-chain cooldown.
+        # alerts on every run rather than riding the per-chain cooldown. Unlike
+        # routine Envio errors it notifies: every Envio-backed monitor is blind
+        # until it recovers, and a silent message went unnoticed in practice.
         logger.error("Indexer unavailable: %s", exc)
         send_envio_error_message(
             f"Envio indexer unavailable: {exc}",
             PROTOCOL,
+            disable_notification=False,
             source="indexer_freshness",
         )
         return
