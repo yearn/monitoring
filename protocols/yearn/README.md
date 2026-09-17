@@ -62,12 +62,12 @@ The script `yearn/alert_small_parent_flows.py` alerts on every deposit or withdr
 ### Data Sources
 
 - **Parent vault discovery**: Kong GraphQL, filtered to Yearn v3 `vaultType: 1` vaults and excluding retired entries. Hidden vaults stay monitored because `isHidden` only controls UI visibility; rows missing asset metadata are logged and skipped.
-- **Flow events**: Envio `Deposit` and `Withdraw` entities. Alerts include the ERC-4626 owner and sender, the transaction initiator, and the asset receiver for withdrawals.
+- **Flow events**: Envio `Deposit` and `Withdraw` entities. The aggregate includes the amount, asset, vault, direction, and transaction link for each shown flow.
 - **Token decimals**: the parent vault's underlying asset metadata from Kong, used only to show a human-readable amount alongside the raw value.
 
-Deposits and withdrawals are processed with independent per-chain `(blockNumber, logIndex)` cursors stored in the monitoring database. A cursor advances only after an event is successfully evaluated and, when applicable, delivered to Telegram. A new deployment starts each stream with a two-hour lookback; that starting timestamp is persisted, so a stream that has not yet seen any event never slides its window forward and a long run gap cannot drop events.
+Deposits and withdrawals are processed with independent per-chain `(blockNumber, logIndex)` cursors stored in the monitoring database. The run stages cursor updates in memory and saves them only after the aggregate alert is delivered. A failed send leaves the flows available for the next run. A new deployment starts each stream with a two-hour lookback; that starting timestamp is persisted, so a stream that has not yet seen any event never slides its window forward and a long run gap cannot drop events.
 
-**Routing:** every qualifying flow in a run is aggregated into one Telegram message
+**Routing:** qualifying flows in a run are summarized in one Telegram message
 (per chain and direction, sorted chronologically) and sent to a dedicated noisy-channel
 group, `TELEGRAM_CHAT_ID_SMALL_DEPOSITS`, so the volume doesn't spam the protocol's
 main chat or the curation group. If that chat id is unset the aggregated message falls
@@ -76,11 +76,10 @@ back to the yearn group.
 A run with no qualifying flows does not produce a Telegram message — a quiet day
 shouldn't wake up the channel with an empty "0 flows" header.
 
-The aggregated message is hard-capped at `--max-flows` entries (default 500) so an
-indexer catch-up after a long outage can't produce a multi-thousand-line Telegram
-post. Flows past the cap are counted and shown as a footer on the message
-("N truncated past the per-run cap of M"), and the same count is logged for the
-run-log audit trail. The first Envio failure is reported once to the Envio channel
+The aggregated message includes up to `--max-flows` entries (default 500) and
+fits within Telegram's message limit. Additional flows are counted in the
+message as truncated, with the same count logged for the run audit trail.
+The first Envio failure is reported once to the Envio channel
 and stops the run; unprocessed events are picked up on the next run.
 
 ### Usage

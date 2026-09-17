@@ -21,7 +21,7 @@ from utils import store
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import EXPLORER_URLS, Chain
 from utils.logger import get_logger
-from utils.telegram import SMALL_DEPOSITS_CHANNEL, resolve_channel, send_envio_error_message
+from utils.telegram import MAX_MESSAGE_LENGTH, SMALL_DEPOSITS_CHANNEL, resolve_channel, send_envio_error_message
 
 load_dotenv()
 
@@ -32,8 +32,9 @@ DEFAULT_LOG_LEVEL = os.getenv("SMALL_PARENT_FLOWS_LOG_LEVEL") or os.getenv("LOG_
 DEFAULT_THRESHOLD_RAW = 10_000
 DEFAULT_LOOKBACK_SECONDS = 7200
 DEFAULT_PAGE_SIZE = 1000
-DEFAULT_MAX_ALERTS = 20
-DEFAULT_MAX_FLOWS = 500  # Safety-net cap on the aggregated message; see ``FlowAggregator``.
+DEFAULT_MAX_FLOWS = 500
+# Reserve room for send_alert's prefix and Telegram's UTF-16 emoji accounting.
+MAX_AGGREGATE_LENGTH = MAX_MESSAGE_LENGTH - 32
 PROTOCOL = "yearn"
 STATE_NAMESPACE = "yearn.small_parent_flows"
 FLOW_TYPES = ("deposit", "withdrawal")
@@ -69,11 +70,8 @@ class FlowAggregator:
     (deposits before withdrawals within each chain), sorted chronologically by
     ``(block_number, log_index)`` so the run reads top-to-bottom in event order.
 
-    A hard cap (``max_flows``) protects against pathological runs where thousands of
-    flows qualify at once — e.g. an indexer catch-up after a long outage. Once the cap
-    is hit the aggregator counts additional flows but does not render them in the
-    message body; a one-line footer surfaces the truncated count so the truncation is
-    visible in Telegram, and the same count is logged for the run-log audit trail.
+    The aggregate is limited by ``max_flows`` and Telegram's message length. Flows
+    beyond either limit are counted as truncated in the message and run log.
     """
 
     def __init__(
@@ -94,14 +92,30 @@ class FlowAggregator:
         self.truncated += 1
 
     def send_summary(self) -> None:
-        """Send one aggregated Telegram message covering every recorded flow.
+        """Send one aggregated Telegram message within Telegram's length limit.
 
         No-op when no flows were recorded — avoids spamming the channel with a
         "0 flows" header on quiet runs.
         """
         if not self._flows:
             return
-        message = format_aggregated_message(self._flows, self.truncated)
+        shown = len(self._flows)
+        truncated = self.truncated
+        message = format_aggregated_message(self._flows, truncated)
+        if len(message) > MAX_AGGREGATE_LENGTH:
+            low, high = 0, shown
+            while low < high:
+                middle = (low + high + 1) // 2
+                candidate = format_aggregated_message(self._flows[:middle], truncated + shown - middle)
+                if len(candidate) <= MAX_AGGREGATE_LENGTH:
+                    low = middle
+                else:
+                    high = middle - 1
+            if low == 0:
+                raise RuntimeError("First small parent flow exceeds the Telegram message limit")
+            message = format_aggregated_message(self._flows[:low], truncated + shown - low)
+            truncated += shown - low
+            shown = low
         (self.sender or send_alert)(
             Alert(
                 AlertSeverity.LOW,
@@ -110,6 +124,8 @@ class FlowAggregator:
                 channel=resolve_channel(SMALL_DEPOSITS_CHANNEL, PROTOCOL),
             )
         )
+        self.truncated = truncated
+        self._flows = self._flows[:shown]
 
     @property
     def collected(self) -> int:
@@ -173,7 +189,7 @@ def format_aggregated_message(flows: list[SmallFlowRecord], truncated: int) -> s
     total = len(flows) + truncated
     header = f"ℹ️ Small parent-vault flows — {total} in this run"
     if truncated:
-        header += f" ({truncated} truncated past the per-run cap of {len(flows)})"
+        header += f" ({truncated} truncated; {len(flows)} shown)"
 
     sections: list[str] = []
     for chain_name in sorted(by_chain):
@@ -475,10 +491,11 @@ def monitor_flow_type(
     threshold_raw: int,
     lookback_seconds: int,
     page_size: int,
+    pending_cursors: dict[tuple[int, str], EventCursor],
     now: int | None = None,
     alert_sender: Callable[[SmallFlowRecord], None] | None = None,
 ) -> tuple[int, int]:
-    """Fetch and process all new events of one type for a chain."""
+    """Fetch events and stage the last processed cursor for delivery confirmation."""
     persisted_cursor = load_cursor(chain_id, flow_type)
     if persisted_cursor is not None:
         cursor = persisted_cursor
@@ -500,7 +517,7 @@ def monitor_flow_type(
                 continue
             if process_event(event, vaults_by_address, threshold_raw, alert_sender):
                 alerted += 1
-            save_cursor(chain_id, flow_type, event_cursor)
+            pending_cursors[(chain_id, flow_type)] = event_cursor
             cursor = event_cursor
             processed += 1
 
@@ -515,6 +532,7 @@ def monitor_chain(
     threshold_raw: int,
     lookback_seconds: int,
     page_size: int,
+    pending_cursors: dict[tuple[int, str], EventCursor],
     now: int | None = None,
     alert_sender: Callable[[SmallFlowRecord], None] | None = None,
 ) -> tuple[int, int]:
@@ -542,6 +560,7 @@ def monitor_chain(
             threshold_raw,
             lookback_seconds,
             page_size,
+            pending_cursors,
             now,
             alert_sender,
         )
@@ -581,9 +600,9 @@ def main() -> None:
         type=int,
         default=DEFAULT_MAX_FLOWS,
         help=(
-            "Hard cap on the number of flows included in the aggregated Telegram message "
-            f"(default: {DEFAULT_MAX_FLOWS}). Flows beyond this cap are counted in the run "
-            "log and shown as a footer on the aggregated message but not rendered inline."
+            "Maximum flows rendered in the aggregate Telegram message "
+            f"(default: {DEFAULT_MAX_FLOWS}). Flows beyond this or Telegram's length "
+            "limit are counted in the message and run log."
         ),
     )
     parser.add_argument("--log-level", default=DEFAULT_LOG_LEVEL)
@@ -591,8 +610,8 @@ def main() -> None:
 
     # get_logger() installs its own handler and disables propagation, so the
     # root-logger basicConfig would not affect this module's output.
-    log_level = logging.getLevelName(args.log_level.upper())
-    if not isinstance(log_level, int):
+    log_level = logging.getLevelNamesMapping().get(args.log_level.upper())
+    if log_level is None:
         parser.error(f"--log-level must be a logging level name, got {args.log_level!r}")
     logger.setLevel(log_level)
     if args.threshold_raw <= 0:
@@ -605,6 +624,7 @@ def main() -> None:
         parser.error("--max-flows must be positive")
 
     aggregator = FlowAggregator(args.max_flows)
+    pending_cursors: dict[tuple[int, str], EventCursor] = {}
     total_processed = 0
     total_alerted = 0
     try:
@@ -614,6 +634,7 @@ def main() -> None:
                 args.threshold_raw,
                 args.lookback_seconds,
                 args.page_size,
+                pending_cursors,
                 alert_sender=aggregator,
             )
             total_processed += processed
@@ -624,9 +645,11 @@ def main() -> None:
         logger.error("Aborting run after Envio failure: %s", exc)
     finally:
         aggregator.send_summary()
+        for (chain_id, flow_type), cursor in pending_cursors.items():
+            save_cursor(chain_id, flow_type, cursor)
         if aggregator.truncated:
             logger.warning(
-                "Per-run cap of %d reached; %d additional flow(s) truncated from the aggregated message",
+                "Aggregate message includes %d flow(s); %d additional flow(s) truncated",
                 aggregator.collected,
                 aggregator.truncated,
             )

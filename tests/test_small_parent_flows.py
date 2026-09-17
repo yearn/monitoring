@@ -1,3 +1,4 @@
+import sys
 from decimal import Decimal
 
 import pytest
@@ -5,7 +6,7 @@ import pytest
 from protocols.yearn import alert_small_parent_flows as monitor
 from utils.alert import Alert, AlertSeverity
 from utils.chains import Chain
-from utils.telegram import SMALL_DEPOSITS_CHANNEL
+from utils.telegram import MAX_MESSAGE_LENGTH, SMALL_DEPOSITS_CHANNEL
 
 VAULT = {
     "address": "0xParent",
@@ -145,18 +146,13 @@ def test_load_events_selects_envio_entity_and_receiver(monkeypatch) -> None:
     assert events and events[0]["flow_type"] == "withdrawal"
 
 
-def test_monitor_flow_type_pages_and_persists_each_processed_event(monkeypatch) -> None:
+def test_monitor_flow_type_pages_and_stages_last_processed_cursor(monkeypatch) -> None:
     first = make_event(flow_type="withdrawal", block_number=100, log_index=2)
     second = make_event(flow_type="withdrawal", block_number=101, log_index=3)
     calls = []
-    saved = []
+    pending_cursors = {}
 
     monkeypatch.setattr(monitor, "load_cursor", lambda _chain_id, _flow_type: None)
-    monkeypatch.setattr(
-        monitor,
-        "save_cursor",
-        lambda chain_id, flow_type, cursor: saved.append((chain_id, flow_type, cursor)),
-    )
     monkeypatch.setattr(monitor, "process_event", lambda event, *_args: event is first)
 
     def fake_load(flow_type, chain_id, addresses, cursor, since_ts, limit):
@@ -175,6 +171,7 @@ def test_monitor_flow_type_pages_and_persists_each_processed_event(monkeypatch) 
         10_000,
         lookback_seconds=7200,
         page_size=2,
+        pending_cursors=pending_cursors,
         now=1_700_010_000,
         alert_sender=lambda _record: None,
     )
@@ -185,10 +182,7 @@ def test_monitor_flow_type_pages_and_persists_each_processed_event(monkeypatch) 
     assert calls[0][3] == monitor.EventCursor(0, -1)
     assert calls[0][4] == 1_700_002_800
     assert calls[1][3] == monitor.EventCursor(101, 3)
-    assert saved == [
-        (1, "withdrawal", monitor.EventCursor(100, 2)),
-        (1, "withdrawal", monitor.EventCursor(101, 3)),
-    ]
+    assert pending_cursors == {(1, "withdrawal"): monitor.EventCursor(101, 3)}
 
 
 def test_monitor_chain_runs_deposit_and_withdrawal_streams(monkeypatch) -> None:
@@ -202,7 +196,7 @@ def test_monitor_chain_runs_deposit_and_withdrawal_streams(monkeypatch) -> None:
 
     monkeypatch.setattr(monitor, "monitor_flow_type", fake_monitor)
 
-    result = monitor.monitor_chain(Chain.MAINNET, 10_000, 7200, 1000)
+    result = monitor.monitor_chain(Chain.MAINNET, 10_000, 7200, 1000, {})
 
     assert result == (2, 2)
     assert flow_types == ["deposit", "withdrawal"]
@@ -248,6 +242,7 @@ def test_first_run_lookback_floor_persists_without_events(monkeypatch) -> None:
             10_000,
             lookback_seconds=7200,
             page_size=100,
+            pending_cursors={},
             now=now,
             alert_sender=lambda _record: None,
         )
@@ -344,6 +339,72 @@ def test_flow_aggregator_truncates_with_footer_past_the_cap(monkeypatch) -> None
     assert "3 truncated" in body
     # Only the first 2 flows should be rendered.
     assert body.count("→") == 2
+
+
+def test_flow_aggregator_counts_every_flow_omitted_by_telegram_length_limit() -> None:
+    delivered: list[Alert] = []
+    aggregator = monitor.FlowAggregator(max_flows=500, sender=delivered.append)
+
+    for index in range(80):
+        aggregator(_record(tx_hash=f"0x{index:064x}", block_number=100 + index))
+    aggregator.send_summary()
+
+    assert aggregator.total == 80
+    assert aggregator.truncated > 0
+    assert len(f"ℹ️ {delivered[0].message}") <= MAX_MESSAGE_LENGTH
+    assert delivered[0].message.count("→") == aggregator.collected
+    assert f"{aggregator.truncated} truncated" in delivered[0].message
+
+
+def test_flow_aggregator_rejects_a_single_flow_that_cannot_fit() -> None:
+    delivered: list[Alert] = []
+    aggregator = monitor.FlowAggregator(max_flows=500, sender=delivered.append)
+    aggregator(_record(asset_symbol="A" * MAX_MESSAGE_LENGTH))
+
+    with pytest.raises(RuntimeError, match="exceeds the Telegram message limit"):
+        aggregator.send_summary()
+
+    assert delivered == []
+    assert aggregator.total == 1
+
+
+def test_failed_aggregate_send_leaves_cursors_for_retry(monkeypatch) -> None:
+    cursor_state: dict[tuple[int, str], monitor.EventCursor] = {}
+    delivered: list[Alert] = []
+    events = [make_event(block_number=100), make_event(block_number=101)]
+    seen: list[monitor.EventCursor] = []
+
+    monkeypatch.setattr(sys, "argv", ["alert_small_parent_flows.py", "--chain-ids", "1"])
+    monkeypatch.setattr(monitor, "fetch_kong_parent_vaults", lambda _chain: [VAULT])
+    monkeypatch.setattr(monitor, "load_or_init_start_ts", lambda *_args: 0)
+    monkeypatch.setattr(monitor, "load_cursor", lambda chain, flow: cursor_state.get((chain, flow)))
+    monkeypatch.setattr(
+        monitor, "save_cursor", lambda chain, flow, cursor: cursor_state.__setitem__((chain, flow), cursor)
+    )
+
+    def fake_load(flow_type, _chain, _addresses, cursor, _since, _limit):
+        if flow_type != "deposit":
+            return []
+        seen.append(cursor)
+        return [event for event in events if monitor.cursor_from_event(event) > cursor]
+
+    def fake_send(alert: Alert) -> None:
+        if not delivered:
+            delivered.append(alert)
+            raise RuntimeError("Telegram 429")
+        delivered.append(alert)
+
+    monkeypatch.setattr(monitor, "load_events", fake_load)
+    monkeypatch.setattr(monitor, "send_alert", fake_send)
+
+    with pytest.raises(RuntimeError, match="Telegram 429"):
+        monitor.main()
+    assert cursor_state == {}
+
+    monitor.main()
+    assert seen == [monitor.EventCursor(0, -1), monitor.EventCursor(0, -1)]
+    assert cursor_state == {(1, "deposit"): monitor.EventCursor(101, 2)}
+    assert delivered[0].message == delivered[1].message
 
 
 def test_flow_aggregator_groups_by_chain_and_sorts_chronologically(monkeypatch) -> None:
