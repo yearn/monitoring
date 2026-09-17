@@ -5,7 +5,7 @@ import pytest
 from protocols.yearn import alert_small_parent_flows as monitor
 from utils.alert import Alert, AlertSeverity
 from utils.chains import Chain
-from utils.telegram import CURATION_CHANNEL
+from utils.telegram import SMALL_DEPOSITS_CHANNEL
 
 VAULT = {
     "address": "0xParent",
@@ -24,12 +24,13 @@ def make_event(
     assets: str = "5000",
     block_number: int = 100,
     log_index: int = 2,
+    chain_id: int = 1,
 ) -> dict:
     event = {
         "id": f"1_{block_number}_{log_index}",
         "flow_type": flow_type,
         "vaultAddress": "0xParent",
-        "chainId": 1,
+        "chainId": chain_id,
         "blockNumber": block_number,
         "blockTimestamp": 1_700_000_000,
         "transactionHash": "0xTransaction",
@@ -53,72 +54,71 @@ def test_small_flow_uses_raw_asset_units() -> None:
     assert not monitor.is_small_flow("0", 10_000)
 
 
-def test_process_deposit_sends_low_alert_with_all_addresses(monkeypatch) -> None:
-    monkeypatch.setenv("TELEGRAM_CHAT_ID_CURATION", "curation_chat_id")
-    alerts = []
+def test_process_event_builds_structured_record(monkeypatch) -> None:
+    """``process_event`` should hand a ``SmallFlowRecord`` to ``alert_sender`` with every
+    field the aggregator needs to render one line in the aggregated message. The record
+    carries the rendered ``amount`` / ``asset_symbol`` and the chain/explorer already
+    resolved — the aggregator doesn't need to re-look-up anything for the body."""
+    monkeypatch.setenv("TELEGRAM_CHAT_ID_SMALL_DEPOSITS", "small_deposits_chat_id")
+    records: list[monitor.SmallFlowRecord] = []
 
     did_alert = monitor.process_event(
         make_event(),
         {"0xparent": VAULT},
         10_000,
-        alert_sender=alerts.append,
+        alert_sender=records.append,
     )
 
     assert did_alert
-    assert len(alerts) == 1
-    alert = alerts[0]
-    assert alert.severity is AlertSeverity.LOW
-    assert alert.protocol == "yearn"
-    assert alert.channel == CURATION_CHANNEL
-    assert "Small parent-vault deposit" in alert.message
-    assert "Raw Assets: 5,000" in alert.message
-    assert "Normalized: 0.005 USDC" in alert.message
-    assert "Raw Threshold: < 10,000" in alert.message
-    assert "0xOwner" in alert.message
-    assert "0xSender" in alert.message
-    assert "0xTransactionFrom" in alert.message
-    assert "0xTransaction" in alert.message
-    assert "Receiver" not in alert.message
+    assert len(records) == 1
+    record = records[0]
+    assert record.flow_type == "deposit"
+    assert record.chain_name == "mainnet"
+    assert record.amount == "0.005"
+    assert record.asset_symbol == "USDC"
+    assert record.vault_symbol == "yvUSDC"
+    assert record.vault_address == "0xParent"
+    assert record.tx_hash == "0xTransaction"
+    assert record.block_number == 100
+    assert record.log_index == 2
+    assert record.explorer  # non-empty when the chain has an explorer URL
 
 
-def test_process_withdrawal_includes_asset_receiver() -> None:
-    alerts = []
+def test_process_event_carries_withdrawal_marker_and_receiver_in_event_payload() -> None:
+    """The receiver lives on the Envio event payload, not on the record. The aggregator
+    stays simple — the receiver field is omitted from the aggregated message because
+    it would crowd each line; reviewers follow the explorer link for full context."""
+    records: list[monitor.SmallFlowRecord] = []
 
-    did_alert = monitor.process_event(
+    monitor.process_event(
         make_event(flow_type="withdrawal"),
         {"0xparent": VAULT},
         10_000,
-        alert_sender=alerts.append,
+        alert_sender=records.append,
     )
 
-    assert did_alert
-    assert len(alerts) == 1
-    assert "Small parent-vault withdrawal" in alerts[0].message
-    assert "Receiver" in alerts[0].message
-    assert "0xReceiver" in alerts[0].message
-
-
-def test_process_event_falls_back_to_yearn_channel_without_curation_chat(monkeypatch) -> None:
-    monkeypatch.delenv("TELEGRAM_CHAT_ID_CURATION", raising=False)
-    alerts = []
-
-    monitor.process_event(make_event(), {"0xparent": VAULT}, 10_000, alert_sender=alerts.append)
-
-    assert alerts[0].channel == monitor.PROTOCOL
+    assert records[0].flow_type == "withdrawal"
 
 
 def test_process_event_does_not_alert_at_threshold() -> None:
-    alerts = []
+    records: list[monitor.SmallFlowRecord] = []
 
     did_alert = monitor.process_event(
         make_event(assets="10000"),
         {"0xparent": VAULT},
         10_000,
-        alert_sender=alerts.append,
+        alert_sender=records.append,
     )
 
     assert not did_alert
-    assert alerts == []
+    assert records == []
+
+
+def test_process_event_raises_without_alert_sender() -> None:
+    """Calling ``process_event`` on a small flow with no sender configured is a programmer
+    error — surface it loudly rather than silently dropping the alert."""
+    with pytest.raises(RuntimeError, match="no alert_sender"):
+        monitor.process_event(make_event(), {"0xparent": VAULT}, 10_000)
 
 
 def test_load_events_selects_envio_entity_and_receiver(monkeypatch) -> None:
@@ -176,6 +176,7 @@ def test_monitor_flow_type_pages_and_persists_each_processed_event(monkeypatch) 
         lookback_seconds=7200,
         page_size=2,
         now=1_700_010_000,
+        alert_sender=lambda _record: None,
     )
 
     assert (processed, alerted) == (2, 1)
@@ -248,33 +249,174 @@ def test_first_run_lookback_floor_persists_without_events(monkeypatch) -> None:
             lookback_seconds=7200,
             page_size=100,
             now=now,
+            alert_sender=lambda _record: None,
         )
 
     assert since_values == [1_700_002_800, 1_700_002_800]
     assert monitor.load_cursor(8453, "deposit") is None
 
 
-def test_alert_limiter_caps_individual_alerts_and_summarizes(monkeypatch) -> None:
-    monkeypatch.setenv("TELEGRAM_CHAT_ID_CURATION", "curation_chat_id")
-    delivered = []
-    limiter = monitor.AlertLimiter(2, sender=delivered.append)
+# ---- FlowAggregator ----
+
+
+def _record(
+    *,
+    chain_name: str = "mainnet",
+    flow_type: str = "deposit",
+    amount: str = "0.005",
+    asset_symbol: str = "USDC",
+    vault_symbol: str = "yvUSDC",
+    vault_address: str = "0xParentVaultAddress",
+    explorer: str | None = "https://etherscan.io",
+    tx_hash: str = "0xTransactionHash",
+    block_number: int = 100,
+    log_index: int = 2,
+) -> monitor.SmallFlowRecord:
+    return monitor.SmallFlowRecord(
+        chain_name=chain_name,
+        flow_type=flow_type,
+        amount=amount,
+        asset_symbol=asset_symbol,
+        vault_symbol=vault_symbol,
+        vault_address=vault_address,
+        explorer=explorer,
+        tx_hash=tx_hash,
+        block_number=block_number,
+        log_index=log_index,
+    )
+
+
+def test_flow_aggregator_emits_one_alert_for_all_flows(monkeypatch) -> None:
+    """All qualifying flows collected during a run must end up in exactly one
+    Telegram message, not 1-per-flow. This is the headline fix for the 429
+    rate-limit incident on 2026-09-17."""
+    monkeypatch.setenv("TELEGRAM_CHAT_ID_SMALL_DEPOSITS", "small_deposits_chat_id")
+    delivered: list[Alert] = []
+    aggregator = monitor.FlowAggregator(max_flows=10, sender=delivered.append)
 
     for index in range(5):
-        limiter(Alert(AlertSeverity.LOW, f"alert {index}", monitor.PROTOCOL))
-    limiter.send_summary()
-
-    assert (limiter.sent, limiter.suppressed) == (2, 3)
-    assert [alert.message for alert in delivered[:2]] == ["alert 0", "alert 1"]
-    assert len(delivered) == 3
-    assert "3 more qualifying flows" in delivered[2].message
-    assert delivered[2].channel == CURATION_CHANNEL
-
-
-def test_alert_limiter_skips_summary_when_nothing_suppressed() -> None:
-    delivered = []
-    limiter = monitor.AlertLimiter(2, sender=delivered.append)
-
-    limiter(Alert(AlertSeverity.LOW, "alert", monitor.PROTOCOL))
-    limiter.send_summary()
+        aggregator(_record(tx_hash=f"0xTx{index:02d}", block_number=100 + index))
+    aggregator.send_summary()
 
     assert len(delivered) == 1
+    assert delivered[0].channel == SMALL_DEPOSITS_CHANNEL
+    assert delivered[0].severity is AlertSeverity.LOW
+    assert delivered[0].protocol == monitor.PROTOCOL
+    body = delivered[0].message
+    assert body.startswith("ℹ️ Small parent-vault flows — 5 in this run")
+    assert body.count("→") == 5  # one arrow per flow line
+    # The aggregated body should NOT contain any of the per-flow decorations
+    # from the old build_alert_message — no "Raw Assets", "Owner:", "Receiver:" lines.
+    assert "Raw Assets" not in body
+    assert "Owner:" not in body
+    assert "Receiver:" not in body
+
+
+def test_flow_aggregator_no_ops_send_summary_when_no_flows_recorded() -> None:
+    """A quiet run should NOT produce a "0 flows" header — that would spam the
+    destination channel every hour on a healthy day."""
+    delivered: list[Alert] = []
+    aggregator = monitor.FlowAggregator(max_flows=10, sender=delivered.append)
+
+    aggregator.send_summary()
+
+    assert delivered == []
+
+
+def test_flow_aggregator_truncates_with_footer_past_the_cap(monkeypatch) -> None:
+    """Past the per-run cap, the aggregator counts the overflow but does not render
+    those flows inline. The truncation is visible in Telegram via a footer on the
+    aggregated message so reviewers can tell when they're seeing a partial view."""
+    monkeypatch.setenv("TELEGRAM_CHAT_ID_SMALL_DEPOSITS", "small_deposits_chat_id")
+    delivered: list[Alert] = []
+    aggregator = monitor.FlowAggregator(max_flows=2, sender=delivered.append)
+
+    for index in range(5):
+        aggregator(_record(tx_hash=f"0xTx{index:02d}", block_number=100 + index))
+    aggregator.send_summary()
+
+    assert aggregator.collected == 2
+    assert aggregator.truncated == 3
+    assert aggregator.total == 5
+    assert len(delivered) == 1
+    body = delivered[0].message
+    assert "5 in this run" in body
+    assert "3 truncated" in body
+    # Only the first 2 flows should be rendered.
+    assert body.count("→") == 2
+
+
+def test_flow_aggregator_groups_by_chain_and_sorts_chronologically(monkeypatch) -> None:
+    """The body must group flows by chain (alphabetical) and within each chain sort
+    chronologically by (block_number, log_index) so reviewers can read top-to-bottom
+    in event order rather than insertion order."""
+    monkeypatch.setenv("TELEGRAM_CHAT_ID_SMALL_DEPOSITS", "small_deposits_chat_id")
+    delivered: list[Alert] = []
+    aggregator = monitor.FlowAggregator(max_flows=20, sender=delivered.append)
+
+    # Intentionally scrambled insertion order across chains and blocks.
+    aggregator(_record(chain_name="polygon", flow_type="withdrawal", tx_hash="0xPolyW2", block_number=200, log_index=1))
+    aggregator(_record(chain_name="mainnet", flow_type="deposit", tx_hash="0xMainD1", block_number=150, log_index=0))
+    aggregator(_record(chain_name="mainnet", flow_type="withdrawal", tx_hash="0xMainW1", block_number=100, log_index=5))
+    aggregator(_record(chain_name="polygon", flow_type="deposit", tx_hash="0xPolyD1", block_number=100, log_index=0))
+    aggregator(_record(chain_name="base", flow_type="deposit", tx_hash="0xBaseD1", block_number=110, log_index=0))
+    aggregator.send_summary()
+
+    body = delivered[0].message
+    # Chains appear in alphabetical order: base, mainnet, polygon.
+    base_idx = body.index("⛓️ base")
+    mainnet_idx = body.index("⛓️ mainnet")
+    polygon_idx = body.index("⛓️ polygon")
+    assert base_idx < mainnet_idx < polygon_idx
+    # Within mainnet: deposit block 150 must come before withdrawal block 100.
+    mainnet_section = body[mainnet_idx:polygon_idx]
+    assert mainnet_section.index("0xMainD1") < mainnet_section.index("0xMainW1")
+
+
+def test_flow_aggregator_drops_zero_record_send_summary() -> None:
+    """``send_summary`` is a no-op when no flows were ever recorded."""
+    aggregator = monitor.FlowAggregator(max_flows=10, sender=lambda _alert: None)
+    # No calls; should not raise.
+    aggregator.send_summary()
+    assert aggregator.collected == 0
+    assert aggregator.total == 0
+
+
+def test_flow_aggregator_falls_back_to_yearn_channel_without_small_deposits_chat(monkeypatch) -> None:
+    """When ``TELEGRAM_CHAT_ID_SMALL_DEPOSITS`` is unset the aggregated message should
+    fall back to the protocol's own chat (mirrors ``CURATION_CHANNEL`` behavior) so
+    operators see the alert until the dedicated group is configured."""
+    monkeypatch.delenv("TELEGRAM_CHAT_ID_SMALL_DEPOSITS", raising=False)
+    delivered: list[Alert] = []
+    aggregator = monitor.FlowAggregator(max_flows=10, sender=delivered.append)
+    aggregator(_record())
+    aggregator.send_summary()
+
+    assert delivered[0].channel == monitor.PROTOCOL
+
+
+# ---- Message formatter ----
+
+
+def test_format_aggregated_message_layout() -> None:
+    flows = [
+        _record(chain_name="mainnet", flow_type="deposit", tx_hash="0xMainD", block_number=100),
+        _record(chain_name="mainnet", flow_type="withdrawal", tx_hash="0xMainW", block_number=200),
+    ]
+    body = monitor.format_aggregated_message(flows, truncated=0)
+
+    assert body.startswith("ℹ️ Small parent-vault flows — 2 in this run")
+    assert "⛓️ mainnet — 2 flow(s)" in body
+    assert "• 1 deposit(s):" in body
+    assert "• 1 withdrawal(s):" in body
+    # Deposits appear before withdrawals within the same chain section.
+    assert body.index("deposit(s):") < body.index("withdrawal(s):")
+
+
+def test_render_flow_line_short_hash_and_ellipsized_vault() -> None:
+    """The per-flow line should fit one phone screen line: short tx hash and a
+    ellipsized vault address when the address is long-form (checksum, 42 chars)."""
+    line = monitor.render_flow_line(_record())
+    assert "0xTransact…Hash" in line
+    assert "0xPare…ress" in line
+    assert "→" in line  # deposit arrow

@@ -67,9 +67,21 @@ The script `yearn/alert_small_parent_flows.py` alerts on every deposit or withdr
 
 Deposits and withdrawals are processed with independent per-chain `(blockNumber, logIndex)` cursors stored in the monitoring database. A cursor advances only after an event is successfully evaluated and, when applicable, delivered to Telegram. A new deployment starts each stream with a two-hour lookback; that starting timestamp is persisted, so a stream that has not yet seen any event never slides its window forward and a long run gap cannot drop events.
 
-**Routing:** flow alerts and the overflow summary go to the internal curation chat (`TELEGRAM_CHAT_ID_CURATION`), not the public yearn group. If that chat id is unset they fall back to the yearn group.
+**Routing:** every qualifying flow in a run is aggregated into one Telegram message
+(per chain and direction, sorted chronologically) and sent to a dedicated noisy-channel
+group, `TELEGRAM_CHAT_ID_SMALL_DEPOSITS`, so the volume doesn't spam the protocol's
+main chat or the curation group. If that chat id is unset the aggregated message falls
+back to the yearn group.
 
-At most `--max-alerts` individual alerts are sent per run; any further qualifying flows are logged and summarized in a single message. The first Envio failure is reported once to the Envio channel and stops the run, and the unprocessed events are picked up on the next run.
+A run with no qualifying flows does not produce a Telegram message — a quiet day
+shouldn't wake up the channel with an empty "0 flows" header.
+
+The aggregated message is hard-capped at `--max-flows` entries (default 500) so an
+indexer catch-up after a long outage can't produce a multi-thousand-line Telegram
+post. Flows past the cap are counted and shown as a footer on the message
+("N truncated past the per-run cap of M"), and the same count is logged for the
+run-log audit trail. The first Envio failure is reported once to the Envio channel
+and stops the run; unprocessed events are picked up on the next run.
 
 ### Usage
 
@@ -83,7 +95,7 @@ Optional flags:
 - `--lookback-seconds` (default: `7200`, used only the first time a chain/flow stream runs)
 - `--page-size` (default: `1000`)
 - `--chain-ids` (default: `1,8453,42161,137,747474`, the chains indexed by [yearn-envio](https://github.com/yearn/yearn-envio))
-- `--max-alerts` (default: `20`, individual alerts per run before summarizing)
+- `--max-flows` (default: `500`, hard cap on flows rendered into the aggregated message)
 - `--log-level` (default: `SMALL_PARENT_FLOWS_LOG_LEVEL`, then `LOG_LEVEL`, then `INFO`)
 
 =======

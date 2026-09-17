@@ -36,6 +36,15 @@ ENVIO_CHANNEL = "envio"
 # chat id falls back to the protocol's own group instead of dropping the alert.
 CURATION_CHANNEL = "curation"
 
+# Channel key for small parent-vault flow alerts — deposits and withdrawals below the
+# dust threshold (see ``protocols/yearn/alert_small_parent_flows.py``). Operationally
+# distinct from the curation chat because these alerts are pure notification noise —
+# no curation action is expected — so they're routed to a dedicated group via
+# ``TELEGRAM_CHAT_ID_SMALL_DEPOSITS`` rather than spamming a protocol's main feed.
+# When the chat id is unset the channel falls back to the protocol's own chat, matching
+# ``CURATION_CHANNEL``'s "fail-open to the protocol group" semantics.
+SMALL_DEPOSITS_CHANNEL = "small_deposits"
+
 # Matches `bot<digits>:<token>` in Telegram API URLs. Used to scrub the bot
 # token out of exception messages — `requests.HTTPError.__str__()` includes
 # the full URL, so without this the token leaks into any log or alert that
