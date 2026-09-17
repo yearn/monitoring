@@ -428,6 +428,27 @@ class TestSendEnvioErrorMessage(unittest.TestCase):
         self.assertTrue(json_body["disable_notification"])
         self.assertNotIn("parse_mode", json_body)  # plain text
 
+    def test_alert_protocol_changes_stored_key_only(self):
+        """alert_protocol overrides the stored key; label and chat stay the same."""
+        for env in (
+            {"TELEGRAM_CHAT_ID_ENVIO": "envio_chat_id", "TELEGRAM_CHAT_ID_ERRORS": ""},
+            {"TELEGRAM_CHAT_ID_ENVIO": "", "TELEGRAM_CHAT_ID_ERRORS": "errors_chat_id"},
+            {"TELEGRAM_CHAT_ID_ENVIO": "", "TELEGRAM_CHAT_ID_ERRORS": ""},
+        ):
+            with (
+                self.subTest(env=env),
+                patch.dict(os.environ, env),
+                patch("utils.telegram.send_telegram_message") as mock_send,
+            ):
+                send_envio_error_message("GraphQL boom", "yearn", alert_protocol="yearn-internal")
+
+                kwargs = mock_send.call_args.kwargs
+                self.assertEqual(kwargs["origin_protocol"], "yearn-internal")
+                if env["TELEGRAM_CHAT_ID_ENVIO"] or env["TELEGRAM_CHAT_ID_ERRORS"]:
+                    self.assertEqual(mock_send.call_args.args[0], "[yearn] GraphQL boom")
+                else:
+                    self.assertEqual(kwargs["channel"], "yearn")
+
     @patch("utils.telegram.requests.post")
     def test_labels_originating_protocol(self, mock_post):
         """Every monitor's envio problems land in one chat, labelled by origin."""

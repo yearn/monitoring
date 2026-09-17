@@ -21,7 +21,7 @@ from utils import store
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import EXPLORER_URLS, Chain
 from utils.logger import get_logger
-from utils.telegram import CURATION_CHANNEL, resolve_channel, send_envio_error_message
+from utils.telegram import MAX_MESSAGE_LENGTH, SMALL_DEPOSITS_CHANNEL, resolve_channel, send_envio_error_message
 
 load_dotenv()
 
@@ -32,8 +32,14 @@ DEFAULT_LOG_LEVEL = os.getenv("SMALL_PARENT_FLOWS_LOG_LEVEL") or os.getenv("LOG_
 DEFAULT_THRESHOLD_RAW = 10_000
 DEFAULT_LOOKBACK_SECONDS = 7200
 DEFAULT_PAGE_SIZE = 1000
-DEFAULT_MAX_ALERTS = 20
+DEFAULT_MAX_FLOWS = 500
+# Reserve room for send_alert's prefix and Telegram's UTF-16 emoji accounting.
+MAX_AGGREGATE_LENGTH = MAX_MESSAGE_LENGTH - 32
 PROTOCOL = "yearn"
+# Stored alert-history key for flow and Envio error alerts. Kept off the public
+# Yearn monitoring page, which queries ``yearn``; Telegram routing and the
+# ``[yearn]`` label still use ``PROTOCOL``.
+ALERT_PROTOCOL = "yearn-internal"
 STATE_NAMESPACE = "yearn.small_parent_flows"
 FLOW_TYPES = ("deposit", "withdrawal")
 FLOW_ENTITY = {"deposit": "Deposit", "withdrawal": "Withdraw"}
@@ -48,47 +54,189 @@ class EnvioUnavailableError(RuntimeError):
     """Raised after an Envio failure has been reported, so the run stops without re-alerting."""
 
 
-class AlertLimiter:
-    """Deliver alerts up to a per-run cap and summarize the overflow in one message."""
+class FlowAggregator:
+    """Collect qualifying flows during a run and emit one aggregated Telegram message.
 
-    def __init__(self, max_alerts: int, sender: Callable[[Alert], None] | None = None) -> None:
-        """Initialize the limiter.
+    Replaces the previous ``AlertLimiter`` design, which sent up to N individual alerts
+    and then a single overflow summary. That produced two failure modes:
 
-        Args:
-            max_alerts: Maximum number of individual alerts to deliver in one run.
-            sender: Alert delivery function. Defaults to ``send_alert``.
-        """
-        self.max_alerts = max_alerts
+    - **Telegram rate-limit hits.** A burst of 20 LOW-severity messages from one cron
+      tick (each ~1s apart) is enough to trip Telegram's per-chat-per-second limit on
+      the destination group; the *21st* message then returns 429 with ``retry_after=17``
+      and the run's overflow summary is lost. (See production incident on
+      2026-09-17 02:05:57 UTC — alert #991 was created but ``delivery_status=failed``
+      with the same 429 in ``delivery_error``.)
+    - **Audit friction.** Reviewers had to scroll past N near-identical messages to
+      reconstruct the picture; a single grouped message is easier to grep, diff across
+      runs, and link from a gist.
+
+    Flows are grouped by chain (network name, alphabetical), then by direction
+    (deposits before withdrawals within each chain), sorted chronologically by
+    ``(block_number, log_index)`` so the run reads top-to-bottom in event order.
+
+    The aggregate is limited by ``max_flows`` and Telegram's message length. Flows
+    beyond either limit are counted as truncated in the message and run log.
+    """
+
+    def __init__(
+        self,
+        max_flows: int,
+        sender: Callable[[Alert], None] | None = None,
+    ) -> None:
+        self.max_flows = max_flows
         self.sender = sender
-        self.sent = 0
-        self.suppressed = 0
+        self._flows: list[SmallFlowRecord] = []
+        self.truncated = 0
 
-    def _send(self, alert: Alert) -> None:
-        """Deliver one alert through the configured sender."""
-        (self.sender or send_alert)(alert)
-
-    def __call__(self, alert: Alert) -> None:
-        """Deliver ``alert`` if the cap allows it, otherwise log and count it."""
-        if self.sent < self.max_alerts:
-            self._send(alert)
-            self.sent += 1
+    def __call__(self, record: SmallFlowRecord) -> None:
+        """Record one qualifying flow from ``process_event``."""
+        if len(self._flows) < self.max_flows:
+            self._flows.append(record)
             return
-        self.suppressed += 1
-        logger.warning("Per-run alert cap reached; suppressed alert:\n%s", alert.message)
+        self.truncated += 1
 
     def send_summary(self) -> None:
-        """Send one summary alert if any individual alerts were suppressed."""
-        if not self.suppressed:
+        """Send one aggregated Telegram message within Telegram's length limit.
+
+        No-op when no flows were recorded — avoids spamming the channel with a
+        "0 flows" header on quiet runs.
+        """
+        if not self._flows:
             return
-        self._send(
+        shown = len(self._flows)
+        truncated = self.truncated
+        message = format_aggregated_message(self._flows, truncated)
+        if len(message) > MAX_AGGREGATE_LENGTH:
+            low, high = 0, shown
+            while low < high:
+                middle = (low + high + 1) // 2
+                candidate = format_aggregated_message(self._flows[:middle], truncated + shown - middle)
+                if len(candidate) <= MAX_AGGREGATE_LENGTH:
+                    low = middle
+                else:
+                    high = middle - 1
+            if low == 0:
+                raise RuntimeError("First small parent flow exceeds the Telegram message limit")
+            message = format_aggregated_message(self._flows[:low], truncated + shown - low)
+            truncated += shown - low
+            shown = low
+        (self.sender or send_alert)(
             Alert(
                 AlertSeverity.LOW,
-                f"Small parent-vault flows: {self.suppressed:,} more qualifying flows were not sent "
-                f"individually after reaching the per-run cap of {self.max_alerts:,}. See the run logs for details.",
-                PROTOCOL,
-                channel=resolve_channel(CURATION_CHANNEL, PROTOCOL),
+                message,
+                ALERT_PROTOCOL,
+                channel=resolve_channel(SMALL_DEPOSITS_CHANNEL, PROTOCOL),
             )
         )
+        self.truncated = truncated
+        self._flows = self._flows[:shown]
+
+    @property
+    def collected(self) -> int:
+        """Number of flows actually rendered into the aggregated message body."""
+        return len(self._flows)
+
+    @property
+    def total(self) -> int:
+        """Total qualifying flows seen this run, including any beyond the cap."""
+        return len(self._flows) + self.truncated
+
+
+@dataclass(frozen=True)
+class SmallFlowRecord:
+    """One qualifying flow, normalized for aggregation.
+
+    Carries the minimum fields needed to render one line in the aggregated message.
+    ``process_event`` builds one of these and hands it to the aggregator; the
+    aggregator does *not* keep the per-flow ``Alert.message`` text — the final body is
+    rebuilt from structured data at ``send_summary()`` time so the formatter can group
+    and sort freely.
+    """
+
+    chain_name: str
+    flow_type: str
+    amount: str
+    asset_symbol: str
+    vault_symbol: str
+    vault_address: str
+    explorer: str | None
+    tx_hash: str
+    block_number: int
+    log_index: int
+
+
+def format_aggregated_message(flows: list[SmallFlowRecord], truncated: int) -> str:
+    """Render one Telegram message body covering all ``flows`` in this run.
+
+    Layout::
+
+        ℹ️ Small parent-vault flows — N in this run
+
+        ⛓️ Base — 8 flow(s)
+          • 5 deposit(s):
+            0.0015 USDC → yvUSDC (0xvault…abcd) — Tx [0x1234…5678]
+            …
+          • 3 withdrawal(s):
+            …
+
+        ⛓️ Ethereum — 4 flow(s)
+          …
+
+    Each flow line is a single short bullet; full owner/sender/receiver detail from
+    ``build_alert_message`` is left to the per-flow explorer link in any follow-up
+    gist, not repeated inline.
+    """
+    by_chain: dict[str, list[SmallFlowRecord]] = {}
+    for flow in flows:
+        by_chain.setdefault(flow.chain_name, []).append(flow)
+
+    total = len(flows) + truncated
+    header = f"ℹ️ Small parent-vault flows — {total} in this run"
+    if truncated:
+        header += f" ({truncated} truncated; {len(flows)} shown)"
+
+    sections: list[str] = []
+    for chain_name in sorted(by_chain):
+        chain_flows = by_chain[chain_name]
+        deposits = sorted(
+            (f for f in chain_flows if f.flow_type == "deposit"),
+            key=lambda f: (f.block_number, f.log_index),
+        )
+        withdrawals = sorted(
+            (f for f in chain_flows if f.flow_type == "withdrawal"),
+            key=lambda f: (f.block_number, f.log_index),
+        )
+        bits: list[str] = [f"⛓️ {chain_name} — {len(chain_flows)} flow(s)"]
+        if deposits:
+            bits.append(f"  • {len(deposits)} deposit(s):")
+            bits.extend(f"    {render_flow_line(f)}" for f in deposits)
+        if withdrawals:
+            bits.append(f"  • {len(withdrawals)} withdrawal(s):")
+            bits.extend(f"    {render_flow_line(f)}" for f in withdrawals)
+        sections.append("\n".join(bits))
+
+    return header + "\n\n" + "\n\n".join(sections)
+
+
+def render_flow_line(flow: SmallFlowRecord) -> str:
+    """Render one flow as a single Telegram-safe bullet line.
+
+    Format: ``<amount> <symbol> <arrow> <vault_label> — Tx [<short_hash>]``.
+    The vault address is shortened when it's the long-form checksum address; the
+    explorer link (when present) is rendered as a Markdown link to the full tx.
+    """
+    arrow = "→" if flow.flow_type == "deposit" else "←"
+    if flow.vault_address and len(flow.vault_address) > 14:
+        vault = f"{flow.vault_symbol} ({flow.vault_address[:6]}…{flow.vault_address[-4:]})"
+    else:
+        vault = flow.vault_symbol or flow.vault_address or "vault"
+    asset = f"{flow.amount} {flow.asset_symbol}".strip()
+    tx_short = f"{flow.tx_hash[:10]}…{flow.tx_hash[-4:]}" if len(flow.tx_hash) > 16 else flow.tx_hash
+    if flow.explorer:
+        tx_part = f"[{tx_short}]({flow.explorer}/tx/{flow.tx_hash})"
+    else:
+        tx_part = tx_short
+    return f"{asset} {arrow} {vault} — Tx {tx_part}"
 
 
 @dataclass(frozen=True, order=True)
@@ -130,6 +278,7 @@ def gql_request(query: str, variables: dict) -> dict:
             f"Small parent flow monitor: Envio GraphQL request failed ({exc}). Skipping this run.",
             PROTOCOL,
             source="small_parent_flows",
+            alert_protocol=ALERT_PROTOCOL,
         )
         logger.error("Envio request failed: %s", exc)
         raise EnvioUnavailableError(f"Envio request failed: {exc}") from exc
@@ -139,6 +288,7 @@ def gql_request(query: str, variables: dict) -> dict:
             f"Small parent flow monitor: Envio GraphQL errors: {payload['errors']}",
             PROTOCOL,
             source="small_parent_flows",
+            alert_protocol=ALERT_PROTOCOL,
         )
         logger.error("Envio GraphQL errors: %s", payload["errors"])
         raise EnvioUnavailableError(f"Envio GraphQL errors: {payload['errors']}")
@@ -237,42 +387,6 @@ def address_link(address: str, explorer: str | None) -> str:
     return address
 
 
-def build_alert_message(
-    event: dict,
-    vault: dict,
-    raw_assets: int,
-    amount: Decimal,
-    threshold_raw: int,
-) -> str:
-    """Build the Telegram message for one qualifying flow."""
-    chain_id = int(event["chainId"])
-    chain = Chain.from_chain_id(chain_id)
-    explorer = EXPLORER_URLS.get(chain_id)
-    vault_address = str(event["vaultAddress"])
-    tx_hash = str(event["transactionHash"])
-    tx = f"[{tx_hash}]({explorer}/tx/{tx_hash})" if explorer else tx_hash
-    flow_type = str(event["flow_type"])
-
-    lines = [
-        f"Small parent-vault {flow_type}",
-        f"🏦 Vault: {address_link(vault_address, explorer)} ({vault['symbol']})",
-        f"🔢 Raw Assets: {raw_assets:,}",
-        f"🪙 Normalized: {format_amount(amount)} {vault['asset_symbol']}",
-        f"📏 Raw Threshold: < {threshold_raw:,}",
-        f"⛓️ Chain: {chain.network_name}",
-        f"👤 Owner: {address_link(str(event['owner']), explorer)}",
-        f"💳 Sender: {address_link(str(event['sender']), explorer)}",
-    ]
-    receiver = event.get("receiver")
-    if receiver:
-        lines.append(f"📥 Receiver: {address_link(str(receiver), explorer)}")
-    transaction_from = event.get("transactionFrom")
-    if transaction_from:
-        lines.append(f"🚀 Tx From: {address_link(str(transaction_from), explorer)}")
-    lines.append(f"🔗 Tx: {tx}")
-    return "\n".join(lines)
-
-
 def cursor_from_event(event: dict) -> EventCursor:
     """Return the sortable cursor represented by an Envio event."""
     return EventCursor(int(event["blockNumber"]), int(event["logIndex"]))
@@ -329,9 +443,22 @@ def process_event(
     event: dict,
     vaults_by_address: dict[str, dict],
     threshold_raw: int,
-    alert_sender: Callable[[Alert], None] | None = None,
+    alert_sender: Callable[[SmallFlowRecord], None] | None = None,
 ) -> bool:
-    """Evaluate one flow, sending an alert when it is below the threshold."""
+    """Evaluate one flow, handing a structured record to the aggregator when below threshold.
+
+    The previous design built a full ``Alert`` here and routed it to ``send_alert``
+    immediately — which made per-flow messages and forced an AlertLimiter on top to
+    cap the volume. Now we hand a ``SmallFlowRecord`` (the minimum data needed for
+    the aggregated message) to the caller-supplied ``alert_sender``, which in
+    production is a ``FlowAggregator`` that emits one grouped Telegram message at
+    ``send_summary()`` time. Tests can pass a list-collector to inspect the
+    per-flow records without going through the aggregator.
+
+    ``alert_sender`` is optional but only because events at-or-above the threshold
+    short-circuit before the call site; if a small flow is found with no sender
+    configured that's a programmer error and we raise rather than silently dropping.
+    """
     vault_address = str(event["vaultAddress"]).lower()
     vault = vaults_by_address.get(vault_address)
     if vault is None:
@@ -342,11 +469,23 @@ def process_event(
         return False
 
     amount = format_units(raw_assets, int(vault["asset_decimals"]))
-    message = build_alert_message(event, vault, raw_assets, amount, threshold_raw)
-    # Dust flows are for the curation team to review, not something the public
-    # yearn group can act on.
-    alert = Alert(AlertSeverity.LOW, message, PROTOCOL, channel=resolve_channel(CURATION_CHANNEL, PROTOCOL))
-    (alert_sender or send_alert)(alert)
+    chain_id = int(event["chainId"])
+    chain = Chain.from_chain_id(chain_id)
+    record = SmallFlowRecord(
+        chain_name=chain.network_name,
+        flow_type=str(event["flow_type"]),
+        amount=format_amount(amount),
+        asset_symbol=str(vault["asset_symbol"]),
+        vault_symbol=str(vault["symbol"]),
+        vault_address=str(event["vaultAddress"]),
+        explorer=EXPLORER_URLS.get(chain_id),
+        tx_hash=str(event["transactionHash"]),
+        block_number=int(event["blockNumber"]),
+        log_index=int(event["logIndex"]),
+    )
+    if alert_sender is None:
+        raise RuntimeError("process_event called on a small flow with no alert_sender configured")
+    alert_sender(record)
     return True
 
 
@@ -358,10 +497,11 @@ def monitor_flow_type(
     threshold_raw: int,
     lookback_seconds: int,
     page_size: int,
+    pending_cursors: dict[tuple[int, str], EventCursor],
     now: int | None = None,
-    alert_sender: Callable[[Alert], None] | None = None,
+    alert_sender: Callable[[SmallFlowRecord], None] | None = None,
 ) -> tuple[int, int]:
-    """Fetch and process all new events of one type for a chain."""
+    """Fetch events and stage the last processed cursor for delivery confirmation."""
     persisted_cursor = load_cursor(chain_id, flow_type)
     if persisted_cursor is not None:
         cursor = persisted_cursor
@@ -383,7 +523,7 @@ def monitor_flow_type(
                 continue
             if process_event(event, vaults_by_address, threshold_raw, alert_sender):
                 alerted += 1
-            save_cursor(chain_id, flow_type, event_cursor)
+            pending_cursors[(chain_id, flow_type)] = event_cursor
             cursor = event_cursor
             processed += 1
 
@@ -398,8 +538,9 @@ def monitor_chain(
     threshold_raw: int,
     lookback_seconds: int,
     page_size: int,
+    pending_cursors: dict[tuple[int, str], EventCursor],
     now: int | None = None,
-    alert_sender: Callable[[Alert], None] | None = None,
+    alert_sender: Callable[[SmallFlowRecord], None] | None = None,
 ) -> tuple[int, int]:
     """Fetch and process deposits and withdrawals for one chain."""
     vaults = fetch_kong_parent_vaults(chain)
@@ -425,6 +566,7 @@ def monitor_chain(
             threshold_raw,
             lookback_seconds,
             page_size,
+            pending_cursors,
             now,
             alert_sender,
         )
@@ -459,14 +601,23 @@ def main() -> None:
     parser.add_argument("--lookback-seconds", type=int, default=DEFAULT_LOOKBACK_SECONDS)
     parser.add_argument("--page-size", type=int, default=DEFAULT_PAGE_SIZE)
     parser.add_argument("--chain-ids", default=default_chain_ids)
-    parser.add_argument("--max-alerts", type=int, default=DEFAULT_MAX_ALERTS)
+    parser.add_argument(
+        "--max-flows",
+        type=int,
+        default=DEFAULT_MAX_FLOWS,
+        help=(
+            "Maximum flows rendered in the aggregate Telegram message "
+            f"(default: {DEFAULT_MAX_FLOWS}). Flows beyond this or Telegram's length "
+            "limit are counted in the message and run log."
+        ),
+    )
     parser.add_argument("--log-level", default=DEFAULT_LOG_LEVEL)
     args = parser.parse_args()
 
     # get_logger() installs its own handler and disables propagation, so the
     # root-logger basicConfig would not affect this module's output.
-    log_level = logging.getLevelName(args.log_level.upper())
-    if not isinstance(log_level, int):
+    log_level = logging.getLevelNamesMapping().get(args.log_level.upper())
+    if log_level is None:
         parser.error(f"--log-level must be a logging level name, got {args.log_level!r}")
     logger.setLevel(log_level)
     if args.threshold_raw <= 0:
@@ -475,10 +626,11 @@ def main() -> None:
         parser.error("--lookback-seconds must be non-negative")
     if args.page_size <= 0:
         parser.error("--page-size must be positive")
-    if args.max_alerts < 0:
-        parser.error("--max-alerts must be non-negative")
+    if args.max_flows <= 0:
+        parser.error("--max-flows must be positive")
 
-    limiter = AlertLimiter(args.max_alerts)
+    aggregator = FlowAggregator(args.max_flows)
+    pending_cursors: dict[tuple[int, str], EventCursor] = {}
     total_processed = 0
     total_alerted = 0
     try:
@@ -488,7 +640,8 @@ def main() -> None:
                 args.threshold_raw,
                 args.lookback_seconds,
                 args.page_size,
-                alert_sender=limiter,
+                pending_cursors,
+                alert_sender=aggregator,
             )
             total_processed += processed
             total_alerted += alerted
@@ -497,13 +650,21 @@ def main() -> None:
         # Already reported to the Envio channel once; stop instead of repeating it per chain/flow.
         logger.error("Aborting run after Envio failure: %s", exc)
     finally:
-        limiter.send_summary()
+        aggregator.send_summary()
+        for (chain_id, flow_type), cursor in pending_cursors.items():
+            save_cursor(chain_id, flow_type, cursor)
+        if aggregator.truncated:
+            logger.warning(
+                "Aggregate message includes %d flow(s); %d additional flow(s) truncated",
+                aggregator.collected,
+                aggregator.truncated,
+            )
     logger.info(
-        "complete: processed=%d alerted=%d sent=%d suppressed=%d",
+        "complete: processed=%d alerted=%d collected=%d truncated=%d",
         total_processed,
         total_alerted,
-        limiter.sent,
-        limiter.suppressed,
+        aggregator.collected,
+        aggregator.truncated,
     )
 
 

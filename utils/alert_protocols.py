@@ -41,6 +41,9 @@ PAGELESS_ALERT_PROTOCOLS: frozenset[str] = frozenset(
         # Internal-only mirror of the Yearn timelock alerts; keeping its own key
         # stops the Yearn page listing every alert twice.
         "YEARN_TIMELOCK_INTERNAL",
+        # Small parent-vault flow alerts: curation-team review only, not shown
+        # on the public Yearn page.
+        "yearn-internal",
         # Automation run digests, not a monitored protocol.
         "automation",
     }
