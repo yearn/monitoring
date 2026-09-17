@@ -576,20 +576,20 @@ def test_accountable_real_config_onchain_limit(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", ["LendSwift - Warehouse Senior Note", "Slope - Forward Flows"])
-def test_accountable_real_config_covers_next_day_document_upload(name: str) -> None:
+def test_accountable_real_config_weekly_document_limit(name: str) -> None:
     module = load_3jane_module()
     payload = fresh_accountable_payload()
     source = payload["data"]["dataSources"][name]
-    source["lastUpdated"] = str(ACCOUNTABLE_FIXTURE_NOW_MS - (8 * 24 * 60 * 60 + 5 * 60) * 1000)
+    source["lastUpdated"] = str(ACCOUNTABLE_FIXTURE_NOW_MS - 8 * 24 * 60 * 60 * 1000)
 
     result = evaluate_report(parse_report(payload, module.ACCOUNTABLE_FEED, ACCOUNTABLE_FIXTURE_NOW_MS))
     assert result.status is AccountableStatus.OK
 
-    source["lastUpdated"] = str(ACCOUNTABLE_FIXTURE_NOW_MS - (9 * 24 * 60 * 60 + 1) * 1000)
+    source["lastUpdated"] = str(ACCOUNTABLE_FIXTURE_NOW_MS - (8 * 24 * 60 * 60 + 1) * 1000)
     result = evaluate_report(parse_report(payload, module.ACCOUNTABLE_FEED, ACCOUNTABLE_FIXTURE_NOW_MS))
     assert result.status is AccountableStatus.STALE
     assert name in result.reason
-    assert "9d limit" in result.reason
+    assert "8d limit" in result.reason
 
 
 @pytest.mark.parametrize(
@@ -597,7 +597,7 @@ def test_accountable_real_config_covers_next_day_document_upload(name: str) -> N
     [
         ("LendSwift - Warehouse Senior Note", "15 MIN", 20 * 3600, AccountableStatus.STALE, 3600),
         ("Slope - Forward Flows", "15 MIN", 20 * 3600, AccountableStatus.STALE, 3600),
-        ("USD3 Minted Liabilities", "WEEKLY", 7 * 86400 + 3600, AccountableStatus.OK, 9 * 86400),
+        ("USD3 Minted Liabilities", "WEEKLY", 7 * 86400 + 3600, AccountableStatus.OK, 8 * 86400),
     ],
 )
 def test_accountable_real_config_tracks_changed_cadence(
@@ -627,7 +627,7 @@ def test_accountable_real_config_applies_weekly_grace_to_new_source() -> None:
     payload["data"]["dataSources"]["New Document Report"] = {
         "type": "Document Report",
         "frequency": "WEEKLY",
-        "lastUpdated": str(ACCOUNTABLE_FIXTURE_NOW_MS - (8 * 24 * 60 * 60 + 5 * 60) * 1000),
+        "lastUpdated": str(ACCOUNTABLE_FIXTURE_NOW_MS - 8 * 24 * 60 * 60 * 1000),
     }
 
     result = evaluate_report(parse_report(payload, module.ACCOUNTABLE_FEED, ACCOUNTABLE_FIXTURE_NOW_MS))

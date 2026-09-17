@@ -44,7 +44,7 @@
 | Borrower delinquent/default watch | New milestone: delinquent, ≤14d, ≤7d, ≤3d, ≤1d, default | MEDIUM |
 | Accountable collateral ratio | < 95% (band transition) | CRITICAL |
 | Accountable collateral ratio | < 99% (band transition) | HIGH |
-| Accountable feed stale | Aggregate report or source: >1h for 15-minute/`live` cadence, >9d for weekly cadence, otherwise >2 short periods or >1 long period; required source missing, malformed, or future-dated (alert-once) | MEDIUM |
+| Accountable feed stale | Aggregate report or source: >1h for 15-minute/`live` cadence, >8d for weekly cadence, otherwise >2 short periods or >1 long period; required source missing, malformed, or future-dated (alert-once) | MEDIUM |
 | Accountable feed unavailable | First consecutive miss HIGH; second CRITICAL (then quiet until recovery) | HIGH / CRITICAL |
 | Monitoring run failure | Uncaught exception in `main()` | LOW |
 
@@ -103,7 +103,7 @@ The API rounds `collateralization` to six decimals. Near the alert boundary that
 
 A fresh aggregate timestamp does not prove every input is fresh, and this matters more than usual here: `reserves_split` is essentially all "Morpho Credit", of which the bulk is off-chain loan receivables priced by manually uploaded document reports. Those routinely run past their declared cadence.
 
-The aggregate report uses `reserves.interval`; sources use their effective `frequency`. The base freshness limit is two periods for cadences of one hour or less and one period for longer cadences. `live` parses as a 15-minute cadence. The 3Jane configuration adds grace by cadence, applied to the aggregate report and every source alike: 30 minutes for a 15-minute cadence (1-hour limit, tolerating up to three missed refreshes) and two days for a weekly cadence (9-day limit). Grace is keyed by cadence rather than source name, so a source that changes cadence gets the limit for its new cadence, subject to the Slope correction below, and a newly added source gets the same grace as its peers. The weekly limit allows a midnight-dated report to arrive any time on the day after its next reporting date, while a roughly two-week gap still alerts.
+The aggregate report uses `reserves.interval`; sources use their effective `frequency`. The base freshness limit is two periods for cadences of one hour or less and one period for longer cadences. `live` parses as a 15-minute cadence. The 3Jane configuration adds grace by cadence, applied to the aggregate report and every source alike: 30 minutes for a 15-minute cadence (1-hour limit, tolerating up to three missed refreshes) and one day for a weekly cadence (8-day limit). Grace is keyed by cadence rather than source name, so a source that changes cadence gets the limit for its new cadence, subject to the Slope correction below, and a newly added source gets the same grace as its peers. The weekly limit tolerates a report up to one day late; because document reports carry midnight timestamps, an upload later on the following calendar day can still raise a MEDIUM stale alert until it lands.
 
 Stale alerts show both age and the effective limit, for the aggregate report and for each stale source. A source whose `lastUpdated` is in the future is treated as unusable rather than clamped to "fresh", which would defeat the check. Unknown additional sources with an unrecognised cadence are skipped rather than flagged, so a schema addition on Accountable's side cannot spuriously page us.
 

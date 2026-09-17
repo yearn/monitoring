@@ -93,7 +93,7 @@ def format_age(seconds: int) -> str:
         seconds: Non-negative elapsed time in seconds.
 
     Returns:
-        A compact age such as ``31m``, ``1h 1m``, or ``9d 1m``.
+        A compact age such as ``31m``, ``1h 1m``, or ``8d 1m``.
     """
     minutes = (max(0, seconds) + 59) // 60
     days, remainder = divmod(minutes, 24 * 60)

@@ -130,11 +130,10 @@ ACCOUNTABLE_FEED = AccountableFeedConfig(
     # Correct only the known DAILY/weekly disagreement; honor future cadence changes.
     source_frequency_corrections=(("Slope - Forward Flows", "DAILY", "WEEKLY"),),
     # Permit one missed 15-minute refresh (aggregate report and on-chain sources),
-    # or a weekly report uploaded any time on the day after its midnight-dated
-    # reporting period.
+    # or a weekly report up to one day late.
     grace_by_cadence_seconds=(
         (15 * SECONDS_PER_MINUTE, 30 * SECONDS_PER_MINUTE),
-        (7 * SECONDS_PER_DAY, 2 * SECONDS_PER_DAY),
+        (7 * SECONDS_PER_DAY, SECONDS_PER_DAY),
     ),
 )
 # TODO: Recalibrate both thresholds after Accountable includes 3Jane's idle
