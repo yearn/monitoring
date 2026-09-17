@@ -129,6 +129,8 @@ class AccountableFeedConfig:
         required_sources: Source names that must carry usable freshness metadata.
         source_frequency_overrides: Trusted source-frequency corrections keyed
             by source name, used when the JSON endpoint disagrees with the UI.
+        source_staleness_grace_seconds: Extra time allowed after the normal
+            cadence-based limit, keyed by source name.
     """
 
     dfid: str
@@ -138,6 +140,7 @@ class AccountableFeedConfig:
     dashboard_type: str
     required_sources: tuple[str, ...] = ()
     source_frequency_overrides: tuple[tuple[str, str], ...] = ()
+    source_staleness_grace_seconds: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -301,6 +304,7 @@ def _parse_data_sources(
     now_ms: int,
     required_sources: tuple[str, ...] = (),
     frequency_overrides: tuple[tuple[str, str], ...] = (),
+    staleness_grace_seconds: tuple[tuple[str, int], ...] = (),
 ) -> tuple[tuple[DataSourceSnapshot, ...], tuple[str, ...]]:
     """Build source snapshots with cadence-based staleness budgets.
 
@@ -322,6 +326,7 @@ def _parse_data_sources(
 
     required = set(required_sources)
     overrides = dict(frequency_overrides)
+    grace_by_source = dict(staleness_grace_seconds)
     problems: list[str] = []
     missing = sorted(required.difference(payload))
     if missing:
@@ -385,7 +390,7 @@ def _parse_data_sources(
                 frequency=str(effective_frequency),
                 last_updated_ms=last_updated_ms,
                 age_seconds=max(0, age_seconds),
-                max_age_seconds=_stale_after_seconds(cadence_seconds),
+                max_age_seconds=_stale_after_seconds(cadence_seconds) + grace_by_source.get(str(name), 0),
             )
         )
     return tuple(snapshots), tuple(problems)
@@ -491,6 +496,7 @@ def parse_report(payload: Any, config: AccountableFeedConfig, now_ms: int) -> Ac
         now_ms,
         config.required_sources,
         config.source_frequency_overrides,
+        config.source_staleness_grace_seconds,
     )
 
     return AccountableReport(
@@ -521,7 +527,7 @@ def evaluate_report(report: AccountableReport) -> AccountableFetchResult:
         return AccountableFetchResult(
             AccountableStatus.STALE,
             report,
-            f"report is {report.report_age_seconds // SECONDS_PER_HOUR}h old (interval {report.report_interval})",
+            f"report is {_format_age(report.report_age_seconds)} old (interval {report.report_interval})",
         )
 
     if report.source_problems:
@@ -534,12 +540,24 @@ def evaluate_report(report: AccountableReport) -> AccountableFetchResult:
     stale = report.stale_sources
     if stale:
         detail = ", ".join(
-            f"{source.name} ({source.age_seconds // SECONDS_PER_HOUR}h old, cadence {source.frequency})"
+            f"{source.name} ({_format_age(source.age_seconds)} old, "
+            f"{_format_age(source.max_age_seconds)} limit, cadence {source.frequency})"
             for source in stale
         )
         return AccountableFetchResult(AccountableStatus.STALE, report, f"stale sources: {detail}")
 
     return AccountableFetchResult(AccountableStatus.OK, report)
+
+
+def _format_age(seconds: int) -> str:
+    """Format a duration, rounding up so a threshold breach stays visible."""
+    minutes = (seconds + 59) // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, remaining_minutes = divmod(minutes, 60)
+    if remaining_minutes:
+        return f"{hours}h {remaining_minutes}m"
+    return f"{hours}h"
 
 
 def fetch_report(config: AccountableFeedConfig, now_ms: int | None = None) -> AccountableFetchResult:

@@ -46,7 +46,7 @@ protocols:
       - name: "Proof of Solvency"
         description: "Accountable collateral ratio <95% (CRITICAL) or <99% (HIGH)"
       - name: "Proof of Solvency Freshness"
-        description: "MEDIUM when a short-cadence report/source misses 2 periods or a >1h cadence misses 1; HIGH on first unavailable run, CRITICAL on the second consecutive miss"
+        description: "MEDIUM when the live report exceeds 30m, either on-chain source exceeds 1h, or either weekly document source exceeds 8d; HIGH on first unavailable run, CRITICAL on the second consecutive miss"
       - name: "Timelock"
         description: "CallScheduled events from 24h and 7-day TimelockControllers via Envio"
 

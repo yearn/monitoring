@@ -38,6 +38,12 @@ CONFIG = AccountableFeedConfig(
         "USD3 On-Chain Reserves",
     ),
     source_frequency_overrides=(("Slope - Forward Flows", "WEEKLY"),),
+    source_staleness_grace_seconds=(
+        ("LendSwift - Warehouse Senior Note", 24 * 60 * 60),
+        ("Slope - Forward Flows", 24 * 60 * 60),
+        ("USD3 Minted Liabilities", 30 * 60),
+        ("USD3 On-Chain Reserves", 30 * 60),
+    ),
 )
 
 
@@ -92,11 +98,9 @@ def test_coerces_numeric_strings() -> None:
 def test_recorded_live_payload_uses_slope_weekly_override() -> None:
     result = evaluate_report(parse_report(load_payload(), CONFIG, FIXTURE_NOW_MS))
 
-    assert result.status is AccountableStatus.STALE
+    assert result.status is AccountableStatus.OK
     assert result.report is not None
-    assert [source.name for source in result.report.stale_sources] == [
-        "LendSwift - Warehouse Senior Note",
-    ]
+    assert result.report.stale_sources == ()
     slope = next(source for source in result.report.sources if source.name == "Slope - Forward Flows")
     assert slope.frequency == "WEEKLY"
     assert not slope.is_stale
@@ -261,7 +265,7 @@ def test_aggregate_report_is_stale_only_after_more_than_two_cadence_periods() ->
     result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
 
     assert result.status is AccountableStatus.STALE
-    assert "old" in result.reason
+    assert "31m old" in result.reason
 
 
 def test_weekly_aggregate_report_is_not_stale_after_six_hours() -> None:
@@ -293,33 +297,68 @@ def test_fresh_aggregate_with_stale_source_is_detected() -> None:
 
 
 def test_source_is_stale_only_after_more_than_two_cadence_periods() -> None:
+    config = replace(CONFIG, source_staleness_grace_seconds=())
     payload = load_fresh_payload()
     source = payload["data"]["dataSources"]["USD3 Minted Liabilities"]
     source["lastUpdated"] = str(FIXTURE_NOW_MS - 30 * 60 * 1000)
 
-    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+    result = evaluate_report(parse_report(payload, config, FIXTURE_NOW_MS))
 
     assert result.status is AccountableStatus.OK
 
     source["lastUpdated"] = str(FIXTURE_NOW_MS - (30 * 60 + 1) * 1000)
-    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+    result = evaluate_report(parse_report(payload, config, FIXTURE_NOW_MS))
 
     assert result.status is AccountableStatus.STALE
     assert "USD3 Minted Liabilities" in result.reason
 
 
+@pytest.mark.parametrize("source_name", ["USD3 Minted Liabilities", "USD3 On-Chain Reserves"])
+def test_3jane_onchain_source_has_one_hour_freshness_budget(source_name: str) -> None:
+    payload = load_fresh_payload()
+    source = payload["data"]["dataSources"][source_name]
+    source["lastUpdated"] = str(FIXTURE_NOW_MS - 60 * 60 * 1000)
+
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+    assert result.status is AccountableStatus.OK
+
+    source["lastUpdated"] = str(FIXTURE_NOW_MS - (60 * 60 + 1) * 1000)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+    assert result.status is AccountableStatus.STALE
+    assert source_name in result.reason
+    assert "1h 1m old" in result.reason
+    assert "1h limit" in result.reason
+
+
+@pytest.mark.parametrize("source_name", ["LendSwift - Warehouse Senior Note", "Slope - Forward Flows"])
+def test_3jane_document_source_has_eight_day_freshness_budget(source_name: str) -> None:
+    payload = load_fresh_payload()
+    source = payload["data"]["dataSources"][source_name]
+    source["lastUpdated"] = str(FIXTURE_NOW_MS - 8 * 24 * 60 * 60 * 1000)
+
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+    assert result.status is AccountableStatus.OK
+
+    source["lastUpdated"] = str(FIXTURE_NOW_MS - (8 * 24 * 60 * 60 + 1) * 1000)
+    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+    assert result.status is AccountableStatus.STALE
+    assert source_name in result.reason
+    assert "192h limit" in result.reason
+
+
 def test_daily_source_is_stale_after_first_missed_period() -> None:
+    config = replace(CONFIG, source_staleness_grace_seconds=())
     payload = load_fresh_payload()
     source = payload["data"]["dataSources"]["USD3 Minted Liabilities"]
     source["frequency"] = "DAILY"
     source["lastUpdated"] = str(FIXTURE_NOW_MS - 24 * 60 * 60 * 1000)
 
-    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+    result = evaluate_report(parse_report(payload, config, FIXTURE_NOW_MS))
 
     assert result.status is AccountableStatus.OK
 
     source["lastUpdated"] = str(FIXTURE_NOW_MS - (24 * 60 * 60 + 1) * 1000)
-    result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
+    result = evaluate_report(parse_report(payload, config, FIXTURE_NOW_MS))
 
     assert result.status is AccountableStatus.STALE
     assert "USD3 Minted Liabilities" in result.reason

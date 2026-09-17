@@ -129,6 +129,14 @@ ACCOUNTABLE_FEED = AccountableFeedConfig(
     # The dashboard UI declares Slope as Weekly, while older JSON responses
     # reported Daily. Bind the operator-confirmed cadence to avoid false alerts.
     source_frequency_overrides=(("Slope - Forward Flows", "WEEKLY"),),
+    # On-chain sources sometimes miss a 15-minute refresh; document reports
+    # carry midnight timestamps and may be uploaded the following day.
+    source_staleness_grace_seconds=(
+        ("LendSwift - Warehouse Senior Note", 24 * 60 * 60),
+        ("Slope - Forward Flows", 24 * 60 * 60),
+        ("USD3 Minted Liabilities", 30 * 60),
+        ("USD3 On-Chain Reserves", 30 * 60),
+    ),
 )
 # TODO: Recalibrate both thresholds after Accountable includes 3Jane's idle
 # funds in the reported reserve totals. These values are temporary test bands.

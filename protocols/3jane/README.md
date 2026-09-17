@@ -44,7 +44,7 @@
 | Borrower delinquent/default watch | New milestone: delinquent, ≤14d, ≤7d, ≤3d, ≤1d, default | MEDIUM |
 | Accountable collateral ratio | < 95% (band transition) | CRITICAL |
 | Accountable collateral ratio | < 99% (band transition) | HIGH |
-| Accountable feed stale | Short cadence >2 periods; long cadence >1 period (alert-once) | MEDIUM |
+| Accountable feed stale | Aggregate: >2 short periods or >1 long period; 3Jane sources: >1h on-chain or >8d documents (alert-once) | MEDIUM |
 | Accountable feed unavailable | First consecutive miss HIGH; second CRITICAL (then quiet until recovery) | HIGH / CRITICAL |
 | Monitoring run failure | Uncaught exception in `main()` | LOW |
 
@@ -103,7 +103,7 @@ The API rounds `collateralization` to six decimals. Near the alert boundary that
 
 A fresh aggregate timestamp does not prove every input is fresh, and this matters more than usual here: `reserves_split` is essentially all "Morpho Credit", of which the bulk is off-chain loan receivables priced by manually uploaded document reports. Those routinely run past their declared cadence.
 
-The aggregate report and each required source use their declared cadence. Cadences of one hour or less get one missed-period allowance and become stale after two periods; longer cadences become stale as soon as the first expected update is late. The aggregate cadence comes from `reserves.interval`; source cadences come from each source's `frequency`. This means `15 MIN` becomes stale after 30 minutes, hourly after 2 hours, daily after 24 hours, and weekly after 7 days. A source whose `lastUpdated` is in the future is treated as unusable rather than clamped to "fresh", which would defeat the check. Unknown additional sources with an unrecognised cadence are skipped rather than flagged, so a schema addition on Accountable's side cannot spuriously page us.
+The aggregate report and each required source use their declared cadence. Cadences of one hour or less get one missed-period allowance and become stale after two periods; longer cadences become stale as soon as the first expected update is late. The aggregate cadence comes from `reserves.interval`; source cadences come from each source's `frequency`. The aggregate `live` report becomes stale after 30 minutes. The 3Jane source configuration adds 30 minutes of grace to both 15-minute on-chain sources (1-hour limit) and one day to both weekly document sources (8-day limit). This covers a missed on-chain refresh and next-day document uploads while still alerting on a second missed weekly report. Stale alerts show both age and the effective limit. A source whose `lastUpdated` is in the future is treated as unusable rather than clamped to "fresh", which would defeat the check. Unknown additional sources with an unrecognised cadence are skipped rather than flagged, so a schema addition on Accountable's side cannot spuriously page us.
 
 The 3Jane dashboard UI declares `Slope - Forward Flows` as weekly, while older `/dashboard` JSON responses reported it as daily. The feed configuration therefore binds that source to `WEEKLY`; stale alerts display the effective cadence used by the monitor.
 
