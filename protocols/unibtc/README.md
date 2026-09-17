@@ -40,6 +40,7 @@ An understated total is worse than no data: it inflates PoR coverage and hides a
 - `time` is at most 1 hour older than the pinned block.
 - Every chain holding meaningful supply is present with a positive value: Ethereum (1), BSC (56), Base (8453), BOB (60808), Berachain (80094) — 99.4% of supply on 2026-09-16.
 - The Ethereum entry matches the block-pinned on-chain `totalSupply()` within 1%.
+- `total_supply` equals the sum of `supplies` within 0.01 uniBTC. The checks use the total, so the per-chain safeguards above only protect it when the two agree.
 
 The required-chain list is static; a new chain gaining material supply must be added to `API_REQUIRED_CHAINS`.
 

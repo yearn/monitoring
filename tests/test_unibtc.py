@@ -350,6 +350,67 @@ def test_unexpected_minting_rearms_after_baseline_gap(monkeypatch: pytest.Monkey
     assert all(alert.severity == AlertSeverity.CRITICAL for alert in alerts)
 
 
+class _FlakySender:
+    """send_alert stand-in that raises for the first ``failures`` calls, like a Telegram outage."""
+
+    def __init__(self, failures: int) -> None:
+        self.failures = failures
+        self.delivered: list[Alert] = []
+
+    def __call__(self, alert: Alert) -> None:
+        if self.failures > 0:
+            self.failures -= 1
+            raise RuntimeError("simulated delivery failure")
+        self.delivered.append(alert)
+
+
+def test_unexpected_minting_retries_after_delivery_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed send must not mark the mint as alerted (PR #362 review)."""
+    stub_cache(monkeypatch)
+    sender = _FlakySender(failures=1)
+    monkeypatch.setattr(unibtc, "send_alert", sender)
+    now = 1_700_000_000
+    base = 300 * 10**8
+    minted = base + 10 * 10**8
+    unibtc.store_supply_snapshots([(now - 3600, base), (now - 24 * 3600, base)])
+
+    with pytest.raises(RuntimeError):
+        unibtc.check_unexpected_minting(make_state(total_supply=minted, block_timestamp=now))
+    unibtc.check_unexpected_minting(make_state(total_supply=minted, block_timestamp=now + 600))
+
+    assert [alert.severity for alert in sender.delivered] == [AlertSeverity.CRITICAL, AlertSeverity.HIGH]
+
+
+def test_unexpected_minting_second_failure_keeps_first_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """1h delivered, 24h failed: only the 24h alert is retried."""
+    stub_cache(monkeypatch)
+    sender = _FlakySender(failures=0)
+    now = 1_700_000_000
+    base = 300 * 10**8
+    minted = base + 10 * 10**8
+    unibtc.store_supply_snapshots([(now - 3600, base), (now - 24 * 3600, base)])
+
+    def fail_24h(alert: Alert) -> None:
+        if "24h" in alert.message:
+            raise RuntimeError("simulated delivery failure")
+        sender(alert)
+
+    monkeypatch.setattr(unibtc, "send_alert", fail_24h)
+    with pytest.raises(RuntimeError):
+        unibtc.check_unexpected_minting(make_state(total_supply=minted, block_timestamp=now))
+    monkeypatch.setattr(unibtc, "send_alert", sender)
+    unibtc.check_unexpected_minting(make_state(total_supply=minted, block_timestamp=now + 600))
+
+    assert [alert.severity for alert in sender.delivered] == [AlertSeverity.CRITICAL, AlertSeverity.HIGH]
+
+
+def test_mint_alert_due_does_not_record_send(monkeypatch: pytest.MonkeyPatch) -> None:
+    cache = stub_cache(monkeypatch)
+
+    assert unibtc.mint_alert_due(unibtc.CACHE_KEY_MINT_1H_ALERTED, 10**9, 31_000_000_000, 10**9) is True
+    assert unibtc.CACHE_KEY_MINT_1H_ALERTED not in cache
+
+
 def test_mint_alert_due_rearms_on_missing_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
     cache = stub_cache(monkeypatch)
     cache[unibtc.CACHE_KEY_MINT_1H_ALERTED] = "31100000000"
@@ -580,6 +641,33 @@ def test_api_rejected_when_stale() -> None:
 def test_api_accepts_timestamp_slightly_ahead_of_block() -> None:
     state = make_state()
     assert unibtc.api_stats_problems(make_api(updated_at=state.block_timestamp + 30), state) == []
+
+
+def test_api_rejected_when_total_excludes_listed_chain() -> None:
+    """Every required chain listed, Ethereum matches, but total omits BOB (PR #362 review)."""
+    full = make_api()
+    bob = next(entry.supply for entry in full.chain_supplies if entry.chain_id == 60808)
+    api = unibtc.ApiStats(
+        total_supply=full.total_supply - bob,
+        updated_at=full.updated_at,
+        chain_supplies=full.chain_supplies,
+    )
+
+    problems = unibtc.api_stats_problems(api, make_state())
+
+    assert len(problems) == 1
+    assert "differs from per-chain sum" in problems[0]
+
+
+def test_api_accepts_rounding_between_total_and_sum() -> None:
+    """Live totals differed from the per-chain sum by 4.2e-7 uniBTC."""
+    full = make_api()
+    api = unibtc.ApiStats(
+        total_supply=full.total_supply + Decimal("0.00000042"),
+        updated_at=full.updated_at,
+        chain_supplies=full.chain_supplies,
+    )
+    assert unibtc.api_stats_problems(api, make_state()) == []
 
 
 def test_api_rejected_when_mainnet_disagrees_with_chain() -> None:

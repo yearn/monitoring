@@ -74,6 +74,8 @@ RESERVE_API_URL = "https://affiliate-api-eosin.vercel.app/api/v1/third/stats/uni
 API_MAX_AGE_SECONDS = 60 * 60
 # The API's Ethereum entry must match our block-pinned totalSupply within this fraction.
 API_MAINNET_SUPPLY_TOLERANCE = Decimal("0.01")
+# total_supply must equal the per-chain sum up to rounding (observed difference: 4.2e-7 uniBTC).
+API_TOTAL_SUM_TOLERANCE = Decimal("0.01")
 MAINNET_CHAIN_ID = 1
 # Chains holding >= ~100 uniBTC (99.4% of supply on 2026-09-16). A response missing any
 # of these, or reporting zero for one, understates total supply and is rejected.
@@ -540,6 +542,15 @@ def api_stats_problems(stats: ApiStats, state: UnibtcState) -> list[str]:
         elif entry.supply <= 0:
             problems.append(f"{name} (chain {chain_id}) supply is {entry.supply}")
 
+    # The checks consume total_supply, but the safeguards above inspect supplies; they
+    # only protect the total if the two agree.
+    chain_sum = sum((entry.supply for entry in stats.chain_supplies), Decimal("0"))
+    if abs(stats.total_supply - chain_sum) > API_TOTAL_SUM_TOLERANCE:
+        problems.append(
+            f"total_supply {format_decimal_amount(stats.total_supply)} differs from per-chain sum "
+            f"{format_decimal_amount(chain_sum)} by {format_decimal_amount(abs(stats.total_supply - chain_sum))}"
+        )
+
     mainnet = by_chain.get(MAINNET_CHAIN_ID)
     onchain = normalize_token_amount(state.total_supply, UNIBTC_DECIMALS)
     if mainnet is not None and mainnet.supply > 0 and onchain > 0:
@@ -620,8 +631,12 @@ def mint_alert_due(key: str, delta: int | None, current_supply: int, threshold: 
     supply may have fallen back well below it, and holding the stale marker would
     silently suppress the next genuine mint.
 
+    This only decides; it never records a send. The caller writes ``current_supply``
+    under ``key`` after ``send_alert`` returns, so a failed delivery (which raises)
+    leaves the marker unset and the alert is retried on the next run.
+
     Args:
-        key: Cache key holding the ``totalSupply`` at the last alert.
+        key: Cache key holding the ``totalSupply`` at the last delivered alert.
         delta: Window supply delta, or None when no baseline is available.
         current_supply: Current ``totalSupply``.
         threshold: Raw mint threshold for this window.
@@ -634,10 +649,7 @@ def mint_alert_due(key: str, delta: int | None, current_supply: int, threshold: 
         if last_alert_supply:
             _set_cache(key, 0)
         return False
-    if last_alert_supply and current_supply < last_alert_supply + threshold:
-        return False
-    _set_cache(key, current_supply)
-    return True
+    return not (last_alert_supply and current_supply < last_alert_supply + threshold)
 
 
 def check_unexpected_minting(state: UnibtcState) -> None:
@@ -694,6 +706,8 @@ def check_unexpected_minting(state: UnibtcState) -> None:
                 PROTOCOL,
             )
         )
+        # Recorded per alert and only after delivery: send_alert raises on failure.
+        _set_cache(CACHE_KEY_MINT_1H_ALERTED, state.total_supply)
     if due_24h and delta_24h is not None:
         send_alert(
             Alert(
@@ -707,6 +721,7 @@ def check_unexpected_minting(state: UnibtcState) -> None:
                 PROTOCOL,
             )
         )
+        _set_cache(CACHE_KEY_MINT_24H_ALERTED, state.total_supply)
 
     snapshots.append((now, state.total_supply))
     store_supply_snapshots(prune_snapshots(snapshots, now))

@@ -429,7 +429,7 @@ protocols:
       - name: "Vault or Router Paused"
         description: "Vault outOfService()/paused() or live DelayRedeemRouter paused() is true"
       - name: "Proof of Reserves"
-        description: "Chainlink PoR / Bedrock API supply <100% (CRITICAL) or <101% (HIGH); skipped when the API response is stale, missing a major chain, or disagrees with on-chain Ethereum supply"
+        description: "Chainlink PoR / Bedrock API supply <100% (CRITICAL) or <101% (HIGH); skipped when the API response is stale, missing a major chain, inconsistent with its own per-chain sum, or disagrees with on-chain Ethereum supply"
       - name: "PoR Staleness"
         description: "Chainlink PoR updatedAt older than the Vault feederHeartbeat, capped at 86,400s"
       - name: "Supply Feeder"
