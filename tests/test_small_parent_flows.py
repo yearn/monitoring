@@ -217,11 +217,14 @@ def test_gql_request_reports_once_and_raises(monkeypatch) -> None:
 
     monkeypatch.setattr(monitor, "ENVIO_GRAPHQL_URL", "https://envio.example/graphql")
     monkeypatch.setattr(monitor, "http_json", failing_http)
-    monkeypatch.setattr(monitor, "send_envio_error_message", lambda *args, **kwargs: reported.append(args))
+    monkeypatch.setattr(monitor, "send_envio_error_message", lambda *args, **kwargs: reported.append((args, kwargs)))
 
     with pytest.raises(monitor.EnvioUnavailableError):
         monitor.gql_request("query {}", {})
     assert len(reported) == 1
+    args, kwargs = reported[0]
+    assert args[1] == monitor.PROTOCOL
+    assert kwargs["alert_protocol"] == "yearn-internal"
 
 
 def test_first_run_lookback_floor_persists_without_events(monkeypatch) -> None:
@@ -296,7 +299,7 @@ def test_flow_aggregator_emits_one_alert_for_all_flows(monkeypatch) -> None:
     assert len(delivered) == 1
     assert delivered[0].channel == SMALL_DEPOSITS_CHANNEL
     assert delivered[0].severity is AlertSeverity.LOW
-    assert delivered[0].protocol == monitor.PROTOCOL
+    assert delivered[0].protocol == "yearn-internal"
     body = delivered[0].message
     assert body.startswith("ℹ️ Small parent-vault flows — 5 in this run")
     assert body.count("→") == 5  # one arrow per flow line

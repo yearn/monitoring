@@ -36,6 +36,10 @@ DEFAULT_MAX_FLOWS = 500
 # Reserve room for send_alert's prefix and Telegram's UTF-16 emoji accounting.
 MAX_AGGREGATE_LENGTH = MAX_MESSAGE_LENGTH - 32
 PROTOCOL = "yearn"
+# Stored alert-history key for flow and Envio error alerts. Kept off the public
+# Yearn monitoring page, which queries ``yearn``; Telegram routing and the
+# ``[yearn]`` label still use ``PROTOCOL``.
+ALERT_PROTOCOL = "yearn-internal"
 STATE_NAMESPACE = "yearn.small_parent_flows"
 FLOW_TYPES = ("deposit", "withdrawal")
 FLOW_ENTITY = {"deposit": "Deposit", "withdrawal": "Withdraw"}
@@ -120,7 +124,7 @@ class FlowAggregator:
             Alert(
                 AlertSeverity.LOW,
                 message,
-                PROTOCOL,
+                ALERT_PROTOCOL,
                 channel=resolve_channel(SMALL_DEPOSITS_CHANNEL, PROTOCOL),
             )
         )
@@ -274,6 +278,7 @@ def gql_request(query: str, variables: dict) -> dict:
             f"Small parent flow monitor: Envio GraphQL request failed ({exc}). Skipping this run.",
             PROTOCOL,
             source="small_parent_flows",
+            alert_protocol=ALERT_PROTOCOL,
         )
         logger.error("Envio request failed: %s", exc)
         raise EnvioUnavailableError(f"Envio request failed: {exc}") from exc
@@ -283,6 +288,7 @@ def gql_request(query: str, variables: dict) -> dict:
             f"Small parent flow monitor: Envio GraphQL errors: {payload['errors']}",
             PROTOCOL,
             source="small_parent_flows",
+            alert_protocol=ALERT_PROTOCOL,
         )
         logger.error("Envio GraphQL errors: %s", payload["errors"])
         raise EnvioUnavailableError(f"Envio GraphQL errors: {payload['errors']}")

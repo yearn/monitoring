@@ -73,6 +73,11 @@ group, `TELEGRAM_CHAT_ID_SMALL_DEPOSITS`, so the volume doesn't spam the protoco
 main chat or the curation group. If that chat id is unset the aggregated message falls
 back to the yearn group.
 
+The aggregated message and this monitor's Envio error messages are stored in alert
+history under the `yearn-internal` protocol key, so they do not appear on the public
+Yearn monitoring page (which queries `yearn`). Telegram routing and the `[yearn]`
+label on Envio errors are unchanged.
+
 A run with no qualifying flows does not produce a Telegram message — a quiet day
 shouldn't wake up the channel with an empty "0 flows" header.
 
