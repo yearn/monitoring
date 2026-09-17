@@ -47,7 +47,7 @@ from utils.cache import (
     write_last_value_with_timestamp_to_file,
 )
 from utils.chains import Chain
-from utils.formatting import format_duration, format_usd, format_with_suffix
+from utils.formatting import format_age, format_duration, format_usd, format_with_suffix
 from utils.logger import get_logger
 from utils.telegram import escape_markdown
 from utils.web3_wrapper import ChainManager
@@ -77,6 +77,7 @@ ENVIO_PAGE_SIZE = int(os.getenv("THREE_JANE_ENVIO_PAGE_SIZE", "1000"))
 DECIMALS = 6
 ONE_SHARE = 10**DECIMALS
 RATE_SCALE = 10**18
+SECONDS_PER_MINUTE = 60
 SECONDS_PER_DAY = 86_400
 
 # --- Cache Keys ---
@@ -126,9 +127,14 @@ ACCOUNTABLE_FEED = AccountableFeedConfig(
         "Slope - Forward Flows",
         "USD3 On-Chain Reserves",
     ),
-    # The dashboard UI declares Slope as Weekly, while older JSON responses
-    # reported Daily. Bind the operator-confirmed cadence to avoid false alerts.
-    source_frequency_overrides=(("Slope - Forward Flows", "WEEKLY"),),
+    # Correct only the known DAILY/weekly disagreement; honor future cadence changes.
+    source_frequency_corrections=(("Slope - Forward Flows", "DAILY", "WEEKLY"),),
+    # Permit one missed 15-minute refresh (aggregate report and on-chain sources),
+    # or a midnight-dated weekly report uploaded by midday UTC the day after it is due.
+    grace_by_cadence_seconds=(
+        (15 * SECONDS_PER_MINUTE, 30 * SECONDS_PER_MINUTE),
+        (7 * SECONDS_PER_DAY, SECONDS_PER_DAY * 3 // 2),
+    ),
 )
 # TODO: Recalibrate both thresholds after Accountable includes 3Jane's idle
 # funds in the reported reserve totals. These values are temporary test bands.
@@ -960,7 +966,7 @@ def _format_accountable_report(report: AccountableReport) -> str:
         f"Liabilities: {format_usd(float(report.total_supply))}\n"
         f"🧮 Net: {format_usd(float(report.net))} | Verifiability: {report.verifiability}%\n"
         f"🕒 Report: {report.report_timestamp:%Y-%m-%d %H:%M:%S UTC} "
-        f"({format_duration(report.report_age_seconds)} old)"
+        f"({format_age(report.report_age_seconds)} old)"
     )
 
 

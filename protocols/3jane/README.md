@@ -44,7 +44,7 @@
 | Borrower delinquent/default watch | New milestone: delinquent, ≤14d, ≤7d, ≤3d, ≤1d, default | MEDIUM |
 | Accountable collateral ratio | < 95% (band transition) | CRITICAL |
 | Accountable collateral ratio | < 99% (band transition) | HIGH |
-| Accountable feed stale | Short cadence >2 periods; long cadence >1 period (alert-once) | MEDIUM |
+| Accountable feed stale | Aggregate report or source: >1h for 15-minute/`live` cadence, >8.5d for weekly cadence, otherwise >2 short periods or >1 long period; required source missing, malformed, or future-dated (alert-once) | MEDIUM |
 | Accountable feed unavailable | First consecutive miss HIGH; second CRITICAL (then quiet until recovery) | HIGH / CRITICAL |
 | Monitoring run failure | Uncaught exception in `main()` | LOW |
 
@@ -103,9 +103,11 @@ The API rounds `collateralization` to six decimals. Near the alert boundary that
 
 A fresh aggregate timestamp does not prove every input is fresh, and this matters more than usual here: `reserves_split` is essentially all "Morpho Credit", of which the bulk is off-chain loan receivables priced by manually uploaded document reports. Those routinely run past their declared cadence.
 
-The aggregate report and each required source use their declared cadence. Cadences of one hour or less get one missed-period allowance and become stale after two periods; longer cadences become stale as soon as the first expected update is late. The aggregate cadence comes from `reserves.interval`; source cadences come from each source's `frequency`. This means `15 MIN` becomes stale after 30 minutes, hourly after 2 hours, daily after 24 hours, and weekly after 7 days. A source whose `lastUpdated` is in the future is treated as unusable rather than clamped to "fresh", which would defeat the check. Unknown additional sources with an unrecognised cadence are skipped rather than flagged, so a schema addition on Accountable's side cannot spuriously page us.
+The aggregate report uses `reserves.interval`; sources use their effective `frequency`. The base freshness limit is two periods for cadences of one hour or less and one period for longer cadences. `live` parses as a 15-minute cadence. The 3Jane configuration adds grace by cadence, applied to the aggregate report and every source alike: 30 minutes for a 15-minute cadence (1-hour limit, tolerating up to three missed refreshes) and 1.5 days for a weekly cadence (8.5-day limit). Grace is keyed by cadence rather than source name, so a source that changes cadence gets the limit for its new cadence, subject to the Slope correction below, and a newly added source gets the same grace as its peers. Document reports carry midnight UTC timestamps, so the weekly limit expires at 12:00 UTC on the day after the next report is due: an upload by then does not alert, while a later upload raises one MEDIUM stale alert that clears when the report lands.
 
-The 3Jane dashboard UI declares `Slope - Forward Flows` as weekly, while older `/dashboard` JSON responses reported it as daily. The feed configuration therefore binds that source to `WEEKLY`; stale alerts display the effective cadence used by the monitor.
+Stale alerts show both age and the effective limit, for the aggregate report and for each stale source. A source whose `lastUpdated` is in the future is treated as unusable rather than clamped to "fresh", which would defeat the check. Unknown additional sources with an unrecognised cadence are skipped rather than flagged, so a schema addition on Accountable's side cannot spuriously page us.
+
+The 3Jane dashboard UI declares `Slope - Forward Flows` as weekly, while `/dashboard` JSON has reported it as daily. The feed configuration corrects `DAILY` to `WEEKLY` for this source; any other reported cadence is used as reported. Stale alerts display the effective cadence used by the monitor.
 
 The four known 3Jane sources are required, and a missing or malformed freshness record for one of them makes the feed **stale**, not unavailable. Freshness can no longer be established, but the collateral ratio itself is unaffected — so the report is still returned and the sub-95% check still runs. An upstream source rename degrades the feed to a MEDIUM staleness alert; it cannot silently disable the CRITICAL solvency check.
 
