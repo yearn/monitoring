@@ -47,7 +47,7 @@ from utils.cache import (
     write_last_value_with_timestamp_to_file,
 )
 from utils.chains import Chain
-from utils.formatting import format_duration, format_usd, format_with_suffix
+from utils.formatting import format_age, format_duration, format_usd, format_with_suffix
 from utils.logger import get_logger
 from utils.telegram import escape_markdown
 from utils.web3_wrapper import ChainManager
@@ -77,6 +77,7 @@ ENVIO_PAGE_SIZE = int(os.getenv("THREE_JANE_ENVIO_PAGE_SIZE", "1000"))
 DECIMALS = 6
 ONE_SHARE = 10**DECIMALS
 RATE_SCALE = 10**18
+SECONDS_PER_MINUTE = 60
 SECONDS_PER_DAY = 86_400
 
 # --- Cache Keys ---
@@ -126,16 +127,14 @@ ACCOUNTABLE_FEED = AccountableFeedConfig(
         "Slope - Forward Flows",
         "USD3 On-Chain Reserves",
     ),
-    # The dashboard UI declares Slope as Weekly, while older JSON responses
-    # reported Daily. Bind the operator-confirmed cadence to avoid false alerts.
-    source_frequency_overrides=(("Slope - Forward Flows", "WEEKLY"),),
-    # On-chain sources sometimes miss a 15-minute refresh; document reports
-    # carry midnight timestamps and may be uploaded the following day.
-    source_staleness_grace_seconds=(
-        ("LendSwift - Warehouse Senior Note", 24 * 60 * 60),
-        ("Slope - Forward Flows", 24 * 60 * 60),
-        ("USD3 Minted Liabilities", 30 * 60),
-        ("USD3 On-Chain Reserves", 30 * 60),
+    # Correct only the known DAILY/weekly disagreement; honor future cadence changes.
+    source_frequency_corrections=(("Slope - Forward Flows", "DAILY", "WEEKLY"),),
+    # Permit one missed 15-minute refresh (aggregate report and on-chain sources),
+    # or a weekly report uploaded any time on the day after its midnight-dated
+    # reporting period.
+    grace_by_cadence_seconds=(
+        (15 * SECONDS_PER_MINUTE, 30 * SECONDS_PER_MINUTE),
+        (7 * SECONDS_PER_DAY, 2 * SECONDS_PER_DAY),
     ),
 )
 # TODO: Recalibrate both thresholds after Accountable includes 3Jane's idle
@@ -968,7 +967,7 @@ def _format_accountable_report(report: AccountableReport) -> str:
         f"Liabilities: {format_usd(float(report.total_supply))}\n"
         f"🧮 Net: {format_usd(float(report.net))} | Verifiability: {report.verifiability}%\n"
         f"🕒 Report: {report.report_timestamp:%Y-%m-%d %H:%M:%S UTC} "
-        f"({format_duration(report.report_age_seconds)} old)"
+        f"({format_age(report.report_age_seconds)} old)"
     )
 
 

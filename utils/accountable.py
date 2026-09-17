@@ -29,6 +29,7 @@ from typing import Any
 
 import requests
 
+from utils.formatting import format_age
 from utils.http_client import request_with_retry
 from utils.logger import get_logger
 
@@ -90,11 +91,20 @@ _FREQUENCY_UNIT_SECONDS: dict[str, int] = {
 }
 
 
-def _stale_after_seconds(cadence_seconds: int) -> int:
-    """Return the age at which a report or source becomes stale."""
+def _stale_after_seconds(cadence_seconds: int, grace_by_cadence: dict[int, int] | None = None) -> int:
+    """Return the age at which a report or source becomes stale.
+
+    Args:
+        cadence_seconds: Parsed cadence of the report or source.
+        grace_by_cadence: Optional extra seconds keyed by cadence.
+
+    Returns:
+        The maximum acceptable age in seconds.
+    """
+    base = cadence_seconds
     if cadence_seconds <= SHORT_CADENCE_MAX_SECONDS:
-        return cadence_seconds * SHORT_CADENCE_STALE_PERIODS
-    return cadence_seconds
+        base = cadence_seconds * SHORT_CADENCE_STALE_PERIODS
+    return base + (grace_by_cadence or {}).get(cadence_seconds, 0)
 
 
 class AccountableError(Exception):
@@ -127,10 +137,12 @@ class AccountableFeedConfig:
         message_url: Public URL for the dashboard, used in alerts.
         dashboard_type: Dashboard type the endpoint serves
         required_sources: Source names that must carry usable freshness metadata.
-        source_frequency_overrides: Trusted source-frequency corrections keyed
-            by source name, used when the JSON endpoint disagrees with the UI.
-        source_staleness_grace_seconds: Extra time allowed after the normal
-            cadence-based limit, keyed by source name.
+        source_frequency_corrections: Corrections as source name, reported
+            frequency, and effective frequency. A correction applies only while
+            the reported frequency still matches the known bad value.
+        grace_by_cadence_seconds: Extra seconds after the normal freshness
+            limit, keyed by the parsed cadence in seconds. Applies to both the
+            aggregate report and each source.
     """
 
     dfid: str
@@ -139,8 +151,35 @@ class AccountableFeedConfig:
     message_url: str
     dashboard_type: str
     required_sources: tuple[str, ...] = ()
-    source_frequency_overrides: tuple[tuple[str, str], ...] = ()
-    source_staleness_grace_seconds: tuple[tuple[str, int], ...] = ()
+    source_frequency_corrections: tuple[tuple[str, str, str], ...] = ()
+    grace_by_cadence_seconds: tuple[tuple[int, int], ...] = ()
+
+    def __post_init__(self) -> None:
+        """Reject ambiguous or ineffective freshness configuration."""
+        if len(self.required_sources) != len(set(self.required_sources)):
+            raise ValueError("required_sources contains a duplicate name")
+
+        seen_names: set[str] = set()
+        for name, reported, effective in self.source_frequency_corrections:
+            if name in seen_names:
+                raise ValueError(f"source_frequency_corrections contains duplicate name {name!r}")
+            if name not in self.required_sources:
+                raise ValueError(f"source_frequency_corrections name {name!r} is not required")
+            if parse_frequency_seconds(reported) is None:
+                raise ValueError(f"source_frequency_corrections has unrecognised reported frequency {reported!r}")
+            if parse_frequency_seconds(effective) is None:
+                raise ValueError(f"source_frequency_corrections has unrecognised effective frequency {effective!r}")
+            seen_names.add(name)
+
+        seen_cadences: set[int] = set()
+        for cadence, grace in self.grace_by_cadence_seconds:
+            if isinstance(cadence, bool) or not isinstance(cadence, int) or cadence <= 0:
+                raise ValueError(f"grace cadence must be a positive integer: {cadence!r}")
+            if isinstance(grace, bool) or not isinstance(grace, int) or grace < 0:
+                raise ValueError(f"grace must be a non-negative integer: {grace!r}")
+            if cadence in seen_cadences:
+                raise ValueError(f"grace_by_cadence_seconds contains duplicate cadence {cadence}")
+            seen_cadences.add(cadence)
 
 
 @dataclass(frozen=True)
@@ -156,7 +195,7 @@ class DataSourceSnapshot:
 
     @property
     def is_stale(self) -> bool:
-        """Whether the source is older than its cadence-based age limit."""
+        """Whether the source is older than its cadence limit plus configured grace."""
         return self.age_seconds > self.max_age_seconds
 
 
@@ -184,18 +223,19 @@ class AccountableReport:
     report_age_seconds: int
     report_interval: str
     report_cadence_seconds: int
+    report_max_age_seconds: int
     sources: tuple[DataSourceSnapshot, ...]
     source_problems: tuple[str, ...] = ()
 
     @property
     def stale_sources(self) -> tuple[DataSourceSnapshot, ...]:
-        """Sources older than their cadence-based age limits."""
+        """Sources older than their cadence limits plus configured grace."""
         return tuple(source for source in self.sources if source.is_stale)
 
     @property
     def report_is_stale(self) -> bool:
-        """Whether the aggregate report is older than its cadence-based limit."""
-        return self.report_age_seconds > _stale_after_seconds(self.report_cadence_seconds)
+        """Whether the aggregate report is older than its cadence limit plus configured grace."""
+        return self.report_age_seconds > self.report_max_age_seconds
 
     @property
     def report_timestamp(self) -> datetime:
@@ -302,11 +342,9 @@ def parse_frequency_seconds(frequency: Any) -> int | None:
 def _parse_data_sources(
     payload: Any,
     now_ms: int,
-    required_sources: tuple[str, ...] = (),
-    frequency_overrides: tuple[tuple[str, str], ...] = (),
-    staleness_grace_seconds: tuple[tuple[str, int], ...] = (),
+    config: AccountableFeedConfig,
 ) -> tuple[tuple[DataSourceSnapshot, ...], tuple[str, ...]]:
-    """Build source snapshots with cadence-based staleness budgets.
+    """Build source snapshots with cadence limits plus configured grace.
 
     Unknown sources with an unrecognised cadence or missing timestamp are
     skipped, so an Accountable schema addition cannot spuriously page us. A
@@ -320,13 +358,13 @@ def _parse_data_sources(
         The parsed snapshots, and descriptions of any required-source problems.
     """
     if not isinstance(payload, dict):
-        if required_sources:
+        if config.required_sources:
             return (), ("dataSources is missing or not an object",)
         return (), ()
 
-    required = set(required_sources)
-    overrides = dict(frequency_overrides)
-    grace_by_source = dict(staleness_grace_seconds)
+    required = set(config.required_sources)
+    corrections = {name: (reported, effective) for name, reported, effective in config.source_frequency_corrections}
+    grace_by_cadence = dict(config.grace_by_cadence_seconds)
     problems: list[str] = []
     missing = sorted(required.difference(payload))
     if missing:
@@ -340,7 +378,16 @@ def _parse_data_sources(
                 problems.append(f"dataSources.{name} is not an object")
             continue
         reported_frequency = entry.get("frequency")
-        effective_frequency = overrides.get(str(name), reported_frequency)
+        effective_frequency = reported_frequency
+        correction = corrections.get(str(name))
+        if correction and parse_frequency_seconds(reported_frequency) == parse_frequency_seconds(correction[0]):
+            effective_frequency = correction[1]
+            logger.info(
+                "Accountable source %s reports frequency %r; using configured correction %r",
+                name,
+                reported_frequency,
+                effective_frequency,
+            )
         cadence_seconds = parse_frequency_seconds(effective_frequency)
         if cadence_seconds is None:
             if is_required:
@@ -348,13 +395,6 @@ def _parse_data_sources(
             else:
                 logger.debug("Accountable source %s has unparseable frequency %r", name, effective_frequency)
             continue
-        if str(name) in overrides and reported_frequency != effective_frequency:
-            logger.warning(
-                "Accountable source %s reports frequency %r; using configured override %r",
-                name,
-                reported_frequency,
-                effective_frequency,
-            )
         try:
             last_updated_ms = _coerce_int(entry.get("lastUpdated"), f"dataSources.{name}.lastUpdated")
         except AccountableError as exc:
@@ -390,7 +430,7 @@ def _parse_data_sources(
                 frequency=str(effective_frequency),
                 last_updated_ms=last_updated_ms,
                 age_seconds=max(0, age_seconds),
-                max_age_seconds=_stale_after_seconds(cadence_seconds) + grace_by_source.get(str(name), 0),
+                max_age_seconds=_stale_after_seconds(cadence_seconds, grace_by_cadence),
             )
         )
     return tuple(snapshots), tuple(problems)
@@ -494,9 +534,7 @@ def parse_report(payload: Any, config: AccountableFeedConfig, now_ms: int) -> Ac
     sources, source_problems = _parse_data_sources(
         data.get("dataSources"),
         now_ms,
-        config.required_sources,
-        config.source_frequency_overrides,
-        config.source_staleness_grace_seconds,
+        config,
     )
 
     return AccountableReport(
@@ -511,6 +549,7 @@ def parse_report(payload: Any, config: AccountableFeedConfig, now_ms: int) -> Ac
         report_age_seconds=max(0, age_seconds),
         report_interval=str(report_interval_value),
         report_cadence_seconds=report_cadence_seconds,
+        report_max_age_seconds=_stale_after_seconds(report_cadence_seconds, dict(config.grace_by_cadence_seconds)),
         sources=sources,
         source_problems=source_problems,
     )
@@ -519,15 +558,16 @@ def parse_report(payload: Any, config: AccountableFeedConfig, now_ms: int) -> Ac
 def evaluate_report(report: AccountableReport) -> AccountableFetchResult:
     """Classify a parsed report as OK or STALE.
 
-    Short cadences of up to one hour become stale after two periods. Longer
-    cadences become stale after the first missed update. Required sources whose
-    freshness cannot be established are also stale.
+    Short cadences of up to one hour get two periods, and longer cadences get
+    one period. Configured cadence grace extends those limits. Required sources
+    whose freshness cannot be established are also stale.
     """
     if report.report_is_stale:
         return AccountableFetchResult(
             AccountableStatus.STALE,
             report,
-            f"report is {_format_age(report.report_age_seconds)} old (interval {report.report_interval})",
+            f"report is {format_age(report.report_age_seconds)} old "
+            f"({format_age(report.report_max_age_seconds)} limit, interval {report.report_interval})",
         )
 
     if report.source_problems:
@@ -540,24 +580,13 @@ def evaluate_report(report: AccountableReport) -> AccountableFetchResult:
     stale = report.stale_sources
     if stale:
         detail = ", ".join(
-            f"{source.name} ({_format_age(source.age_seconds)} old, "
-            f"{_format_age(source.max_age_seconds)} limit, cadence {source.frequency})"
+            f"{source.name} ({format_age(source.age_seconds)} old, "
+            f"{format_age(source.max_age_seconds)} limit, cadence {source.frequency})"
             for source in stale
         )
         return AccountableFetchResult(AccountableStatus.STALE, report, f"stale sources: {detail}")
 
     return AccountableFetchResult(AccountableStatus.OK, report)
-
-
-def _format_age(seconds: int) -> str:
-    """Format a duration, rounding up so a threshold breach stays visible."""
-    minutes = (seconds + 59) // 60
-    if minutes < 60:
-        return f"{minutes}m"
-    hours, remaining_minutes = divmod(minutes, 60)
-    if remaining_minutes:
-        return f"{hours}h {remaining_minutes}m"
-    return f"{hours}h"
 
 
 def fetch_report(config: AccountableFeedConfig, now_ms: int | None = None) -> AccountableFetchResult:

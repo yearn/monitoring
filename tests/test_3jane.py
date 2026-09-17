@@ -1,11 +1,14 @@
 import importlib.util
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
+from typing import Any, cast
 
 import pytest
 
 from utils import paths, store
+from utils.accountable import AccountableStatus, evaluate_report, parse_report
 
 
 def load_3jane_module() -> ModuleType:
@@ -515,6 +518,135 @@ def test_parse_envio_borrower_default_watch_rows_default_started_forces_default(
 
 # --- Accountable Proof of Solvency ---
 
+ACCOUNTABLE_FIXTURE_NOW_MS = 1_785_491_000_000
+
+
+def fresh_accountable_payload() -> dict[str, Any]:
+    """Load the recorded dashboard response with current source timestamps."""
+    path = Path(__file__).parent / "fixtures" / "accountable_3jane_dashboard.json"
+    payload = cast(dict[str, Any], json.loads(path.read_text()))
+    for source in payload["data"]["dataSources"].values():
+        source["lastUpdated"] = str(ACCOUNTABLE_FIXTURE_NOW_MS)
+    return payload
+
+
+def test_accountable_real_config_accepts_recorded_payload() -> None:
+    module = load_3jane_module()
+    path = Path(__file__).parent / "fixtures" / "accountable_3jane_dashboard.json"
+    payload = json.loads(path.read_text())
+
+    result = evaluate_report(parse_report(payload, module.ACCOUNTABLE_FEED, ACCOUNTABLE_FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.OK
+    assert result.report is not None
+    slope = next(source for source in result.report.sources if source.name == "Slope - Forward Flows")
+    assert slope.frequency == "WEEKLY"
+
+
+def test_accountable_real_config_live_aggregate_limit() -> None:
+    module = load_3jane_module()
+    payload = fresh_accountable_payload()
+    payload["data"]["reserves"]["interval"] = "live"
+    payload["data"]["ts"] = str(ACCOUNTABLE_FIXTURE_NOW_MS - 60 * 60 * 1000)
+
+    result = evaluate_report(parse_report(payload, module.ACCOUNTABLE_FEED, ACCOUNTABLE_FIXTURE_NOW_MS))
+    assert result.status is AccountableStatus.OK
+
+    payload["data"]["ts"] = str(ACCOUNTABLE_FIXTURE_NOW_MS - (60 * 60 + 1) * 1000)
+    result = evaluate_report(parse_report(payload, module.ACCOUNTABLE_FEED, ACCOUNTABLE_FIXTURE_NOW_MS))
+    assert result.status is AccountableStatus.STALE
+    assert "1h 1m old (1h limit, interval live)" in result.reason
+
+
+@pytest.mark.parametrize("name", ["USD3 Minted Liabilities", "USD3 On-Chain Reserves"])
+def test_accountable_real_config_onchain_limit(name: str) -> None:
+    module = load_3jane_module()
+    payload = fresh_accountable_payload()
+    source = payload["data"]["dataSources"][name]
+    source["lastUpdated"] = str(ACCOUNTABLE_FIXTURE_NOW_MS - 60 * 60 * 1000)
+
+    result = evaluate_report(parse_report(payload, module.ACCOUNTABLE_FEED, ACCOUNTABLE_FIXTURE_NOW_MS))
+    assert result.status is AccountableStatus.OK
+
+    source["lastUpdated"] = str(ACCOUNTABLE_FIXTURE_NOW_MS - (60 * 60 + 1) * 1000)
+    result = evaluate_report(parse_report(payload, module.ACCOUNTABLE_FEED, ACCOUNTABLE_FIXTURE_NOW_MS))
+    assert result.status is AccountableStatus.STALE
+    assert name in result.reason
+    assert "1h limit" in result.reason
+
+
+@pytest.mark.parametrize("name", ["LendSwift - Warehouse Senior Note", "Slope - Forward Flows"])
+def test_accountable_real_config_covers_next_day_document_upload(name: str) -> None:
+    module = load_3jane_module()
+    payload = fresh_accountable_payload()
+    source = payload["data"]["dataSources"][name]
+    source["lastUpdated"] = str(ACCOUNTABLE_FIXTURE_NOW_MS - (8 * 24 * 60 * 60 + 5 * 60) * 1000)
+
+    result = evaluate_report(parse_report(payload, module.ACCOUNTABLE_FEED, ACCOUNTABLE_FIXTURE_NOW_MS))
+    assert result.status is AccountableStatus.OK
+
+    source["lastUpdated"] = str(ACCOUNTABLE_FIXTURE_NOW_MS - (9 * 24 * 60 * 60 + 1) * 1000)
+    result = evaluate_report(parse_report(payload, module.ACCOUNTABLE_FEED, ACCOUNTABLE_FIXTURE_NOW_MS))
+    assert result.status is AccountableStatus.STALE
+    assert name in result.reason
+    assert "9d limit" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("name", "frequency", "age_seconds", "expected_status", "expected_limit"),
+    [
+        ("LendSwift - Warehouse Senior Note", "15 MIN", 20 * 3600, AccountableStatus.STALE, 3600),
+        ("Slope - Forward Flows", "15 MIN", 20 * 3600, AccountableStatus.STALE, 3600),
+        ("USD3 Minted Liabilities", "WEEKLY", 7 * 86400 + 3600, AccountableStatus.OK, 9 * 86400),
+    ],
+)
+def test_accountable_real_config_tracks_changed_cadence(
+    name: str,
+    frequency: str,
+    age_seconds: int,
+    expected_status: AccountableStatus,
+    expected_limit: int,
+) -> None:
+    module = load_3jane_module()
+    payload = fresh_accountable_payload()
+    source = payload["data"]["dataSources"][name]
+    source["frequency"] = frequency
+    source["lastUpdated"] = str(ACCOUNTABLE_FIXTURE_NOW_MS - age_seconds * 1000)
+
+    result = evaluate_report(parse_report(payload, module.ACCOUNTABLE_FEED, ACCOUNTABLE_FIXTURE_NOW_MS))
+
+    assert result.status is expected_status
+    assert result.report is not None
+    parsed_source = next(item for item in result.report.sources if item.name == name)
+    assert parsed_source.max_age_seconds == expected_limit
+
+
+def test_accountable_real_config_applies_weekly_grace_to_new_source() -> None:
+    module = load_3jane_module()
+    payload = fresh_accountable_payload()
+    payload["data"]["dataSources"]["New Document Report"] = {
+        "type": "Document Report",
+        "frequency": "WEEKLY",
+        "lastUpdated": str(ACCOUNTABLE_FIXTURE_NOW_MS - (8 * 24 * 60 * 60 + 5 * 60) * 1000),
+    }
+
+    result = evaluate_report(parse_report(payload, module.ACCOUNTABLE_FEED, ACCOUNTABLE_FIXTURE_NOW_MS))
+
+    assert result.status is AccountableStatus.OK
+
+
+def test_accountable_stale_alert_uses_same_report_age_in_both_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+    report = make_accountable_report(module, "1.20", age_seconds=30 * 60 + 1)
+    reason = evaluate_report(report).reason
+
+    module.check_accountable_staleness(report, reason)
+
+    assert alerts[0].message.count("31m old") == 2
+
 
 def make_accountable_report(
     module: ModuleType,
@@ -541,6 +673,7 @@ def make_accountable_report(
         report_age_seconds=age_seconds,
         report_interval="live",
         report_cadence_seconds=15 * 60,
+        report_max_age_seconds=30 * 60,
         sources=(),
     )
 
