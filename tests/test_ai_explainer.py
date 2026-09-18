@@ -1703,6 +1703,36 @@ class TestBatchUndecodedCalls(unittest.TestCase):
         self.assertIn("## Stated Intent", result.report)
         self.assertIn("top up the payer", result.report)
 
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    def test_bytes_params_reach_the_prompt_as_hex_not_python_repr(
+        self,
+        mock_decode: MagicMock,
+        _mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+    ) -> None:
+        """eth_abi returns bytes for bytes32; the model should not parse Python escapes."""
+        root = bytes.fromhex("d6e32aa8b4cae01447b55ec0f497f92b3b27bc6f36185c06e3229e7743db2062")
+        mock_decode.return_value = DecodedCall(
+            function_name="updateRoot", signature="updateRoot(bytes32)", params=[("bytes32", root)]
+        )
+        provider = MagicMock()
+        provider.supports_structured_output = False
+        provider.complete.return_value = "TLDR: root rotated. LOW.\n\nDETAIL:\nanalysis."
+        provider.model_name = "test"
+        mock_get_provider.return_value = provider
+
+        explain_transaction(target="0xT", calldata="0x21ff9970" + root.hex(), chain_id=1)
+        prompt = provider.complete.call_args[0][0]
+        self.assertIn(f"0x{root.hex()}", prompt)
+        self.assertNotIn("\\x", prompt)
+        self.assertNotIn("b'", prompt)
+
 
 class TestBatchSimulationsAttributed(unittest.TestCase):
     @patch("utils.llm.ai_explainer.get_source_context", return_value=None)

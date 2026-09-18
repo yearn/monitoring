@@ -260,6 +260,19 @@ def _amount_hint(type_str: str, value: object, token: RelatedToken | None) -> st
     return f" (≈ {amount} {token.symbol})"
 
 
+def _groups_digits(type_str: str) -> bool:
+    """True for integer types wide enough that digit grouping aids reading.
+
+    Narrow widths carry identifiers — LayerZero EIDs, chain ids, nonces — where
+    ``30,183`` reads as a quantity rather than the endpoint id it is. ERC20
+    amounts are uint256, so nothing that needs grouping is excluded.
+    """
+    match = re.fullmatch(r"u?int(\d*)", type_str)
+    if not match:
+        return False
+    return int(match.group(1) or 256) >= 128
+
+
 def _format_param_value(
     type_str: str,
     value: object,
@@ -273,7 +286,8 @@ def _format_param_value(
     if isinstance(value, bytes):
         return f"`0x{value.hex()}`"
     if isinstance(value, int) and not isinstance(value, bool):
-        return f"`{value:,}`{_amount_hint(type_str, value, token)}"
+        rendered = f"{value:,}" if _groups_digits(type_str) else str(value)
+        return f"`{rendered}`{_amount_hint(type_str, value, token)}"
     return f"`{value}`"
 
 

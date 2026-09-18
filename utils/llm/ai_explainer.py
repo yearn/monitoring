@@ -997,6 +997,21 @@ def _param_label(type_str: str, name: str | None) -> str:
     return f"{type_str} {name}" if name else type_str
 
 
+def _render_prompt_value(value: object) -> str:
+    """Prompt-side scalar rendering: bytes as hex, never a Python repr.
+
+    ``eth_abi`` hands back ``bytes`` for ``bytes32``, so a merkle root reached
+    the model as ``b'\\xd6\\xe3*\\xa8...'`` and a zeroed peer as 32 literal
+    ``\\x00`` escapes — Python syntax the model has to decode before it can
+    reason about the value.
+    """
+    if isinstance(value, bytes):
+        return f"0x{value.hex()}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_render_prompt_value(v) for v in value) + "]"
+    return str(value)
+
+
 def _format_decoded_calls(
     calls: list[DecodedCall],
     address_labels: dict[str, str] | None = None,
@@ -1045,9 +1060,9 @@ def _format_decoded_calls(
                     lines.append(f"{_indent}  {label}: ↳")
                     lines.append(_format_decoded_calls([inner], labels, _depth=_depth + 1, _indent=nested_indent))
                 else:
-                    lines.append(f"{_indent}  {label}: {value}")
+                    lines.append(f"{_indent}  {label}: {_render_prompt_value(value)}")
             else:
-                lines.append(f"{_indent}  {label}: {value}")
+                lines.append(f"{_indent}  {label}: {_render_prompt_value(value)}")
         parts.append("\n".join(lines))
     return "\n\n".join(parts)
 

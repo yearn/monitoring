@@ -647,3 +647,24 @@ class TestUndecodedCallEntries(unittest.TestCase):
         self.assertNotIn("- LOW", title)
         self.assertIn("## Call Flow", report)
         self.assertNotIn("## Analysis", report)
+
+
+class TestDigitGrouping(unittest.TestCase):
+    """Narrow int types carry identifiers, so they must not read as quantities."""
+
+    @staticmethod
+    def _flow(type_str: str, value: int, name: str) -> str:
+        call = DecodedCall(function_name="f", signature=f"f({type_str})", params=[(type_str, value)])
+        ctx = ReportContext(entries=[CallEntry(target=REGISTRY, call=call, param_names=[name])], chain_id=1)
+        return format_call_flow(ctx)
+
+    def test_narrow_uint_identifier_is_not_grouped(self) -> None:
+        self.assertIn("`30183`", self._flow("uint32", 30183, "_eid"))
+        self.assertNotIn("30,183", self._flow("uint32", 30183, "_eid"))
+
+    def test_uint64_nonce_is_not_grouped(self) -> None:
+        self.assertIn("`1234567`", self._flow("uint64", 1234567, "nonce"))
+
+    def test_wide_uint_quantity_keeps_grouping(self) -> None:
+        flow = self._flow("uint256", 5708604366258097914860884, "emissions")
+        self.assertIn("`5,708,604,366,258,097,914,860,884`", flow)
