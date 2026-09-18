@@ -177,6 +177,16 @@ class TestCollectSafetyChecks(unittest.TestCase):
         call = DecodedCall(function_name="deposit", signature="deposit()")
         self.assertEqual(_collect_safety_checks([("0xT", call, 10**18)], chain_id=1), [])
 
+    @patch("utils.llm.ai_explainer.get_function_state_mutability")
+    @patch("utils.llm.ai_explainer.get_verification_status", return_value=False)
+    def test_unknown_call_still_flags_unverified_without_dummy_decoded(
+        self, _ver: MagicMock, mock_mut: MagicMock
+    ) -> None:
+        notes = _collect_safety_checks([("0xT", None, 10**18)], chain_id=1)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("UNVERIFIED", notes[0])
+        mock_mut.assert_not_called()
+
 
 class TestBatchParamConstants(unittest.TestCase):
     """Tests for the 'Shared Across Batch' section."""
@@ -218,19 +228,84 @@ class TestBatchParamConstants(unittest.TestCase):
 class TestExplainTransaction(unittest.TestCase):
     """Tests for explain_transaction."""
 
-    def test_empty_calldata_returns_none(self) -> None:
-        result = explain_transaction(target="0xTarget", calldata="0x", chain_id=1)
-        self.assertIsNone(result)
+    TARGET = "0x" + "aa" * 20
 
-    def test_short_calldata_returns_none(self) -> None:
-        result = explain_transaction(target="0xTarget", calldata="0x1234", chain_id=1)
-        self.assertIsNone(result)
-
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction")
     @patch("utils.llm.ai_explainer.decode_calldata")
-    def test_undecoded_calldata_returns_none(self, mock_decode: MagicMock) -> None:
-        mock_decode.return_value = None
-        result = explain_transaction(target="0xTarget", calldata="0x11223344", chain_id=1)
-        self.assertIsNone(result)
+    def test_empty_calldata_is_deterministic(
+        self,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_meta: MagicMock,
+    ) -> None:
+        result = explain_transaction(target=self.TARGET, calldata="0x", chain_id=1, value=10**18)
+        assert result is not None
+        mock_decode.assert_not_called()
+        mock_simulate.assert_not_called()
+        mock_get_provider.assert_not_called()
+        self.assertEqual(result.detail, "")
+        self.assertNotIn("LOW", result.summary)
+        self.assertNotIn("MEDIUM", result.summary)
+        self.assertNotIn("**Risk:**", result.report)
+        self.assertIn("empty calldata", result.report)
+        self.assertIn("no function selector", result.report)
+        self.assertNotIn("Native ETH transfer", result.report)
+        self.assertNotIn("delivered", result.report.lower())
+        self.assertIn("1. **Empty calldata**", result.report)
+        self.assertIn("**ETH value:** `1.000000` ETH", result.report)
+
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction")
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    def test_short_calldata_is_unknown_selector_not_empty_transfer(
+        self,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_meta: MagicMock,
+    ) -> None:
+        result = explain_transaction(target=self.TARGET, calldata="0x1234", chain_id=1)
+        assert result is not None
+        mock_decode.assert_not_called()
+        mock_simulate.assert_not_called()
+        mock_get_provider.assert_not_called()
+        self.assertEqual(result.detail, "")
+        self.assertIn("unknown_selector", result.report)
+        self.assertIn("`0x1234`", result.report)
+        self.assertNotIn("empty_calldata", result.report)
+        self.assertNotIn("Empty calldata", result.report)
+        self.assertNotIn("Native ETH transfer", result.report)
+
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction")
+    @patch("utils.llm.ai_explainer.decode_calldata", return_value=None)
+    def test_undecoded_selector_is_deterministic(
+        self,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_meta: MagicMock,
+    ) -> None:
+        result = explain_transaction(target=self.TARGET, calldata="0x11223344", chain_id=1)
+        assert result is not None
+        mock_decode.assert_called_once()
+        mock_simulate.assert_not_called()
+        mock_get_provider.assert_not_called()
+        self.assertEqual(result.detail, "")
+        self.assertIn("unknown_selector", result.report)
+        self.assertIn("1. **Undecoded calldata**", result.report)
+        self.assertNotIn("**Risk:**", result.report)
 
 
 class TestStructuredOutput(unittest.TestCase):
@@ -394,6 +469,10 @@ class TestCollectUniqueAddresses(unittest.TestCase):
             params=[("address", "0x" + "00" * 20), ("uint256", 1)],
         )
         self.assertEqual(collect_unique_addresses([("0xnothex", call)]), [])
+
+    def test_unknown_call_still_contributes_target(self) -> None:
+        target = "0xF5f2718708f471e43968271956CC01aaA8c46119"
+        self.assertEqual(collect_unique_addresses([(target, None)]), [target])
 
 
 class TestFormatExplanationLine(unittest.TestCase):
@@ -1371,6 +1450,82 @@ class TestBatchUndecodedCalls(unittest.TestCase):
         self.assertIn("unknown_selector", result.report)
         self.assertEqual(provider.complete.call_count, 1)
 
+    @patch("utils.llm.ai_explainer.fetch_function_input_names")
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    def test_param_names_stay_aligned_across_unknown_middle(
+        self,
+        mock_decode: MagicMock,
+        _mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+        mock_names: MagicMock,
+    ) -> None:
+        """decoded / unknown / decoded must not shift ABI names onto the wrong call."""
+        set_owner = DecodedCall(
+            function_name="setOwner",
+            signature="setOwner(address)",
+            params=[("address", _addr(1))],
+        )
+        set_cap = DecodedCall(
+            function_name="setCap",
+            signature="setCap(address,uint256)",
+            params=[("address", _addr(2)), ("uint256", 99)],
+        )
+        owner_data = "0xf2fde38b" + "00" * 32
+        cap_data = "0xabcdef01" + "00" * 64
+
+        def decode(data: str, chain_id: int | None = None, target: str | None = None) -> DecodedCall | None:
+            if data == owner_data:
+                return set_owner
+            if data == cap_data:
+                return set_cap
+            return None
+
+        mock_decode.side_effect = decode
+        mock_names.side_effect = lambda _chain, _target, fname: {
+            "setOwner": ["newOwner"],
+            "setCap": ["asset", "cap"],
+        }[fname]
+        provider = MagicMock()
+        provider.supports_structured_output = False
+        provider.complete.return_value = "TLDR: mixed names. LOW.\n\nDETAIL:\nanalysis."
+        provider.model_name = "test"
+        mock_get_provider.return_value = provider
+
+        result = explain_batch_transaction(
+            calls=[
+                {"target": "0xT1", "data": owner_data, "value": "0"},
+                {"target": "0xT2", "data": UNKNOWN_DATA, "value": "0"},
+                {"target": "0xT3", "data": cap_data, "value": "0"},
+            ],
+            chain_id=1,
+            refine=False,
+        )
+        assert result is not None
+        prompt = provider.complete.call_args[0][0]
+        call3 = prompt[prompt.index("Call 3:") :]
+        call2 = prompt[prompt.index("Call 2:") : prompt.index("Call 3:")]
+        self.assertIn("address newOwner", prompt)
+        self.assertIn("Call 2: UNDECODED", prompt)
+        self.assertNotIn("newOwner", call2)
+        self.assertNotIn("newOwner", call3)
+        self.assertIn("address asset", call3)
+        self.assertIn("uint256 cap", call3)
+        self.assertIn("`address newOwner`", result.report)
+        self.assertIn("`address asset`", result.report)
+        self.assertIn("`uint256 cap`", result.report)
+        # Names belong to call 1 and 3; call 2 must not inherit either set.
+        flow_call2 = result.report[
+            result.report.index("2. **Undecoded calldata**") : result.report.index("3. **`setCap")
+        ]
+        self.assertNotIn("newOwner", flow_call2)
+        self.assertNotIn("asset", flow_call2)
+
     @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
     @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
     @patch("utils.llm.ai_explainer.get_llm_provider")
@@ -1401,8 +1556,9 @@ class TestBatchUndecodedCalls(unittest.TestCase):
         self.assertNotIn("**Risk:**", result.report)
         self.assertNotIn(" LOW", result.title)
         self.assertIn("1. **Undecoded calldata**", result.report)
-        self.assertIn("2. **Native ETH transfer**", result.report)
-        self.assertEqual(mock_simulate.call_count, 2)
+        self.assertIn("2. **Empty calldata**", result.report)
+        self.assertNotIn("Native ETH transfer", result.report)
+        self.assertEqual(mock_simulate.call_count, 1)
 
 
 class TestBatchSimulationsAttributed(unittest.TestCase):

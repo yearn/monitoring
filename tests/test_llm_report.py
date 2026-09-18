@@ -547,7 +547,7 @@ class TestUndecodedCallEntries(unittest.TestCase):
         self.assertIn("3. **`pause()`**", flow)
         self.assertNotIn("2. **`pause()`**", flow)
 
-    def test_empty_calldata_native_transfer(self) -> None:
+    def test_empty_calldata_not_asserted_as_transfer(self) -> None:
         ctx = _add_farms_ctx(
             entries=[
                 CallEntry(
@@ -561,9 +561,30 @@ class TestUndecodedCallEntries(unittest.TestCase):
             ]
         )
         flow = format_call_flow(ctx)
-        self.assertIn("**Native ETH transfer**", flow)
-        self.assertIn("empty calldata", flow)
+        self.assertIn("**Empty calldata**", flow)
+        self.assertIn("no function selector", flow)
         self.assertIn("`0x`", flow)
+        self.assertNotIn("Native ETH transfer", flow)
+        self.assertNotIn("delivered", flow.lower())
+
+    def test_short_nonempty_payload_is_unknown_selector(self) -> None:
+        ctx = _add_farms_ctx(
+            entries=[
+                CallEntry(
+                    target=FARM,
+                    call=None,
+                    raw_calldata="0x1234",
+                    original_index=1,
+                    decode_status="unknown_selector",
+                )
+            ]
+        )
+        flow = format_call_flow(ctx)
+        self.assertIn("**Undecoded calldata**", flow)
+        self.assertIn("`0x1234`", flow)
+        self.assertIn("unknown_selector", flow)
+        self.assertNotIn("Empty calldata", flow)
+        self.assertNotIn("Native ETH transfer", flow)
 
     def test_unknown_target_still_in_reference_table(self) -> None:
         ctx = _add_farms_ctx(

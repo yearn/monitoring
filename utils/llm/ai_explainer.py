@@ -335,11 +335,34 @@ def _setter_key_args(decoded: DecodedCall) -> tuple:
     return tuple(values)
 
 
+def _normalize_calldata(data: str | None) -> str:
+    """Canonicalize hex calldata; missing or blank becomes ``0x``."""
+    if not data:
+        return "0x"
+    text = data.strip()
+    if not text or text.lower() == "0x":
+        return "0x"
+    if text[:2].lower() != "0x":
+        text = "0x" + text
+    return "0x" if text.lower() == "0x" else text
+
+
+def _has_function_selector(data: str) -> bool:
+    """True when the payload is long enough to contain a 4-byte selector."""
+    hex_part = data[2:] if data[:2].lower() == "0x" else data
+    return len(hex_part) >= 8
+
+
 def _decode_status(data: str, decoded: DecodedCall | None) -> str:
-    """Classify whether a payload decoded, had no selector, or is unknown."""
+    """Classify whether a payload decoded, had no selector, or is unknown.
+
+    Empty calldata has no selector and is not an ABI decode failure. Short
+    nonempty payloads stay ``unknown_selector`` and must not be relabeled as
+    empty-calldata transfers.
+    """
     if decoded is not None:
         return "decoded"
-    if not data or data.lower() in ("0x",):
+    if _normalize_calldata(data) == "0x":
         return "empty_calldata"
     return "unknown_selector"
 
@@ -556,7 +579,7 @@ def _collect_source_contexts(
 
 
 def _collect_safety_checks(
-    targets_calls_values: list[tuple[str, DecodedCall, int]],
+    targets_calls_values: list[tuple[str, DecodedCall | None, int]],
     chain_id: int,
 ) -> list[str]:
     """Deterministic pre-flight checks surfaced to the LLM as hard signals.
@@ -593,7 +616,7 @@ def _collect_safety_checks(
 
     payable_seen: set[tuple[str, str]] = set()
     for target, decoded, value in targets_calls_values:
-        if not (target and value > 0 and decoded.function_name):
+        if decoded is None or not (target and value > 0 and decoded.function_name):
             continue
         fn_key = (target.lower(), decoded.function_name)
         if fn_key in payable_seen:
@@ -764,12 +787,13 @@ def _extract_address_args(decoded: DecodedCall, _depth: int = 0) -> list[str]:
     return out
 
 
-def collect_unique_addresses(targets_and_calls: list[tuple[str, DecodedCall]]) -> list[str]:
+def collect_unique_addresses(targets_and_calls: list[tuple[str, DecodedCall | None]]) -> list[str]:
     """Every distinct non-zero address in the transaction, checksummed, in first-seen order.
 
     Covers each call's own target plus every address-typed argument (including
-    those nested inside `bytes` payloads). Shared by the label lookup and the
-    prompt's Address Links section so both cover exactly the same set.
+    those nested inside `bytes` payloads). Unknown/empty-calldata calls still
+    contribute their target. Shared by the label lookup and the prompt's
+    Address Links section so both cover exactly the same set.
     """
     seen: set[str] = set()
     out: list[str] = []
@@ -796,13 +820,14 @@ def collect_unique_addresses(targets_and_calls: list[tuple[str, DecodedCall]]) -
     for target, decoded in targets_and_calls:
         if target:
             _consider(target)
-        for raw in _extract_address_args(decoded):
-            _consider(raw)
+        if decoded is not None:
+            for raw in _extract_address_args(decoded):
+                _consider(raw)
     return out
 
 
 def _collect_address_labels(
-    targets_and_calls: list[tuple[str, DecodedCall]],
+    targets_and_calls: list[tuple[str, DecodedCall | None]],
     chain_id: int,
 ) -> dict[str, str]:
     """Look up `{checksum_address: contract_name}` for every relevant address.
@@ -980,17 +1005,22 @@ def _format_prepared_calldata(
         status = _decode_status(item.data, item.decoded)
         target = _annotate_address(item.target, labels) if item.target else "(no target)"
         if status == "empty_calldata":
-            header = f"Call {item.index}: native ETH transfer (empty calldata)"
+            header = f"Call {item.index}: empty calldata (no function selector)"
+            semantics = (
+                "empty calldata; intended native value is listed above — "
+                "do not assert delivery or that receive/fallback will succeed"
+            )
         else:
             selector = item.data[:10] if len(item.data) >= 10 else item.data or "0x"
             header = f"Call {item.index}: UNDECODED (selector {selector})"
+            semantics = "unresolved — do not invent what this call does"
         lines = [
             header,
             f"  target: {target}",
             f"  value: {item.value} wei",
             f"  calldata: {item.data or '0x'}",
             f"  decode status: {status}",
-            "  semantics: unresolved — do not invent what this call does",
+            f"  semantics: {semantics}",
         ]
         parts.append("\n".join(lines))
     return "\n\n".join(parts)
@@ -1509,6 +1539,8 @@ def explain_transaction(
     """Generate an AI explanation for a governance transaction.
 
     Decodes calldata, simulates via Tenderly, and sends context to the LLM.
+    Unknown selectors, short nonempty payloads, and empty calldata still produce
+    a deterministic summary/report (zero LLM calls, empty detail, no risk tag).
     Returns None if explanation cannot be generated (missing API keys, errors, etc.).
 
     Args:
@@ -1539,13 +1571,24 @@ def explain_transaction(
     Returns:
         Explanation with summary and detail, or None on failure.
     """
-    if not calldata or len(calldata) < 10:
-        return None
-
-    decoded = decode_calldata(calldata, chain_id=chain_id, target=target)
-    if not decoded:
-        logger.info("Could not decode calldata for %s, skipping AI explanation", target)
-        return None
+    calldata = _normalize_calldata(calldata)
+    decoded = decode_calldata(calldata, chain_id=chain_id, target=target) if _has_function_selector(calldata) else None
+    if decoded is None:
+        logger.info(
+            "Could not decode calldata for %s; using deterministic unknown/empty-calldata summary",
+            target,
+        )
+        item = _PreparedCall(index=1, target=target, data=calldata, value=value, decoded=None)
+        address_labels = _collect_address_labels([(target, None)], chain_id)
+        return _deterministic_undecoded_explanation(
+            [item],
+            chain_id=chain_id,
+            protocol=protocol,
+            label=label,
+            from_address=from_address,
+            label_address=label_address,
+            address_labels=address_labels,
+        )
 
     decoded_calls = [decoded]
     proxy_upgrade_info = _get_proxy_upgrade_info(calldata, target, chain_id)
@@ -1658,11 +1701,14 @@ def _prepare_batch_items(
     items: list[_PreparedCall] = []
     for i, call in enumerate(calls, start=1):
         target = call.get("target", "")
-        data = call.get("data", "0x")
+        data = _normalize_calldata(call.get("data"))
         value = int(call.get("value", "0"))
-        decoded = decode_calldata(data, chain_id=chain_id, target=target)
+        decoded = decode_calldata(data, chain_id=chain_id, target=target) if _has_function_selector(data) else None
+        status = _decode_status(data, decoded)
         simulation: SimulationResult | None = None
-        if not skip_simulation:
+        # Empty calldata has no function to simulate; a SUCCESS here would look
+        # like confirmed native delivery, which we must not assert.
+        if not skip_simulation and status != "empty_calldata":
             simulation = simulate_transaction(
                 target=target,
                 calldata=data,
@@ -1713,11 +1759,18 @@ def _call_entry_from_item(
 
 
 def _undecoded_batch_summary(items: list[_PreparedCall]) -> str:
-    """Deterministic Telegram summary when every batch call failed to decode."""
+    """Deterministic Telegram summary when every call failed to decode."""
     n = len(items)
-    noun = "call" if n == 1 else "calls"
+    if n == 1:
+        status = _decode_status(items[0].data, items[0].decoded)
+        if status == "empty_calldata":
+            return (
+                "This call has empty calldata (no function selector). "
+                "See the linked report for the intended target and native value."
+            )
+        return "Could not decode this call. See the linked report for the original target, value, and payload."
     return (
-        f"Could not decode {n} {noun} in this batch. "
+        f"Could not decode {n} calls in this batch. "
         "See the linked report for original indices, targets, values, and payloads."
     )
 
@@ -1803,12 +1856,7 @@ def explain_batch_transaction(
     decoded_items = [item for item in items if item.decoded is not None]
     decoded_with_target = [(item.target, item.decoded) for item in decoded_items if item.decoded is not None]
     decoded_calls = [item.decoded for item in decoded_items if item.decoded is not None]
-    targets_calls_values = [
-        (item.target, item.decoded, item.value) for item in decoded_items if item.decoded is not None
-    ]
-    all_targets_for_labels = [
-        (item.target, item.decoded or DecodedCall(function_name="", signature="", params=[])) for item in items
-    ]
+    all_targets_for_labels = [(item.target, item.decoded) for item in items]
 
     upgrade_parts: list[str] = []
     for item in items:
@@ -1834,8 +1882,7 @@ def explain_batch_transaction(
     state_reads = _collect_state_reads(decoded_with_target, chain_id)
     param_names_decoded = _collect_param_names(decoded_with_target, chain_id)
     safety_notes = _collect_safety_checks(
-        targets_calls_values
-        + [(item.target, DecodedCall("", "", []), item.value) for item in items if item.decoded is None],
+        [(item.target, item.decoded, item.value) for item in items],
         chain_id,
     )
     roles_by_target = _collect_role_names(decoded_with_target, chain_id)

@@ -386,9 +386,12 @@ The table deduplicates the executor, alert contract, call targets, address-value
 **Call Flow is built in Python, not asked of the LLM** — it comes straight from the
 input calls (`CallEntry` per call: original 1-based index, target, signature or
 undecoded status, ABI parameter names, ETH value, raw calldata, nested `bytes`
-payloads unwrapped up to `MAX_BYTES_RECURSION_DEPTH`). Unknown selectors and
-empty-calldata native transfers stay in the flow with their original index so
-they cannot disappear or renumber later calls. Arrays and tuple/struct
+payloads unwrapped up to `MAX_BYTES_RECURSION_DEPTH`). Unknown selectors and empty-calldata calls stay in the flow with their original
+index so they cannot disappear or renumber later calls. Empty calldata is labeled
+as having no function selector; intended native value is shown but not asserted
+as delivered. Single-call `explain_transaction` uses the same deterministic
+summary/report path as an all-unknown batch (zero LLM calls, empty detail, no
+risk tag). Arrays and tuple/struct
 arguments are decomposed recursively (`array_element_type` / `tuple_component_types`),
 so an address inside a `MarketParams`-style struct is still rendered as a link and
 still reaches label lookup and the Address Links section — `iter_address_values()`
@@ -470,8 +473,8 @@ safe/multisend.py            # Safe MultiSendCallOnly inner-call extractor + DEL
 
 ## Integration Points
 
-- **Timelock alerts** (`timelock/timelock_alerts.py`): Calls `explain_transaction()` or `explain_batch_transaction()` for each scheduled operation.
-- **Safe alerts** (`safe/main.py`): Routes through `_explain_safe_tx()`, which detects `operation=DELEGATECALL` multisend batches and dispatches to `explain_batch_transaction()` with `skip_simulation=True` and a DELEGATECALL context note. Plain CALL Safe txs use `explain_transaction()` as before.
+- **Timelock alerts** (`timelock/timelock_alerts.py`): Calls `explain_transaction()` or `explain_batch_transaction()` for each scheduled operation. Empty and short payloads still reach the explainer; callers no longer drop them on `len(data) >= 10`.
+- **Safe alerts** (`safe/main.py`): Routes through `_explain_safe_tx()`, which detects `operation=DELEGATECALL` multisend batches and dispatches to `explain_batch_transaction()` with `skip_simulation=True` and a DELEGATECALL context note. Plain CALL Safe txs use `explain_transaction()`. Empty and short targeted payloads are explained the same way as decoded calls.
 - Both call sites use `format_explanation_line()` to append the AI summary to Telegram messages.
 - Both call sites can opt into the refine pass per-protocol by passing `refine=True` to the explainer.
 

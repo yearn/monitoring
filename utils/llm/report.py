@@ -415,7 +415,7 @@ def format_call_flow(ctx: ReportContext) -> str:
         target = address_link(entry.target, ctx.chain_id, ctx.labels) if entry.target else "_unknown target_"
         if entry.call is None:
             if entry.decode_status == "empty_calldata":
-                lines.append(f"{number}. **Native ETH transfer** on {target} — empty calldata")
+                lines.append(f"{number}. **Empty calldata** on {target} — no function selector")
             else:
                 selector = entry.raw_calldata[:10] if len(entry.raw_calldata) >= 10 else entry.raw_calldata or "0x"
                 lines.append(f"{number}. **Undecoded calldata** on {target} — unknown selector `{selector}`")
@@ -524,7 +524,11 @@ def format_reference_table(ctx: ReportContext) -> str:
 
     for entry in ctx.entries:
         if entry.call is None:
-            received = "undecoded calldata" if entry.decode_status != "empty_calldata" else "a native ETH transfer"
+            received = (
+                "undecoded calldata"
+                if entry.decode_status != "empty_calldata"
+                else "empty calldata (no function selector)"
+            )
             _add_reference(references, ctx, entry.target, "Call target", f"Receives {received}")
             continue
         _add_reference(
