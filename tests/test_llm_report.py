@@ -263,6 +263,31 @@ class TestAmountAnnotation(unittest.TestCase):
         flow = format_call_flow(_add_farms_ctx(entries=[entry]))
         self.assertNotIn("≈", flow)
 
+    def test_share_transfer_does_not_inherit_asset_decimals(self) -> None:
+        call = DecodedCall(
+            function_name="transfer",
+            signature="transfer(address,uint256)",
+            params=[("address", FARM), ("uint256", 10**18)],
+        )
+        entry = CallEntry(
+            target=REGISTRY,
+            call=call,
+            param_names=["to", "shares"],
+            amount_token=self.ASSET,
+        )
+        flow = format_call_flow(_add_farms_ctx(entries=[entry]))
+        self.assertNotIn("≈", flow)
+        self.assertNotIn("USDC", flow)
+
+    def test_unnamed_vault_transfer_does_not_use_asset_token(self) -> None:
+        call = DecodedCall(
+            function_name="transfer",
+            signature="transfer(address,uint256)",
+            params=[("address", FARM), ("uint256", 10**18)],
+        )
+        entry = CallEntry(target=REGISTRY, call=call, amount_token=self.ASSET)
+        self.assertNotIn("≈", format_call_flow(_add_farms_ctx(entries=[entry])))
+
     def test_self_token_assets_param_annotated(self) -> None:
         call = DecodedCall(
             function_name="mint",

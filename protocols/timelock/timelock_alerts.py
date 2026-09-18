@@ -332,6 +332,16 @@ def _maple_proposal_calls(event: dict, chain_id: int) -> list[dict[str, str]] | 
     return [{"target": str(t), "data": _to_hex(d), "value": "0"} for t, d in zip(targets, datas)]
 
 
+def _int_or_zero(value: object) -> int:
+    """JSON null / missing / unparsable wei amounts become 0, not a crash."""
+    if value is None or value == "":
+        return 0
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
 def _explainer_calls_from_events(events: list[dict]) -> list[dict[str, str]]:
     """Keep every event with a target, including empty and short calldata.
 
@@ -347,7 +357,7 @@ def _explainer_calls_from_events(events: list[dict]) -> list[dict[str, str]]:
             {
                 "target": target,
                 "data": event.get("data") or "0x",
-                "value": str(event.get("value", 0)),
+                "value": str(_int_or_zero(event.get("value"))),
             }
         )
     return calls
@@ -381,7 +391,7 @@ def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain
                 target=call["target"],
                 calldata=call["data"],
                 chain_id=chain_id,
-                value=int(call.get("value", 0)),
+                value=_int_or_zero(call.get("value")),
                 protocol=timelock_info.protocol,
                 label=timelock_info.label,
                 from_address=timelock_info.address,

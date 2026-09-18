@@ -23,6 +23,7 @@ from utils.llm.ai_explainer import (
     explain_transaction,
     format_explanation_line,
 )
+from utils.llm.base import LLMError
 from utils.related_tokens import RelatedToken
 from utils.source_context import SourceContext
 from utils.tenderly.simulation import SimulationResult
@@ -187,6 +188,18 @@ class TestCollectSafetyChecks(unittest.TestCase):
         self.assertIn("UNVERIFIED", notes[0])
         mock_mut.assert_not_called()
 
+    @patch("utils.llm.ai_explainer.get_function_state_mutability")
+    @patch("utils.llm.ai_explainer.get_verification_status", return_value=False)
+    def test_empty_calldata_does_not_flag_unverified(self, mock_ver: MagicMock, mock_mut: MagicMock) -> None:
+        notes = _collect_safety_checks(
+            [("0xT", None, 10**18)],
+            chain_id=1,
+            decode_statuses=["empty_calldata"],
+        )
+        self.assertEqual(notes, [])
+        mock_ver.assert_not_called()
+        mock_mut.assert_not_called()
+
 
 class TestBatchParamConstants(unittest.TestCase):
     """Tests for the 'Shared Across Batch' section."""
@@ -247,7 +260,8 @@ class TestExplainTransaction(unittest.TestCase):
         assert result is not None
         mock_decode.assert_not_called()
         mock_simulate.assert_not_called()
-        mock_get_provider.assert_not_called()
+        mock_get_provider.assert_called()
+        mock_get_provider.return_value.complete.assert_not_called()
         self.assertEqual(result.detail, "")
         self.assertNotIn("LOW", result.summary)
         self.assertNotIn("MEDIUM", result.summary)
@@ -276,7 +290,8 @@ class TestExplainTransaction(unittest.TestCase):
         assert result is not None
         mock_decode.assert_not_called()
         mock_simulate.assert_not_called()
-        mock_get_provider.assert_not_called()
+        mock_get_provider.assert_called()
+        mock_get_provider.return_value.complete.assert_not_called()
         self.assertEqual(result.detail, "")
         self.assertIn("unknown_selector", result.report)
         self.assertIn("`0x1234`", result.report)
@@ -301,11 +316,16 @@ class TestExplainTransaction(unittest.TestCase):
         assert result is not None
         mock_decode.assert_called_once()
         mock_simulate.assert_not_called()
-        mock_get_provider.assert_not_called()
+        mock_get_provider.assert_called()
+        mock_get_provider.return_value.complete.assert_not_called()
         self.assertEqual(result.detail, "")
         self.assertIn("unknown_selector", result.report)
         self.assertIn("1. **Undecoded calldata**", result.report)
         self.assertNotIn("**Risk:**", result.report)
+
+    @patch("utils.llm.ai_explainer.get_llm_provider", side_effect=LLMError("LLM_API_KEY is not set"))
+    def test_unconfigured_llm_skips_deterministic_path(self, _mock_get_provider: MagicMock) -> None:
+        self.assertIsNone(explain_transaction(target=self.TARGET, calldata="0x", chain_id=1, value=10**18))
 
 
 class TestStructuredOutput(unittest.TestCase):
@@ -1444,7 +1464,7 @@ class TestBatchUndecodedCalls(unittest.TestCase):
         self.assertIn("Call 2: UNDECODED", prompt)
         self.assertIn("Call 3:", prompt)
         self.assertIn(UNKNOWN_DATA, prompt)
-        self.assertIn("1000000000000000000 wei", prompt)
+        self.assertIn("ETH value: 1.000000 ETH", prompt)
         self.assertIn("semantics: unresolved", prompt)
         self.assertIn("2. **Undecoded calldata**", result.report)
         self.assertIn("unknown_selector", result.report)
@@ -1548,9 +1568,12 @@ class TestBatchUndecodedCalls(unittest.TestCase):
             label="Test Timelock",
         )
         assert result is not None
-        mock_get_provider.assert_not_called()
+        mock_get_provider.assert_called()
+        mock_get_provider.return_value.complete.assert_not_called()
         self.assertEqual(result.detail, "")
-        self.assertIn("Could not decode 2 calls", result.summary)
+        self.assertIn("empty-calldata", result.summary)
+        self.assertIn("undecoded", result.summary)
+        self.assertNotIn("Could not decode 2 calls", result.summary)
         self.assertNotIn("LOW", result.summary)
         self.assertNotIn("MEDIUM", result.summary)
         self.assertNotIn("**Risk:**", result.report)
@@ -1559,6 +1582,38 @@ class TestBatchUndecodedCalls(unittest.TestCase):
         self.assertIn("2. **Empty calldata**", result.report)
         self.assertNotIn("Native ETH transfer", result.report)
         self.assertEqual(mock_simulate.call_count, 1)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata", return_value=None)
+    def test_all_empty_calldata_does_not_claim_decode_failure(
+        self,
+        _mock_decode: MagicMock,
+        _mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+    ) -> None:
+        result = explain_batch_transaction(
+            calls=[
+                {"target": "0xT1", "data": "0x", "value": "1"},
+                {"target": "0xT2", "data": "0x", "value": "1"},
+                {"target": "0xT3", "data": "0x", "value": "1"},
+            ],
+            chain_id=1,
+            context_note="Executed via DELEGATECALL from the Safe.",
+            description="payouts",
+        )
+        assert result is not None
+        mock_get_provider.return_value.complete.assert_not_called()
+        self.assertIn("3 empty-calldata calls", result.summary)
+        self.assertNotIn("Could not decode", result.summary)
+        self.assertIn("## Execution Context", result.report)
+        self.assertIn("DELEGATECALL", result.report)
+        self.assertIn("## Stated Intent", result.report)
+        self.assertIn("payouts", result.report)
 
 
 class TestBatchSimulationsAttributed(unittest.TestCase):
@@ -1633,6 +1688,28 @@ class TestMappingKeyStateReads(unittest.TestCase):
         self.assertIn(b, rendered)
 
     @patch("utils.llm.ai_explainer.read_before_state")
+    def test_single_arg_setters_share_one_scalar_read(self, mock_read: MagicMock) -> None:
+        from utils.on_chain_state import StateRead
+
+        mock_read.return_value = [StateRead(var_name="maxSlippage", type_str="uint256", value=10**18, key_args=())]
+
+        def _set_slippage(value: int) -> DecodedCall:
+            return DecodedCall(
+                function_name="setMaxSlippage",
+                signature="setMaxSlippage(uint256)",
+                params=[("uint256", value)],
+            )
+
+        result = _collect_state_reads(
+            [("0xT", _set_slippage(99 * 10**16)), ("0xT", _set_slippage(98 * 10**16))],
+            chain_id=1,
+        )
+        self.assertEqual(mock_read.call_count, 1)
+        rendered = result.prompt_text()
+        self.assertIn("maxSlippage = 1000000000000000000", rendered)
+        self.assertNotIn("maxSlippage(", rendered)
+
+    @patch("utils.llm.ai_explainer.read_before_state")
     def test_forty_keys_cap_at_twelve_and_report_omitted(self, mock_read: MagicMock) -> None:
         from utils.on_chain_state import StateRead
 
@@ -1647,10 +1724,14 @@ class TestMappingKeyStateReads(unittest.TestCase):
         calls = [("0xT", _set_cap(_addr(i))) for i in range(1, 41)]
         result = _collect_state_reads(calls, chain_id=1)
         self.assertEqual(mock_read.call_count, MAX_STATE_READ_KEYS_PER_SIGNATURE)
-        self.assertIn("28 further keys not read", result.prompt_text())
+        self.assertIn("28 additional mapping keys skipped", result.prompt_text())
         self.assertIn(f"(limit: {MAX_STATE_READ_KEYS_PER_SIGNATURE})", result.report_text())
         unavailable = [r for _, reads in result.by_target for r in reads if not r.available]
         self.assertEqual(len(unavailable), 28)
+        self.assertTrue(all(r.var_name == "cap" for r in unavailable))
+        md = result.report_text(chain_id=1)
+        self.assertIn("- On", md)
+        self.assertIn("_unavailable_", md)
 
     @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
     @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
@@ -1693,8 +1774,8 @@ class TestMappingKeyStateReads(unittest.TestCase):
         self.assertEqual(mock_read.call_count, MAX_STATE_READ_KEYS_PER_SIGNATURE)
         self.assertIn("1. **`setCap(address,uint256)`**", result.report)
         self.assertIn("40. **`setCap(address,uint256)`**", result.report)
-        self.assertIn("28 further keys not read", result.report)
-        self.assertIn("28 further keys not read", provider.complete.call_args[0][0])
+        self.assertIn("28 additional mapping keys skipped", result.report)
+        self.assertIn("28 additional mapping keys skipped", provider.complete.call_args[0][0])
 
     @patch("utils.llm.ai_explainer.read_before_state")
     def test_overloads_have_separate_caps(self, mock_read: MagicMock) -> None:
@@ -1715,7 +1796,7 @@ class TestMappingKeyStateReads(unittest.TestCase):
         ]
         result = _collect_state_reads(addr_calls + bytes_calls, chain_id=1)
         self.assertEqual(mock_read.call_count, 12 + 4)
-        self.assertIn("1 further keys not read for `setCap(address,uint256)`", result.prompt_text())
+        self.assertIn("1 additional mapping key skipped for `setCap(address,uint256)`", result.prompt_text())
 
     @patch("utils.llm.ai_explainer.read_before_state", side_effect=RuntimeError("rpc down"))
     def test_worker_failure_marked_unavailable(self, mock_read: MagicMock) -> None:

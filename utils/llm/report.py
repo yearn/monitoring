@@ -100,14 +100,18 @@ def is_token_amount_param(
     support ``amount``/``assets``. Names alone never choose a token or scale, and
     share quantities must not inherit an underlying asset's decimals.
     """
+    if param_name:
+        normalized = param_name.lstrip("_").lower()
+        if normalized in _NON_AMOUNT_PARAM_NAMES:
+            return False
     amount_index = token_amount_index(signature)
     if amount_index is not None and param_index == amount_index:
-        return True
+        # Movement sigs describe the target's own token. A related ``asset()``
+        # token must not scale share/vault amounts.
+        return token is None or token.getter == "self"
     if not param_name:
         return False
     normalized = param_name.lstrip("_").lower()
-    if normalized in _NON_AMOUNT_PARAM_NAMES:
-        return False
     if token is None or token.getter != "self":
         return False
     return normalized in _AMOUNT_PARAM_NAMES
@@ -165,6 +169,12 @@ class ReportContext:
     related_addresses: list[str] = field(default_factory=list)
     # Deterministic before-state notes (unavailable keys, omitted-key cap).
     state_read_notes: str = ""
+    # Execution context the LLM can't infer from calldata (e.g. Safe DELEGATECALL).
+    context_note: str = ""
+    # Proposer-supplied description of intent.
+    description: str = ""
+    # Seatbelt-style checks (unverified target, ETH to nonpayable).
+    safety_notes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -637,12 +647,19 @@ def build_report(summary: str, detail: str, ctx: ReportContext, risk_tag: str = 
         sections.append(metadata)
     if summary:
         sections.append(f"## Summary\n\n{summary}")
+    if ctx.context_note:
+        sections.append(f"## Execution Context\n\n{ctx.context_note}")
+    if ctx.description:
+        sections.append(f"## Stated Intent\n\n{ctx.description}")
     if detail:
         sections.append(f"## Analysis\n\n{_REDUNDANT_ANALYSIS_HEADING_RE.sub('', detail)}")
     if call_flow:
         sections.append(f"## Call Flow\n\n{call_flow}")
     if ctx.state_read_notes:
         sections.append(f"## Current State\n\n{ctx.state_read_notes}")
+    if ctx.safety_notes:
+        notes = "\n".join(f"- {note}" for note in ctx.safety_notes)
+        sections.append(f"## Safety Checks\n\n{notes}")
     if ctx.protocol_context:
         sections.append(f"## Protocol Context\n\n{ctx.protocol_context}")
     reference = format_reference_table(ctx)

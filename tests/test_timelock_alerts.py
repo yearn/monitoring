@@ -284,6 +284,17 @@ class TestAiExplanationCallGates(unittest.TestCase):
         self.assertEqual(mock_explain.call_args.kwargs["value"], 1000)
 
     @patch("protocols.timelock.timelock_alerts.explain_transaction")
+    def test_null_value_does_not_crash_explainer(self, mock_explain: unittest.mock.MagicMock) -> None:
+        from protocols.timelock.timelock_alerts import _get_ai_explanation
+
+        mock_explain.return_value = None
+        event = _make_event(data="0x8456cb59")
+        event["value"] = None
+        _get_ai_explanation([event], TIMELOCK_INFO, 1)
+        mock_explain.assert_called_once()
+        self.assertEqual(mock_explain.call_args.kwargs["value"], 0)
+
+    @patch("protocols.timelock.timelock_alerts.explain_transaction")
     def test_short_calldata_single_call_reaches_explainer(self, mock_explain: unittest.mock.MagicMock) -> None:
         from protocols.timelock.timelock_alerts import _get_ai_explanation
 

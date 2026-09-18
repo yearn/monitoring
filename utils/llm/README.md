@@ -99,7 +99,7 @@ Handles:
 
 Follows EIP-1967 proxies to locate the function source, but issues `eth_call`s against the original storage-holder address.
 
-Distinct mapping keys are kept: two `setCap(address,uint256)` calls for different keys schedule two reads. Equivalent getter inputs are deduplicated before any RPC. Distinct key tuples are capped at `MAX_STATE_READ_KEYS_PER_SIGNATURE` (12) per `(target, full signature)` and run through `_parallel_map` (max 8 workers). Further keys stay visible on the call but are marked unavailable, with an aggregate note such as `28 further keys not read for setCap(address,uint256) on 0xT (limit: 12).` Missing values are never inferred from another market.
+Distinct mapping keys are kept: two `setCap(address,uint256)` calls for different keys schedule two reads. Single-arg setters (`setMaxSlippage(uint256)`) share one scalar read — the new value is not treated as a mapping key. Equivalent getter inputs are deduplicated before any RPC. Distinct key tuples are capped at `MAX_STATE_READ_KEYS_PER_SIGNATURE` (12) per `(target, full signature)` and run through `_parallel_map` (max 8 workers). Further keys stay visible on the call but are marked unavailable, with an aggregate note such as `28 additional mapping keys skipped for setCap(address,uint256) on 0xT (limit: 12).` Missing values are never inferred from another market. The gist **Current State** section is a markdown list with explorer links; the LLM prompt keeps the compact plain-text form.
 
 ### 4. Tenderly Simulation (`utils/tenderly/simulation.py`)
 

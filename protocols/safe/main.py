@@ -199,6 +199,16 @@ def get_safe_url(safe_address: str, network_name: str) -> str:
     return f"{SAFE_WEBSITE_URL}{safe_address_network_prefix[network_name]}:{safe_address}"
 
 
+def _int_or_zero(value: object) -> int:
+    """JSON null / missing / unparsable wei amounts become 0, not a crash."""
+    if value is None or value == "":
+        return 0
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
 def _explain_safe_tx(
     tx: dict,
     target: str,
@@ -244,7 +254,7 @@ def _explain_safe_tx(
         target=target,
         calldata=hex_data,
         chain_id=chain_id,
-        value=int(tx.get("value", 0)),
+        value=_int_or_zero(tx.get("value")),
         protocol=protocol,
         label=additional_info or "",
         from_address=safe_address,
