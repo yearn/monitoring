@@ -16,6 +16,7 @@ from eth_utils import to_checksum_address
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.calldata.decoder import decode_calldata, format_call_lines
 from utils.chains import EXPLORER_URLS, Chain
+from utils.formatting import parse_wei
 from utils.llm.ai_explainer import Explanation, explain_batch_transaction, explain_transaction, format_explanation_line
 from utils.logger import get_logger
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
@@ -332,16 +333,6 @@ def _maple_proposal_calls(event: dict, chain_id: int) -> list[dict[str, str]] | 
     return [{"target": str(t), "data": _to_hex(d), "value": "0"} for t, d in zip(targets, datas)]
 
 
-def _int_or_zero(value: object) -> int:
-    """JSON null / missing / unparsable wei amounts become 0, not a crash."""
-    if value is None or value == "":
-        return 0
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0
-
-
 def _explainer_calls_from_events(events: list[dict]) -> list[dict[str, str]]:
     """Keep every event with a target, including empty and short calldata.
 
@@ -357,7 +348,7 @@ def _explainer_calls_from_events(events: list[dict]) -> list[dict[str, str]]:
             {
                 "target": target,
                 "data": event.get("data") or "0x",
-                "value": str(_int_or_zero(event.get("value"))),
+                "value": str(parse_wei(event.get("value"))),
             }
         )
     return calls
@@ -391,7 +382,7 @@ def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain
                 target=call["target"],
                 calldata=call["data"],
                 chain_id=chain_id,
-                value=_int_or_zero(call.get("value")),
+                value=parse_wei(call.get("value")),
                 protocol=timelock_info.protocol,
                 label=timelock_info.label,
                 from_address=timelock_info.address,

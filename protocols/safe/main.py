@@ -19,6 +19,7 @@ from utils.cache import (
     write_last_executed_nonce_to_file,
 )
 from utils.chains import safe_network_to_chain_id
+from utils.formatting import parse_wei
 from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
 from utils.logger import get_logger
 from utils.telegram import escape_markdown, send_telegram_message
@@ -199,16 +200,6 @@ def get_safe_url(safe_address: str, network_name: str) -> str:
     return f"{SAFE_WEBSITE_URL}{safe_address_network_prefix[network_name]}:{safe_address}"
 
 
-def _int_or_zero(value: object) -> int:
-    """JSON null / missing / unparsable wei amounts become 0, not a crash."""
-    if value is None or value == "":
-        return 0
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0
-
-
 def _explain_safe_tx(
     tx: dict,
     target: str,
@@ -254,7 +245,7 @@ def _explain_safe_tx(
         target=target,
         calldata=hex_data,
         chain_id=chain_id,
-        value=_int_or_zero(tx.get("value")),
+        value=parse_wei(tx.get("value")),
         protocol=protocol,
         label=additional_info or "",
         from_address=safe_address,

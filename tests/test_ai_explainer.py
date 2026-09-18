@@ -7,6 +7,8 @@ from utils.calldata.decoder import DecodedCall, decode_calldata
 from utils.erc20_metadata import ERC20Metadata
 from utils.formatting import format_decimal_amount, normalize_token_amount
 from utils.llm.ai_explainer import (
+    MAX_PROMPT_CALLDATA_CHARS,
+    MAX_PROMPT_SIMULATIONS,
     MAX_STATE_READ_KEYS_PER_SIGNATURE,
     SYSTEM_INSTRUCTIONS,
     Explanation,
@@ -223,6 +225,35 @@ class TestBatchParamConstants(unittest.TestCase):
         self.assertIn("arg[0]", result)
         self.assertNotIn("arg[1]", result)  # different across calls
         self.assertNotIn("arg[2]", result)
+
+    def test_scope_names_decoded_subset_when_batch_has_unknowns(self) -> None:
+        """The note must not claim a constant holds across calls it never saw."""
+        market = b"\x01" * 32
+        calls = [
+            DecodedCall(
+                function_name="setCap",
+                signature="setCap(bytes32,uint256)",
+                params=[("bytes32", market), ("uint256", cap)],
+            )
+            for cap in (100, 200, 300, 400)
+        ]
+        result = _build_prompt(target="0xT", value=0, decoded_calls=calls, simulation=None, total_calls=6)
+        self.assertIn("identical across all 4 decoded calls (of 6 in the batch)", result)
+        self.assertNotIn("identical across all 4 calls", result)
+
+    def test_scope_omits_qualifier_when_every_call_decoded(self) -> None:
+        market = b"\x01" * 32
+        calls = [
+            DecodedCall(
+                function_name="setCap",
+                signature="setCap(bytes32,uint256)",
+                params=[("bytes32", market), ("uint256", cap)],
+            )
+            for cap in (100, 200)
+        ]
+        result = _build_prompt(target="0xT", value=0, decoded_calls=calls, simulation=None, total_calls=2)
+        self.assertIn("identical across all 2 calls", result)
+        self.assertNotIn("in the batch)", result)
 
     def test_single_call_no_section(self) -> None:
         calls = [DecodedCall(function_name="pause", signature="pause()", params=[])]
@@ -1853,3 +1884,116 @@ class TestTextRefineDetailBudget(unittest.TestCase):
         result = _generate_explanation(provider, "prompt", refine=True)
         self.assertIn("revised. LOW", result.summary)
         self.assertEqual(result.detail, "")
+
+
+class TestPromptSizeGuards(unittest.TestCase):
+    """Batch prompts stay bounded, and quantities keep one unit throughout."""
+
+    @staticmethod
+    def _provider() -> MagicMock:
+        provider = MagicMock()
+        provider.supports_structured_output = False
+        provider.complete.return_value = "TLDR: big batch. LOW.\n\nDETAIL:\nanalysis."
+        provider.model_name = "test"
+        return provider
+
+    @staticmethod
+    def _calldata_section(prompt: str) -> str:
+        return prompt.split("--- Decoded Calldata ---", 1)[1].split("\n---", 1)[0]
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction")
+    @patch("utils.llm.ai_explainer.decode_calldata", return_value=PAUSE)
+    def test_successful_simulations_are_capped(
+        self,
+        _mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+    ) -> None:
+        """Every sim used to be rendered; a 30-call batch could overflow the context."""
+        total = MAX_PROMPT_SIMULATIONS + 2
+        mock_simulate.side_effect = [SimulationResult(success=True, gas_used=100 + i) for i in range(total)]
+        provider = self._provider()
+        mock_get_provider.return_value = provider
+
+        result = explain_batch_transaction(
+            calls=[{"target": _addr(i), "data": PAUSE_DATA, "value": "0"} for i in range(total)],
+            chain_id=1,
+            refine=False,
+        )
+        assert result is not None
+        prompt = provider.complete.call_args[0][0]
+        self.assertEqual(prompt.count("(independent simulation;"), MAX_PROMPT_SIMULATIONS)
+        self.assertIn("2 further successful independent simulations omitted", prompt)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    def test_long_undecoded_payload_is_truncated(
+        self,
+        mock_decode: MagicMock,
+        _mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+    ) -> None:
+        """Undecoded payloads are dumped verbatim, so they need their own cap."""
+        long_data = "0x" + "ab" * 400
+        mock_decode.side_effect = lambda data, chain_id=None, target=None: None if data == long_data else PAUSE
+        provider = self._provider()
+        mock_get_provider.return_value = provider
+
+        result = explain_batch_transaction(
+            calls=[
+                {"target": "0xT1", "data": PAUSE_DATA, "value": "0"},
+                {"target": "0xT2", "data": long_data, "value": "0"},
+            ],
+            chain_id=1,
+            refine=False,
+        )
+        assert result is not None
+        prompt = provider.complete.call_args[0][0]
+        self.assertNotIn(long_data, prompt)
+        self.assertIn(long_data[:MAX_PROMPT_CALLDATA_CHARS], prompt)
+        self.assertIn(f"({len(long_data)} chars, truncated)", prompt)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    def test_native_values_use_eth_for_decoded_and_undecoded_alike(
+        self,
+        mock_decode: MagicMock,
+        _mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+    ) -> None:
+        """Handing the model wei and ETH in one section invites decimal confusion."""
+        mock_decode.side_effect = lambda data, chain_id=None, target=None: PAUSE if data == PAUSE_DATA else None
+        provider = self._provider()
+        mock_get_provider.return_value = provider
+
+        result = explain_batch_transaction(
+            calls=[
+                {"target": "0xT1", "data": PAUSE_DATA, "value": "1000000000000000000"},
+                {"target": "0xT2", "data": UNKNOWN_DATA, "value": "2000000000000000000"},
+                {"target": "0xT3", "data": "0x", "value": "3000000000000000000"},
+            ],
+            chain_id=1,
+            refine=False,
+        )
+        assert result is not None
+        section = self._calldata_section(provider.complete.call_args[0][0])
+        self.assertEqual(section.count("ETH value:"), 3)
+        for eth in ("1.000000 ETH", "2.000000 ETH", "3.000000 ETH"):
+            self.assertIn(eth, section)
+        self.assertNotIn(" wei", section)
+        self.assertNotIn("1000000000000000000", section)

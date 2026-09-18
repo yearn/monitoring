@@ -106,3 +106,19 @@ def format_age(seconds: int) -> str:
     if remaining_minutes or not parts:
         parts.append(f"{remaining_minutes}m")
     return " ".join(parts)
+
+
+def parse_wei(value: object) -> int:
+    """Parse a wei amount from untrusted JSON, defaulting to 0 instead of raising.
+
+    Upstream sources disagree on how a zero-value call is represented: the Safe
+    API and Envio may return an integer, a decimal string, an empty string, or
+    a JSON ``null``. ``int(None)`` and ``int("None")`` both raise, and a raise
+    here aborts a whole alert, so every unusable shape collapses to 0.
+    """
+    if value is None or value == "":
+        return 0
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0

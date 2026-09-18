@@ -18,7 +18,7 @@ from utils.cache import cache_path
 from utils.calldata.decoder import MAX_BYTES_RECURSION_DEPTH, DecodedCall, decode_calldata, try_decode_inner_calldata
 from utils.calldata.role_names import normalize_role_hash, resolve_role_names
 from utils.erc20_metadata import fetch_erc20_metadata
-from utils.formatting import format_decimal_amount, normalize_token_amount
+from utils.formatting import format_decimal_amount, normalize_token_amount, parse_wei
 from utils.impl_diff import diff_implementations, format_impl_diff
 from utils.llm import get_llm_provider
 from utils.llm.base import LLMError, LLMProvider
@@ -376,16 +376,6 @@ def _setter_key_args(decoded: DecodedCall) -> tuple:
     if len(values) < 2:
         return ()
     return tuple(values[:-1])
-
-
-def _parse_wei(value: object) -> int:
-    """JSON null / missing / unparsable wei amounts become 0, not a crash."""
-    if value is None or value == "":
-        return 0
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0
 
 
 def _normalize_calldata(data: str | None) -> str:
@@ -1809,7 +1799,7 @@ def _prepare_batch_items(
     for i, call in enumerate(calls, start=1):
         target = call.get("target", "")
         data = _normalize_calldata(call.get("data"))
-        value = _parse_wei(call.get("value", 0))
+        value = parse_wei(call.get("value", 0))
         decoded = decode_calldata(data, chain_id=chain_id, target=target) if _has_function_selector(data) else None
         status = _decode_status(data, decoded)
         simulation: SimulationResult | None = None
