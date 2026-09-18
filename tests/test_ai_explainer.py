@@ -1886,12 +1886,35 @@ class TestMappingKeyStateReads(unittest.TestCase):
         self.assertEqual(mock_read.call_count, 12 + 4)
         self.assertIn("1 additional mapping key skipped for `setCap(address,uint256)`", result.prompt_text())
 
-    @patch("utils.llm.ai_explainer.read_before_state", side_effect=RuntimeError("rpc down"))
-    def test_worker_failure_marked_unavailable(self, mock_read: MagicMock) -> None:
-        result = _collect_state_reads([("0xT", _set_cap(_addr(1)))], chain_id=1)
+    @patch("utils.llm.ai_explainer.read_before_state")
+    def test_worker_failure_marked_unavailable_against_a_known_getter(self, mock_read: MagicMock) -> None:
+        """A key whose read fails is still reported, named by the getter a sibling found."""
+        from utils.on_chain_state import StateRead
+
+        def read(_chain: int, _target: str, decoded: DecodedCall) -> list[StateRead]:
+            if decoded.params[0][1] == _addr(2):
+                raise RuntimeError("rpc down")
+            return [StateRead(var_name="cap", type_str="uint256", value=5, key_args=(decoded.params[0][1],))]
+
+        mock_read.side_effect = read
+        result = _collect_state_reads([("0xT", _set_cap(_addr(1))), ("0xT", _set_cap(_addr(2)))], chain_id=1)
         reads = result.by_target[0][1]
-        self.assertTrue(any(not r.available for r in reads))
-        self.assertEqual(mock_read.call_count, 1)
+        unavailable = [r for r in reads if not r.available]
+        self.assertEqual(len(unavailable), 1)
+        self.assertEqual(unavailable[0].var_name, "cap")
+        self.assertEqual(mock_read.call_count, 2)
+
+    @patch("utils.llm.ai_explainer.read_before_state", return_value=[])
+    def test_unidentified_getter_reports_nothing_rather_than_the_setter(self, mock_read: MagicMock) -> None:
+        """OApp's setPeer delegates its write, so no state var is found.
+
+        Emitting ``setPeer(30183) = unavailable`` would name a getter that does
+        not exist, which is worse than saying nothing.
+        """
+        result = _collect_state_reads([("0xT", _set_cap(_addr(1))), ("0xT", _set_cap(_addr(2)))], chain_id=1)
+        self.assertEqual(result.by_target, [])
+        self.assertEqual(result.prompt_text(), "")
+        self.assertEqual(mock_read.call_count, 2)
 
 
 def _setter_key(decoded: DecodedCall) -> tuple:

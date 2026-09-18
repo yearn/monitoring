@@ -509,9 +509,11 @@ def _collect_state_reads(
             if read.available:
                 readable_var[group] = read.var_name
 
-    def _var_name(decoded: DecodedCall, group: tuple[str, str]) -> str:
-        return readable_var.get(group, decoded.function_name)
-
+    # A key is only worth reporting as unavailable once a sibling read has told us
+    # which getter we were after. When no read in the group succeeded we never
+    # identified a state variable at all — a setter that delegates its write
+    # (OApp's setPeer -> _setPeer) yields none — and labelling the line with the
+    # setter would invent a getter that does not exist.
     for job, reads in zip(jobs, raw_results):
         target, decoded, key_args = job
         group = (target.lower(), decoded.signature or decoded.function_name)
@@ -519,14 +521,15 @@ def _collect_state_reads(
         if reads:
             bucket.extend(reads)
             continue
-        if key_args:
-            bucket.append(_unavailable(key_args, _var_name(decoded, group)))
+        if key_args and group in readable_var:
+            bucket.append(_unavailable(key_args, readable_var[group]))
 
     omitted_by_group: dict[tuple[str, str], int] = {}
     for target, decoded, key_args in omitted_jobs:
         group = (target.lower(), decoded.signature or decoded.function_name)
         omitted_by_group[group] = omitted_by_group.get(group, 0) + 1
-        _ensure_target(target).append(_unavailable(key_args, _var_name(decoded, group)))
+        if group in readable_var:
+            _ensure_target(target).append(_unavailable(key_args, readable_var[group]))
 
     notes: list[str] = []
     for (target_key, sig), count in omitted_by_group.items():
