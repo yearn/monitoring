@@ -1077,8 +1077,12 @@ def _format_prepared_calldata(
         if status == "empty_calldata":
             header = f"Call {item.index}: empty calldata (no function selector)"
             semantics = (
-                "empty calldata; intended native value is listed above — "
-                "do not assert delivery or that receive/fallback will succeed"
+                (
+                    "empty calldata; intended native value is listed above — "
+                    "do not assert delivery or that receive/fallback will succeed"
+                )
+                if item.value > 0
+                else "empty calldata and zero value — this call invokes nothing and transfers nothing"
             )
         else:
             selector = item.data[:10] if len(item.data) >= 10 else item.data or "0x"
@@ -1087,10 +1091,12 @@ def _format_prepared_calldata(
         calldata = item.data or "0x"
         if len(calldata) > MAX_PROMPT_CALLDATA_CHARS:
             calldata = f"{calldata[:MAX_PROMPT_CALLDATA_CHARS]}… ({len(item.data)} chars, truncated)"
-        lines = [
-            header,
-            f"  target: {target}",
-            f"  ETH value: {item.value / 1e18:.6f} ETH",
+        lines = [header, f"  target: {target}"]
+        # A zero value is the norm for governance calls; printing it on every
+        # undecoded entry is noise the decoded branch above already omits.
+        if item.value > 0:
+            lines.append(f"  ETH value: {item.value / 1e18:.6f} ETH")
+        lines += [
             f"  calldata: {calldata}",
             f"  decode status: {status}",
             f"  semantics: {semantics}",

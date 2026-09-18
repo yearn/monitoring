@@ -1997,3 +1997,41 @@ class TestPromptSizeGuards(unittest.TestCase):
             self.assertIn(eth, section)
         self.assertNotIn(" wei", section)
         self.assertNotIn("1000000000000000000", section)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    def test_zero_value_is_omitted_for_decoded_and_undecoded_alike(
+        self,
+        mock_decode: MagicMock,
+        _mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+    ) -> None:
+        """Governance calls carry no value ~always; a 0 line on every entry is noise."""
+        mock_decode.side_effect = lambda data, chain_id=None, target=None: PAUSE if data == PAUSE_DATA else None
+        provider = self._provider()
+        mock_get_provider.return_value = provider
+
+        result = explain_batch_transaction(
+            calls=[
+                {"target": "0xT1", "data": PAUSE_DATA, "value": "0"},
+                {"target": "0xT2", "data": UNKNOWN_DATA, "value": "0"},
+                {"target": "0xT3", "data": "0x", "value": "0"},
+            ],
+            chain_id=1,
+            refine=False,
+        )
+        assert result is not None
+        prompt = provider.complete.call_args[0][0]
+        self.assertNotIn("ETH value:", prompt)
+        self.assertNotIn("0.000000 ETH", prompt)
+        self.assertIn("invokes nothing and transfers nothing", prompt)
+        self.assertNotIn("**ETH value:**", result.report)
+        # The entries themselves must survive; only the noisy zero line goes.
+        self.assertIn("Call 2: UNDECODED", prompt)
+        self.assertIn("2. **Undecoded calldata**", result.report)
+        self.assertIn("3. **Empty calldata**", result.report)

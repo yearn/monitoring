@@ -431,8 +431,6 @@ def format_call_flow(ctx: ReportContext) -> str:
                 lines.append(f"{number}. **Undecoded calldata** on {target} — unknown selector `{selector}`")
             if entry.value > 0:
                 lines.append(f"   - **ETH value:** `{entry.value / 1e18:.6f}` ETH")
-            elif entry.value == 0:
-                lines.append("   - **ETH value:** `0`")
             if entry.raw_calldata:
                 lines.append(f"   - **Calldata:** `{entry.raw_calldata}`")
             lines.append(f"   - **Decode status:** `{entry.decode_status}`")
