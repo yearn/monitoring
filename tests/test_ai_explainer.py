@@ -7,6 +7,7 @@ from utils.calldata.decoder import DecodedCall, decode_calldata
 from utils.erc20_metadata import ERC20Metadata
 from utils.formatting import format_decimal_amount, normalize_token_amount
 from utils.llm.ai_explainer import (
+    MAX_INLINE_UNDECODED_CALLS,
     MAX_PROMPT_CALLDATA_CHARS,
     MAX_PROMPT_SIMULATIONS,
     MAX_STATE_READ_KEYS_PER_SIGNATURE,
@@ -296,13 +297,15 @@ class TestExplainTransaction(unittest.TestCase):
         self.assertEqual(result.detail, "")
         self.assertNotIn("LOW", result.summary)
         self.assertNotIn("MEDIUM", result.summary)
-        self.assertNotIn("**Risk:**", result.report)
-        self.assertIn("empty calldata", result.report)
-        self.assertIn("no function selector", result.report)
-        self.assertNotIn("Native ETH transfer", result.report)
-        self.assertNotIn("delivered", result.report.lower())
-        self.assertIn("1. **Empty calldata**", result.report)
-        self.assertIn("**ETH value:** `1.000000` ETH", result.report)
+        # The summary carries every fact, so no gist is published for it.
+        self.assertEqual(result.report, "")
+        self.assertEqual(result.title, "")
+        self.assertIn("Empty calldata", result.summary)
+        self.assertIn("no function selector", result.summary)
+        self.assertIn(self.TARGET, result.summary)
+        self.assertIn("1.000000 ETH", result.summary)
+        self.assertNotIn("Native ETH transfer", result.summary)
+        self.assertNotIn("delivered", result.summary.lower())
 
     @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
     @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
@@ -324,11 +327,12 @@ class TestExplainTransaction(unittest.TestCase):
         mock_get_provider.assert_called()
         mock_get_provider.return_value.complete.assert_not_called()
         self.assertEqual(result.detail, "")
-        self.assertIn("unknown_selector", result.report)
-        self.assertIn("`0x1234`", result.report)
-        self.assertNotIn("empty_calldata", result.report)
-        self.assertNotIn("Empty calldata", result.report)
-        self.assertNotIn("Native ETH transfer", result.report)
+        self.assertEqual(result.report, "")
+        self.assertIn("Could not decode", result.summary)
+        self.assertIn("selector 0x1234", result.summary)
+        self.assertIn(self.TARGET, result.summary)
+        self.assertNotIn("empty calldata", result.summary)
+        self.assertNotIn("Native ETH transfer", result.summary)
 
     @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
     @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
@@ -350,9 +354,10 @@ class TestExplainTransaction(unittest.TestCase):
         mock_get_provider.assert_called()
         mock_get_provider.return_value.complete.assert_not_called()
         self.assertEqual(result.detail, "")
-        self.assertIn("unknown_selector", result.report)
-        self.assertIn("1. **Undecoded calldata**", result.report)
-        self.assertNotIn("**Risk:**", result.report)
+        self.assertEqual(result.report, "")
+        self.assertIn("Could not decode", result.summary)
+        self.assertIn("selector 0x11223344", result.summary)
+        self.assertIn(self.TARGET, result.summary)
 
     @patch("utils.llm.ai_explainer.get_llm_provider", side_effect=LLMError("LLM_API_KEY is not set"))
     def test_unconfigured_llm_skips_deterministic_path(self, _mock_get_provider: MagicMock) -> None:
@@ -1607,11 +1612,13 @@ class TestBatchUndecodedCalls(unittest.TestCase):
         self.assertNotIn("Could not decode 2 calls", result.summary)
         self.assertNotIn("LOW", result.summary)
         self.assertNotIn("MEDIUM", result.summary)
-        self.assertNotIn("**Risk:**", result.report)
-        self.assertNotIn(" LOW", result.title)
-        self.assertIn("1. **Undecoded calldata**", result.report)
-        self.assertIn("2. **Empty calldata**", result.report)
-        self.assertNotIn("Native ETH transfer", result.report)
+        # Two calls fit inline, so the alert is self-contained: no gist, and both
+        # entries keep their original index, target and value.
+        self.assertEqual(result.report, "")
+        self.assertEqual(result.title, "")
+        self.assertIn("1. 0xT1 (selector 0xdeadbeef)", result.summary)
+        self.assertIn("2. 0xT2 (empty calldata, 0.000000 ETH)", result.summary)
+        self.assertNotIn("Native ETH transfer", result.summary)
         self.assertEqual(mock_simulate.call_count, 1)
 
     @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
@@ -1645,6 +1652,56 @@ class TestBatchUndecodedCalls(unittest.TestCase):
         self.assertIn("DELEGATECALL", result.report)
         self.assertIn("## Stated Intent", result.report)
         self.assertIn("payouts", result.report)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata", return_value=None)
+    def test_batch_over_inline_cap_still_publishes_a_report(
+        self,
+        _mock_decode: MagicMock,
+        _mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+    ) -> None:
+        """Too many entries to inline: the facts must survive in a linked report."""
+        total = MAX_INLINE_UNDECODED_CALLS + 2
+        result = explain_batch_transaction(
+            calls=[{"target": _addr(i), "data": "0x", "value": "0"} for i in range(total)],
+            chain_id=1,
+            label="Test Timelock",
+        )
+        assert result is not None
+        mock_get_provider.return_value.complete.assert_not_called()
+        self.assertIn("See the linked report", result.summary)
+        self.assertNotEqual(result.report, "")
+        self.assertIn(f"{total}. **Empty calldata**", result.report)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata", return_value=None)
+    def test_proposer_description_keeps_the_report_for_a_small_batch(
+        self,
+        _mock_decode: MagicMock,
+        _mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+    ) -> None:
+        """Stated intent cannot fit in the summary, so it must not be dropped."""
+        result = explain_batch_transaction(
+            calls=[{"target": "0xT1", "data": "0x", "value": "0"}],
+            chain_id=1,
+            description="top up the payer",
+        )
+        assert result is not None
+        mock_get_provider.return_value.complete.assert_not_called()
+        self.assertIn("## Stated Intent", result.report)
+        self.assertIn("top up the payer", result.report)
 
 
 class TestBatchSimulationsAttributed(unittest.TestCase):

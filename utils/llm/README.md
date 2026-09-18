@@ -318,7 +318,7 @@ Calls upgradeTo(address) on the AAVE pool proxy...
 
 If structured output is disabled and refine revises the summary, the original detail is discarded (so summary and detail cannot diverge) and **one** extra completion regenerates detail from the final summary. An immediate `PASS` keeps the original detail with no extra call. Expansion failure leaves the revised summary in place and does not resurrect stale detail.
 
-A batch whose every call failed to decode never enters this path: it produces a deterministic Telegram summary and gist (no LLM calls, no risk tag, `detail=""`).
+A call or batch whose every payload failed to decode never enters this path: it produces a deterministic Telegram summary (no LLM calls, no risk tag, `detail=""`). Up to `MAX_INLINE_UNDECODED_CALLS` (3) entries name their target and native value in the summary itself, so no gist is published — it would only restate the alert, and governance calls carry no value almost always. A gist is still published when the summary cannot carry everything: more entries than the cap, or an execution `context_note`, proposer `description`, or safety note attached to the batch. Zero native values are omitted everywhere, matching the decoded path.
 
 Structured output is controlled by `LLM_STRUCTURED_OUTPUT` (per-provider default: on for `anthropic`/`openai`/`venice` — all verified live — off for `groq`/custom, since JSON-schema support varies by backend).
 

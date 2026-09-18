@@ -265,6 +265,9 @@ MAX_STATE_READ_KEYS_PER_SIGNATURE = 12
 # Prompt-size guards for independent per-call simulations and raw calldata dumps.
 MAX_PROMPT_SIMULATIONS = 8
 MAX_PROMPT_CALLDATA_CHARS = 256
+# Undecoded batches up to this size name every target/value in the Telegram
+# summary; larger ones defer to a linked report to stay inside the message budget.
+MAX_INLINE_UNDECODED_CALLS = 3
 
 
 @dataclass(frozen=True)
@@ -1861,35 +1864,67 @@ def _call_entry_from_item(
     )
 
 
+def _undecoded_call_phrase(item: _PreparedCall) -> str:
+    """One call as ``0xTarget (empty calldata, 1.500000 ETH)`` for the Telegram summary.
+
+    Addresses stay full and unlinked: the summary is markdown-escaped before it
+    ships, so a link would render as literal brackets.
+    """
+    target = item.target or "(no target)"
+    if _decode_status(item.data, item.decoded) == "empty_calldata":
+        what = "empty calldata"
+    else:
+        what = f"selector {item.data[:10] if len(item.data) >= 10 else item.data or '0x'}"
+    if item.value > 0:
+        return f"{target} ({what}, {item.value / 1e18:.6f} ETH)"
+    return f"{target} ({what})"
+
+
+def _undecoded_composition(n: int, n_empty: int, n_unknown: int) -> str:
+    """Lead sentence naming what the batch is made of."""
+    if n_unknown == 0:
+        return f"This batch has {n} empty-calldata calls (no function selector)."
+    if n_empty == 0:
+        return f"Could not decode {n} calls in this batch."
+    empty_noun = "call" if n_empty == 1 else "calls"
+    unknown_noun = "call" if n_unknown == 1 else "calls"
+    return f"This batch has {n_empty} empty-calldata {empty_noun} and {n_unknown} undecoded {unknown_noun}."
+
+
 def _undecoded_batch_summary(items: list[_PreparedCall]) -> str:
-    """Deterministic Telegram summary when every call failed to decode."""
+    """Deterministic Telegram summary when every call failed to decode.
+
+    Up to ``MAX_INLINE_UNDECODED_CALLS`` entries name their target and value
+    inline, so the alert is self-contained and needs no linked report. Larger
+    batches would blow the Telegram budget, so they defer to the gist instead.
+    """
     n = len(items)
     statuses = [_decode_status(item.data, item.decoded) for item in items]
     n_empty = statuses.count("empty_calldata")
     n_unknown = n - n_empty
-    if n == 1:
-        if n_empty:
-            return (
-                "This call has empty calldata (no function selector). "
-                "See the linked report for the intended target and native value."
-            )
-        return "Could not decode this call. See the linked report for the original target, value, and payload."
-    if n_unknown == 0:
+
+    if n > MAX_INLINE_UNDECODED_CALLS:
         return (
-            f"This batch has {n} empty-calldata calls (no function selector). "
-            "See the linked report for the intended targets and native values."
-        )
-    if n_empty == 0:
-        return (
-            f"Could not decode {n} calls in this batch. "
+            f"{_undecoded_composition(n, n_empty, n_unknown)} "
             "See the linked report for original indices, targets, values, and payloads."
         )
-    empty_noun = "call" if n_empty == 1 else "calls"
-    unknown_noun = "call" if n_unknown == 1 else "calls"
-    return (
-        f"This batch has {n_empty} empty-calldata {empty_noun} and {n_unknown} undecoded {unknown_noun}. "
-        "See the linked report for original indices, targets, values, and payloads."
-    )
+
+    if n == 1:
+        item = items[0]
+        if n_empty:
+            if item.value > 0:
+                return (
+                    f"Empty calldata (no function selector) on {item.target or '(no target)'} "
+                    f"carrying {item.value / 1e18:.6f} ETH — nothing is invoked, and delivery is not confirmed."
+                )
+            return (
+                f"Empty calldata and zero value on {item.target or '(no target)'} — "
+                "this call invokes nothing and transfers nothing."
+            )
+        return f"Could not decode this call: {_undecoded_call_phrase(item)}."
+
+    details = "; ".join(f"{item.index}. {_undecoded_call_phrase(item)}" for item in items)
+    return f"{_undecoded_composition(n, n_empty, n_unknown)} {details}."
 
 
 def _deterministic_undecoded_explanation(
@@ -1928,6 +1963,12 @@ def _deterministic_undecoded_explanation(
         safety_notes=safety_notes or [],
     )
     summary = _undecoded_batch_summary(items)
+    # A small batch states every target and value in the summary itself, so a gist
+    # would only restate the alert. Anything the summary cannot carry — execution
+    # context, proposer intent, an unverified-target warning — still earns one.
+    inlined = len(items) <= MAX_INLINE_UNDECODED_CALLS
+    if inlined and not context_note and not description and not safety_notes:
+        return Explanation(summary=summary, detail="", report="", title="")
     report = build_report(summary, "", report_ctx, risk_tag="")
     title = build_title(report_ctx, risk_tag="", fallback=DETAIL_REPORT_TITLE)
     return Explanation(summary=summary, detail="", report=report, title=title)
