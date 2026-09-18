@@ -38,20 +38,108 @@ _REDUNDANT_ANALYSIS_HEADING_RE = re.compile(
 )
 
 
+# Standard ERC20 movement functions: signature -> (label, recipient_param_index,
+# amount_param_index, is_flow). Shared with the explainer so report amount hints
+# and Token Flows classify the same parameters. `is_flow` marks calls that
+# actually move a balance (summed into the per-token total); approve only sets
+# an allowance, so it's listed but not summed.
+TOKEN_MOVE_SIGS: dict[str, tuple[str, int | None, int, bool]] = {
+    "transfer(address,uint256)": ("transfer", 0, 1, True),
+    "transferFrom(address,address,uint256)": ("transferFrom", 1, 2, True),
+    "mint(address,uint256)": ("mint", 0, 1, True),
+    "burn(address,uint256)": ("burn", 0, 1, True),
+    "approve(address,uint256)": ("approve", 0, 1, False),
+}
+
+# ABI names that are never token amounts, even when a related token is known.
+_NON_AMOUNT_PARAM_NAMES = frozenset(
+    {
+        "deadline",
+        "timestamp",
+        "time",
+        "expiry",
+        "expiration",
+        "epoch",
+        "id",
+        "marketid",
+        "index",
+        "nonce",
+        "rate",
+        "fee",
+        "bps",
+        "duration",
+        "delay",
+        "slippage",
+        "ltv",
+        "shares",
+        "share",
+    }
+)
+
+# Names that can support amount classification only when the target itself is
+# the token (related-token getter ``self``). They never pick a token on their own.
+_AMOUNT_PARAM_NAMES = frozenset({"amount", "amounts", "assets", "value"})
+
+
+def token_amount_index(signature: str) -> int | None:
+    """Amount-parameter index for a known ERC20 movement signature, else None."""
+    spec = TOKEN_MOVE_SIGS.get(signature)
+    return spec[2] if spec else None
+
+
+def is_token_amount_param(
+    signature: str,
+    param_index: int,
+    param_name: str | None,
+    token: RelatedToken | None = None,
+) -> bool:
+    """True when existing evidence says this parameter is a token amount.
+
+    Prefer the exact ERC20 movement signature → amount-index mapping. ABI names
+    can exclude (timestamp, marketId, shares) or, when the target *is* the token,
+    support ``amount``/``assets``. Names alone never choose a token or scale, and
+    share quantities must not inherit an underlying asset's decimals.
+    """
+    amount_index = token_amount_index(signature)
+    if amount_index is not None and param_index == amount_index:
+        return True
+    if not param_name:
+        return False
+    normalized = param_name.lstrip("_").lower()
+    if normalized in _NON_AMOUNT_PARAM_NAMES:
+        return False
+    if token is None or token.getter != "self":
+        return False
+    return normalized in _AMOUNT_PARAM_NAMES
+
+
 @dataclass(frozen=True)
 class CallEntry:
-    """One decoded call in the transaction, with the context needed to render it."""
+    """One call in the transaction, with the context needed to render it.
+
+    ``call`` is None when the payload could not be decoded. Those entries still
+    belong in the call flow: dropping them hides an action and renumbers later
+    calls. ``original_index`` is the 1-based input order and must be preserved
+    even when neighbors fail to decode.
+    """
 
     target: str
-    call: DecodedCall
+    call: DecodedCall | None = None
     value: int = 0
     param_names: list[str] | None = None
     # Role hash → role name for this call's bytes32 role arguments, so the call
     # flow shows `GOVERNOR` next to the digest instead of the digest alone.
     role_names: dict[str, str] = field(default_factory=dict)
     # The single ERC20 this call's target is denominated in, when exactly one
-    # resolved. Used to annotate raw amounts with a human-readable figure.
+    # resolved. Applied only to parameters that ``is_token_amount_param`` accepts.
     amount_token: RelatedToken | None = None
+    raw_calldata: str = ""
+    original_index: int | None = None
+    # ``decoded``, ``unknown_selector``, or ``empty_calldata``.
+    decode_status: str = "decoded"
+    # Deterministic simulation note for this call. Failed sims may appear here
+    # as diagnostics; they must not be copied into the LLM risk prompt.
+    simulation_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -75,6 +163,8 @@ class ReportContext:
     # Addresses introduced by protocol-specific context. These may not occur in
     # calldata but still belong in the report's deterministic reference table.
     related_addresses: list[str] = field(default_factory=list)
+    # Deterministic before-state notes (unavailable keys, omitted-key cap).
+    state_read_notes: str = ""
 
 
 @dataclass
@@ -239,8 +329,9 @@ def _render_param(
 
     Composites recurse so addresses nested in a struct or an array of structs
     still come out as explorer links rather than a stringified Python tuple.
-    Recursion terminates on the type string, which is finite. ``token`` carries
-    the call target's sole ERC20, used to annotate raw amounts.
+    Recursion terminates on the type string, which is finite. ``token`` is the
+    call target's sole ERC20 and is only passed for parameters already identified
+    as token amounts.
     """
     element = array_element_type(type_str)
     if element is not None and isinstance(value, (list, tuple)):
@@ -249,7 +340,8 @@ def _render_param(
         lines = [f"{indent}- {label}:"]
         for i, item in enumerate(value):
             if _is_composite(element):
-                lines.extend(_render_param(f"`[{i}]`", element, item, chain_id, labels, indent + "  ", depth, token))
+                # Nested tuples/structs must not inherit a parent amount token.
+                lines.extend(_render_param(f"`[{i}]`", element, item, chain_id, labels, indent + "  ", depth, None))
             else:
                 lines.append(f"{indent}  - {_format_param_value(element, item, chain_id, labels, token)}")
         return lines
@@ -260,9 +352,7 @@ def _render_param(
             return [f"{indent}- {label}: _(empty)_"]
         lines = [f"{indent}- {label}:"]
         for component, item in zip(components, value):
-            lines.extend(
-                _render_param(f"`{component}`", component, item, chain_id, labels, indent + "  ", depth, token)
-            )
+            lines.extend(_render_param(f"`{component}`", component, item, chain_id, labels, indent + "  ", depth, None))
         return lines
 
     if type_str == "bytes" and depth < MAX_BYTES_RECURSION_DEPTH:
@@ -294,7 +384,10 @@ def _format_params(
     lines: list[str] = []
     for i, (type_str, value) in enumerate(call.params):
         name = param_names[i] if param_names is not None and i < len(param_names) else None
-        rendered = _render_param(_param_label(type_str, name), type_str, value, chain_id, labels, indent, depth, token)
+        hint_token = token if is_token_amount_param(call.signature, i, name, token) else None
+        rendered = _render_param(
+            _param_label(type_str, name), type_str, value, chain_id, labels, indent, depth, hint_token
+        )
         if role_names and type_str == "bytes32" and len(rendered) == 1:
             role = role_names.get(normalize_role_hash(value))
             if role:
@@ -318,20 +411,37 @@ def format_call_flow(ctx: ReportContext) -> str:
         lines.append("")
 
     for i, entry in enumerate(ctx.entries, start=1):
+        number = entry.original_index if entry.original_index is not None else i
         target = address_link(entry.target, ctx.chain_id, ctx.labels) if entry.target else "_unknown target_"
-        lines.append(f"{i}. **`{entry.call.signature}`** on {target}")
-        if entry.value > 0:
-            lines.append(f"   - **ETH value:** `{entry.value / 1e18:.6f}` ETH")
-        param_lines = _format_params(
-            entry.call,
-            ctx.chain_id,
-            ctx.labels,
-            entry.param_names,
-            indent="   ",
-            token=entry.amount_token,
-            role_names=entry.role_names,
-        )
-        lines.extend(param_lines or ["   - _no inputs_"])
+        if entry.call is None:
+            if entry.decode_status == "empty_calldata":
+                lines.append(f"{number}. **Native ETH transfer** on {target} — empty calldata")
+            else:
+                selector = entry.raw_calldata[:10] if len(entry.raw_calldata) >= 10 else entry.raw_calldata or "0x"
+                lines.append(f"{number}. **Undecoded calldata** on {target} — unknown selector `{selector}`")
+            if entry.value > 0:
+                lines.append(f"   - **ETH value:** `{entry.value / 1e18:.6f}` ETH")
+            elif entry.value == 0:
+                lines.append("   - **ETH value:** `0`")
+            if entry.raw_calldata:
+                lines.append(f"   - **Calldata:** `{entry.raw_calldata}`")
+            lines.append(f"   - **Decode status:** `{entry.decode_status}`")
+        else:
+            lines.append(f"{number}. **`{entry.call.signature}`** on {target}")
+            if entry.value > 0:
+                lines.append(f"   - **ETH value:** `{entry.value / 1e18:.6f}` ETH")
+            param_lines = _format_params(
+                entry.call,
+                ctx.chain_id,
+                ctx.labels,
+                entry.param_names,
+                indent="   ",
+                token=entry.amount_token,
+                role_names=entry.role_names,
+            )
+            lines.extend(param_lines or ["   - _no inputs_"])
+        if entry.simulation_note:
+            lines.append(f"   - {entry.simulation_note}")
         lines.append("")
 
     return "\n".join(lines).rstrip()
@@ -413,6 +523,10 @@ def format_reference_table(ctx: ReportContext) -> str:
         _add_reference(references, ctx, label_address, "Alert contract", "Contract named in the report header")
 
     for entry in ctx.entries:
+        if entry.call is None:
+            received = "undecoded calldata" if entry.decode_status != "empty_calldata" else "a native ETH transfer"
+            _add_reference(references, ctx, entry.target, "Call target", f"Receives {received}")
+            continue
         _add_reference(
             references,
             ctx,
@@ -509,7 +623,8 @@ def build_report(summary: str, detail: str, ctx: ReportContext, risk_tag: str = 
     Returns:
         Markdown body, or "" when there is nothing worth publishing.
     """
-    if not detail and not summary:
+    call_flow = format_call_flow(ctx)
+    if not detail and not summary and not call_flow:
         return ""
 
     sections: list[str] = []
@@ -520,9 +635,10 @@ def build_report(summary: str, detail: str, ctx: ReportContext, risk_tag: str = 
         sections.append(f"## Summary\n\n{summary}")
     if detail:
         sections.append(f"## Analysis\n\n{_REDUNDANT_ANALYSIS_HEADING_RE.sub('', detail)}")
-    call_flow = format_call_flow(ctx)
     if call_flow:
         sections.append(f"## Call Flow\n\n{call_flow}")
+    if ctx.state_read_notes:
+        sections.append(f"## Current State\n\n{ctx.state_read_notes}")
     if ctx.protocol_context:
         sections.append(f"## Protocol Context\n\n{ctx.protocol_context}")
     reference = format_reference_table(ctx)

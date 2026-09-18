@@ -7,15 +7,19 @@ from utils.calldata.decoder import DecodedCall, decode_calldata
 from utils.erc20_metadata import ERC20Metadata
 from utils.formatting import format_decimal_amount, normalize_token_amount
 from utils.llm.ai_explainer import (
+    MAX_STATE_READ_KEYS_PER_SIGNATURE,
     SYSTEM_INSTRUCTIONS,
     Explanation,
     _build_prompt,
     _collect_safety_checks,
+    _collect_state_reads,
     _collect_token_flows,
     _explanation_from_json,
+    _generate_explanation,
     _parse_explanation,
     _sole_token_by_target,
     collect_unique_addresses,
+    explain_batch_transaction,
     explain_transaction,
     format_explanation_line,
 )
@@ -430,12 +434,39 @@ class TestFormatExplanationLine(unittest.TestCase):
         self.assertIn("Couldn't post full report", result)
 
     def test_format_no_detail(self) -> None:
-        """If there's no detail, no gist upload is attempted."""
+        """If there's no detail and no report, no gist upload is attempted."""
         explanation = Explanation(summary="This pauses the protocol.", detail="")
         result = format_explanation_line(explanation)
         self.assertIn("AI Summary", result)
         self.assertIn("This pauses the protocol.", result)
         self.assertNotIn("Full details", result)
+
+    @patch("utils.llm.ai_explainer.upload_to_gist", return_value="https://gist.wavey.info/abc123")
+    def test_report_only_uploads_without_detail(self, mock_gist: MagicMock) -> None:
+        explanation = Explanation(
+            summary="Could not decode 3 calls in this batch.",
+            detail="",
+            report="## Call Flow\n\n1. **Undecoded calldata**",
+            title="Infinifi Shorttimelock - 11/08/2026 10:00",
+        )
+        result = format_explanation_line(explanation)
+        mock_gist.assert_called_once_with(explanation.report, title=explanation.title)
+        self.assertIn("Full details", result)
+        self.assertIn("https://gist.wavey.info/abc123", result)
+
+    @patch("utils.llm.ai_explainer._spill_unpublished_report", return_value="/tmp/report.md")
+    @patch("utils.llm.ai_explainer.upload_to_gist", return_value="")
+    def test_report_only_upload_failure_spills(self, mock_gist: MagicMock, mock_spill: MagicMock) -> None:
+        explanation = Explanation(
+            summary="Could not decode 3 calls in this batch.",
+            detail="",
+            report="## Call Flow\n\n1. **Undecoded calldata**",
+            title="Infinifi Shorttimelock - 11/08/2026 10:00",
+        )
+        result = format_explanation_line(explanation)
+        mock_gist.assert_called_once()
+        mock_spill.assert_called_once()
+        self.assertIn("Couldn't post full report", result)
 
 
 class TestFailedSimulationDropped(unittest.TestCase):
@@ -1274,3 +1305,314 @@ class TestUnpublishedReportSpill(unittest.TestCase):
         result = format_explanation_line(Explanation(summary="Grants mint rights.", detail="d", report="r"))
         self.assertIn("Grants mint rights.", result)
         self.assertIn("Couldn't post full report", result)
+
+
+PAUSE = DecodedCall(function_name="pause", signature="pause()")
+UNKNOWN_DATA = "0xdeadbeef"
+PAUSE_DATA = "0x8456cb59"
+
+
+def _addr(i: int) -> str:
+    return "0x" + f"{i:040x}"
+
+
+def _set_cap(key: str, cap: int = 1) -> DecodedCall:
+    return DecodedCall(
+        function_name="setCap",
+        signature="setCap(address,uint256)",
+        params=[("address", key), ("uint256", cap)],
+    )
+
+
+class TestBatchUndecodedCalls(unittest.TestCase):
+    """Unknown batch calls stay visible; all-unknown batches skip the LLM."""
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    def test_unknown_middle_call_kept_in_prompt_and_report(
+        self,
+        mock_decode: MagicMock,
+        _mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+    ) -> None:
+        def decode(data: str, chain_id: int | None = None, target: str | None = None) -> DecodedCall | None:
+            return None if data == UNKNOWN_DATA else PAUSE
+
+        mock_decode.side_effect = decode
+        provider = MagicMock()
+        provider.supports_structured_output = False
+        provider.complete.return_value = "TLDR: mixed batch. LOW.\n\nDETAIL:\nanalysis."
+        provider.model_name = "test"
+        mock_get_provider.return_value = provider
+
+        result = explain_batch_transaction(
+            calls=[
+                {"target": "0xT1", "data": PAUSE_DATA, "value": "0"},
+                {"target": "0xT2", "data": UNKNOWN_DATA, "value": "1000000000000000000"},
+                {"target": "0xT3", "data": PAUSE_DATA, "value": "0"},
+            ],
+            chain_id=1,
+            refine=False,
+        )
+        assert result is not None
+        prompt = provider.complete.call_args[0][0]
+        self.assertIn("Call 1:", prompt)
+        self.assertIn("Call 2: UNDECODED", prompt)
+        self.assertIn("Call 3:", prompt)
+        self.assertIn(UNKNOWN_DATA, prompt)
+        self.assertIn("1000000000000000000 wei", prompt)
+        self.assertIn("semantics: unresolved", prompt)
+        self.assertIn("2. **Undecoded calldata**", result.report)
+        self.assertIn("unknown_selector", result.report)
+        self.assertEqual(provider.complete.call_count, 1)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata", return_value=None)
+    def test_all_unknown_is_deterministic_and_skips_llm(
+        self,
+        _mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+    ) -> None:
+        result = explain_batch_transaction(
+            calls=[
+                {"target": "0xT1", "data": UNKNOWN_DATA, "value": "0"},
+                {"target": "0xT2", "data": "0x", "value": "1"},
+            ],
+            chain_id=1,
+            label="Test Timelock",
+        )
+        assert result is not None
+        mock_get_provider.assert_not_called()
+        self.assertEqual(result.detail, "")
+        self.assertIn("Could not decode 2 calls", result.summary)
+        self.assertNotIn("LOW", result.summary)
+        self.assertNotIn("MEDIUM", result.summary)
+        self.assertNotIn("**Risk:**", result.report)
+        self.assertNotIn(" LOW", result.title)
+        self.assertIn("1. **Undecoded calldata**", result.report)
+        self.assertIn("2. **Native ETH transfer**", result.report)
+        self.assertEqual(mock_simulate.call_count, 2)
+
+
+class TestBatchSimulationsAttributed(unittest.TestCase):
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction")
+    @patch("utils.llm.ai_explainer.decode_calldata", return_value=PAUSE)
+    def test_each_successful_sim_is_labeled_independent(
+        self,
+        _mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+    ) -> None:
+        mock_simulate.side_effect = [
+            SimulationResult(success=True, gas_used=111),
+            SimulationResult(success=False, gas_used=0, error_message="execution reverted: not authorized"),
+            SimulationResult(success=True, gas_used=333),
+        ]
+        provider = MagicMock()
+        provider.supports_structured_output = False
+        provider.complete.return_value = "TLDR: three calls. LOW.\n\nDETAIL:\nanalysis."
+        provider.model_name = "test"
+        mock_get_provider.return_value = provider
+
+        result = explain_batch_transaction(
+            calls=[
+                {"target": "0xT1", "data": PAUSE_DATA, "value": "0"},
+                {"target": "0xT2", "data": PAUSE_DATA, "value": "0"},
+                {"target": "0xT3", "data": PAUSE_DATA, "value": "0"},
+            ],
+            chain_id=1,
+            refine=False,
+        )
+        assert result is not None
+        prompt = provider.complete.call_args[0][0]
+        self.assertIn("Call 1 (independent simulation", prompt)
+        self.assertIn("Call 3 (independent simulation", prompt)
+        self.assertNotIn("Call 2 (independent simulation", prompt)
+        self.assertNotIn("FAILED", prompt)
+        self.assertNotIn("execution reverted", prompt)
+        self.assertEqual(mock_simulate.call_count, 3)
+        self.assertIn("1. **`pause()`**", result.report)
+        self.assertIn("not a predicted governance failure", result.report)
+
+
+class TestMappingKeyStateReads(unittest.TestCase):
+    @patch("utils.llm.ai_explainer.read_before_state")
+    def test_distinct_keys_are_read_and_duplicates_deduped(self, mock_read: MagicMock) -> None:
+        mock_read.side_effect = lambda _chain, _target, decoded: [
+            __import__("utils.on_chain_state", fromlist=["StateRead"]).StateRead(
+                var_name="cap",
+                type_str="mapping(address => uint256)",
+                value=1,
+                key_args=_setter_key(decoded),
+            )
+        ]
+        a, b = _addr(1), _addr(2)
+        result = _collect_state_reads(
+            [
+                ("0xT", _set_cap(a, 10)),
+                ("0xT", _set_cap(b, 20)),
+                ("0xT", _set_cap(a, 99)),
+            ],
+            chain_id=1,
+        )
+        self.assertEqual(mock_read.call_count, 2)
+        rendered = result.prompt_text()
+        self.assertIn(a, rendered)
+        self.assertIn(b, rendered)
+
+    @patch("utils.llm.ai_explainer.read_before_state")
+    def test_forty_keys_cap_at_twelve_and_report_omitted(self, mock_read: MagicMock) -> None:
+        from utils.on_chain_state import StateRead
+
+        mock_read.side_effect = lambda _chain, _target, decoded: [
+            StateRead(
+                var_name="cap",
+                type_str="mapping(address => uint256)",
+                value=1,
+                key_args=(decoded.params[0][1],),
+            )
+        ]
+        calls = [("0xT", _set_cap(_addr(i))) for i in range(1, 41)]
+        result = _collect_state_reads(calls, chain_id=1)
+        self.assertEqual(mock_read.call_count, MAX_STATE_READ_KEYS_PER_SIGNATURE)
+        self.assertIn("28 further keys not read", result.prompt_text())
+        self.assertIn(f"(limit: {MAX_STATE_READ_KEYS_PER_SIGNATURE})", result.report_text())
+        unavailable = [r for _, reads in result.by_target for r in reads if not r.available]
+        self.assertEqual(len(unavailable), 28)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.read_before_state")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    def test_batch_retains_all_calls_when_keys_are_capped(
+        self,
+        mock_decode: MagicMock,
+        _mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_read: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+    ) -> None:
+        from utils.on_chain_state import StateRead
+
+        mock_decode.side_effect = [_set_cap(_addr(i)) for i in range(1, 41)]
+        mock_read.side_effect = lambda _chain, _target, decoded: [
+            StateRead(
+                var_name="cap",
+                type_str="mapping(address => uint256)",
+                value=1,
+                key_args=(decoded.params[0][1],),
+            )
+        ]
+        provider = MagicMock()
+        provider.supports_structured_output = False
+        provider.complete.return_value = "TLDR: sets many caps. LOW.\n\nDETAIL:\nanalysis."
+        provider.model_name = "test"
+        mock_get_provider.return_value = provider
+
+        result = explain_batch_transaction(
+            [{"target": "0xT", "data": f"0x{i:08x}", "value": "0"} for i in range(1, 41)],
+            chain_id=1,
+            refine=False,
+        )
+        assert result is not None
+        self.assertEqual(mock_read.call_count, MAX_STATE_READ_KEYS_PER_SIGNATURE)
+        self.assertIn("1. **`setCap(address,uint256)`**", result.report)
+        self.assertIn("40. **`setCap(address,uint256)`**", result.report)
+        self.assertIn("28 further keys not read", result.report)
+        self.assertIn("28 further keys not read", provider.complete.call_args[0][0])
+
+    @patch("utils.llm.ai_explainer.read_before_state")
+    def test_overloads_have_separate_caps(self, mock_read: MagicMock) -> None:
+        from utils.on_chain_state import StateRead
+
+        mock_read.return_value = [StateRead(var_name="cap", type_str="uint256", value=1)]
+        addr_calls = [("0xT", _set_cap(_addr(i))) for i in range(1, 14)]
+        bytes_calls = [
+            (
+                "0xT",
+                DecodedCall(
+                    function_name="setCap",
+                    signature="setCap(bytes32,uint256)",
+                    params=[("bytes32", bytes([i]) * 32), ("uint256", 1)],
+                ),
+            )
+            for i in range(1, 5)
+        ]
+        result = _collect_state_reads(addr_calls + bytes_calls, chain_id=1)
+        self.assertEqual(mock_read.call_count, 12 + 4)
+        self.assertIn("1 further keys not read for `setCap(address,uint256)`", result.prompt_text())
+
+    @patch("utils.llm.ai_explainer.read_before_state", side_effect=RuntimeError("rpc down"))
+    def test_worker_failure_marked_unavailable(self, mock_read: MagicMock) -> None:
+        result = _collect_state_reads([("0xT", _set_cap(_addr(1)))], chain_id=1)
+        reads = result.by_target[0][1]
+        self.assertTrue(any(not r.available for r in reads))
+        self.assertEqual(mock_read.call_count, 1)
+
+
+def _setter_key(decoded: DecodedCall) -> tuple:
+    return (decoded.params[0][1],)
+
+
+class TestTextRefineDetailBudget(unittest.TestCase):
+    def test_immediate_pass_keeps_detail_without_extra_call(self) -> None:
+        provider = MagicMock()
+        provider.supports_structured_output = False
+        provider.complete.side_effect = [
+            "TLDR: original. LOW.\n\nDETAIL:\nOriginal analysis.",
+            "PASS",
+        ]
+        result = _generate_explanation(provider, "prompt", refine=True)
+        self.assertEqual(provider.complete.call_count, 2)
+        self.assertEqual(result.detail, "Original analysis.")
+        self.assertIn("original. LOW", result.summary)
+
+    def test_multiple_revisions_regenerate_detail_once(self) -> None:
+        provider = MagicMock()
+        provider.supports_structured_output = False
+        provider.complete.side_effect = [
+            "TLDR: original. LOW.\n\nDETAIL:\nOriginal analysis.",
+            "TLDR: revised once. LOW.",
+            "TLDR: revised twice. LOW.",
+            "PASS",
+            "Fresh detail from the final summary.",
+        ]
+        result = _generate_explanation(provider, "prompt", refine=True)
+        self.assertEqual(provider.complete.call_count, 5)
+        self.assertIn("revised twice. LOW", result.summary)
+        self.assertEqual(result.detail, "Fresh detail from the final summary.")
+        self.assertNotIn("Original analysis", result.detail)
+
+    def test_expansion_failure_keeps_revised_summary_discards_stale_detail(self) -> None:
+        from utils.llm.base import LLMError
+
+        provider = MagicMock()
+        provider.supports_structured_output = False
+        provider.complete.side_effect = [
+            "TLDR: original. LOW.\n\nDETAIL:\nOriginal analysis.",
+            "TLDR: revised. LOW.",
+            "PASS",
+            LLMError("boom"),
+        ]
+        result = _generate_explanation(provider, "prompt", refine=True)
+        self.assertIn("revised. LOW", result.summary)
+        self.assertEqual(result.detail, "")

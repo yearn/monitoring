@@ -7,7 +7,7 @@ transactions (timelocks and Safe multisigs).
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from functools import lru_cache
@@ -24,6 +24,7 @@ from utils.llm import get_llm_provider
 from utils.llm.base import LLMError, LLMProvider
 from utils.llm.protocol_context import resolve_protocol_context
 from utils.llm.report import (
+    TOKEN_MOVE_SIGS,
     CallEntry,
     ReportContext,
     build_report,
@@ -100,14 +101,17 @@ Critical rules for parameter interpretation:
   and are AUTHORITATIVE. Use those numbers (and the per-token "Total moved") verbatim
   for any magnitude you report — do NOT re-derive amounts from raw calldata units or
   do your own decimal division, and make sure the TLDR and DETAIL agree with it.
-- When a Related Tokens section resolves EXACTLY ONE token for the target, its decimals are a
-  verified on-chain fact: normalize the amount, state it with the token symbol
-  ("5,369,214.23 JANE"), and do NOT hedge about decimals. Mention the getter it came from
-  only in DETAIL, not the TLDR.
-- If a unit is ambiguous and nothing above resolves it — no Related Tokens entry for the
-  target, or several candidate tokens with different decimals — say so explicitly rather than
-  guessing. Quote the raw value plus its 1e18-normalized form, and name the candidates when
-  there are several.
+- A Related Tokens section that resolves EXACTLY ONE token verifies decimals only for
+  parameters that Token Flows or a known ERC20 movement signature identifies as token
+  quantities. Normalize THOSE parameters with the token symbol ("5,369,214.23 JANE") and
+  do NOT hedge about their decimals. Mention the getter only in DETAIL, not the TLDR.
+  A sole related token does NOT mean every uint is a token amount — timestamps, IDs,
+  rates, epochs, shares, and unnamed integers stay raw. Share quantities must not inherit
+  an underlying asset's decimals.
+- If a unit is ambiguous and nothing above resolves it — no Token Flows row, no known
+  movement-signature amount, no Related Tokens entry for the target, or several candidate
+  tokens with different decimals — say so explicitly rather than guessing. Quote the raw
+  value plus its 1e18-normalized form, and name the candidates when there are several.
 - When a Protocol Context section is provided, treat its farm identity, accounting asset,
   normalized totalAssets, and configured token targets as verified deterministic facts. Distinguish
   the accounting asset from non-accounting ERC20 targets configured in an escrow whitelist;
@@ -252,6 +256,10 @@ TLDR: <revised>"""
 # cap is about quality, not cost. Bump it if you want to spend more calls.
 MAX_REFINE_ROUNDS = 3
 
+# Distinct mapping-key tuples scheduled per (target, full signature) for before-state
+# reads. Dedup and this cap run before RPC work; further keys are marked unavailable.
+MAX_STATE_READ_KEYS_PER_SIGNATURE = 12
+
 
 @dataclass(frozen=True)
 class Explanation:
@@ -271,32 +279,190 @@ class Explanation:
     title: str = ""
 
 
+@dataclass(frozen=True)
+class StateReadResult:
+    """Before-state reads plus notes for keys that were capped or failed."""
+
+    by_target: list[tuple[str, list[StateRead]]]
+    omitted_notes: list[str] = field(default_factory=list)
+
+    def prompt_text(self) -> str:
+        """Render the Current State prompt block, including omitted-key counts."""
+        if not self.by_target and not self.omitted_notes:
+            return ""
+        lines: list[str] = []
+        for tgt, reads in self.by_target:
+            lines.append(f"On {tgt}:")
+            formatted = format_state_reads(reads)
+            if formatted:
+                lines.append(formatted)
+        lines.extend(self.omitted_notes)
+        return "\n".join(lines)
+
+    def report_text(self) -> str:
+        """Same facts for the gist; empty when nothing was observed or omitted."""
+        return self.prompt_text()
+
+
+@dataclass(frozen=True)
+class _PreparedCall:
+    """One batch/input call with its original index and decode/sim evidence."""
+
+    index: int  # 1-based input order
+    target: str
+    data: str
+    value: int
+    decoded: DecodedCall | None
+    simulation: SimulationResult | None = None
+
+
+def _freeze_value(value: object) -> object:
+    """Make a decoded ABI value hashable for dedup keys."""
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_value(item) for item in value)
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, dict):
+        return tuple(sorted((key, _freeze_value(item)) for key, item in value.items()))
+    return value
+
+
+def _setter_key_args(decoded: DecodedCall) -> tuple:
+    """Leading setter args used as mapping keys (last arg is the new value)."""
+    values = [_freeze_value(value) for _, value in decoded.params]
+    if len(values) >= 2:
+        return tuple(values[:-1])
+    return tuple(values)
+
+
+def _decode_status(data: str, decoded: DecodedCall | None) -> str:
+    """Classify whether a payload decoded, had no selector, or is unknown."""
+    if decoded is not None:
+        return "decoded"
+    if not data or data.lower() in ("0x",):
+        return "empty_calldata"
+    return "unknown_selector"
+
+
+def _simulation_note(sim: SimulationResult | None, *, independent: bool) -> str:
+    """Deterministic per-call simulation line for the gist call flow.
+
+    Failed sims are labeled as diagnostics so a reviewer can see them without
+    treating them as a predicted governance revert.
+    """
+    if sim is None:
+        return ""
+    caveat = "independent simulation; does not prove the batch succeeds atomically" if independent else "simulation"
+    if sim.success:
+        gas = f", gas {sim.gas_used:,}" if sim.gas_used else ""
+        return (
+            f"**Independent simulation:** SUCCESS{gas} ({caveat})" if independent else f"**Simulation:** SUCCESS{gas}"
+        )
+    error = sim.error_message or "reverted"
+    return (
+        f"**Simulation diagnostic:** {error} — not a predicted governance failure "
+        f"({caveat}; omitted from the risk prompt)"
+    )
+
+
 def _collect_state_reads(
     targets_and_calls: list[tuple[str, DecodedCall]],
     chain_id: int,
-) -> list[tuple[str, list[StateRead]]]:
+) -> StateReadResult:
     """Best-effort: read current on-chain values for state vars each call will write.
 
-    Returns a list of (target, reads) tuples in input order, one per unique
-    (target, function) pair. Pairs that yielded no reads are omitted.
+    Deduplicates equivalent getter inputs (same target, full signature, and mapping
+    keys) and caps distinct mapping-key tuples at
+    ``MAX_STATE_READ_KEYS_PER_SIGNATURE`` per (target, signature) *before* any RPC.
+    Scheduled jobs run through ``_parallel_map`` (max 8 workers). Skipped and failed
+    keys are marked unavailable; omitted-key counts are reported rather than inferred
+    from another market.
     """
-    out: list[tuple[str, list[StateRead]]] = []
-    seen: set[tuple[str, str]] = set()
+    seen_keys: set[tuple[str, str, tuple]] = set()
+    group_counts: dict[tuple[str, str], int] = {}
+    jobs: list[tuple[str, DecodedCall, tuple]] = []
+    omitted_jobs: list[tuple[str, DecodedCall, tuple]] = []
+    display_target: dict[str, str] = {}
+
     for target, decoded in targets_and_calls:
-        if not target:
+        if not target or not decoded.function_name:
             continue
-        key = (target.lower(), decoded.function_name)
-        if key in seen:
+        sig = decoded.signature or decoded.function_name
+        group = (target.lower(), sig)
+        key_args = _setter_key_args(decoded)
+        unique = (target.lower(), sig, key_args)
+        if unique in seen_keys:
             continue
-        seen.add(key)
+        seen_keys.add(unique)
+        display_target.setdefault(target.lower(), target)
+        if group_counts.get(group, 0) >= MAX_STATE_READ_KEYS_PER_SIGNATURE:
+            omitted_jobs.append((target, decoded, key_args))
+            continue
+        group_counts[group] = group_counts.get(group, 0) + 1
+        jobs.append((target, decoded, key_args))
+
+    def fetch(job: tuple[str, DecodedCall, tuple]) -> list[StateRead]:
+        target, decoded, _key_args = job
         try:
-            reads = read_before_state(chain_id, target, decoded)
+            return read_before_state(chain_id, target, decoded)
         except Exception as e:  # noqa: BLE001
             logger.info("State read failed for %s.%s: %s", target, decoded.function_name, e)
-            reads = []
+            return []
+
+    raw_results = _parallel_map(fetch, jobs) if jobs else []
+
+    readable_var: dict[tuple[str, str], str] = {}
+    grouped: dict[str, list[StateRead]] = {}
+    order: list[str] = []
+
+    def _ensure_target(target: str) -> list[StateRead]:
+        key = target.lower()
+        if key not in grouped:
+            grouped[key] = []
+            order.append(display_target.get(key, target))
+        return grouped[key]
+
+    def _unavailable(decoded: DecodedCall, key_args: tuple, var_name: str) -> StateRead:
+        return StateRead(
+            var_name=var_name,
+            type_str="",
+            value=None,
+            key_args=key_args,
+            available=False,
+        )
+
+    for job, reads in zip(jobs, raw_results):
+        target, decoded, key_args = job
+        group = (target.lower(), decoded.signature or decoded.function_name)
+        bucket = _ensure_target(target)
+        if reads is None:
+            bucket.append(_unavailable(decoded, key_args, decoded.function_name))
+            continue
         if reads:
-            out.append((target, reads))
-    return out
+            for read in reads:
+                if read.available:
+                    readable_var[group] = read.var_name
+            bucket.extend(reads)
+            continue
+        if key_args:
+            bucket.append(_unavailable(decoded, key_args, decoded.function_name))
+
+    omitted_by_group: dict[tuple[str, str], int] = {}
+    for target, decoded, key_args in omitted_jobs:
+        group = (target.lower(), decoded.signature or decoded.function_name)
+        omitted_by_group[group] = omitted_by_group.get(group, 0) + 1
+        var_name = readable_var.get(group, decoded.function_name)
+        _ensure_target(target).append(_unavailable(decoded, key_args, var_name))
+
+    notes: list[str] = []
+    for (target_key, sig), count in omitted_by_group.items():
+        target = display_target.get(target_key, target_key)
+        notes.append(
+            f"{count} further keys not read for `{sig}` on {target} (limit: {MAX_STATE_READ_KEYS_PER_SIGNATURE})."
+        )
+
+    by_target = [(target, grouped[target.lower()]) for target in order if grouped[target.lower()]]
+    return StateReadResult(by_target=by_target, omitted_notes=notes)
 
 
 def _format_batch_param_constants(decoded_calls: list[DecodedCall]) -> str:
@@ -785,6 +951,67 @@ def _format_decoded_calls(
     return "\n\n".join(parts)
 
 
+def _format_prepared_calldata(
+    items: list[_PreparedCall],
+    address_labels: dict[str, str] | None = None,
+    param_names_per_item: list[list[str] | None] | None = None,
+) -> str:
+    """Format every input call, including payloads that failed to decode.
+
+    Decoded calls reuse ``_format_decoded_calls`` so nested bytes handling stays
+    in one place; unknown and empty-calldata calls keep their original index,
+    target, value, and raw payload.
+    """
+    labels = address_labels or {}
+    parts: list[str] = []
+    for i, item in enumerate(items):
+        names = (param_names_per_item or [None] * len(items))[i]
+        if item.decoded is not None:
+            rendered = _format_decoded_calls([item.decoded], labels, [names])
+            # _format_decoded_calls always numbers from 1; restore the original index.
+            rendered = rendered.replace("Call 1:", f"Call {item.index}:", 1)
+            extra: list[str] = []
+            if item.value > 0:
+                extra.append(f"  ETH value: {item.value / 1e18:.6f} ETH")
+            extra.append("  decode status: decoded")
+            parts.append(rendered + "\n" + "\n".join(extra) if extra else rendered)
+            continue
+
+        status = _decode_status(item.data, item.decoded)
+        target = _annotate_address(item.target, labels) if item.target else "(no target)"
+        if status == "empty_calldata":
+            header = f"Call {item.index}: native ETH transfer (empty calldata)"
+        else:
+            selector = item.data[:10] if len(item.data) >= 10 else item.data or "0x"
+            header = f"Call {item.index}: UNDECODED (selector {selector})"
+        lines = [
+            header,
+            f"  target: {target}",
+            f"  value: {item.value} wei",
+            f"  calldata: {item.data or '0x'}",
+            f"  decode status: {status}",
+            "  semantics: unresolved — do not invent what this call does",
+        ]
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts)
+
+
+def _format_batch_simulation_section(items: list[_PreparedCall]) -> str:
+    """Prompt section for successful independent per-call simulations.
+
+    Failed and missing sims are omitted here (they bias the model toward a
+    false revert). They are still logged and attached to the gist call flow.
+    """
+    blocks: list[str] = []
+    for item in items:
+        sim = item.simulation
+        if sim is None or not sim.success:
+            continue
+        header = f"Call {item.index} (independent simulation; does not prove the batch succeeds atomically):"
+        blocks.append(header + "\n" + _format_simulation_context(sim))
+    return "\n\n".join(blocks)
+
+
 def _format_simulation_context(sim: SimulationResult) -> str:
     """Format simulation results into a readable string for the LLM prompt."""
     parts: list[str] = []
@@ -853,17 +1080,8 @@ def _sole_token_by_target(per_target: list[tuple[str, list[RelatedToken]]]) -> d
     return {target.lower(): tokens[0] for target, tokens in per_target if len(tokens) == 1}
 
 
-# Standard ERC20 movement functions: signature -> (label, recipient_param_index,
-# amount_param_index, is_flow). `recipient_param_index` is None when there is no
-# single recipient. `is_flow` marks calls that actually move a balance (summed into
-# the per-token total); approve only sets an allowance, so it's listed but not summed.
-_TOKEN_MOVE_SIGS: dict[str, tuple[str, int | None, int, bool]] = {
-    "transfer(address,uint256)": ("transfer", 0, 1, True),
-    "transferFrom(address,address,uint256)": ("transferFrom", 1, 2, True),
-    "mint(address,uint256)": ("mint", 0, 1, True),
-    "burn(address,uint256)": ("burn", 0, 1, True),
-    "approve(address,uint256)": ("approve", 0, 1, False),
-}
+# Standard ERC20 movement signatures live in ``TOKEN_MOVE_SIGS`` (utils.llm.report)
+# so amount hints and Token Flows classify the same parameters.
 
 
 def _collect_token_flows(
@@ -890,7 +1108,7 @@ def _collect_token_flows(
     token_order: list[str] = []
 
     for target, decoded in targets_and_calls:
-        spec = _TOKEN_MOVE_SIGS.get(decoded.signature)
+        spec = TOKEN_MOVE_SIGS.get(decoded.signature)
         if not spec or not target:
             continue
         _kind, recipient_idx, amount_idx, is_flow = spec
@@ -946,13 +1164,15 @@ def _build_prompt(
     proxy_upgrade_info: str = "",
     source_contexts: list[SourceContext] | None = None,
     context_note: str = "",
-    state_reads: list[tuple[str, list[StateRead]]] | None = None,
+    state_section: str = "",
     address_labels: dict[str, str] | None = None,
     param_names_per_call: list[list[str] | None] | None = None,
     safety_notes: list[str] | None = None,
     role_names: list[str] | None = None,
     description: str = "",
     address_links: str = "",
+    decoded_section: str = "",
+    simulation_section: str = "",
 ) -> str:
     """Build the user prompt for the LLM (per-transaction context only).
 
@@ -979,9 +1199,8 @@ def _build_prompt(
     if description:
         parts.append(f"\n--- Stated Intent (proposal description) ---\n{description}")
 
-    parts.append(
-        f"\n--- Decoded Calldata ---\n{_format_decoded_calls(decoded_calls, address_labels, param_names_per_call)}"
-    )
+    calldata = decoded_section or _format_decoded_calls(decoded_calls, address_labels, param_names_per_call)
+    parts.append(f"\n--- Decoded Calldata ---\n{calldata}")
 
     if address_links:
         parts.append(
@@ -1019,12 +1238,8 @@ def _build_prompt(
         rendered = "\n\n".join(format_source_context(ctx) for ctx in source_contexts)
         parts.append(f"\n--- Contract Source Context ---\n{rendered}")
 
-    if state_reads:
-        rendered_state: list[str] = []
-        for tgt, reads in state_reads:
-            rendered_state.append(f"On {tgt}:")
-            rendered_state.append(format_state_reads(reads))
-        parts.append("\n--- Current State (before this call) ---\n" + "\n".join(rendered_state))
+    if state_section:
+        parts.append(f"\n--- Current State (before this call) ---\n{state_section}")
 
     if proxy_upgrade_info:
         parts.append(f"\n--- Proxy Upgrade ---\n{proxy_upgrade_info}")
@@ -1039,7 +1254,9 @@ def _build_prompt(
     if risk_anchors:
         parts.append(f"\n--- Risk Anchors ---\n{risk_anchors}")
 
-    if simulation:
+    if simulation_section:
+        parts.append(f"\n--- Simulation Results ---\n{simulation_section}")
+    elif simulation:
         parts.append(f"\n--- Simulation Results ---\n{_format_simulation_context(simulation)}")
 
     return "\n".join(parts)
@@ -1173,8 +1390,8 @@ def _refine_summary(
     either returns ``PASS`` (we stop and keep the draft) or a revised ``TLDR:``
     that becomes the next round's draft. Runs before detail expansion — the
     summary is authoritative, so it's the artifact we refine; only the summary
-    text is rewritten. Critique converges fast and over-editing degrades quality,
-    so rounds are capped rather than looped until the model "feels done".
+    text is rewritten. A revision clears any existing DETAIL so the two cannot
+    diverge; the caller regenerates detail from the final summary when needed.
 
     Never raises: any LLM error or empty/invalid response keeps the best draft so far.
     """
@@ -1251,20 +1468,24 @@ def _generate_explanation(
     if not summary_draft.summary:
         return summary_draft
 
+    had_detail = bool(summary_draft.detail)
     if refine:
         summary_draft = _refine_summary(prompt, summary_draft, provider)
 
     # Structured stage 1 (the production path) yields no detail, so we expand it from
     # the confirmed summary — that's the derive-from-summary guarantee. The text
-    # fallback instead parses a joint TLDR+DETAIL from a single completion; we keep that
-    # detail as-is rather than paying a second call for the degraded path.
+    # fallback parses a joint TLDR+DETAIL from a single completion. A successful
+    # summary revision invalidates that detail; regenerate it once from the final
+    # summary rather than resurrecting stale prose.
     detail = summary_draft.detail
     if not detail and provider.supports_structured_output:
+        detail = _expand_detail(provider, prompt, summary_draft.summary)
+    elif not detail and had_detail and not provider.supports_structured_output:
         detail = _expand_detail(provider, prompt, summary_draft.summary)
 
     report = ""
     title = ""
-    if detail and report_ctx is not None:
+    if report_ctx is not None:
         prose, risk_tag = _split_risk_tag(summary_draft.summary)
         report = build_report(prose, detail, report_ctx, risk_tag)
         title = build_title(report_ctx, risk_tag, fallback=DETAIL_REPORT_TITLE)
@@ -1341,6 +1562,7 @@ def explain_transaction(
         address_labels.setdefault(address, context_label)
 
     simulation: SimulationResult | None = None
+    simulation_for_report: SimulationResult | None = None
     if not skip_simulation:
         simulation = simulate_transaction(
             target=target,
@@ -1349,6 +1571,7 @@ def explain_transaction(
             value=value,
             from_address=from_address,
         )
+        simulation_for_report = simulation
         if simulation:
             logger.info("Simulation completed: success=%s gas=%s", simulation.success, simulation.gas_used)
             if not simulation.success:
@@ -1375,7 +1598,7 @@ def explain_transaction(
         proxy_upgrade_info=proxy_upgrade_info,
         source_contexts=source_contexts,
         context_note=context_note,
-        state_reads=state_reads,
+        state_section=state_reads.prompt_text(),
         address_labels=address_labels,
         param_names_per_call=param_names,
         safety_notes=safety_notes,
@@ -1396,6 +1619,10 @@ def explain_transaction(
                 param_names=param_names[0],
                 role_names=roles_by_target.get(target.lower(), {}),
                 amount_token=_sole_token_by_target(related_tokens).get(target.lower()),
+                raw_calldata=calldata,
+                original_index=1,
+                decode_status="decoded",
+                simulation_note=_simulation_note(simulation_for_report, independent=False),
             )
         ],
         chain_id=chain_id,
@@ -1406,6 +1633,7 @@ def explain_transaction(
         label_address=label_address or from_address,
         protocol_context=protocol_ctx.report,
         related_addresses=protocol_ctx.addresses,
+        state_read_notes=state_reads.report_text(),
     )
 
     try:
@@ -1418,6 +1646,115 @@ def explain_transaction(
     except LLMError as e:
         logger.error("Failed to generate AI explanation: %s", e)
         return None
+
+
+def _prepare_batch_items(
+    calls: list[dict[str, str]],
+    chain_id: int,
+    from_address: str,
+    skip_simulation: bool,
+) -> list[_PreparedCall]:
+    """Decode and optionally simulate each input call, preserving original indices."""
+    items: list[_PreparedCall] = []
+    for i, call in enumerate(calls, start=1):
+        target = call.get("target", "")
+        data = call.get("data", "0x")
+        value = int(call.get("value", "0"))
+        decoded = decode_calldata(data, chain_id=chain_id, target=target)
+        simulation: SimulationResult | None = None
+        if not skip_simulation:
+            simulation = simulate_transaction(
+                target=target,
+                calldata=data,
+                chain_id=chain_id,
+                value=value,
+                from_address=from_address,
+            )
+            if simulation is not None and not simulation.success:
+                logger.warning(
+                    "Batch call %d simulation reported failure (%s); omitting from prompt",
+                    i,
+                    simulation.error_message,
+                )
+        items.append(
+            _PreparedCall(
+                index=i,
+                target=target,
+                data=data,
+                value=value,
+                decoded=decoded,
+                simulation=simulation,
+            )
+        )
+    return items
+
+
+def _call_entry_from_item(
+    item: _PreparedCall,
+    *,
+    param_names: list[str] | None,
+    role_names: dict[str, str],
+    amount_token: RelatedToken | None,
+    independent_sim: bool,
+) -> CallEntry:
+    """Build a report entry that keeps unknown payloads visible."""
+    return CallEntry(
+        target=item.target,
+        call=item.decoded,
+        value=item.value,
+        param_names=param_names,
+        role_names=role_names,
+        amount_token=amount_token,
+        raw_calldata=item.data,
+        original_index=item.index,
+        decode_status=_decode_status(item.data, item.decoded),
+        simulation_note=_simulation_note(item.simulation, independent=independent_sim),
+    )
+
+
+def _undecoded_batch_summary(items: list[_PreparedCall]) -> str:
+    """Deterministic Telegram summary when every batch call failed to decode."""
+    n = len(items)
+    noun = "call" if n == 1 else "calls"
+    return (
+        f"Could not decode {n} {noun} in this batch. "
+        "See the linked report for original indices, targets, values, and payloads."
+    )
+
+
+def _deterministic_undecoded_explanation(
+    items: list[_PreparedCall],
+    *,
+    chain_id: int,
+    protocol: str,
+    label: str,
+    from_address: str,
+    label_address: str,
+    address_labels: dict[str, str],
+) -> Explanation:
+    """Build summary + report for an all-unknown batch without any LLM calls."""
+    report_ctx = ReportContext(
+        entries=[
+            _call_entry_from_item(
+                item,
+                param_names=None,
+                role_names={},
+                amount_token=None,
+                independent_sim=True,
+            )
+            for item in items
+        ],
+        chain_id=chain_id,
+        labels=address_labels,
+        protocol=protocol,
+        label=label,
+        from_address=from_address,
+        label_address=label_address or from_address,
+    )
+    summary = _undecoded_batch_summary(items)
+    report = build_report(summary, "", report_ctx, risk_tag="")
+    title = build_title(report_ctx, risk_tag="", fallback=DETAIL_REPORT_TITLE)
+    return Explanation(summary=summary, detail="", report=report, title=title)
 
 
 def explain_batch_transaction(
@@ -1462,54 +1799,45 @@ def explain_batch_transaction(
     if not calls:
         return None
 
-    decoded_calls: list[DecodedCall] = []
-    decoded_with_target: list[tuple[str, DecodedCall]] = []
-    targets_calls_values: list[tuple[str, DecodedCall, int]] = []
-    simulations: list[SimulationResult | None] = []
-
-    for call in calls:
-        target = call.get("target", "")
-        data = call.get("data", "0x")
-        value = int(call.get("value", "0"))
-
-        decoded = decode_calldata(data, chain_id=chain_id, target=target)
-        if decoded:
-            decoded_calls.append(decoded)
-            decoded_with_target.append((target, decoded))
-            targets_calls_values.append((target, decoded, value))
-
-        if not skip_simulation:
-            sim = simulate_transaction(
-                target=target,
-                calldata=data,
-                chain_id=chain_id,
-                value=value,
-                from_address=from_address,
-            )
-            simulations.append(sim)
-
-    if not decoded_calls:
-        return None
-
-    # Prefer a successful sim; if every inner call failed in Tenderly, drop the
-    # sim section entirely rather than feeding the LLM "FAILED" + a misleading
-    # revert reason from a sim that probably just couldn't model the real call.
-    simulation = next((s for s in simulations if s is not None and s.success), None)
-    if simulation is None and any(s is not None and not s.success for s in simulations):
-        logger.warning("All batch simulations reported failure; omitting from prompt")
+    items = _prepare_batch_items(calls, chain_id, from_address, skip_simulation)
+    decoded_items = [item for item in items if item.decoded is not None]
+    decoded_with_target = [(item.target, item.decoded) for item in decoded_items if item.decoded is not None]
+    decoded_calls = [item.decoded for item in decoded_items if item.decoded is not None]
+    targets_calls_values = [
+        (item.target, item.decoded, item.value) for item in decoded_items if item.decoded is not None
+    ]
+    all_targets_for_labels = [
+        (item.target, item.decoded or DecodedCall(function_name="", signature="", params=[])) for item in items
+    ]
 
     upgrade_parts: list[str] = []
-    for call in calls:
-        info = _get_proxy_upgrade_info(call.get("data", "0x"), call.get("target", ""), chain_id)
+    for item in items:
+        info = _get_proxy_upgrade_info(item.data, item.target, chain_id)
         if info:
             upgrade_parts.append(info)
     proxy_upgrade_info = "\n".join(upgrade_parts)
 
+    address_labels = _collect_address_labels(all_targets_for_labels, chain_id)
+
+    if not decoded_items:
+        return _deterministic_undecoded_explanation(
+            items,
+            chain_id=chain_id,
+            protocol=protocol,
+            label=label,
+            from_address=from_address,
+            label_address=label_address,
+            address_labels=address_labels,
+        )
+
     source_contexts = _collect_source_contexts(decoded_with_target, chain_id)
     state_reads = _collect_state_reads(decoded_with_target, chain_id)
-    address_labels = _collect_address_labels(decoded_with_target, chain_id)
-    param_names = _collect_param_names(decoded_with_target, chain_id)
-    safety_notes = _collect_safety_checks(targets_calls_values, chain_id)
+    param_names_decoded = _collect_param_names(decoded_with_target, chain_id)
+    safety_notes = _collect_safety_checks(
+        targets_calls_values
+        + [(item.target, DecodedCall("", "", []), item.value) for item in items if item.decoded is None],
+        chain_id,
+    )
     roles_by_target = _collect_role_names(decoded_with_target, chain_id)
     token_flows = _collect_token_flows(decoded_with_target, chain_id, address_labels)
     related_tokens = _collect_related_tokens(decoded_with_target, chain_id)
@@ -1517,46 +1845,54 @@ def explain_batch_transaction(
     for address, context_label in protocol_ctx.labels.items():
         address_labels.setdefault(address, context_label)
 
-    targets = ", ".join(c.get("target", "?") for c in calls)
-    total_value = sum(int(c.get("value", "0")) for c in calls)
-    addresses = list(dict.fromkeys([*collect_unique_addresses(decoded_with_target), *protocol_ctx.addresses]))
+    names_by_index: dict[int, list[str] | None] = {}
+    for item, names in zip(decoded_items, param_names_decoded):
+        names_by_index[item.index] = names
+    param_names_per_item = [names_by_index.get(item.index) for item in items]
+
+    targets = ", ".join(item.target or "?" for item in items)
+    total_value = sum(item.value for item in items)
+    addresses = list(dict.fromkeys([*collect_unique_addresses(all_targets_for_labels), *protocol_ctx.addresses]))
     address_links = format_address_links_block(addresses, chain_id, address_labels)
+    simulation_section = _format_batch_simulation_section(items)
+    decoded_section = _format_prepared_calldata(items, address_labels, param_names_per_item)
 
     prompt = _build_prompt(
         target=targets,
         value=total_value,
         decoded_calls=decoded_calls,
-        simulation=simulation,
+        simulation=None,
         protocol=protocol,
         label=label,
         token_flows=token_flows,
         proxy_upgrade_info=proxy_upgrade_info,
         source_contexts=source_contexts,
         context_note=context_note,
-        state_reads=state_reads,
+        state_section=state_reads.prompt_text(),
         address_labels=address_labels,
-        param_names_per_call=param_names,
+        param_names_per_call=None,
         safety_notes=safety_notes,
         role_names=_format_role_name_notes(roles_by_target),
         description=description,
         address_links=address_links,
         related_tokens=format_related_tokens_block(related_tokens, address_labels),
         protocol_context=protocol_ctx.prompt,
+        decoded_section=decoded_section,
+        simulation_section=simulation_section,
     )
     logger.info("Full AI context for batch (%s calls):\n%s", len(calls), prompt)
 
     sole_tokens = _sole_token_by_target(related_tokens)
     report_ctx = ReportContext(
         entries=[
-            CallEntry(
-                target=tgt,
-                call=call,
-                value=val,
-                param_names=names,
-                role_names=roles_by_target.get(tgt.lower(), {}),
-                amount_token=sole_tokens.get(tgt.lower()),
+            _call_entry_from_item(
+                item,
+                param_names=names_by_index.get(item.index),
+                role_names=roles_by_target.get(item.target.lower(), {}) if item.target else {},
+                amount_token=sole_tokens.get(item.target.lower()) if item.target else None,
+                independent_sim=True,
             )
-            for (tgt, call, val), names in zip(targets_calls_values, param_names)
+            for item in items
         ],
         chain_id=chain_id,
         labels=address_labels,
@@ -1566,6 +1902,7 @@ def explain_batch_transaction(
         label_address=label_address or from_address,
         protocol_context=protocol_ctx.report,
         related_addresses=protocol_ctx.addresses,
+        state_read_notes=state_reads.report_text(),
     )
 
     try:
@@ -1588,6 +1925,9 @@ def format_explanation_line(explanation: Explanation) -> str:
     to Wavey Gist and linked. The bare detail is published instead when no report
     was built (explanations generated without report context).
 
+    Publication runs when ``report`` or ``detail`` is nonempty so a deterministic
+    report-only explanation (empty LLM detail) still gets a Full details link.
+
     When the upload fails the report is written to disk first. It exists only in
     memory at this point, and regenerating it means paying for the LLM calls
     again against a chain state that has since moved — so an unpublished report
@@ -1595,14 +1935,14 @@ def format_explanation_line(explanation: Explanation) -> str:
     than a reconstruction.
     """
     line = f"\n🤖 *AI Summary:*\n{escape_markdown(explanation.summary)}"
-    if explanation.detail:
-        report = explanation.report or explanation.detail
+    payload = explanation.report or explanation.detail
+    if payload:
         title = explanation.title or DETAIL_REPORT_TITLE
-        detail_url = upload_to_gist(report, title=title)
+        detail_url = upload_to_gist(payload, title=title)
         if detail_url:
             line += f"\n[Full details]({detail_url})"
         else:
-            spilled = _spill_unpublished_report(report, title)
+            spilled = _spill_unpublished_report(payload, title)
             line += "\n⚠️ Couldn't post full report"
             if spilled:
                 logger.warning("Unpublished report saved to %s for later recovery", spilled)

@@ -1,6 +1,7 @@
 """Tests for the gist report renderer (utils/llm/report.py)."""
 
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -35,7 +36,7 @@ def _add_farms_ctx(**overrides) -> ReportContext:
         params=[("uint256", 2), ("address[]", (FARM,))],
     )
     defaults = {
-        "entries": [CallEntry(target=REGISTRY, call=call, param_names=["_type", "_farms"])],
+        "entries": [CallEntry(target=REGISTRY, call=call, param_names=["_type", "_farms"], original_index=1)],
         "chain_id": 1,
         "labels": {REGISTRY: "FarmRegistry"},
         "protocol": "INFINIFI",
@@ -43,7 +44,11 @@ def _add_farms_ctx(**overrides) -> ReportContext:
         "from_address": TIMELOCK,
     }
     defaults.update(overrides)
-    return ReportContext(**defaults)  # type: ignore[arg-type]
+    ctx = ReportContext(**defaults)  # type: ignore[arg-type]
+    numbered = []
+    for i, entry in enumerate(ctx.entries, start=1):
+        numbered.append(entry if entry.original_index is not None else replace(entry, original_index=i))
+    return replace(ctx, entries=numbered) if numbered != list(ctx.entries) else ctx
 
 
 class TestAddressLink(unittest.TestCase):
@@ -203,37 +208,89 @@ class TestCompositeParams(unittest.TestCase):
 
 
 class TestAmountAnnotation(unittest.TestCase):
-    """Raw amounts get a human-readable hint when the target's token is known."""
+    """Raw amounts get a hint only when signature/index or self-token evidence says so."""
 
     JANE = RelatedToken(getter="jane", address="0x333333330522F64EE8d0b3039c460b41670e3404", symbol="JANE", decimals=18)
+    USDC = RelatedToken(getter="self", address=REGISTRY, symbol="USDC", decimals=6)
+    ASSET = RelatedToken(getter="asset", address=FARM, symbol="USDC", decimals=6)
 
-    def _flow(self, params: list, token: RelatedToken | None) -> str:
+    def test_standard_transfer_amount_annotated_without_names(self) -> None:
+        call = DecodedCall(
+            function_name="transfer",
+            signature="transfer(address,uint256)",
+            params=[("address", FARM), ("uint256", 1_000_000)],
+        )
+        entry = CallEntry(target=REGISTRY, call=call, amount_token=self.USDC)
+        self.assertIn("(≈ 1 USDC)", format_call_flow(_add_farms_ctx(entries=[entry])))
+
+    def test_emissions_not_annotated_from_related_token_alone(self) -> None:
         call = DecodedCall(
             function_name="setEpochEmissions",
             signature="setEpochEmissions(uint256,uint256)",
-            params=params,
+            params=[("uint256", 43), ("uint256", 5499673832374850402183062)],
         )
-        entry = CallEntry(target=REGISTRY, call=call, param_names=["_epoch", "emissions"], amount_token=token)
-        return format_call_flow(_add_farms_ctx(entries=[entry]))
+        entry = CallEntry(target=REGISTRY, call=call, param_names=["_epoch", "emissions"], amount_token=self.JANE)
+        self.assertNotIn("≈", format_call_flow(_add_farms_ctx(entries=[entry])))
 
-    def test_large_uint_annotated(self) -> None:
-        flow = self._flow([("uint256", 43), ("uint256", 5499673832374850402183062)], self.JANE)
-        self.assertIn("`5,499,673,832,374,850,402,183,062` (≈ 5,499,673 JANE)", flow)
-
-    def test_small_uint_not_annotated(self) -> None:
-        """An epoch number must not be rendered as 0.000000000000000043 JANE."""
-        flow = self._flow([("uint256", 43), ("uint256", 5369214230155537376952673)], self.JANE)
-        self.assertIn("- `uint256 _epoch`: `43`\n", flow)
-
-    def test_no_annotation_without_token(self) -> None:
-        flow = self._flow([("uint256", 43), ("uint256", 5369214230155537376952673)], None)
+    def test_timestamp_not_annotated_as_token_amount(self) -> None:
+        call = DecodedCall(
+            function_name="setUnlockTime",
+            signature="setUnlockTime(uint256)",
+            params=[("uint256", 1_800_000_000)],
+        )
+        entry = CallEntry(target=REGISTRY, call=call, param_names=["timestamp"], amount_token=self.USDC)
+        flow = format_call_flow(_add_farms_ctx(entries=[entry]))
+        self.assertIn("`1,800,000,000`", flow)
+        self.assertNotIn("USDC", flow)
         self.assertNotIn("≈", flow)
 
-    def test_sub_token_amount_keeps_one_truncated_decimal(self) -> None:
-        usdc = RelatedToken(getter="self", address=REGISTRY, symbol="USDC", decimals=6)
-        self.assertIn("(≈ 0.5 USDC)", self._flow([("uint256", 590_000)], usdc))
-        self.assertNotIn("≈", self._flow([("uint256", 99_999)], usdc))
-        self.assertIn("(≈ 1 USDC)", self._flow([("uint256", 1_000_000)], usdc))
+    def test_unnamed_abi_suppresses_non_movement_hints(self) -> None:
+        call = DecodedCall(
+            function_name="setCap",
+            signature="setCap(uint256)",
+            params=[("uint256", 1_800_000_000)],
+        )
+        entry = CallEntry(target=REGISTRY, call=call, param_names=None, amount_token=self.USDC)
+        self.assertNotIn("≈", format_call_flow(_add_farms_ctx(entries=[entry])))
+
+    def test_shares_do_not_inherit_asset_decimals(self) -> None:
+        call = DecodedCall(
+            function_name="deposit",
+            signature="deposit(uint256,uint256)",
+            params=[("uint256", 5_000_000), ("uint256", 10**18)],
+        )
+        entry = CallEntry(target=REGISTRY, call=call, param_names=["assets", "shares"], amount_token=self.ASSET)
+        flow = format_call_flow(_add_farms_ctx(entries=[entry]))
+        self.assertNotIn("≈", flow)
+
+    def test_self_token_assets_param_annotated(self) -> None:
+        call = DecodedCall(
+            function_name="mint",
+            signature="mint(uint256)",
+            params=[("uint256", 1_000_000)],
+        )
+        entry = CallEntry(target=REGISTRY, call=call, param_names=["assets"], amount_token=self.USDC)
+        self.assertIn("(≈ 1 USDC)", format_call_flow(_add_farms_ctx(entries=[entry])))
+
+    def test_nested_tuple_uint_not_annotated(self) -> None:
+        call = DecodedCall(
+            function_name="configure",
+            signature="configure((address,uint256))",
+            params=[("(address,uint256)", (FARM, 1_800_000_000))],
+        )
+        entry = CallEntry(target=REGISTRY, call=call, amount_token=self.USDC)
+        flow = format_call_flow(_add_farms_ctx(entries=[entry]))
+        self.assertIn("`1,800,000,000`", flow)
+        self.assertNotIn("≈", flow)
+
+    def test_sub_token_transfer_keeps_one_truncated_decimal(self) -> None:
+        call = DecodedCall(
+            function_name="transfer",
+            signature="transfer(address,uint256)",
+            params=[("address", FARM), ("uint256", 590_000)],
+        )
+        entry = CallEntry(target=REGISTRY, call=call, amount_token=self.USDC)
+        self.assertIn("(≈ 0.5 USDC)", format_call_flow(_add_farms_ctx(entries=[entry])))
 
     def test_non_uint_types_untouched(self) -> None:
         call = DecodedCall(function_name="setRoot", signature="setRoot(bytes32)", params=[("bytes32", b"\\x01" * 32)])
@@ -405,7 +462,12 @@ class TestBuildReport(unittest.TestCase):
         self.assertNotIn("**Risk:**", build_report("Summary.", "Analysis.", _add_farms_ctx()))
 
     def test_empty_without_content(self) -> None:
-        self.assertEqual(build_report("", "", _add_farms_ctx()), "")
+        self.assertEqual(build_report("", "", _add_farms_ctx(entries=[])), "")
+
+    def test_call_flow_without_llm_prose(self) -> None:
+        report = build_report("", "", _add_farms_ctx())
+        self.assertIn("## Call Flow", report)
+        self.assertNotIn("## Analysis", report)
 
 
 if __name__ == "__main__":
@@ -442,3 +504,100 @@ class TestRoleNameAnnotation(unittest.TestCase):
 
     def test_lookup_is_case_insensitive(self) -> None:
         self.assertIn("role **RECEIPT_TOKEN_MINTER**", self._flow({self.MINTER.lower(): "RECEIPT_TOKEN_MINTER"}))
+
+
+class TestUndecodedCallEntries(unittest.TestCase):
+    """Unknown payloads stay in the call flow with original indices and raw data."""
+
+    def test_unknown_middle_call_keeps_index_payload_and_value(self) -> None:
+        pause = DecodedCall(function_name="pause", signature="pause()")
+        ctx = _add_farms_ctx(
+            entries=[
+                CallEntry(target=REGISTRY, call=pause, original_index=1, decode_status="decoded"),
+                CallEntry(
+                    target=FARM,
+                    call=None,
+                    value=10**18,
+                    raw_calldata="0xdeadbeef",
+                    original_index=2,
+                    decode_status="unknown_selector",
+                ),
+                CallEntry(target=DROP, call=pause, original_index=3, decode_status="decoded"),
+            ]
+        )
+        flow = format_call_flow(ctx)
+        self.assertIn("1. **`pause()`**", flow)
+        self.assertIn("2. **Undecoded calldata**", flow)
+        self.assertIn(f"https://etherscan.io/address/{FARM_CKS}", flow)
+        self.assertIn("`0xdeadbeef`", flow)
+        self.assertIn("**ETH value:** `1.000000` ETH", flow)
+        self.assertIn("**Decode status:** `unknown_selector`", flow)
+        self.assertIn("3. **`pause()`**", flow)
+
+    def test_stored_index_not_renumbered_by_enumerate(self) -> None:
+        pause = DecodedCall(function_name="pause", signature="pause()")
+        ctx = _add_farms_ctx(
+            entries=[
+                CallEntry(target=REGISTRY, call=pause, original_index=1),
+                CallEntry(target=FARM, call=pause, original_index=3),
+            ]
+        )
+        flow = format_call_flow(ctx)
+        self.assertIn("1. **`pause()`**", flow)
+        self.assertIn("3. **`pause()`**", flow)
+        self.assertNotIn("2. **`pause()`**", flow)
+
+    def test_empty_calldata_native_transfer(self) -> None:
+        ctx = _add_farms_ctx(
+            entries=[
+                CallEntry(
+                    target=FARM,
+                    call=None,
+                    value=5 * 10**17,
+                    raw_calldata="0x",
+                    original_index=1,
+                    decode_status="empty_calldata",
+                )
+            ]
+        )
+        flow = format_call_flow(ctx)
+        self.assertIn("**Native ETH transfer**", flow)
+        self.assertIn("empty calldata", flow)
+        self.assertIn("`0x`", flow)
+
+    def test_unknown_target_still_in_reference_table(self) -> None:
+        ctx = _add_farms_ctx(
+            entries=[
+                CallEntry(
+                    target=FARM,
+                    call=None,
+                    raw_calldata="0xdeadbeef",
+                    original_index=1,
+                    decode_status="unknown_selector",
+                )
+            ]
+        )
+        table = format_reference_table(ctx)
+        self.assertIn(FARM_CKS, table)
+        self.assertIn("undecoded calldata", table)
+
+    def test_all_unknown_report_has_no_risk_tag(self) -> None:
+        ctx = _add_farms_ctx(
+            entries=[
+                CallEntry(
+                    target=FARM,
+                    call=None,
+                    raw_calldata="0xdeadbeef",
+                    original_index=1,
+                    decode_status="unknown_selector",
+                )
+            ]
+        )
+        summary = "Could not decode 1 call in this batch. See the linked report for original indices, targets, values, and payloads."
+        report = build_report(summary, "", ctx, risk_tag="")
+        title = build_title(ctx, risk_tag="", now=datetime(2026, 8, 11, 10, 0, tzinfo=timezone.utc))
+        self.assertNotIn("**Risk:**", report)
+        self.assertNotIn(" LOW", title)
+        self.assertNotIn("- LOW", title)
+        self.assertIn("## Call Flow", report)
+        self.assertNotIn("## Analysis", report)
