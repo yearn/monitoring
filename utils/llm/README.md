@@ -99,6 +99,8 @@ Handles:
 
 Follows EIP-1967 proxies to locate the function source, but issues `eth_call`s against the original storage-holder address.
 
+Distinct mapping keys are kept: two `setCap(address,uint256)` calls for different keys schedule two reads. Single-arg setters (`setMaxSlippage(uint256)`) share one scalar read — the new value is not treated as a mapping key. Equivalent getter inputs are deduplicated before any RPC. Distinct key tuples are capped at `MAX_STATE_READ_KEYS_PER_SIGNATURE` (12) per `(target, full signature)` and run through `_parallel_map` (max 8 workers). Further keys stay visible on the call but are marked unavailable, with an aggregate note such as `28 additional mapping keys skipped for setCap(address,uint256) on 0xT (limit: 12).` Missing values are never inferred from another market. The gist **Current State** section is a markdown list with explorer links; the LLM prompt keeps the compact plain-text form.
+
 ### 4. Tenderly Simulation (`utils/tenderly/simulation.py`)
 
 Simulates the transaction against current on-chain state to get:
@@ -113,6 +115,8 @@ Requires `TENDERLY_API_KEY`. Simulation failure is non-blocking — the pipeline
 **State overrides** (`state_objects`) reduce false reverts. When a call forwards ETH (`value > 0`), the executor (timelock/Safe) often doesn't hold that balance, so a faithful sim would revert with "insufficient funds" — a false negative. `_merge_balance_override` grants the sender exactly the forwarded `value`. Callers can pass additional overrides (e.g. a role/owner storage slot) to unblock access-gated setters; caller-supplied values win on conflict.
 
 Callers can pass `skip_simulation=True` to bypass Tenderly entirely. Used for Safe transactions with `operation=DELEGATECALL` (typically multiSend batches), where our plain-CALL simulator can't model the real execution and would produce a spurious "revert" verdict.
+
+Timelock batches still simulate each inner call independently. Successful results are attributed to their original call index and labeled as independent simulations — they do not prove the batch succeeds atomically. Failed simulations are omitted from the risk prompt (Tenderly often false-reverts governance calls) but kept as call-flow diagnostics so a reviewer can see them without treating them as a predicted on-chain failure.
 
 ### 5. Proxy Upgrade Detection & Implementation Diff (`utils/proxy.py`, `utils/impl_diff.py`)
 
@@ -170,7 +174,9 @@ Token Flows only covers calls that *move* a token. A governance call like `setEp
 
 Filtering on "is it actually an ERC20" is what makes this need no configuration — `owner()` drops out on its own, no name blocklist. The target being itself a token is reported as `getter="self"`. Capped at `MAX_GETTER_CALLS` (8) per target, memoized per `(chain_id, target)`, and best-effort: any failure yields `[]` and the alert proceeds unchanged.
 
-The system prompt treats **exactly one** resolved token as verified decimals — state the amount and symbol, no hedge. Zero or several tokens keeps the hedge, since normalizing would be a guess. The Call Flow also annotates raw `uint*` values with `(≈ 5,369,214.23 JANE)`, but only above `10 ** (decimals - 3)` so an epoch number like `43` isn't rendered as `0.000000000000000043 JANE`.
+The system prompt treats **exactly one** related token as verified decimals only for parameters that Token Flows or a known ERC20 movement signature identifies as token quantities. A sole related token does **not** mean every uint is a token amount — timestamps, IDs, rates, epochs, shares, and unnamed integers stay raw. Share quantities must not inherit an underlying asset's decimals.
+
+The Call Flow annotates a raw `uint*` with `(≈ 1,800 USDC)` only when that evidence exists: the amount index of `transfer`/`transferFrom`/`mint`/`burn`/`approve`, or an ABI name like `amount`/`assets` when the target itself is the token (`getter="self"`). Missing or partial ABI names suppress hints except for those exact movement mappings. Nested tuple fields never inherit a parent token hint.
 
 ### 5e. Infinifi Escrow Context (`utils/llm/infinifi_context.py`)
 
@@ -308,7 +314,11 @@ DETAIL:
 Calls upgradeTo(address) on the AAVE pool proxy...
 ```
 
-`_parse_explanation()` splits this with tolerant regex (handles `### DETAIL`, `**TLDR:**`, etc.); if the format isn't followed, the whole response becomes the summary (backward compatible). This degraded path keeps both fields from one completion and skips the separate expansion, so the derive-from-summary guarantee applies to the structured (production) path only.
+`_parse_explanation()` splits this with tolerant regex (handles `### DETAIL`, `**TLDR:**`, etc.); if the format isn't followed, the whole response becomes the summary (backward compatible). This degraded path keeps both fields from one completion and skips the separate expansion unless a later summary revision invalidates the detail.
+
+If structured output is disabled and refine revises the summary, the original detail is discarded (so summary and detail cannot diverge) and **one** extra completion regenerates detail from the final summary. An immediate `PASS` keeps the original detail with no extra call. Expansion failure leaves the revised summary in place and does not resurrect stale detail.
+
+A call or batch whose every payload failed to decode never enters this path: it produces a deterministic Telegram summary (no LLM calls, no risk tag, `detail=""`). Up to `MAX_INLINE_UNDECODED_CALLS` (3) entries name their target and native value in the summary itself, so no gist is published — it would only restate the alert, and governance calls carry no value almost always. A gist is still published when the summary cannot carry everything: more entries than the cap, or an execution `context_note`, proposer `description`, or safety note attached to the batch. Zero native values are omitted everywhere, matching the decoded path.
 
 Structured output is controlled by `LLM_STRUCTURED_OUTPUT` (per-provider default: on for `anthropic`/`openai`/`venice` — all verified live — off for `groq`/custom, since JSON-schema support varies by backend).
 
@@ -374,9 +384,14 @@ The report also ends with a code-generated `## Reference` table after Call Flow:
 The table deduplicates the executor, alert contract, call targets, address-valued calldata arguments, and addresses introduced by protocol adapters. Every description is prefixed with its role so multi-use addresses remain unambiguous. Roles and descriptions come from those deterministic relationships; the LLM does not generate them.
 
 **Call Flow is built in Python, not asked of the LLM** — it comes straight from the
-decoded calldata (`CallEntry` per call: target, signature, ABI parameter names, ETH
-value, nested `bytes` payloads unwrapped up to `MAX_BYTES_RECURSION_DEPTH`), so it
-can't be hallucinated, re-ordered, or summarized away. Arrays and tuple/struct
+input calls (`CallEntry` per call: original 1-based index, target, signature or
+undecoded status, ABI parameter names, ETH value, raw calldata, nested `bytes`
+payloads unwrapped up to `MAX_BYTES_RECURSION_DEPTH`). Unknown selectors and empty-calldata calls stay in the flow with their original
+index so they cannot disappear or renumber later calls. Empty calldata is labeled
+as having no function selector; intended native value is shown but not asserted
+as delivered. Single-call `explain_transaction` uses the same deterministic
+summary/report path as an all-unknown batch (zero LLM calls, empty detail, no
+risk tag). Arrays and tuple/struct
 arguments are decomposed recursively (`array_element_type` / `tuple_component_types`),
 so an address inside a `MarketParams`-style struct is still rendered as a link and
 still reaches label lookup and the Address Links section — `iter_address_values()`
@@ -384,6 +399,9 @@ walks the same type structure for collection. Every address is rendered
 full-length (never truncated) as a link to the chain's explorer from
 `EXPLORER_URLS`, annotated with its contract label / token symbol when known;
 chains with no configured explorer degrade to plain code spans.
+
+`format_explanation_line` publishes when `report` or `detail` is nonempty, so a
+deterministic report with empty LLM detail still gets a Full details link.
 
 `format_address_links_block()` reuses the same renderer to give the LLM the exact
 markdown link for each address in the transaction — that's what makes the
@@ -455,8 +473,8 @@ safe/multisend.py            # Safe MultiSendCallOnly inner-call extractor + DEL
 
 ## Integration Points
 
-- **Timelock alerts** (`timelock/timelock_alerts.py`): Calls `explain_transaction()` or `explain_batch_transaction()` for each scheduled operation.
-- **Safe alerts** (`safe/main.py`): Routes through `_explain_safe_tx()`, which detects `operation=DELEGATECALL` multisend batches and dispatches to `explain_batch_transaction()` with `skip_simulation=True` and a DELEGATECALL context note. Plain CALL Safe txs use `explain_transaction()` as before.
+- **Timelock alerts** (`timelock/timelock_alerts.py`): Calls `explain_transaction()` or `explain_batch_transaction()` for each scheduled operation. Empty and short payloads still reach the explainer; callers no longer drop them on `len(data) >= 10`.
+- **Safe alerts** (`safe/main.py`): Routes through `_explain_safe_tx()`, which detects `operation=DELEGATECALL` multisend batches and dispatches to `explain_batch_transaction()` with `skip_simulation=True` and a DELEGATECALL context note. Plain CALL Safe txs use `explain_transaction()`. Empty and short targeted payloads are explained the same way as decoded calls.
 - Both call sites use `format_explanation_line()` to append the AI summary to Telegram messages.
 - Both call sites can opt into the refine pass per-protocol by passing `refine=True` to the explainer.
 

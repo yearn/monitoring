@@ -16,7 +16,8 @@ from eth_utils import to_checksum_address
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.calldata.decoder import decode_calldata, format_call_lines
 from utils.chains import EXPLORER_URLS, Chain
-from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
+from utils.formatting import parse_wei
+from utils.llm.ai_explainer import Explanation, explain_batch_transaction, explain_transaction, format_explanation_line
 from utils.logger import get_logger
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
 from utils.safe_tx import unwrap_safe_exec_transaction
@@ -332,7 +333,28 @@ def _maple_proposal_calls(event: dict, chain_id: int) -> list[dict[str, str]] | 
     return [{"target": str(t), "data": _to_hex(d), "value": "0"} for t, d in zip(targets, datas)]
 
 
-def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain_id: int) -> str | None:
+def _explainer_calls_from_events(events: list[dict]) -> list[dict[str, str]]:
+    """Keep every event with a target, including empty and short calldata.
+
+    Callers used to drop payloads shorter than a 4-byte selector, which hid
+    native-value transfers and unknown selectors from mixed batches.
+    """
+    calls: list[dict[str, str]] = []
+    for event in events:
+        target = event.get("target")
+        if not target:
+            continue
+        calls.append(
+            {
+                "target": target,
+                "data": event.get("data") or "0x",
+                "value": str(parse_wei(event.get("value"))),
+            }
+        )
+    return calls
+
+
+def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain_id: int) -> Explanation | None:
     """Generate AI explanation for timelock events. Returns None on any failure."""
     try:
         # Maple's ProposalScheduled event only carries an opaque proposalId — the
@@ -350,25 +372,23 @@ def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain
                 refine=True,
             )
 
-        calls_with_data = [e for e in events if e.get("target") and e.get("data") and len(e.get("data", "")) >= 10]
-        if not calls_with_data:
+        calls = _explainer_calls_from_events(events)
+        if not calls:
             return None
 
-        if len(calls_with_data) == 1:
-            event = calls_with_data[0]
+        if len(calls) == 1:
+            call = calls[0]
             return explain_transaction(
-                target=event["target"],
-                calldata=event["data"],
+                target=call["target"],
+                calldata=call["data"],
                 chain_id=chain_id,
-                value=int(event.get("value", 0)),
+                value=parse_wei(call.get("value")),
                 protocol=timelock_info.protocol,
                 label=timelock_info.label,
                 from_address=timelock_info.address,
                 refine=True,
             )
 
-        # Batch transaction
-        calls = [{"target": e["target"], "data": e["data"], "value": str(e.get("value", 0))} for e in calls_with_data]
         return explain_batch_transaction(
             calls=calls,
             chain_id=chain_id,

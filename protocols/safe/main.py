@@ -19,6 +19,7 @@ from utils.cache import (
     write_last_executed_nonce_to_file,
 )
 from utils.chains import safe_network_to_chain_id
+from utils.formatting import parse_wei
 from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
 from utils.logger import get_logger
 from utils.telegram import escape_markdown, send_telegram_message
@@ -244,7 +245,7 @@ def _explain_safe_tx(
         target=target,
         calldata=hex_data,
         chain_id=chain_id,
-        value=int(tx.get("value", 0)),
+        value=parse_wei(tx.get("value")),
         protocol=protocol,
         label=additional_info or "",
         from_address=safe_address,
@@ -352,24 +353,25 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
                 except Exception as e:
                     logger.error("Cannot decode Pendle aggregate calls: %s", e)
 
-            # AI explanation (best-effort, non-blocking)
-            hex_data = tx.get("data", "0x")
-            if hex_data and len(hex_data) >= 10:
-                chain_id = safe_network_to_chain_id(network_name)
-                try:
-                    explanation = _explain_safe_tx(
-                        tx=tx,
-                        target=target_contract,
-                        hex_data=hex_data,
-                        chain_id=chain_id,
-                        protocol=protocol,
-                        safe_address=safe_address,
-                        additional_info=additional_info,
-                    )
-                    if explanation:
-                        message += format_explanation_line(explanation)
-                except Exception:
-                    logger.debug("AI explanation failed for Safe tx nonce=%s", nonce, exc_info=True)
+            # AI explanation (best-effort, non-blocking). Empty and short
+            # payloads still reach the explainer — they are native transfers
+            # or unknown selectors, not "nothing to explain".
+            hex_data = tx.get("data") or "0x"
+            chain_id = safe_network_to_chain_id(network_name)
+            try:
+                explanation = _explain_safe_tx(
+                    tx=tx,
+                    target=target_contract,
+                    hex_data=hex_data,
+                    chain_id=chain_id,
+                    protocol=protocol,
+                    safe_address=safe_address,
+                    additional_info=additional_info,
+                )
+                if explanation:
+                    message += format_explanation_line(explanation)
+            except Exception:
+                logger.debug("AI explanation failed for Safe tx nonce=%s", nonce, exc_info=True)
 
             # Silent for routine Yearn multisig txs (expected proposer); loud
             # for unexpected proposers and for all non-Yearn protocol alerts.

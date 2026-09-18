@@ -65,8 +65,9 @@ class StateRead:
 
     var_name: str
     type_str: str  # e.g. "uint256", "mapping(address => uint256)"
-    value: Any  # raw decoded value
+    value: Any  # raw decoded value; ignored when ``available`` is False
     key_args: tuple[Any, ...] = ()  # for mapping reads, the key(s) used
+    available: bool = True
 
 
 def _parse_var_declaration(snippet: str, var_name: str) -> tuple[str, list[str]] | None:
@@ -303,10 +304,14 @@ def format_state_reads(reads: list[StateRead]) -> str:
         return ""
     lines: list[str] = []
     for r in reads:
-        value = _fmt_value(r.value)
         if r.key_args:
             keys = ", ".join(_fmt_value(k) for k in r.key_args)
-            lines.append(f"  {r.var_name}({keys}) = {value}  // current value, type: {r.type_str}")
+            name = f"{r.var_name}({keys})"
         else:
-            lines.append(f"  {r.var_name} = {value}  // current value, type: {r.type_str}")
+            name = r.var_name
+        if not r.available:
+            lines.append(f"  {name} = unavailable  // before-state could not be read for this key")
+            continue
+        value = _fmt_value(r.value)
+        lines.append(f"  {name} = {value}  // current value, type: {r.type_str}")
     return "\n".join(lines)
