@@ -29,6 +29,42 @@ class TestLookup(unittest.TestCase):
         self.assertIsNone(lookup("not-hex"))
 
 
+class TestUpgradeAnchorDependsOnPayload(unittest.TestCase):
+    """`upgrade*AndCall` only delegatecalls when its bytes argument is non-empty."""
+
+    _UPGRADE_TO_AND_CALL = "0x4f1ef286"  # upgradeToAndCall(address,bytes)
+    _UPGRADE_AND_CALL = "0x9623609d"  # upgradeAndCall(address,address,bytes)
+
+    def test_empty_payload_says_implementation_only(self) -> None:
+        anchor = lookup(self._UPGRADE_TO_AND_CALL, [("address", "0xnew"), ("bytes", b"")])
+        assert anchor is not None
+        self.assertIn("replaces the implementation only", anchor.rationale)
+        self.assertNotIn("delegatecalls the non-empty", anchor.rationale)
+        self.assertEqual(anchor.level, "HIGH")
+
+    def test_empty_hex_string_payload_is_also_empty(self) -> None:
+        anchor = lookup(self._UPGRADE_TO_AND_CALL, [("address", "0xnew"), ("bytes", "0x")])
+        assert anchor is not None
+        self.assertIn("replaces the implementation only", anchor.rationale)
+
+    def test_non_empty_payload_flags_the_delegatecall(self) -> None:
+        params = [("address", "0xproxy"), ("address", "0xnew"), ("bytes", b"\x8c\xa3\xe1\x1e")]
+        anchor = lookup(self._UPGRADE_AND_CALL, params)
+        assert anchor is not None
+        self.assertIn("delegatecalls", anchor.rationale)
+        self.assertIn("judge that payload too", anchor.rationale)
+
+    def test_without_params_the_anchor_covers_both_cases(self) -> None:
+        anchor = lookup(self._UPGRADE_AND_CALL)
+        assert anchor is not None
+        self.assertIn("if non-empty", anchor.rationale)
+
+    def test_plain_upgrade_to_is_unaffected(self) -> None:
+        anchor = lookup("0x3659cfe6", [("address", "0xnew")])
+        assert anchor is not None
+        self.assertEqual(anchor.rationale, _ANCHORS["0x3659cfe6"].rationale)
+
+
 class TestFormatAnchorsBlock(unittest.TestCase):
     def test_empty_input_returns_empty_string(self) -> None:
         self.assertEqual(format_anchors_block([]), "")

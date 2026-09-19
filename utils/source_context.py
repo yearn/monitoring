@@ -7,7 +7,6 @@ guessing from function names alone.
 Etherscan v2 uses a single multichain API key.
 """
 
-import json
 import os
 import re
 import threading
@@ -16,6 +15,7 @@ from dataclasses import dataclass
 from utils.disk_cache import MISS, DiskCache
 from utils.http_client import fetch_json
 from utils.logger import get_logger
+from utils.verified_contract import CACHE_SCHEMA_VERSION, VerifiedContract, parse_etherscan_entry
 
 logger = get_logger("utils.source_context")
 
@@ -26,13 +26,12 @@ ETHERSCAN_V2_API_URL = "https://api.etherscan.io/v2/api"
 # always under a few hundred chars in practice.
 MAX_SNIPPET_CHARS = 4000
 
-# Per-process cache: (chain_id, address_lower) -> (contract_name, source, abi_json_string)
-# or None for miss. Backed by an on-disk cache (below) so the same verified source is
-# not re-fetched from Etherscan on every cron run; the in-memory dict still serves repeat
-# lookups within a single process for free.
-# The ABI is stored as the raw JSON string from Etherscan and parsed lazily by callers
-# that need it — keeps the cache small for the common case where only source is read.
-_source_cache: dict[tuple[int, str], tuple[str, str, str] | None] = {}
+# Per-process cache: (chain_id, address_lower) -> VerifiedContract or None for miss.
+# Backed by an on-disk cache (below) so the same verified source is not re-fetched from
+# Etherscan on every cron run; the in-memory dict still serves repeat lookups within a
+# single process for free. The record keeps Etherscan's per-file sources and settings
+# rather than a flattened blob, so consumers can scope claims to the deployed contract.
+_source_cache: dict[tuple[int, str], VerifiedContract | None] = {}
 _source_cache_hits = 0
 _source_cache_misses = 0
 _source_cache_lock = threading.RLock()
@@ -42,8 +41,10 @@ _source_key_locks: dict[tuple[int, str], threading.Lock] = {}
 # positive entries never expire; "unverified" misses get the short negative TTL so a
 # contract verified later is picked up. Source can be large (~500KB) — bound the namespace
 # by total bytes as well as entry count. All tunable via env.
+# The namespace carries the record's schema version: because positive entries never
+# expire, a shape change would otherwise keep serving records written by an older version.
 _source_disk_cache = DiskCache(
-    namespace="source-cache",
+    namespace=f"source-cache-v{CACHE_SCHEMA_VERSION}",
     max_entries=int(os.getenv("SOURCE_CACHE_MAX_ENTRIES", "5000")),
     max_bytes=int(os.getenv("SOURCE_CACHE_MAX_BYTES", str(256 * 1024 * 1024))),
 )
@@ -117,11 +118,11 @@ class SourceContext:
     state_var_snippets: list[str]  # natspec + declaration for each mutated state var
 
 
-def _fetch_etherscan_contract(chain_id: int, address: str) -> tuple[str, str, str] | None:
-    """Internal: fetch and cache (contract_name, source, abi_json_string).
+def _fetch_etherscan_contract(chain_id: int, address: str) -> VerifiedContract | None:
+    """Internal: fetch and cache the structured verified-contract record.
 
-    Single Etherscan call shared by `fetch_source` (for natspec) and
-    `fetch_function_input_names` (for parameter labels).
+    Single Etherscan call shared by `fetch_source` (for natspec), `fetch_verified_contract`
+    (for the impl diff) and `fetch_function_input_names` (for parameter labels).
     """
     api_key = os.getenv("ETHERSCAN_TOKEN")
     if not api_key:
@@ -148,12 +149,12 @@ def _fetch_etherscan_contract(chain_id: int, address: str) -> tuple[str, str, st
                 with _source_cache_lock:
                     _source_cache[cache_key] = None
                 return None
-            if isinstance(disk_val, (list, tuple)) and len(disk_val) == 3:
-                record = (disk_val[0], disk_val[1], disk_val[2])
+            record = VerifiedContract.from_cache_dict(disk_val)
+            if record is not None:
                 with _source_cache_lock:
                     _source_cache[cache_key] = record
                 return record
-            # Unexpected shape — fall through to a live fetch.
+            # Unexpected shape (or an older schema) — fall through to a live fetch.
         else:
             _record_cache_event("disk", False, cache_key)
 
@@ -171,35 +172,45 @@ def _fetch_etherscan_contract(chain_id: int, address: str) -> tuple[str, str, st
         status_ok = data is not None and data.get("status") == "1"
         results = (data or {}).get("result") or [] if status_ok else []
         entry = results[0] if results else {}
-        raw_source = entry.get("SourceCode") or ""
+        contract = parse_etherscan_entry(entry) if isinstance(entry, dict) else None
 
-        if not raw_source:
+        if contract is None:
             with _source_cache_lock:
                 _source_cache[cache_key] = None
             if status_ok:
                 _source_disk_cache.set_negative(disk_key)
             return None
 
-        result = (
-            entry.get("ContractName") or "",
-            _concat_sources(raw_source),
-            entry.get("ABI") or "",
-        )
         with _source_cache_lock:
-            _source_cache[cache_key] = result
-        _source_disk_cache.set_positive(disk_key, list(result))
-        return result
+            _source_cache[cache_key] = contract
+        _source_disk_cache.set_positive(disk_key, contract.to_cache_dict())
+        return contract
+
+
+def fetch_verified_contract(chain_id: int, address: str) -> VerifiedContract | None:
+    """Fetch the structured verified-contract record for ``address``, or None.
+
+    This is what semantic consumers (the implementation diff) should use: it
+    keeps per-file sources, compiler settings, the ABI and the resolved
+    compilation target, so a claim can be attributed to the deployed contract.
+    """
+    return _fetch_etherscan_contract(chain_id, address)
 
 
 def fetch_source(chain_id: int, address: str) -> tuple[str, str] | None:
-    """Fetch (contract_name, concatenated_source) for a verified contract.
+    """Fetch (contract_name, concatenated_source) — a best-effort SEARCH helper.
+
+    The concatenation mixes the deployed contract with its bases, libraries and
+    imported interfaces, so it is fine for "find the natspec that mentions X"
+    but must not back a claim about what the deployed contract exposes. Use
+    :func:`fetch_verified_contract` for that.
 
     Returns None if the API key is missing, the contract is unverified, or the
     request fails. Caches by (chain_id, address) so repeated calls during the
     same run hit the API only once.
     """
     record = _fetch_etherscan_contract(chain_id, address)
-    return None if record is None else (record[0], record[1])
+    return None if record is None else (record.contract_name, record.concatenated_source())
 
 
 def fetch_abi_entries(chain_id: int, address: str) -> list[dict] | None:
@@ -210,18 +221,7 @@ def fetch_abi_entries(chain_id: int, address: str) -> list[dict] | None:
     token getters) pay no extra HTTP when source context was already fetched.
     """
     record = _fetch_etherscan_contract(chain_id, address)
-    return None if record is None else _parse_abi(record[2])
-
-
-def _parse_abi(abi_json: str) -> list[dict] | None:
-    """Parse Etherscan's ABI string. Returns None for unverified/malformed."""
-    if not abi_json or abi_json == "Contract source code not verified":
-        return None
-    try:
-        parsed = json.loads(abi_json)
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, list) else None
+    return None if record is None or not record.abi else record.abi
 
 
 def fetch_function_input_names(chain_id: int, address: str, function_name: str) -> list[str] | None:
@@ -236,12 +236,12 @@ def fetch_function_input_names(chain_id: int, address: str, function_name: str) 
     if record is None:
         return None
 
-    names = _function_input_names_from_abi(record[2], function_name)
+    names = _function_input_names_from_abi(record.abi, function_name)
     if names is not None:
         return names
 
     # Function isn't in target ABI — try the impl if this is a generic proxy.
-    if record[0] and record[0] not in _GENERIC_PROXY_NAMES:
+    if record.contract_name and record.contract_name not in _GENERIC_PROXY_NAMES:
         return None
 
     from utils.proxy import get_current_implementation
@@ -252,7 +252,7 @@ def fetch_function_input_names(chain_id: int, address: str, function_name: str) 
     impl_record = _fetch_etherscan_contract(chain_id, impl)
     if impl_record is None:
         return None
-    return _function_input_names_from_abi(impl_record[2], function_name)
+    return _function_input_names_from_abi(impl_record.abi, function_name)
 
 
 def get_verification_status(chain_id: int, address: str) -> bool | None:
@@ -305,11 +305,11 @@ def get_function_state_mutability(chain_id: int, address: str, function_name: st
     if record is None:
         return None
 
-    mut = _function_state_mutability_from_abi(record[2], function_name)
+    mut = _function_state_mutability_from_abi(record.abi, function_name)
     if mut is not None:
         return mut
 
-    if record[0] and record[0] not in _GENERIC_PROXY_NAMES:
+    if record.contract_name and record.contract_name not in _GENERIC_PROXY_NAMES:
         return None
 
     from utils.proxy import get_current_implementation
@@ -320,7 +320,7 @@ def get_function_state_mutability(chain_id: int, address: str, function_name: st
     impl_record = _fetch_etherscan_contract(chain_id, impl)
     if impl_record is None:
         return None
-    return _function_state_mutability_from_abi(impl_record[2], function_name)
+    return _function_state_mutability_from_abi(impl_record.abi, function_name)
 
 
 def get_function_signature_by_selector(chain_id: int, address: str, selector_hex: str) -> str | None:
@@ -335,7 +335,7 @@ def get_function_signature_by_selector(chain_id: int, address: str, selector_hex
     if record is None:
         return None
 
-    sig = _function_signature_from_abi(record[2], selector_hex)
+    sig = _function_signature_from_abi(record.abi, selector_hex)
     if sig is not None:
         return sig
 
@@ -351,17 +351,14 @@ def get_function_signature_by_selector(chain_id: int, address: str, selector_hex
     impl_record = _fetch_etherscan_contract(chain_id, impl)
     if impl_record is None:
         return None
-    return _function_signature_from_abi(impl_record[2], selector_hex)
+    return _function_signature_from_abi(impl_record.abi, selector_hex)
 
 
-def _function_signature_from_abi(abi_json: str, selector_hex: str) -> str | None:
+def _function_signature_from_abi(abi: list[dict], selector_hex: str) -> str | None:
     """Find the function whose 4-byte selector matches and return its signature."""
     from eth_utils import function_signature_to_4byte_selector
     from eth_utils.abi import collapse_if_tuple
 
-    abi = _parse_abi(abi_json)
-    if abi is None:
-        return None
     want = selector_hex.lower()
     for entry in abi:
         if not isinstance(entry, dict) or entry.get("type") != "function":
@@ -381,11 +378,8 @@ def _function_signature_from_abi(abi_json: str, selector_hex: str) -> str | None
     return None
 
 
-def _function_state_mutability_from_abi(abi_json: str, function_name: str) -> str | None:
-    """Pull ``stateMutability`` for ``function_name`` from an ABI JSON string."""
-    abi = _parse_abi(abi_json)
-    if abi is None:
-        return None
+def _function_state_mutability_from_abi(abi: list[dict], function_name: str) -> str | None:
+    """Pull ``stateMutability`` for ``function_name`` from parsed ABI entries."""
     muts: list[str] = []
     for entry in abi:
         if not isinstance(entry, dict) or entry.get("type") != "function":
@@ -400,17 +394,14 @@ def _function_state_mutability_from_abi(abi_json: str, function_name: str) -> st
     return "payable" if "payable" in muts else muts[0]
 
 
-def _function_input_names_from_abi(abi_json: str, function_name: str) -> list[str] | None:
-    """Pull input names for ``function_name`` out of an ABI JSON string.
+def _function_input_names_from_abi(abi: list[dict], function_name: str) -> list[str] | None:
+    """Pull input names for ``function_name`` out of parsed ABI entries.
 
     Returns ``None`` if the function isn't present; an empty list if the
     function has no parameters. If any input is unnamed (anonymous param),
     return ``None`` rather than a mix — the LLM is better off without than
     with partial labels.
     """
-    abi = _parse_abi(abi_json)
-    if abi is None:
-        return None
     for entry in abi:
         if not isinstance(entry, dict) or entry.get("type") != "function":
             continue
@@ -422,28 +413,6 @@ def _function_input_names_from_abi(abi_json: str, function_name: str) -> list[st
             return None
         return names
     return None
-
-
-def _concat_sources(raw_source: str) -> str:
-    """Etherscan returns either a single-file string or a JSON blob of files.
-
-    Multi-file solc input is wrapped in double braces `{{ ... }}`; standard JSON
-    has single braces. Returns concatenated file contents for searching.
-    """
-    stripped = raw_source.strip()
-    if not (stripped.startswith("{") and stripped.endswith("}")):
-        return raw_source
-
-    payload = stripped[1:-1] if stripped.startswith("{{") else stripped
-    try:
-        parsed = json.loads(payload)
-    except json.JSONDecodeError:
-        return raw_source
-
-    sources = parsed.get("sources") if isinstance(parsed, dict) else None
-    if not isinstance(sources, dict):
-        return raw_source
-    return "\n\n".join(f["content"] for f in sources.values() if isinstance(f, dict) and "content" in f)
 
 
 def _extract_function_snippet(source: str, function_name: str) -> str:

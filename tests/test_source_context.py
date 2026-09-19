@@ -1,18 +1,18 @@
 """Tests for utils/source_context.py."""
 
-import json
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from utils.source_context import (
-    _concat_sources,
     _extract_function_body,
     _extract_function_snippet,
     _function_signature_from_abi,
     extract_state_var_snippet,
     fetch_function_input_names,
+    fetch_source,
+    fetch_verified_contract,
     find_state_var_writes,
     get_contract_label,
     get_source_context,
@@ -120,26 +120,56 @@ class TestExtractStateVarSnippet(unittest.TestCase):
         self.assertEqual(snippet, "")
 
 
-class TestConcatSources(unittest.TestCase):
-    def test_plain_solidity(self) -> None:
-        source = "contract Foo { function bar() public {} }"
-        self.assertEqual(_concat_sources(source), source)
+class TestFetchedRecordShape(unittest.TestCase):
+    """The cached record keeps per-file provenance; the flat text is search-only."""
 
-    def test_double_brace_json_format(self) -> None:
-        raw = '{{"sources":{"Foo.sol":{"content":"contract Foo {}"},"Bar.sol":{"content":"contract Bar {}"}}}}'
-        result = _concat_sources(raw)
-        self.assertIn("contract Foo {}", result)
-        self.assertIn("contract Bar {}", result)
+    BUNDLE = (
+        '{{"language":"Solidity","sources":'
+        '{"src/Foo.sol":{"content":"contract Foo { function bar() public {} }"},'
+        '"src/Bar.sol":{"content":"contract Bar {}"}},"settings":{}}}'
+    )
 
-    def test_single_brace_json_format(self) -> None:
-        raw = '{"sources":{"Foo.sol":{"content":"contract Foo {}"}}}'
-        result = _concat_sources(raw)
-        self.assertIn("contract Foo {}", result)
+    def setUp(self) -> None:
+        reset_cache()
 
-    def test_invalid_json_falls_back(self) -> None:
-        raw = "{not valid json}"
-        # Should fall back to raw string when JSON parsing fails
-        self.assertEqual(_concat_sources(raw), raw)
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_verified_contract_keeps_files_and_target(self, mock_fetch: object) -> None:
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "status": "1",
+            "result": [{"SourceCode": self.BUNDLE, "ContractName": "Foo", "ABI": "[]"}],
+        }
+        contract = fetch_verified_contract(1, "0xabc")
+        assert contract is not None
+        self.assertEqual(sorted(contract.sources), ["src/Bar.sol", "src/Foo.sol"])
+        self.assertEqual(contract.compilation_target, ("src/Foo.sol", "Foo"))
+        self.assertIn("contract Foo", contract.target_source)
+        self.assertNotIn("contract Bar", contract.target_source)
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_fetch_source_still_returns_flat_text_for_search(self, mock_fetch: object) -> None:
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "status": "1",
+            "result": [{"SourceCode": self.BUNDLE, "ContractName": "Foo", "ABI": "[]"}],
+        }
+        fetched = fetch_source(1, "0xabc")
+        assert fetched is not None
+        name, source = fetched
+        self.assertEqual(name, "Foo")
+        self.assertIn("contract Foo", source)
+        self.assertIn("contract Bar", source)
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_single_file_source_is_kept_verbatim(self, mock_fetch: object) -> None:
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "status": "1",
+            "result": [{"SourceCode": "contract Foo {}", "ContractName": "Foo", "ABI": "[]"}],
+        }
+        contract = fetch_verified_contract(1, "0xabc")
+        assert contract is not None
+        self.assertEqual(list(contract.sources.values()), ["contract Foo {}"])
 
 
 class TestGetSourceContext(unittest.TestCase):
@@ -466,17 +496,15 @@ class TestFetchFunctionInputNames(unittest.TestCase):
 class TestFunctionSignatureFromAbi(unittest.TestCase):
     """Tests for _function_signature_from_abi (selector → canonical signature)."""
 
-    _ABI = json.dumps(
-        [
-            {"type": "function", "name": "transfer", "inputs": [{"type": "address"}, {"type": "uint256"}]},
-            {"type": "function", "name": "pause", "inputs": []},
-            {
-                "type": "function",
-                "name": "configure",
-                "inputs": [{"type": "tuple", "components": [{"type": "address"}, {"type": "uint256"}]}],
-            },
-        ]
-    )
+    _ABI = [
+        {"type": "function", "name": "transfer", "inputs": [{"type": "address"}, {"type": "uint256"}]},
+        {"type": "function", "name": "pause", "inputs": []},
+        {
+            "type": "function",
+            "name": "configure",
+            "inputs": [{"type": "tuple", "components": [{"type": "address"}, {"type": "uint256"}]}],
+        },
+    ]
 
     def test_matches_selector(self) -> None:
         # transfer(address,uint256) selector is 0xa9059cbb.
@@ -496,8 +524,9 @@ class TestFunctionSignatureFromAbi(unittest.TestCase):
     def test_unknown_selector_returns_none(self) -> None:
         self.assertIsNone(_function_signature_from_abi(self._ABI, "0xdeadbeef"))
 
-    def test_unverified_abi_returns_none(self) -> None:
-        self.assertIsNone(_function_signature_from_abi("Contract source code not verified", "0xa9059cbb"))
+    def test_empty_abi_returns_none(self) -> None:
+        """An unverified contract yields an empty ABI on the record."""
+        self.assertIsNone(_function_signature_from_abi([], "0xa9059cbb"))
 
 
 if __name__ == "__main__":
