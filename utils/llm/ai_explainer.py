@@ -133,8 +133,10 @@ Critical rules for parameter interpretation:
   "External ABI changes" is the complete list of entry-point additions/removals for THAT
   implementation, taken from its verified ABI — do not claim any other function was added,
   removed, or made callable, and never attribute a function to a contract the section
-  didn't list it under. "Changed function bodies" means same signature, different code —
-  behavior changed even though the ABI did not. "Storage compatibility: UNKNOWN" means the
+  didn't list it under. "Target-defined function changes" is where behavior lives: a changed
+  body means the same signature now runs different code, and an added or removed
+  internal/private member means logic moved or was deleted — say what the shown code does
+  rather than just naming it. "Storage compatibility: UNKNOWN" means the
   layout was NOT checked: do not call the upgrade storage-safe, and do not call it unsafe
   either. Treat every "Unvalidated items" entry as an unchecked area, not a clean result.
   Internal or private functions are not a governance control surface, and a modifier shown

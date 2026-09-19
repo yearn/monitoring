@@ -6,8 +6,11 @@ evidence that grounds the alert, in four separated categories:
 
 - **External ABI changes** — added/removed entry points and ``stateMutability``
   changes, taken from each implementation's own verified ABI.
-- **Changed function bodies** — same signature, different code, scoped to the
-  contract actually deployed at that address, with a small unified diff.
+- **Target-defined function changes** — scoped to the contract actually deployed
+  at that address: bodies that changed under an unchanged signature, plus
+  internal/private members added or removed. Comparing only the functions both
+  sides share would miss behavior *moved* into a new helper, or a deleted hook —
+  neither of which has an ABI footprint.
 - **Storage compatibility** — COMPATIBLE / INCOMPATIBLE / UNKNOWN, from the
   compiler storage layouts Sourcify serves for both implementations.
 - **Unvalidated items** — everything the above cannot see, stated explicitly so
@@ -46,6 +49,9 @@ STORAGE_UNKNOWN_NOTE = "not validated automatically; inspect compiler layouts ma
 MAX_DIFFED_FUNCTIONS = 5
 MAX_DIFF_LINES = 30
 MAX_LISTED_CONFLICTS = 10
+# Added internal helpers get their source, not just a name: an upgrade that moves
+# behavior into one is exactly the case a signature alone fails to explain.
+MAX_ADDED_BODIES = 3
 
 _UNVALIDATED_INHERITED = "function and modifier bodies inherited from base contracts were not compared"
 _UNVALIDATED_INDIRECT = (
@@ -79,6 +85,25 @@ class BodyChange:
 
 
 @dataclass(frozen=True)
+class BodyDiff:
+    """What changed among the functions the deployed contract itself defines.
+
+    ``added``/``removed`` cover only members the ABI cannot show (internal,
+    private, modifiers); external ones live in the ABI surface diff instead, so
+    the two sections never report the same function twice.
+    """
+
+    changed: list[BodyChange] = field(default_factory=list)
+    added: list[BodyChange] = field(default_factory=list)
+    removed: list[BodyChange] = field(default_factory=list)
+    scope: str | None = None  # contract whose members were compared, None if unavailable
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.changed or self.added or self.removed)
+
+
+@dataclass(frozen=True)
 class ImplTarget:
     """Which contract, in which file, was deployed at an address."""
 
@@ -99,8 +124,7 @@ class ImplDiff:
     old: ImplTarget
     new: ImplTarget
     surface: AbiSurfaceDiff | None  # None when unavailable or withheld by the gate
-    changed_bodies: list[BodyChange]
-    body_scope: str | None  # contract whose bodies were compared, None if unavailable
+    bodies: BodyDiff
     storage: LayoutComparison
     unvalidated: list[str] = field(default_factory=list)
     surface_note: str = ""  # cross-diff provenance note, empty when nothing to flag
@@ -122,13 +146,13 @@ def diff_implementations(old_addr: str, new_addr: str, chain_id: int) -> ImplDif
     if surface is None:
         unvalidated.append("external ABI surface: no ABI available for one of the implementations")
 
-    changed_bodies, body_scope = _diff_bodies(old, new)
-    if body_scope is None:
+    bodies = _diff_bodies(old, new)
+    if bodies.scope is None:
         unvalidated.append("function bodies: could not resolve the deployed contract's own source unambiguously")
     else:
         unvalidated.append(_UNVALIDATED_INHERITED)
         unvalidated.append(_UNVALIDATED_INDIRECT)
-    if changed_bodies:
+    if not bodies.is_empty:
         unvalidated.append(_UNVALIDATED_MODIFIERS)
 
     storage = _compare_storage(old, new, old_addr, new_addr, chain_id)
@@ -136,23 +160,21 @@ def diff_implementations(old_addr: str, new_addr: str, chain_id: int) -> ImplDif
         unvalidated.append(_UNVALIDATED_NAMESPACED)
 
     surface_note = _provenance_note(new, surface)
-    violations = _consistency_violations(old, new, surface, changed_bodies)
+    violations = _consistency_violations(old, new, surface, bodies)
     if violations:
         # Deterministic evidence that contradicts its own source is worse than
         # no evidence: withhold the section rather than hand it to the model.
         logger.error("impl diff consistency gate failed for %s → %s: %s", old_addr, new_addr, violations)
         surface = None
         surface_note = ""
-        changed_bodies = []
-        body_scope = None
+        bodies = BodyDiff(scope=None)
         unvalidated.extend(violations)
 
     return ImplDiff(
         old=_target(old_addr, old),
         new=_target(new_addr, new),
         surface=surface,
-        changed_bodies=changed_bodies,
-        body_scope=body_scope,
+        bodies=bodies,
         storage=storage,
         unvalidated=unvalidated,
         surface_note=surface_note,
@@ -203,32 +225,65 @@ def _target_is_namespaced(contract: VerifiedContract) -> bool:
     return uses_namespaced_storage(contract.target_source, contract.contract_name)
 
 
-def _diff_bodies(old: VerifiedContract, new: VerifiedContract) -> tuple[list[BodyChange], str | None]:
-    """Compare function bodies within each side's own deployed contract.
+def _diff_bodies(old: VerifiedContract, new: VerifiedContract) -> BodyDiff:
+    """Diff the union of functions each side's own deployed contract defines.
 
-    Returns (changes, scope) where ``scope`` names the contract the comparison
-    covered, or None when either side's target is unresolved or its overloads
-    are ambiguous — in which case no body claim is made at all.
+    Comparing only the intersection loses whole functions: an upgrade that moves
+    logic out of one function into a new internal helper, or deletes a transfer
+    hook, would show as a shrinking body and nothing else. Additions and removals
+    are reported for members the ABI cannot show — internal, private and
+    modifiers — since external ones are already the ABI section's job.
     """
     old_fns = _target_functions(old)
     new_fns = _target_functions(new)
     if old_fns is None or new_fns is None:
-        return [], None
+        return BodyDiff(scope=None)
 
-    changes: list[BodyChange] = []
+    changed: list[BodyChange] = []
     for sig in sorted(set(old_fns) & set(new_fns)):
         old_fn, new_fn = old_fns[sig], new_fns[sig]
         if old_fn.fingerprint == new_fn.fingerprint:
             continue
         diff = ""
-        if len(changes) < MAX_DIFFED_FUNCTIONS:
+        if len(changed) < MAX_DIFFED_FUNCTIONS:
             diff = _unified_diff(
                 _raw_definition(old.target_source, old_fn),
                 _raw_definition(new.target_source, new_fn),
                 sig,
             )
-        changes.append(BodyChange(signature=sig, visibility=new_fn.visibility, modifiers=new_fn.modifiers, diff=diff))
-    return changes, f"{new.contract_name} @ {new.contract_file}"
+        changed.append(BodyChange(signature=sig, visibility=new_fn.visibility, modifiers=new_fn.modifiers, diff=diff))
+
+    added = [new_fns[sig] for sig in sorted(set(new_fns) - set(old_fns)) if _is_hidden_from_abi(new_fns[sig])]
+    removed = [old_fns[sig] for sig in sorted(set(old_fns) - set(new_fns)) if _is_hidden_from_abi(old_fns[sig])]
+    return BodyDiff(
+        changed=changed,
+        added=[_added_change(fn, new.target_source, i) for i, fn in enumerate(added)],
+        removed=[
+            BodyChange(signature=fn.signature, visibility=fn.visibility, modifiers=fn.modifiers) for fn in removed
+        ],
+        scope=f"{new.contract_name} @ {new.contract_file}",
+    )
+
+
+def _is_hidden_from_abi(fn: FunctionDef) -> bool:
+    """True for members no ABI can carry: internal, private, and modifiers.
+
+    Visibility is read from the target's own source rather than matched against
+    ABI signatures, because source types don't always spell the ABI's canonical
+    ones (``initialize(address,Id,…)`` vs ``initialize(address,bytes32,…)``).
+    """
+    return fn.visibility not in ("external", "public")
+
+
+def _added_change(fn: FunctionDef, source: str, index: int) -> BodyChange:
+    """An added function, with its body when it fits the budget.
+
+    A signature alone rarely explains a new internal helper — the behavior an
+    upgrade moved into one is exactly what a reviewer needs to see — so the
+    first few get their source, subject to the same truncation as a diff.
+    """
+    diff = _unified_diff("", _raw_definition(source, fn), fn.signature) if index < MAX_ADDED_BODIES else ""
+    return BodyChange(signature=fn.signature, visibility=fn.visibility, modifiers=fn.modifiers, diff=diff)
 
 
 def _target_functions(contract: VerifiedContract) -> dict[str, FunctionDef] | None:
@@ -278,6 +333,10 @@ def _unified_diff(old_text: str, new_text: str, signature: str) -> str:
     if len(lines) <= MAX_DIFF_LINES:
         return "\n".join(lines)
 
+    if not old_lines:
+        # An addition has nothing to diff against; "rewritten" would misdescribe it.
+        return f"(new function, {len(new_lines)} lines; body omitted — read the source)"
+
     added = sum(1 for line in lines if line.startswith("+") and not line.startswith("+++"))
     removed = sum(1 for line in lines if line.startswith("-") and not line.startswith("---"))
     return (
@@ -290,7 +349,7 @@ def _consistency_violations(
     old: VerifiedContract,
     new: VerifiedContract,
     surface: AbiSurfaceDiff | None,
-    changed_bodies: list[BodyChange],
+    bodies: BodyDiff,
 ) -> list[str]:
     """Re-derive the claims from their own sources; return any that don't hold.
 
@@ -301,8 +360,8 @@ def _consistency_violations(
     violations: list[str] = []
     if surface is not None:
         violations.extend(_surface_violations(old, new, surface))
-    if changed_bodies:
-        violations.extend(_body_violations(new, changed_bodies))
+    if bodies.changed or bodies.added:
+        violations.extend(_body_violations(new, bodies.changed + bodies.added))
     return violations
 
 
@@ -378,17 +437,37 @@ def _fmt_surface(diff: ImplDiff) -> list[str]:
 
 
 def _fmt_bodies(diff: ImplDiff) -> list[str]:
-    """Render the body-change section. ABI equality is not behavioral equality."""
-    if diff.body_scope is None:
-        return ["Changed function bodies: NOT COMPARED — see Unvalidated items."]
-    if not diff.changed_bodies:
-        return [f"Changed function bodies ({diff.body_scope}): none."]
+    """Render the target-defined function section.
 
-    lines = [f"Changed function bodies ({diff.body_scope}):"]
-    for change in diff.changed_bodies:
-        lines.append(f"  ~ {change}")
-        lines.extend(f"      {line}" for line in change.diff.splitlines())
-    return lines
+    ABI equality is not behavioral equality, and neither is an unchanged
+    function list: logic moved into a new internal helper, or a deleted hook,
+    only shows up here.
+    """
+    bodies = diff.bodies
+    if bodies.scope is None:
+        return ["Target-defined function changes: NOT COMPARED — see Unvalidated items."]
+    if bodies.is_empty:
+        return [f"Target-defined function changes ({bodies.scope}): none."]
+
+    lines = [f"Target-defined function changes ({bodies.scope}):"]
+    if bodies.added:
+        lines.append("  Added (internal/private — not on the external surface):")
+        lines.extend(_fmt_body_change("+", change) for change in bodies.added)
+    if bodies.removed:
+        lines.append("  No longer defined here (internal/private; may have moved to a base contract):")
+        lines.extend(_fmt_body_change("-", change) for change in bodies.removed)
+    if bodies.changed:
+        lines.append("  Changed bodies (same signature, different code):")
+        lines.extend(_fmt_body_change("~", change) for change in bodies.changed)
+    return [line for block in lines for line in block.splitlines()]
+
+
+def _fmt_body_change(marker: str, change: BodyChange) -> str:
+    """One entry plus its indented source/diff, when one fits the budget."""
+    head = f"    {marker} {change}"
+    if not change.diff:
+        return head
+    return head + "\n" + "\n".join(f"        {line}" for line in change.diff.splitlines())
 
 
 def _fmt_storage(diff: ImplDiff) -> list[str]:

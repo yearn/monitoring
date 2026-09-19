@@ -122,8 +122,48 @@ class ThreeJaneDiffTest(unittest.TestCase):
     def test_susd3_body_change_is_surfaced(self) -> None:
         """sUSD3's only material change lives inside availableDepositLimit's body."""
         assert self.susd3 is not None
-        self.assertEqual([c.signature for c in self.susd3.changed_bodies], ["availableDepositLimit(address)"])
-        self.assertEqual(self.susd3.body_scope, "sUSD3 @ src/usd3/sUSD3.sol")
+        self.assertEqual([c.signature for c in self.susd3.bodies.changed], ["availableDepositLimit(address)"])
+        self.assertEqual(self.susd3.bodies.scope, "sUSD3 @ src/usd3/sUSD3.sol")
+
+    def test_susd3_gains_and_loses_no_functions(self) -> None:
+        assert self.susd3 is not None
+        self.assertEqual(self.susd3.bodies.added, [])
+        self.assertEqual(self.susd3.bodies.removed, [])
+
+    def test_usd3_added_internal_helpers_are_reported(self) -> None:
+        """USD3 moved deployment into new helpers; comparing only shared functions hid them."""
+        assert self.usd3 is not None
+        self.assertEqual(
+            [c.signature for c in self.usd3.bodies.added],
+            [
+                "_deployDepositedFunds()",
+                "_pendingLoss()",
+                "_postDepositHook(uint256,uint256,address)",
+                "_wrapUSDC(uint256,bool)",
+            ],
+        )
+
+    def test_usd3_removed_internal_hooks_are_reported(self) -> None:
+        """A deleted transfer hook is a behavior change with no ABI footprint."""
+        assert self.usd3 is not None
+        self.assertEqual(
+            [c.signature for c in self.usd3.bodies.removed],
+            ["_postWithdrawHook(uint256,uint256,address,address,uint256)", "_preTransferHook(address,address,uint256)"],
+        )
+
+    def test_ring_fence_implementation_reaches_the_prompt(self) -> None:
+        """_postDepositHook is where the headline ring-fence behavior lives."""
+        assert self.usd3 is not None
+        rendered = format_impl_diff(self.usd3)
+        self.assertIn("_postDepositHook(uint256,uint256,address) internal", rendered)
+        self.assertIn("ringFencedLiquidity += assets;", rendered)
+        self.assertIn("ringFenceConduit[receiver]", rendered)
+
+    def test_external_additions_are_not_duplicated_in_the_body_section(self) -> None:
+        assert self.usd3 is not None
+        body_signatures = {c.signature for c in self.usd3.bodies.added + self.usd3.bodies.removed}
+        self.assertEqual(body_signatures & set(USD3_EXPECTED_ADDED), set())
+        self.assertTrue(all(sig.startswith("_") for sig in body_signatures), body_signatures)
 
     def test_morpho_interface_declarations_never_appear(self) -> None:
         """`clearMarketWindDown` is an IMorpho declaration, not a USD3/sUSD3 entry point."""

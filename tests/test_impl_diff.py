@@ -187,8 +187,8 @@ class TestBodyChanges(ImplDiffTestCase):
     def test_body_only_change_is_reported_with_a_diff(self) -> None:
         diff = self.run_diff()
         assert diff is not None
-        self.assertEqual([c.signature for c in diff.changed_bodies], ["totalAssets()"])
-        change = diff.changed_bodies[0]
+        self.assertEqual([c.signature for c in diff.bodies.changed], ["totalAssets()"])
+        change = diff.bodies.changed[0]
         self.assertEqual(change.visibility, "public")
         self.assertIn("- buffer", change.diff)
         self.assertIn("+++ new totalAssets()", change.diff)
@@ -196,12 +196,94 @@ class TestBodyChanges(ImplDiffTestCase):
     def test_unchanged_body_is_not_reported(self) -> None:
         diff = self.run_diff()
         assert diff is not None
-        self.assertNotIn("setCap(uint256)", [c.signature for c in diff.changed_bodies])
+        self.assertNotIn("setCap(uint256)", [c.signature for c in diff.bodies.changed])
 
     def test_scope_names_the_contract_and_file(self) -> None:
         diff = self.run_diff()
         assert diff is not None
-        self.assertEqual(diff.body_scope, "Vault @ src/Vault.sol")
+        self.assertEqual(diff.bodies.scope, "Vault @ src/Vault.sol")
+
+
+class TestAddedAndRemovedFunctions(ImplDiffTestCase):
+    """Comparing only the intersection loses whole functions.
+
+    Regression: an upgrade that moves logic out of a function into a new internal
+    helper showed the emptied function and nothing else — the helper that now
+    holds the behavior, and any deleted hook, were both invisible.
+    """
+
+    OLD = """
+    contract Vault is Base {
+        function deposit(uint256 amount) external {
+            _accrue();
+            _deploy(amount);
+        }
+
+        function _deploy(uint256 amount) internal { strategy.push(amount); }
+
+        function _preTransferHook(address from, address to) internal { _check(from, to); }
+    }
+    """
+    NEW = """
+    contract Vault is Base {
+        function deposit(uint256 amount) external {
+            _accrue();
+            _postDepositHook(amount);
+        }
+
+        function _deploy(uint256 amount) internal { strategy.push(amount); }
+
+        function _postDepositHook(uint256 amount) internal {
+            fenced += amount;
+            _deploy(amount);
+        }
+    }
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.old_entry = _bundle(self.OLD, OLD_ABI)
+        self.new_entry = _bundle(self.NEW, OLD_ABI)
+
+    def test_added_internal_function_is_reported(self) -> None:
+        diff = self.run_diff()
+        assert diff is not None
+        self.assertEqual([c.signature for c in diff.bodies.added], ["_postDepositHook(uint256)"])
+        self.assertEqual(diff.bodies.added[0].visibility, "internal")
+
+    def test_added_function_carries_its_body(self) -> None:
+        """A signature alone doesn't explain behavior moved into a new helper."""
+        diff = self.run_diff()
+        assert diff is not None
+        self.assertIn("fenced += amount;", diff.bodies.added[0].diff)
+
+    def test_removed_internal_function_is_reported(self) -> None:
+        diff = self.run_diff()
+        assert diff is not None
+        self.assertEqual([c.signature for c in diff.bodies.removed], ["_preTransferHook(address,address)"])
+
+    def test_unchanged_internal_function_is_not_reported(self) -> None:
+        diff = self.run_diff()
+        assert diff is not None
+        for entries in (diff.bodies.added, diff.bodies.removed, diff.bodies.changed):
+            self.assertNotIn("_deploy(uint256)", [c.signature for c in entries])
+
+    def test_rendered_sections_are_labeled(self) -> None:
+        rendered = format_impl_diff(self.run_diff())
+        self.assertIn("Added (internal/private", rendered)
+        self.assertIn("+ _postDepositHook(uint256) internal", rendered)
+        self.assertIn("No longer defined here", rendered)
+        self.assertIn("- _preTransferHook(address,address) internal", rendered)
+
+    def test_external_functions_are_left_to_the_abi_section(self) -> None:
+        """`sweep` is a genuine external addition; it must not be listed twice."""
+        self.old_entry = _bundle(TARGET_OLD, OLD_ABI)
+        self.new_entry = _bundle(TARGET_NEW, NEW_ABI)
+        diff = self.run_diff()
+        assert diff is not None and diff.surface is not None
+        self.assertIn("sweep(address)", [f.signature for f in diff.surface.added])
+        self.assertEqual(diff.bodies.added, [])
+        self.assertEqual(format_impl_diff(diff).count("sweep(address)"), 1)
 
 
 class TestStringLiteralChanges(ImplDiffTestCase):
@@ -233,7 +315,7 @@ class TestStringLiteralChanges(ImplDiffTestCase):
         diff = self.run_diff()
         assert diff is not None and diff.surface is not None
         self.assertTrue(diff.surface.is_empty, "the ABI is identical; only the body changed")
-        self.assertEqual([c.signature for c in diff.changed_bodies], ["totalAssets()"])
+        self.assertEqual([c.signature for c in diff.bodies.changed], ["totalAssets()"])
 
     def test_both_message_versions_appear_in_the_rendered_diff(self) -> None:
         diff = self.run_diff()
@@ -255,8 +337,8 @@ class TestAmbiguousTarget(ImplDiffTestCase):
     def test_body_analysis_unavailable_but_abi_still_diffed(self) -> None:
         diff = self.run_diff()
         assert diff is not None and diff.surface is not None
-        self.assertIsNone(diff.body_scope)
-        self.assertEqual(diff.changed_bodies, [])
+        self.assertIsNone(diff.bodies.scope)
+        self.assertEqual(diff.bodies.changed, [])
         self.assertEqual([f.signature for f in diff.surface.added], ["sweep(address)"])
         rendered = format_impl_diff(diff)
         self.assertIn("NOT COMPARED", rendered)
