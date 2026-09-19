@@ -38,7 +38,7 @@ from utils.logger import get_logger
 from utils.on_chain_state import StateRead, format_state_reads, read_before_state
 from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
 from utils.related_tokens import RelatedToken, format_related_tokens_block, resolve_related_tokens
-from utils.risk_anchors import format_anchors_block
+from utils.risk_anchors import RiskAnchor, format_anchors_block
 from utils.risk_anchors import lookup as lookup_risk_anchor
 from utils.source_context import (
     SourceContext,
@@ -134,6 +134,19 @@ Critical rules for parameter interpretation:
 - When a Risk Anchors section is provided, treat it as a typical floor/ceiling, not a
   verdict. Adjust up or down based on the specific parameters (e.g. grantRole of a
   minor role can be LOW; an upgrade to fresh-bytecode code can be CRITICAL).
+- A Proxy Upgrade section states only what was deterministically derived, and every line
+  names the contract it came from. Use those categories exactly as scoped:
+  "External ABI changes" is the complete list of entry-point additions/removals for THAT
+  implementation, taken from its verified ABI — do not claim any other function was added,
+  removed, or made callable, and never attribute a function to a contract the section
+  didn't list it under. "Target-defined function changes" is where behavior lives: a changed
+  body means the same signature now runs different code, and an added or removed
+  internal/private member means logic moved or was deleted — say what the shown code does
+  rather than just naming it. "Storage compatibility: UNKNOWN" means the
+  layout was NOT checked: do not call the upgrade storage-safe, and do not call it unsafe
+  either. Treat every "Unvalidated items" entry as an unchecked area, not a clean result.
+  Internal or private functions are not a governance control surface, and a modifier shown
+  in source text is not proof of who may call something.
 - When a Safety Checks section is provided, treat each item as a verified hard fact
   (an UNVERIFIED target, an ETH/payable mismatch). Reflect it in the verdict — an
   unverified target is at least MEDIUM since its behavior can't be inspected.
@@ -943,25 +956,24 @@ def _collect_address_labels(
 def _collect_risk_anchors(decoded_calls: list[DecodedCall]) -> str:
     """Build the Risk Anchors prompt section for calls with known anchors.
 
-    Deduped by signature so a 5-call batch of identical setCoverageCap calls
-    surfaces a single line rather than five. Returns "" if no call in the
-    batch has a registered anchor.
+    Deduped by (signature, rationale) so a 5-call batch of identical
+    setCoverageCap calls surfaces a single line rather than five, while two
+    upgrades that differ in their payload argument still get a line each.
+    Returns "" if no call in the batch has a registered anchor.
     """
-    seen: set[str] = set()
-    anchored: list[tuple[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    anchored: list[tuple[str, RiskAnchor]] = []
     for call in decoded_calls:
-        if call.signature in seen:
-            continue
         # The decoder normalizes signatures to the 4byte-selector text form, so
         # we re-compute the selector locally rather than carrying it through.
         try:
             sel = "0x" + function_signature_to_4byte_selector(call.signature).hex()
         except Exception:  # noqa: BLE001 - bad signatures are skipped
             continue
-        anchor = lookup_risk_anchor(sel)
-        if anchor:
+        anchor = lookup_risk_anchor(sel, call.params)
+        if anchor and (call.signature, anchor.rationale) not in seen:
             anchored.append((call.signature, anchor))
-            seen.add(call.signature)
+            seen.add((call.signature, anchor.rationale))
     return format_anchors_block(anchored)
 
 

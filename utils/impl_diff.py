@@ -1,480 +1,516 @@
-"""Compare two proxy implementations' verified source to surface upgrade diffs.
+"""Compare two proxy implementations and surface what actually changed.
 
-When a governance tx upgrades a proxy, the LLM normally sees just the new impl
-address and a diff URL it can't follow. This module fetches both impls' source,
-extracts the structural surface (function signatures + state variables in
-declaration order), and produces a textual diff focused on:
+When a governance tx upgrades a proxy, the LLM otherwise sees just the new impl
+address and a diff URL it can't follow. This module produces the deterministic
+evidence that grounds the alert, in four separated categories:
 
-- Functions added / removed / changed signature
-- Storage layout safety (append-only is safe; reorderings or removals are not)
+- **External ABI changes** — added/removed entry points and ``stateMutability``
+  changes, taken from each implementation's own verified ABI.
+- **Target-defined function changes** — scoped to the contract actually deployed
+  at that address: bodies that changed under an unchanged signature, plus
+  internal/private members added or removed. Comparing only the functions both
+  sides share would miss behavior *moved* into a new helper, or a deleted hook —
+  neither of which has an ABI footprint.
+- **Storage compatibility** — COMPATIBLE / INCOMPATIBLE / UNKNOWN, from the
+  compiler storage layouts Sourcify serves for both implementations.
+- **Unvalidated items** — everything the above cannot see, stated explicitly so
+  silence is never read as safety.
 
-Skipped in v1:
-- Function body changes (would either explode the prompt or require a body hash
-  signal that's hard to interpret).
-- Inherited storage from base contracts (extractor sees the flat source bundle
-  as fetched from Etherscan, which usually contains inherited contracts, but we
-  don't follow inheritance ourselves).
-- EIP-7201 namespaced storage layouts (flagged and layout check skipped).
+Every fact carries provenance (which contract, in which file). Nothing is
+derived from the concatenated source bundle, because the bundle contains bases,
+libraries and imported interfaces that are not part of the deployed contract —
+attributing those to the proxy produced both false positives (an ``IMorpho``
+declaration reported as a new unpermissioned function) and false negatives (a
+real addition masked by a same-signature declaration elsewhere in the bundle).
+
+Before anything is rendered, :func:`_consistency_violations` re-checks the
+result against the ABIs it came from and against the other diffs produced in
+this process. A section that fails its own check is dropped rather than shown.
 """
 
-import re
-from dataclasses import dataclass
-from typing import Iterable
+import difflib
+import threading
+from dataclasses import dataclass, field
 
+from utils.abi_surface import AbiSurfaceDiff, abi_functions, diff_abi_surface
 from utils.logger import get_logger
-from utils.source_context import fetch_source
+from utils.solidity_text import FunctionDef, contract_functions, uses_namespaced_storage
+from utils.source_context import fetch_verified_contract
+from utils.sourcify_layout import fetch_storage_layout
+from utils.storage_layout import LayoutComparison, StorageCompatibility, compare_storage_layouts
+from utils.verified_contract import VerifiedContract
 
 logger = get_logger("utils.impl_diff")
 
-# function <name>(<args>) <modifiers/returns until { or ;>
-# Args don't typically contain nested parens in Solidity, so `[^)]*` works.
-_FUNCTION_DEF_RE = re.compile(
-    r"\bfunction\s+(\w+)\s*\(([^)]*)\)([^{;]*)(?:\{|;)",
-    re.MULTILINE,
-)
+STORAGE_UNKNOWN_NOTE = "not validated automatically; inspect compiler layouts manually"
 
-# State variable declaration: <type> [visibility] [modifiers] <name> [= value];
-# Visibility is OPTIONAL — Solidity defaults state vars to internal, so plain
-# `uint256 cap;` is a valid storage declaration. To avoid matching function-local
-# declarations like `uint256 x = 1;`, the caller filters matches by brace depth
-# (only depth==1, inside a contract body but outside any function).
-_STATE_VAR_RE = re.compile(
-    r"((?:mapping\s*\([^)]+(?:\([^)]*\)[^)]*)*\))|(?:[A-Za-z_]\w*(?:\[[^\]]*\])?))"  # type
-    r"((?:\s+(?:public|private|internal|external|immutable|constant|override(?:\s*\([^)]*\))?|virtual))*)"  # modifiers
-    r"\s+"
-    r"([A-Za-z_]\w*)"  # name
-    r"\s*(?:=|;)",
-)
+# Prompt budget for the body section: enough to see what changed, not enough to
+# drown the rest of the alert. Functions past the cap are still listed by name.
+MAX_DIFFED_FUNCTIONS = 5
+MAX_DIFF_LINES = 30
+MAX_LISTED_CONFLICTS = 10
+# Added internal helpers get their source, not just a name: an upgrade that moves
+# behavior into one is exactly the case a signature alone fails to explain.
+MAX_ADDED_BODIES = 3
 
-# Solidity keywords that look like types but introduce non-state-var declarations
-# at depth 1 (function/struct/enum/etc. headers). Skip these as "types".
-_NON_TYPE_KEYWORDS = frozenset(
-    {
-        "function",
-        "modifier",
-        "constructor",
-        "receive",
-        "fallback",
-        "struct",
-        "enum",
-        "event",
-        "error",
-        "using",
-        "contract",
-        "library",
-        "interface",
-        "abstract",
-        "pragma",
-        "import",
-        "type",  # `type Foo is uint256;` user-defined value types — not a storage slot
-        "return",
-    }
+_UNVALIDATED_INHERITED = "function and modifier bodies inherited from base contracts were not compared"
+_UNVALIDATED_INDIRECT = (
+    "linked or inlined libraries, imported constants and free functions can change behavior "
+    "even when the target's own function bodies are unchanged"
 )
+_UNVALIDATED_MODIFIERS = "source-level modifiers are shown as written; they are not an authorization proof"
+_UNVALIDATED_NAMESPACED = "ERC-7201 namespaced storage layouts are not compared; only positional storage is"
 
-_VISIBILITIES = frozenset({"public", "private", "internal", "external"})
-_FUNCTION_KEYWORDS_TO_SKIP = frozenset(
-    {"if", "for", "while", "modifier", "function", "constructor", "receive", "fallback"}
-)
+# Added-surface sets seen in this process, so the same "additions" can't be
+# reported for two different contracts (the failure that started this).
+_seen_surfaces: dict[frozenset[str], tuple[str, str]] = {}
+_seen_surfaces_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
-class FunctionSig:
-    name: str
-    args: str  # raw arg list e.g. "address _a, uint256 _b"
-    visibility: str  # "external" / "public" / "internal" / "private" or ""
-    modifiers: str  # remaining tokens after visibility (view, payable, onlyOwner, etc.)
+class BodyChange:
+    """A function whose signature is unchanged but whose code is not."""
+
+    signature: str
+    visibility: str
+    modifiers: tuple[str, ...]
+    diff: str = ""  # target-scoped unified diff, possibly truncated or empty
+
+    def __str__(self) -> str:
+        parts = [self.signature]
+        if self.visibility:
+            parts.append(self.visibility)
+        parts.extend(self.modifiers)
+        return " ".join(parts)
 
 
 @dataclass(frozen=True)
-class StateVarDecl:
-    name: str
-    type_str: str  # canonical-ish type, e.g. "uint256", "mapping(address => uint256)"
-    visibility: str  # "public" / etc.
-    immutable: bool  # True if `immutable` or `constant` (NOT a storage slot)
+class BodyDiff:
+    """What changed among the functions the deployed contract itself defines.
+
+    ``added``/``removed`` cover only members the ABI cannot show (internal,
+    private, modifiers); external ones live in the ABI surface diff instead, so
+    the two sections never report the same function twice.
+    """
+
+    changed: list[BodyChange] = field(default_factory=list)
+    added: list[BodyChange] = field(default_factory=list)
+    removed: list[BodyChange] = field(default_factory=list)
+    scope: str | None = None  # contract whose members were compared, None if unavailable
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.changed or self.added or self.removed)
+
+
+@dataclass(frozen=True)
+class ImplTarget:
+    """Which contract, in which file, was deployed at an address."""
+
+    address: str
+    contract_name: str
+    contract_file: str | None
+
+    def __str__(self) -> str:
+        if self.contract_name and self.contract_file:
+            return f"{self.contract_name} ({self.contract_file})"
+        return self.contract_name or self.address
 
 
 @dataclass(frozen=True)
 class ImplDiff:
-    old_addr: str
-    new_addr: str
-    old_name: str
-    new_name: str
-    added_functions: list[FunctionSig]
-    removed_functions: list[FunctionSig]
-    changed_functions: list[tuple[FunctionSig, FunctionSig]]
-    added_state_vars: list[StateVarDecl]  # net additions at the end (append-only)
-    removed_state_vars: list[StateVarDecl]
-    layout_changes: list[str]  # human-readable list of incompatible changes
-    storage_layout_safe: bool
-    namespaced_storage: bool  # if true, layout check was skipped
+    """Deterministic evidence about one implementation swap."""
 
+    old: ImplTarget
+    new: ImplTarget
+    surface: AbiSurfaceDiff | None  # None when unavailable or withheld by the gate
+    bodies: BodyDiff
+    storage: LayoutComparison
+    unvalidated: list[str] = field(default_factory=list)
+    surface_note: str = ""  # cross-diff provenance note, empty when nothing to flag
 
-def _normalize_args(args: str) -> str:
-    """Strip param names, collapse whitespace — so `(uint256 a)` and `(uint256 b)` match."""
-    parts: list[str] = []
-    for raw in args.split(","):
-        raw = raw.strip()
-        if not raw:
-            continue
-        tokens = raw.split()
-        # First token is the type. Subsequent: data location keyword(s) + param name.
-        type_str = tokens[0]
-        # Skip location markers if present
-        idx = 1
-        while idx < len(tokens) and tokens[idx] in {"memory", "calldata", "storage"}:
-            idx += 1
-        # remaining is param name (may be absent in interface declarations)
-        parts.append(type_str)
-    return ",".join(parts)
-
-
-def _extract_function_sigs(source: str) -> list[FunctionSig]:
-    """Find every `function <name>(<args>) <modifiers>` definition in source order."""
-    sigs: list[FunctionSig] = []
-    for m in _FUNCTION_DEF_RE.finditer(source):
-        name = m.group(1)
-        if name in _FUNCTION_KEYWORDS_TO_SKIP:
-            continue
-        args = _normalize_args(m.group(2))
-        mods = m.group(3) or ""
-        tokens = mods.split()
-        visibility = ""
-        other: list[str] = []
-        for t in tokens:
-            t_clean = t.rstrip("(")
-            if t_clean in _VISIBILITIES and not visibility:
-                visibility = t_clean
-            else:
-                other.append(t)
-        sigs.append(
-            FunctionSig(
-                name=name,
-                args=args,
-                visibility=visibility,
-                modifiers=" ".join(other).strip(),
-            )
-        )
-    return sigs
-
-
-_SOLIDITY_NOISE_RE = re.compile(
-    r'/\*[\s\S]*?\*/|//[^\n]*|"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\'',
-)
-
-
-def _strip_solidity_noise(source: str) -> str:
-    """Replace comments and string literals with same-length whitespace.
-
-    Preserving byte offsets keeps the brace-depth array indexable against the
-    original source. Newlines are preserved so line numbers stay stable.
-    """
-    return _SOLIDITY_NOISE_RE.sub(lambda m: "".join("\n" if c == "\n" else " " for c in m.group(0)), source)
-
-
-def _brace_depths(cleaned: str) -> list[int]:
-    """Return a per-character array of brace nesting depth (post-character).
-
-    Depth at index i is the brace depth *after* processing cleaned[i]. So a
-    state var declaration matched at start position p has its lexical depth
-    equal to depths[p - 1] (or 0 if p == 0).
-    """
-    depths = [0] * len(cleaned)
-    depth = 0
-    for i, c in enumerate(cleaned):
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-        depths[i] = depth
-    return depths
-
-
-def _extract_state_vars(source: str) -> list[StateVarDecl]:
-    """Find every state-var declaration in source order.
-
-    Captures default-internal vars (no visibility modifier) as well as explicit
-    ones. Uses brace-depth tracking to exclude function-local declarations.
-    """
-    cleaned = _strip_solidity_noise(source)
-    depths = _brace_depths(cleaned)
-
-    vars_out: list[StateVarDecl] = []
-    seen: set[tuple[str, str]] = set()
-    for m in _STATE_VAR_RE.finditer(cleaned):
-        # Determine the brace depth at the START of the match. State vars live
-        # at depth == 1 (inside a contract/library/interface body, outside any
-        # function/modifier/constructor body).
-        start = m.start()
-        depth_before = depths[start - 1] if start > 0 else 0
-        if depth_before != 1:
-            continue
-
-        type_str = " ".join(m.group(1).split())
-        modifier_block = m.group(2) or ""
-        name = m.group(3)
-
-        # Reject false positives where the regex matched a non-state-var keyword
-        # as the "type" (e.g., `event Foo(...)` or `function bar(...)` if it
-        # somehow slipped through). Most are blocked by the `(=|;)` terminator,
-        # but `using X for Y;` and similar edge cases get filtered here.
-        if type_str.split()[0] in _NON_TYPE_KEYWORDS:
-            continue
-
-        # Visibility token if present in the modifier block
-        visibility = ""
-        for tok in modifier_block.split():
-            if tok in _VISIBILITIES:
-                visibility = tok
-                break
-
-        immutable = "immutable" in modifier_block or "constant" in modifier_block
-
-        key = (name, type_str)
-        if key in seen:
-            continue
-        seen.add(key)
-
-        vars_out.append(
-            StateVarDecl(
-                name=name,
-                type_str=type_str,
-                visibility=visibility,
-                immutable=immutable,
-            )
-        )
-    return vars_out
-
-
-def _is_namespaced_storage(source: str) -> bool:
-    """Heuristic: EIP-7201 contracts have a `_getXxxStorage()` returning a `storage $`."""
-    return bool(
-        re.search(
-            r"function\s+_?[gG]et\w*Storage\b[^{]*\breturns\s*\([^)]*\bstorage\b[^)]*\$",
-            source,
-        )
-    )
-
-
-def _fkey(f: FunctionSig) -> tuple[str, str]:
-    """Function identity for diffing: name + arg types (handles overloads)."""
-    return (f.name, f.args)
-
-
-def _diff_functions(
-    old_fns: list[FunctionSig], new_fns: list[FunctionSig]
-) -> tuple[list[FunctionSig], list[FunctionSig], list[tuple[FunctionSig, FunctionSig]]]:
-    by_old = {_fkey(f): f for f in old_fns}
-    by_new = {_fkey(f): f for f in new_fns}
-
-    added = [new for k, new in by_new.items() if k not in by_old]
-    removed = [old for k, old in by_old.items() if k not in by_new]
-    changed: list[tuple[FunctionSig, FunctionSig]] = []
-    for k in by_old.keys() & by_new.keys():
-        old = by_old[k]
-        new = by_new[k]
-        if old.visibility != new.visibility or old.modifiers != new.modifiers:
-            changed.append((old, new))
-    return added, removed, changed
-
-
-# An OZ-style trailing storage gap: `uintN[K] __gap;` (or `_gap`, `gap`).
-# Reserved for future upgrades; consuming part of it is the canonical safe
-# pattern, so we detach the trailing gap before comparing layouts.
-_STORAGE_GAP_TYPE_RE = re.compile(r"^u?int\d*\s*\[\s*(\d+)\s*\]$")
-
-
-def _gap_size(v: StateVarDecl) -> int | None:
-    """If `v` looks like an OZ trailing storage gap, return its size. Else None."""
-    if not v.name.lower().endswith("gap"):
-        return None
-    m = _STORAGE_GAP_TYPE_RE.match(v.type_str.replace(" ", ""))
-    return int(m.group(1)) if m else None
-
-
-def _detach_trailing_gap(slots: list[StateVarDecl]) -> tuple[list[StateVarDecl], int | None]:
-    """Strip the trailing storage gap (if any) and return (slots_before_gap, gap_size)."""
-    if not slots:
-        return slots, None
-    size = _gap_size(slots[-1])
-    if size is None:
-        return slots, None
-    return slots[:-1], size
-
-
-def _storage_layout(
-    old_vars: list[StateVarDecl], new_vars: list[StateVarDecl]
-) -> tuple[bool, list[str], list[StateVarDecl], list[StateVarDecl]]:
-    """Return (safe, layout_changes, net_added, net_removed).
-
-    Safe upgrade patterns:
-      1. Append-only: new layout begins with the old layout (in the same order).
-      2. OZ storage-gap consumption: trailing `uintN[K] __gap` shrinks by exactly
-         the number of new vars inserted before it. Old contracts often reserve
-         a gap so future upgrades can claim slots without shifting parent
-         storage. Mis-handling this would produce false "unsafe" warnings for
-         most real OpenZeppelin upgradeable contracts.
-
-    Comparison key is (name, type) since rename or type change both shift the
-    bytecode-level storage layout.
-    """
-    # Filter out immutable/constant — they don't occupy a storage slot
-    old_slots = [v for v in old_vars if not v.immutable]
-    new_slots = [v for v in new_vars if not v.immutable]
-
-    # Detach trailing gaps so we can analyze gap consumption separately.
-    old_core, old_gap = _detach_trailing_gap(old_slots)
-    new_core, new_gap = _detach_trailing_gap(new_slots)
-
-    changes: list[str] = []
-
-    # Compare positions both contracts share. Any mismatch here is unsafe.
-    n_common = min(len(old_core), len(new_core))
-    for i in range(n_common):
-        o, n = old_core[i], new_core[i]
-        if (o.name, o.type_str) != (n.name, n.type_str):
-            changes.append(f"slot {i}: {o.type_str} {o.name} → {n.type_str} {n.name}")
-
-    consumed = len(new_core) - len(old_core)
-    added_at_end = list(new_core[len(old_core) :]) if consumed > 0 else []
-    removed_off_end = list(old_core[len(new_core) :]) if consumed < 0 else []
-
-    if consumed > 0:
-        changes.extend(_check_gap_consumption(consumed, old_gap, new_gap))
-    elif consumed < 0:
-        for i, v in enumerate(removed_off_end, start=len(new_core)):
-            changes.append(f"slot {i}: removed {v.type_str} {v.name}")
-    else:
-        changes.extend(_check_gap_only_change(old_gap, new_gap))
-
-    safe = not changes
-    return safe, changes, added_at_end, removed_off_end
-
-
-def _check_gap_consumption(consumed: int, old_gap: int | None, new_gap: int | None) -> list[str]:
-    """Validate that `consumed` new vars correspond to a matching gap shrink.
-
-    If the old contract had no gap, appending at the end is still safe (no shift).
-    """
-    if old_gap is None:
-        return []
-    expected_new_gap = old_gap - consumed
-    if expected_new_gap < 0:
-        return [f"consumed {consumed} new slot(s) but old gap was only {old_gap}; layout overflows reserved space"]
-    if expected_new_gap == 0 and new_gap is not None:
-        return [f"old gap of {old_gap} fully consumed but new contract still has gap of {new_gap}"]
-    if expected_new_gap > 0 and new_gap is None:
-        return [f"old gap of {old_gap} not preserved (expected new gap of {expected_new_gap}, got none)"]
-    if expected_new_gap > 0 and new_gap != expected_new_gap:
-        return [f"gap mismatch: consumed {consumed} slot(s); expected new gap of {expected_new_gap}, got {new_gap}"]
-    return []
-
-
-def _check_gap_only_change(old_gap: int | None, new_gap: int | None) -> list[str]:
-    """Flag gap presence/size disagreements when the non-gap layout is unchanged."""
-    if old_gap is not None and new_gap is None:
-        return [f"old gap of size {old_gap} removed in new layout"]
-    if old_gap is None and new_gap is not None:
-        return [f"new layout introduces gap of size {new_gap} not present in old"]
-    if old_gap != new_gap:
-        return [f"gap size changed from {old_gap} to {new_gap} without slot consumption"]
-    return []
+    @property
+    def storage_status(self) -> StorageCompatibility:
+        return self.storage.status
 
 
 def diff_implementations(old_addr: str, new_addr: str, chain_id: int) -> ImplDiff | None:
-    """Fetch both verified impls and produce a structural diff. None on any failure."""
-    old = fetch_source(chain_id, old_addr)
-    new = fetch_source(chain_id, new_addr)
+    """Fetch both verified implementations and diff them. None on any failure."""
+    old = fetch_verified_contract(chain_id, old_addr)
+    new = fetch_verified_contract(chain_id, new_addr)
     if not old or not new:
         return None
 
-    old_name, old_src = old
-    new_name, new_src = new
+    unvalidated: list[str] = []
+    surface = diff_abi_surface(old.abi, new.abi) if old.abi and new.abi else None
+    if surface is None:
+        unvalidated.append("external ABI surface: no ABI available for one of the implementations")
 
-    old_fns = _extract_function_sigs(old_src)
-    new_fns = _extract_function_sigs(new_src)
-    added_fns, removed_fns, changed_fns = _diff_functions(old_fns, new_fns)
-
-    old_vars = _extract_state_vars(old_src)
-    new_vars = _extract_state_vars(new_src)
-    namespaced = _is_namespaced_storage(old_src) or _is_namespaced_storage(new_src)
-
-    if namespaced:
-        layout_safe = True
-        layout_changes: list[str] = []
-        added_at_end: list[StateVarDecl] = []
-        removed_off_end: list[StateVarDecl] = []
+    bodies = _diff_bodies(old, new)
+    if bodies.scope is None:
+        unvalidated.append("function bodies: could not resolve the deployed contract's own source unambiguously")
     else:
-        layout_safe, layout_changes, added_at_end, removed_off_end = _storage_layout(old_vars, new_vars)
+        unvalidated.append(_UNVALIDATED_INHERITED)
+        unvalidated.append(_UNVALIDATED_INDIRECT)
+    if not bodies.is_empty:
+        unvalidated.append(_UNVALIDATED_MODIFIERS)
+
+    storage = _compare_storage(old, new, old_addr, new_addr, chain_id)
+    if storage.status is not StorageCompatibility.UNKNOWN:
+        unvalidated.append(_UNVALIDATED_NAMESPACED)
+
+    surface_note = _provenance_note(new, surface)
+    violations = _consistency_violations(old, new, surface, bodies)
+    if violations:
+        # Deterministic evidence that contradicts its own source is worse than
+        # no evidence: withhold the section rather than hand it to the model.
+        logger.error("impl diff consistency gate failed for %s → %s: %s", old_addr, new_addr, violations)
+        surface = None
+        surface_note = ""
+        bodies = BodyDiff(scope=None)
+        unvalidated.extend(violations)
 
     return ImplDiff(
-        old_addr=old_addr,
-        new_addr=new_addr,
-        old_name=old_name,
-        new_name=new_name,
-        added_functions=added_fns,
-        removed_functions=removed_fns,
-        changed_functions=changed_fns,
-        added_state_vars=added_at_end,
-        removed_state_vars=removed_off_end,
-        layout_changes=layout_changes,
-        storage_layout_safe=layout_safe,
-        namespaced_storage=namespaced,
+        old=_target(old_addr, old),
+        new=_target(new_addr, new),
+        surface=surface,
+        bodies=bodies,
+        storage=storage,
+        unvalidated=unvalidated,
+        surface_note=surface_note,
     )
 
 
-def _fmt_function(f: FunctionSig) -> str:
-    parts = [f"{f.name}({f.args})"]
-    if f.visibility:
-        parts.append(f.visibility)
-    if f.modifiers:
-        parts.append(f.modifiers)
-    return " ".join(parts)
+def reset_provenance_registry() -> None:
+    """Clear the cross-diff provenance registry (test isolation)."""
+    with _seen_surfaces_lock:
+        _seen_surfaces.clear()
 
 
-def _section(title: str, items: Iterable[str]) -> str:
-    items = list(items)
-    if not items:
+def _target(address: str, contract: VerifiedContract) -> ImplTarget:
+    return ImplTarget(address=address, contract_name=contract.contract_name, contract_file=contract.contract_file)
+
+
+def _compare_storage(
+    old: VerifiedContract,
+    new: VerifiedContract,
+    old_addr: str,
+    new_addr: str,
+    chain_id: int,
+) -> LayoutComparison:
+    """Compare compiler layouts, deferring to UNKNOWN for namespaced storage.
+
+    A positional layout that matches says nothing about ERC-7201 namespaces, so
+    a namespaced target cannot be called COMPATIBLE. A positional *conflict* is
+    still a real conflict, and is reported as such.
+    """
+    comparison = compare_storage_layouts(
+        fetch_storage_layout(chain_id, old_addr),
+        fetch_storage_layout(chain_id, new_addr),
+    )
+    if comparison.status is not StorageCompatibility.COMPATIBLE:
+        return comparison
+    if _target_is_namespaced(old) or _target_is_namespaced(new):
+        return LayoutComparison(
+            status=StorageCompatibility.UNKNOWN,
+            reason="namespaced layout not validated (target declares ERC-7201 storage)",
+        )
+    return comparison
+
+
+def _target_is_namespaced(contract: VerifiedContract) -> bool:
+    """ERC-7201 annotation on the deployed contract itself — not on any import."""
+    if not contract.contract_file:
+        return False
+    return uses_namespaced_storage(contract.target_source, contract.contract_name)
+
+
+def _diff_bodies(old: VerifiedContract, new: VerifiedContract) -> BodyDiff:
+    """Diff the union of functions each side's own deployed contract defines.
+
+    Comparing only the intersection loses whole functions: an upgrade that moves
+    logic out of one function into a new internal helper, or deletes a transfer
+    hook, would show as a shrinking body and nothing else. Additions and removals
+    are reported for members the ABI cannot show — internal, private and
+    modifiers — since external ones are already the ABI section's job.
+    """
+    old_fns = _target_functions(old)
+    new_fns = _target_functions(new)
+    if old_fns is None or new_fns is None:
+        return BodyDiff(scope=None)
+
+    changed: list[BodyChange] = []
+    for sig in sorted(set(old_fns) & set(new_fns)):
+        old_fn, new_fn = old_fns[sig], new_fns[sig]
+        if old_fn.fingerprint == new_fn.fingerprint:
+            continue
+        diff = ""
+        if len(changed) < MAX_DIFFED_FUNCTIONS:
+            diff = _unified_diff(
+                _raw_definition(old.target_source, old_fn),
+                _raw_definition(new.target_source, new_fn),
+                sig,
+            )
+        changed.append(BodyChange(signature=sig, visibility=new_fn.visibility, modifiers=new_fn.modifiers, diff=diff))
+
+    added = [new_fns[sig] for sig in sorted(set(new_fns) - set(old_fns)) if _is_hidden_from_abi(new_fns[sig])]
+    removed = [old_fns[sig] for sig in sorted(set(old_fns) - set(new_fns)) if _is_hidden_from_abi(old_fns[sig])]
+    return BodyDiff(
+        changed=changed,
+        added=[_added_change(fn, new.target_source, i) for i, fn in enumerate(added)],
+        removed=[
+            BodyChange(signature=fn.signature, visibility=fn.visibility, modifiers=fn.modifiers) for fn in removed
+        ],
+        scope=f"{new.contract_name} @ {new.contract_file}",
+    )
+
+
+def _is_hidden_from_abi(fn: FunctionDef) -> bool:
+    """True for members no ABI can carry: internal, private, and modifiers.
+
+    Visibility is read from the target's own source rather than matched against
+    ABI signatures, because source types don't always spell the ABI's canonical
+    ones (``initialize(address,Id,…)`` vs ``initialize(address,bytes32,…)``).
+    """
+    return fn.visibility not in ("external", "public")
+
+
+def _added_change(fn: FunctionDef, source: str, index: int) -> BodyChange:
+    """An added function, with its body when it fits the budget.
+
+    A signature alone rarely explains a new internal helper — the behavior an
+    upgrade moved into one is exactly what a reviewer needs to see — so the
+    first few get their source, subject to the same truncation as a diff.
+    """
+    diff = _unified_diff("", _raw_definition(source, fn), fn.signature) if index < MAX_ADDED_BODIES else ""
+    return BodyChange(signature=fn.signature, visibility=fn.visibility, modifiers=fn.modifiers, diff=diff)
+
+
+def _target_functions(contract: VerifiedContract) -> dict[str, FunctionDef] | None:
+    """The deployed contract's own functions, keyed by signature.
+
+    None when the compilation target can't be resolved, the named contract isn't
+    in the file it resolved to, or two definitions collapse to the same
+    signature — an ambiguous match would compare unrelated functions, so body
+    analysis is reported unavailable instead of guessed.
+    """
+    if not contract.contract_file:
+        return None
+    functions = contract_functions(contract.target_source, contract.contract_name)
+    if functions is None:
+        return None
+
+    by_signature = {fn.signature: fn for fn in functions}
+    if len(by_signature) != len(functions):
+        logger.info("ambiguous overloads in %s; skipping body diff", contract.contract_file)
+        return None
+    return by_signature
+
+
+def _raw_definition(source: str, fn: FunctionDef) -> str:
+    """The function's original text, comments included, for a readable diff."""
+    start, end = fn.span
+    return source[start:end]
+
+
+def _unified_diff(old_text: str, new_text: str, signature: str) -> str:
+    """A compact unified diff of one function, within the prompt budget.
+
+    A diff too large to show is summarized by line counts rather than cut off
+    mid-hunk: half a rewrite reads like a deletion, which is worse than a count.
+    """
+    old_lines, new_lines = old_text.splitlines(), new_text.splitlines()
+    lines = list(
+        difflib.unified_diff(
+            old_lines,
+            new_lines,
+            fromfile=f"old {signature}",
+            tofile=f"new {signature}",
+            lineterm="",
+            n=2,
+        )
+    )
+    if len(lines) <= MAX_DIFF_LINES:
+        return "\n".join(lines)
+
+    if not old_lines:
+        # An addition has nothing to diff against; "rewritten" would misdescribe it.
+        return f"(new function, {len(new_lines)} lines; body omitted — read the source)"
+
+    added = sum(1 for line in lines if line.startswith("+") and not line.startswith("+++"))
+    removed = sum(1 for line in lines if line.startswith("-") and not line.startswith("---"))
+    return (
+        f"(rewritten: +{added}/-{removed} lines across {len(old_lines)} → {len(new_lines)} lines; "
+        "diff omitted — read the source)"
+    )
+
+
+def _consistency_violations(
+    old: VerifiedContract,
+    new: VerifiedContract,
+    surface: AbiSurfaceDiff | None,
+    bodies: BodyDiff,
+) -> list[str]:
+    """Re-derive the claims from their own sources; return any that don't hold.
+
+    Cheap insurance against exactly the class of bug this module was rewritten
+    for: a surface claim that isn't in the target's ABI, or a body claim about a
+    function the target doesn't define.
+    """
+    violations: list[str] = []
+    if surface is not None:
+        violations.extend(_surface_violations(old, new, surface))
+    if bodies.changed or bodies.added:
+        violations.extend(_body_violations(new, bodies.changed + bodies.added))
+    return violations
+
+
+def _surface_violations(old: VerifiedContract, new: VerifiedContract, surface: AbiSurfaceDiff) -> list[str]:
+    """Every addition/removal must agree with the two target ABIs."""
+    old_sigs = set(abi_functions(old.abi))
+    new_sigs = set(abi_functions(new.abi))
+    out: list[str] = []
+    for fn in surface.added:
+        if fn.signature not in new_sigs or fn.signature in old_sigs:
+            out.append(f"withheld ABI section: '{fn.signature}' reported as added but the ABIs disagree")
+    for fn in surface.removed:
+        if fn.signature not in old_sigs or fn.signature in new_sigs:
+            out.append(f"withheld ABI section: '{fn.signature}' reported as removed but the ABIs disagree")
+    return out
+
+
+def _provenance_note(new: VerifiedContract, surface: AbiSurfaceDiff | None) -> str:
+    """Note when a second contract is handed the same set of additions.
+
+    Reporting one contract's functions as another's is what started this, so the
+    coincidence is worth surfacing — but it is not grounds for withholding. Each
+    set is derived from, and re-checked against, that contract's own ABI, so two
+    siblings genuinely gaining the same function is a real result the reviewer
+    should still see. The note says which other contract it matched.
+    """
+    if surface is None:
         return ""
-    return f"{title} ({len(items)}):\n" + "\n".join(f"  {x}" for x in items)
+    added = frozenset(fn.signature for fn in surface.added)
+    if not added:
+        return ""
+
+    label = new.contract_name or new.contract_file or ""
+    with _seen_surfaces_lock:
+        seen = _seen_surfaces.setdefault(added, (label, new.contract_file or ""))
+    if seen[0] == label:
+        return ""
+
+    logger.warning("identical ABI additions reported for %s and %s: %s", seen[0], label, sorted(added))
+    return (
+        f"note: the same {len(added)} addition(s) were also reported for {seen[0]}; "
+        "each set was verified against its own contract's ABI"
+    )
+
+
+def _body_violations(new: VerifiedContract, changed_bodies: list[BodyChange]) -> list[str]:
+    """Every changed body must belong to a function the target itself defines."""
+    defined = _target_functions(new)
+    if defined is None:
+        return ["withheld body section: the deployed contract's functions could not be re-resolved"]
+    return [
+        f"withheld body section: '{change.signature}' is not defined by {new.contract_name}"
+        for change in changed_bodies
+        if change.signature not in defined
+    ]
+
+
+def _fmt_surface(diff: ImplDiff) -> list[str]:
+    """Render the ABI section — the only source of external-surface claims."""
+    label = diff.new.contract_name or diff.new.address
+    if diff.surface is None:
+        return [f"External ABI changes ({label}): NOT AVAILABLE — see Unvalidated items."]
+    if diff.surface.is_empty:
+        return [f"External ABI changes ({label}): none — the external surface is identical."]
+
+    lines = [f"External ABI changes ({label}):"]
+    lines.extend(f"  + {fn}" for fn in diff.surface.added)
+    lines.extend(f"  - {fn}" for fn in diff.surface.removed)
+    lines.extend(f"  ~ {old} → {new}" for old, new in diff.surface.mutability_changed)
+    if diff.surface_note:
+        lines.append(f"  {diff.surface_note}")
+    return lines
+
+
+def _fmt_bodies(diff: ImplDiff) -> list[str]:
+    """Render the target-defined function section.
+
+    ABI equality is not behavioral equality, and neither is an unchanged
+    function list: logic moved into a new internal helper, or a deleted hook,
+    only shows up here.
+    """
+    bodies = diff.bodies
+    if bodies.scope is None:
+        return ["Target-defined function changes: NOT COMPARED — see Unvalidated items."]
+    if bodies.is_empty:
+        return [f"Target-defined function changes ({bodies.scope}): none."]
+
+    lines = [f"Target-defined function changes ({bodies.scope}):"]
+    if bodies.added:
+        lines.append("  Added (internal/private — not on the external surface):")
+        lines.extend(_fmt_body_change("+", change) for change in bodies.added)
+    if bodies.removed:
+        lines.append("  No longer defined here (internal/private; may have moved to a base contract):")
+        lines.extend(_fmt_body_change("-", change) for change in bodies.removed)
+    if bodies.changed:
+        lines.append("  Changed bodies (same signature, different code):")
+        lines.extend(_fmt_body_change("~", change) for change in bodies.changed)
+    return [line for block in lines for line in block.splitlines()]
+
+
+def _fmt_body_change(marker: str, change: BodyChange) -> str:
+    """One entry plus its indented source/diff, when one fits the budget."""
+    head = f"    {marker} {change}"
+    if not change.diff:
+        return head
+    return head + "\n" + "\n".join(f"        {line}" for line in change.diff.splitlines())
+
+
+def _fmt_storage(diff: ImplDiff) -> list[str]:
+    """Render the storage section, including why a verdict is unavailable."""
+    storage = diff.storage
+    if storage.status is StorageCompatibility.UNKNOWN:
+        reason = storage.reason or STORAGE_UNKNOWN_NOTE
+        return [
+            f"Storage compatibility: UNKNOWN — {reason}.",
+            f"  {STORAGE_UNKNOWN_NOTE.capitalize()}.",
+        ]
+
+    lines = [f"Storage compatibility: {storage.status.value} (compiler layouts, both implementations verified)."]
+    if storage.conflicts:
+        lines.append("  Conflicting slots:")
+        for conflict in storage.conflicts[:MAX_LISTED_CONFLICTS]:
+            lines.append(f"    {conflict}")
+        if len(storage.conflicts) > MAX_LISTED_CONFLICTS:
+            lines.append(f"    … and {len(storage.conflicts) - MAX_LISTED_CONFLICTS} more")
+    for gap in storage.consumed_gaps:
+        lines.append(f"  Reserved space consumed: {gap}")
+    for entry in storage.added:
+        lines.append(f"  + {entry}")
+    for before, after in storage.renamed:
+        lines.append(f"  renamed (same slot, same type): {before.label} → {after.label}")
+    return lines
 
 
 def format_impl_diff(diff: ImplDiff) -> str:
-    """Render an ImplDiff into a prompt-ready text block."""
+    """Render an :class:`ImplDiff` into a prompt-ready text block."""
     lines: list[str] = [
-        f"Old: {diff.old_addr}" + (f" ({diff.old_name})" if diff.old_name else ""),
-        f"New: {diff.new_addr}" + (f" ({diff.new_name})" if diff.new_name else ""),
+        f"Old: {diff.old.address} — {diff.old}",
+        f"New: {diff.new.address} — {diff.new}",
     ]
+    if diff.old.contract_name and diff.new.contract_name and diff.old.contract_name != diff.new.contract_name:
+        lines.append(f"Contract name changed: {diff.old.contract_name} → {diff.new.contract_name}")
 
-    func_blocks: list[str] = []
-    if diff.added_functions:
-        func_blocks.append(_section("Functions added", (f"+ {_fmt_function(f)}" for f in diff.added_functions)))
-    if diff.removed_functions:
-        func_blocks.append(_section("Functions removed", (f"- {_fmt_function(f)}" for f in diff.removed_functions)))
-    if diff.changed_functions:
-        func_blocks.append(
-            _section(
-                "Functions with changed visibility/modifiers",
-                (f"~ {_fmt_function(o)}  →  {_fmt_function(n)}" for o, n in diff.changed_functions),
-            )
-        )
-    if func_blocks:
+    for section in (_fmt_surface(diff), _fmt_bodies(diff), _fmt_storage(diff)):
         lines.append("")
-        lines.extend(func_blocks)
+        lines.extend(section)
 
-    if diff.namespaced_storage:
+    if diff.unvalidated:
         lines.append("")
-        lines.append("Storage layout: uses EIP-7201 namespaced storage; positional layout check skipped.")
-    elif not diff.storage_layout_safe:
-        lines.append("")
-        lines.append("⚠ Storage layout NOT upgrade-safe:")
-        lines.extend(f"  {c}" for c in diff.layout_changes)
-    elif diff.added_state_vars:
-        lines.append("")
-        lines.append("Storage layout safe (append-only). New state vars at end:")
-        for v in diff.added_state_vars:
-            lines.append(f"  + {v.type_str} {v.visibility} {v.name}")
-    else:
-        lines.append("")
-        lines.append("Storage layout: unchanged.")
-
+        lines.append("Unvalidated items (absence of a finding here is NOT evidence of safety):")
+        lines.extend(f"  - {item}" for item in diff.unvalidated)
     return "\n".join(lines)
