@@ -6,9 +6,15 @@ bundle contains the deployed contract plus its bases, its libraries and every
 interface it imports, so text extracted from the concatenated bundle cannot be
 attributed to the deployed contract (see ``utils.impl_diff``).
 
-Comments and string literals are blanked (same length, newlines kept) before any
-scanning, so commented-out code is never mistaken for deployed code and byte
-offsets stay usable against the original text.
+Two same-length maskings of the source are used, so byte offsets found in one
+are valid in the other and in the original text:
+
+- :func:`strip_noise` blanks comments *and* string literals. Scanning runs on
+  this, so a ``{`` or the word ``function`` inside a string cannot break brace
+  matching, and commented-out code is never mistaken for deployed code.
+- :func:`strip_comments` blanks only comments. Captured header/body text comes
+  from this, so a changed revert message, role identifier or token name is a
+  real difference rather than an invisible one.
 """
 
 import re
@@ -54,7 +60,8 @@ class FunctionDef:
     body: str  # whitespace-normalized body, "" for a declaration with no body
     has_body: bool
     header: str = ""  # whitespace-normalized text between the params and the body
-    span: tuple[int, int] = (0, 0)  # (start, end) of the definition within the contract body
+    span: tuple[int, int] = (0, 0)  # (start, end) of the definition within the scanned text
+    literals: tuple[str, ...] = ()  # string literals in the definition, verbatim and in order
 
     @property
     def signature(self) -> str:
@@ -63,18 +70,47 @@ class FunctionDef:
 
     @property
     def fingerprint(self) -> str:
-        """Header + body, normalized: what must match for behavior to be unchanged.
+        """What must match for behavior to be unchanged.
 
-        Comments and formatting are already gone, so reflowing a function or
-        editing a docstring is not a change, while any literal, call or modifier
-        edit is.
+        Comments are gone and whitespace is collapsed, so reflowing a function
+        or editing a docstring is not a change. Everything else is: a changed
+        call, modifier, numeric literal — or string literal, which `body` keeps
+        and `literals` pins byte-for-byte, since whitespace inside a string is
+        data, not formatting.
         """
-        return f"{self.header}|{self.body}"
+        return f"{self.header}|{self.body}|{'|'.join(self.literals)}"
 
 
 def strip_noise(source: str) -> str:
-    """Blank out comments and string literals, preserving length and line breaks."""
-    return _NOISE_RE.sub(lambda m: "".join("\n" if c == "\n" else " " for c in m.group(0)), source)
+    """Blank out comments and string literals, preserving length and line breaks.
+
+    For structural scanning only: string contents are gone, so never compare
+    two versions of a function on this text (see :func:`strip_comments`).
+    """
+    return _NOISE_RE.sub(lambda m: _blank(m.group(0)), source)
+
+
+def strip_comments(source: str) -> str:
+    """Blank out comments, keeping string literals intact and offsets stable.
+
+    The same single pass recognizes both, so a ``//`` inside a string literal
+    stays part of the string rather than eating the rest of the line.
+    """
+    return _NOISE_RE.sub(lambda m: _blank(m.group(0)) if _is_comment(m.group(0)) else m.group(0), source)
+
+
+def _blank(text: str) -> str:
+    """Same-length whitespace, keeping newlines so line numbers stay put."""
+    return "".join("\n" if c == "\n" else " " for c in text)
+
+
+def _is_comment(text: str) -> bool:
+    return text.startswith(("//", "/*"))
+
+
+def _string_literals(text: str) -> tuple[str, ...]:
+    """Every string literal in ``text``, verbatim and in source order."""
+    return tuple(m.group(0) for m in _NOISE_RE.finditer(text) if not _is_comment(m.group(0)))
 
 
 def declares_contract(source: str, name: str) -> bool:
@@ -122,13 +158,39 @@ def uses_namespaced_storage(source: str, name: str) -> bool:
     return "@custom:storage-location" in source[start:open_brace]
 
 
-def iter_functions(contract_body: str) -> list[FunctionDef]:
+def contract_functions(source: str, name: str) -> list[FunctionDef] | None:
+    """Functions defined directly in ``name``, or None if it isn't in ``source``.
+
+    The one entry point callers should need: it scopes to the contract, scans
+    the masked text, captures content from the string-preserving text, and
+    returns spans that index straight back into ``source``.
+    """
+    span = find_contract_span(source, name)
+    if span is None:
+        return None
+    start, end = span
+    return iter_functions(
+        strip_noise(source)[start:end],
+        strip_comments(source)[start:end],
+        offset=start,
+    )
+
+
+def iter_functions(contract_body: str, content_body: str | None = None, offset: int = 0) -> list[FunctionDef]:
     """Extract the function-like members declared directly in ``contract_body``.
 
-    ``contract_body`` must come from :func:`find_contract_body`. Matches nested
-    deeper than the contract's own member level (inside a function body, an
-    assembly block, a struct) are skipped.
+    ``contract_body`` must come from :func:`find_contract_body` — it is scanned
+    for structure, so its string literals are blanked. ``content_body`` is the
+    same range with string literals intact (:func:`strip_comments`); header and
+    body text are read from it so string changes are visible. It defaults to
+    ``contract_body``, which is fine for structural tests but blind to string
+    edits — prefer :func:`contract_functions`.
+
+    ``offset`` is added to each span so callers can index the original source.
+    Matches nested deeper than the contract's own member level (inside a
+    function body, an assembly block, a struct) are skipped.
     """
+    content = contract_body if content_body is None else content_body
     depths = _brace_depths(contract_body)
     out: list[FunctionDef] = []
     for m in _FUNCTION_START_RE.finditer(contract_body):
@@ -137,7 +199,7 @@ def iter_functions(contract_body: str) -> list[FunctionDef]:
             continue
         kind = m.group(1) or m.group(3)
         name = m.group(2) or m.group(3)
-        parsed = _parse_function(contract_body, m.end() - 1, kind, name, start)
+        parsed = _parse_function(contract_body, content, m.end() - 1, kind, name, start, offset)
         if parsed:
             out.append(parsed)
     return out
@@ -226,19 +288,25 @@ def _split_top_level(params: str) -> list[str]:
     return [p for p in parts if p]
 
 
-def _parse_function(body: str, paren_idx: int, kind: str, name: str, start: int) -> FunctionDef | None:
-    """Parse one definition starting at its parameter list's `(`."""
+def _parse_function(
+    body: str, content: str, paren_idx: int, kind: str, name: str, start: int, offset: int
+) -> FunctionDef | None:
+    """Parse one definition starting at its parameter list's `(`.
+
+    Every index is found in ``body`` (masked) and then read from ``content``
+    (string literals intact) at the same offsets.
+    """
     close = _match_paren(body, paren_idx)
     if close is None:
         return None
+    # Parameters carry no string literals — Solidity has no default arguments.
     params = normalize_params(body[paren_idx + 1 : close])
 
     header_end, terminator = _scan_header(body, close + 1)
     if terminator is None:
         return None
-    header = body[close + 1 : header_end]
-    visibility, modifiers = _parse_header_tokens(header)
-    normalized_header = " ".join(header.split())
+    visibility, modifiers = _parse_header_tokens(body[close + 1 : header_end])
+    header_text = content[close + 1 : header_end]
 
     if terminator == ";":
         return FunctionDef(
@@ -249,23 +317,26 @@ def _parse_function(body: str, paren_idx: int, kind: str, name: str, start: int)
             modifiers=modifiers,
             body="",
             has_body=False,
-            header=normalized_header,
-            span=(start, header_end + 1),
+            header=" ".join(header_text.split()),
+            span=(start + offset, header_end + 1 + offset),
+            literals=_string_literals(header_text),
         )
 
     body_end = _match_brace(body, header_end)
     if body_end is None:
         return None
+    definition_text = content[close + 1 : body_end]
     return FunctionDef(
         name=name,
         kind=kind,
         params=params,
         visibility=visibility,
         modifiers=modifiers,
-        body=" ".join(body[header_end + 1 : body_end].split()),
+        body=" ".join(content[header_end + 1 : body_end].split()),
         has_body=True,
-        header=normalized_header,
-        span=(start, body_end + 1),
+        header=" ".join(header_text.split()),
+        span=(start + offset, body_end + 1 + offset),
+        literals=_string_literals(definition_text),
     )
 
 

@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 
 from utils.abi_surface import AbiSurfaceDiff, abi_functions, diff_abi_surface
 from utils.logger import get_logger
-from utils.solidity_text import FunctionDef, find_contract_span, iter_functions, strip_noise, uses_namespaced_storage
+from utils.solidity_text import FunctionDef, contract_functions, uses_namespaced_storage
 from utils.source_context import fetch_verified_contract
 from utils.sourcify_layout import fetch_storage_layout
 from utils.storage_layout import LayoutComparison, StorageCompatibility, compare_storage_layouts
@@ -210,12 +210,10 @@ def _diff_bodies(old: VerifiedContract, new: VerifiedContract) -> tuple[list[Bod
     covered, or None when either side's target is unresolved or its overloads
     are ambiguous — in which case no body claim is made at all.
     """
-    old_parsed = _target_functions(old)
-    new_parsed = _target_functions(new)
-    if old_parsed is None or new_parsed is None:
+    old_fns = _target_functions(old)
+    new_fns = _target_functions(new)
+    if old_fns is None or new_fns is None:
         return [], None
-    old_fns, old_body_start = old_parsed
-    new_fns, new_body_start = new_parsed
 
     changes: list[BodyChange] = []
     for sig in sorted(set(old_fns) & set(new_fns)):
@@ -225,16 +223,16 @@ def _diff_bodies(old: VerifiedContract, new: VerifiedContract) -> tuple[list[Bod
         diff = ""
         if len(changes) < MAX_DIFFED_FUNCTIONS:
             diff = _unified_diff(
-                _raw_definition(old.target_source, old_body_start, old_fn),
-                _raw_definition(new.target_source, new_body_start, new_fn),
+                _raw_definition(old.target_source, old_fn),
+                _raw_definition(new.target_source, new_fn),
                 sig,
             )
         changes.append(BodyChange(signature=sig, visibility=new_fn.visibility, modifiers=new_fn.modifiers, diff=diff))
     return changes, f"{new.contract_name} @ {new.contract_file}"
 
 
-def _target_functions(contract: VerifiedContract) -> tuple[dict[str, FunctionDef], int] | None:
-    """(functions by signature, contract-body offset) for the deployed contract.
+def _target_functions(contract: VerifiedContract) -> dict[str, FunctionDef] | None:
+    """The deployed contract's own functions, keyed by signature.
 
     None when the compilation target can't be resolved, the named contract isn't
     in the file it resolved to, or two definitions collapse to the same
@@ -243,23 +241,21 @@ def _target_functions(contract: VerifiedContract) -> tuple[dict[str, FunctionDef
     """
     if not contract.contract_file:
         return None
-    span = find_contract_span(contract.target_source, contract.contract_name)
-    if span is None:
+    functions = contract_functions(contract.target_source, contract.contract_name)
+    if functions is None:
         return None
 
-    body = strip_noise(contract.target_source)[span[0] : span[1]]
-    functions = iter_functions(body)
     by_signature = {fn.signature: fn for fn in functions}
     if len(by_signature) != len(functions):
         logger.info("ambiguous overloads in %s; skipping body diff", contract.contract_file)
         return None
-    return by_signature, span[0]
+    return by_signature
 
 
-def _raw_definition(source: str, body_start: int, fn: FunctionDef) -> str:
+def _raw_definition(source: str, fn: FunctionDef) -> str:
     """The function's original text, comments included, for a readable diff."""
     start, end = fn.span
-    return source[body_start + start : body_start + end]
+    return source[start:end]
 
 
 def _unified_diff(old_text: str, new_text: str, signature: str) -> str:
@@ -354,10 +350,9 @@ def _provenance_note(new: VerifiedContract, surface: AbiSurfaceDiff | None) -> s
 
 def _body_violations(new: VerifiedContract, changed_bodies: list[BodyChange]) -> list[str]:
     """Every changed body must belong to a function the target itself defines."""
-    parsed = _target_functions(new)
-    if parsed is None:
+    defined = _target_functions(new)
+    if defined is None:
         return ["withheld body section: the deployed contract's functions could not be re-resolved"]
-    defined = set(parsed[0])
     return [
         f"withheld body section: '{change.signature}' is not defined by {new.contract_name}"
         for change in changed_bodies

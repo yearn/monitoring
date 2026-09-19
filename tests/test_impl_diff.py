@@ -204,6 +204,45 @@ class TestBodyChanges(ImplDiffTestCase):
         self.assertEqual(diff.body_scope, "Vault @ src/Vault.sol")
 
 
+class TestStringLiteralChanges(ImplDiffTestCase):
+    """A changed string is a behavior change, and must reach the prompt.
+
+    Regression: string literals were blanked before bodies were compared, so an
+    upgrade that only changed a revert message, a role identifier or a token
+    name reported no body change at all.
+    """
+
+    OLD = """
+    contract Vault is Base {
+        function setCap(uint256 newCap) external onlyOwner { cap = newCap; }
+
+        function totalAssets() public view returns (uint256) {
+            require(!paused, "Vault: paused");
+            return asset.balanceOf(address(this));
+        }
+    }
+    """
+    NEW = OLD.replace('"Vault: paused"', '"Vault: halted by guardian"')
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.old_entry = _bundle(self.OLD, OLD_ABI)
+        self.new_entry = _bundle(self.NEW, OLD_ABI)
+
+    def test_changed_revert_message_is_reported_as_a_body_change(self) -> None:
+        diff = self.run_diff()
+        assert diff is not None and diff.surface is not None
+        self.assertTrue(diff.surface.is_empty, "the ABI is identical; only the body changed")
+        self.assertEqual([c.signature for c in diff.changed_bodies], ["totalAssets()"])
+
+    def test_both_message_versions_appear_in_the_rendered_diff(self) -> None:
+        diff = self.run_diff()
+        assert diff is not None
+        rendered = format_impl_diff(diff)
+        self.assertIn("Vault: paused", rendered)
+        self.assertIn("Vault: halted by guardian", rendered)
+
+
 class TestAmbiguousTarget(ImplDiffTestCase):
     """Two files declare the contract: report body analysis unavailable, don't guess."""
 
