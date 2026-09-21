@@ -14,7 +14,7 @@ Where each script in this folder sends its alerts. "Yearn" is the public channel
 | `check_shadow_debt.py` | Shadow debt | Yearn | — | `yearn` |
 | `check_stuck_triggers.py` | Stuck TKS triggers | Yearn | — | `yearn` |
 | `check_timelock_delay.py` | Timelock min delay below 7 days | Yearn timelock internal (`TELEGRAM_CHAT_ID_YEARN_TIMELOCK_INTERNAL`) | — | `YEARN_TIMELOCK_INTERNAL` |
-| `check_indexer_freshness.py` | Envio indexer lag / outage | Envio (`TELEGRAM_CHAT_ID_ENVIO`) | Errors, then Yearn | `yearn` |
+| `check_indexer_freshness.py` | Envio indexer lag / outage | Envio (`TELEGRAM_CHAT_ID_ENVIO`) | Errors, then Yearn | `yearn-internal` |
 
 Envio errors raised inside the flow monitors follow the same Envio → errors → Yearn chain; the small-flows monitor stores them as `yearn-internal`. Unhandled crashes from any script go through `run_with_alert` to the errors channel, falling back to Yearn.
 
@@ -347,7 +347,7 @@ Step 3 covers the inverse trap: an empty result set is not good news. If a chain
 
 ### Alerts
 
-This monitor only ever reports Envio indexer problems, so all of its alerts go to the Envio chat (`TELEGRAM_CHAT_ID_ENVIO`) labelled `[yearn]`, alongside the other indexer failures (large flows, timelock). Every other yearn monitor's operational error still goes to the errors channel. If `TELEGRAM_CHAT_ID_ENVIO` is unset these fall back to the errors channel, and from there to the protocol's own chat.
+This monitor only ever reports Envio indexer problems, so all of its alerts go to the Envio chat (`TELEGRAM_CHAT_ID_ENVIO`) labelled `[yearn]`, alongside the other indexer failures (large flows, timelock). Every other yearn monitor's operational error still goes to the errors channel. If `TELEGRAM_CHAT_ID_ENVIO` is unset these fall back to the errors channel, and from there to the protocol's own chat. They are stored in alert history under the `yearn-internal` protocol key, so they do not appear on the public Yearn monitoring page.
 
 - **Stale or missing chains** — one message listing every lagging chain with its lag and last indexed block, plus every expected chain the indexer reported no sync state for.
 - **Indexer unavailable** — the GraphQL endpoint is unset, unreachable, returned errors, or reported no chains. Sent on every run for as long as it lasts, and — unlike the other Envio messages, which are silent — with a notification, since every Envio-backed monitor is blind until it recovers.

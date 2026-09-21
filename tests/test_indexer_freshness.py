@@ -290,6 +290,7 @@ def test_main_unavailable_alert_notifies(monkeypatch: pytest.MonkeyPatch, envio_
 
     assert len(calls) == 1
     assert calls[0]["disable_notification"] is False
+    assert calls[0]["alert_protocol"] == "yearn-internal"
 
 
 @pytest.mark.parametrize(
