@@ -43,6 +43,8 @@ load_dotenv()
 logger = get_logger("yearn.check_indexer_freshness")
 
 PROTOCOL = "yearn"
+# Alert-history key: internal-only, so indexer alerts stay off the public Yearn page.
+ALERT_PROTOCOL = "yearn-internal"
 
 ENVIO_GRAPHQL_URL = os.getenv("ENVIO_GRAPHQL_URL")
 
@@ -278,7 +280,9 @@ def report_recovered(fresh: list[ChainFreshness]) -> None:
     if not recovered:
         return
     names = ", ".join(f"{chain.name} ({format_duration(chain.lag_seconds or 0)} behind)" for chain in recovered)
-    send_envio_error_message(f"Envio indexer caught up: {names}", PROTOCOL, source="indexer_freshness")
+    send_envio_error_message(
+        f"Envio indexer caught up: {names}", PROTOCOL, source="indexer_freshness", alert_protocol=ALERT_PROTOCOL
+    )
     for chain in recovered:
         _set_last_alert_timestamp(chain.chain.chain_id, 0)
 
@@ -302,6 +306,7 @@ def main() -> None:
             PROTOCOL,
             disable_notification=False,
             source="indexer_freshness",
+            alert_protocol=ALERT_PROTOCOL,
         )
         return
 
@@ -327,6 +332,7 @@ def main() -> None:
         build_alert_message(stale_to_alert, missing_to_alert, max_lag_seconds),
         PROTOCOL,
         source="indexer_freshness",
+        alert_protocol=ALERT_PROTOCOL,
     )
     for entry in stale_to_alert:
         _set_last_alert_timestamp(entry.chain.chain_id, now)
