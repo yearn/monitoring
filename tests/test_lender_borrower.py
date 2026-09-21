@@ -32,7 +32,7 @@ from protocols.yearn.lender_borrower import (
 )
 from utils.alert import Alert
 from utils.chainlink import RoundData
-from utils.telegram import YEARN_MAINTANACE_CHANNEL
+from utils.telegram import YEARN_MAINTENANCE_CHANNEL
 
 CONFIG = STRATEGIES[0]
 
@@ -231,12 +231,12 @@ def test_monitor_errors_are_deduplicated_and_reminded_daily() -> None:
 
 
 @pytest.mark.parametrize(
-    ("chat_id", "expected_channel"), [("maintanace_chat_id", YEARN_MAINTANACE_CHANNEL), ("", "yearn")]
+    ("chat_id", "expected_channel"), [("maintenance_chat_id", YEARN_MAINTENANCE_CHANNEL), ("", "yearn")]
 )
-def test_alerts_route_to_internal_maintanace_chat(
+def test_alerts_route_to_internal_maintenance_chat(
     monkeypatch: pytest.MonkeyPatch, chat_id: str, expected_channel: str
 ) -> None:
-    monkeypatch.setenv("TELEGRAM_CHAT_ID_YEARN_MAINTANACE", chat_id)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID_YEARN_MAINTENANCE", chat_id)
     snapshot = _snapshot(current_ltv_wad=70 * WAD // 100)
     sent: list[Alert] = []
     monkeypatch.setattr(lender_borrower, "_read_snapshot", lambda config, include_rates: snapshot)

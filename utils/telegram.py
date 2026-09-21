@@ -40,11 +40,11 @@ CURATION_CHANNEL = "curation"
 # ``protocols/yearn/alert_small_parent_flows.py``) and lender-borrower strategy risk
 # (see ``protocols/yearn/lender_borrower.py``). Operational noise for the Yearn team,
 # not public announcements, so they go to a dedicated standalone chat,
-# ``TELEGRAM_CHAT_ID_YEARN_MAINTANACE``, served by the DEFAULT bot. Senders store these
+# ``TELEGRAM_CHAT_ID_YEARN_MAINTENANCE``, served by the DEFAULT bot. Senders store these
 # alerts under the page-less ``yearn-internal`` key so they stay off the public Yearn
 # page. When the chat id is unset the channel falls back to the protocol's own chat,
 # matching ``CURATION_CHANNEL``'s "fail-open to the protocol group" semantics.
-YEARN_MAINTANACE_CHANNEL = "yearn_maintanace"
+YEARN_MAINTENANCE_CHANNEL = "yearn_maintenance"
 
 # Matches `bot<digits>:<token>` in Telegram API URLs. Used to scrub the bot
 # token out of exception messages — `requests.HTTPError.__str__()` includes

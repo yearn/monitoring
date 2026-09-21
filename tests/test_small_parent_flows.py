@@ -6,7 +6,7 @@ import pytest
 from protocols.yearn import alert_small_parent_flows as monitor
 from utils.alert import Alert, AlertSeverity
 from utils.chains import Chain
-from utils.telegram import MAX_MESSAGE_LENGTH, YEARN_MAINTANACE_CHANNEL
+from utils.telegram import MAX_MESSAGE_LENGTH, YEARN_MAINTENANCE_CHANNEL
 
 VAULT = {
     "address": "0xParent",
@@ -60,7 +60,7 @@ def test_process_event_builds_structured_record(monkeypatch) -> None:
     field the aggregator needs to render one line in the aggregated message. The record
     carries the rendered ``amount`` / ``asset_symbol`` and the chain/explorer already
     resolved — the aggregator doesn't need to re-look-up anything for the body."""
-    monkeypatch.setenv("TELEGRAM_CHAT_ID_YEARN_MAINTANACE", "yearn_maintanace_chat_id")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID_YEARN_MAINTENANCE", "yearn_maintenance_chat_id")
     records: list[monitor.SmallFlowRecord] = []
 
     did_alert = monitor.process_event(
@@ -288,7 +288,7 @@ def test_flow_aggregator_emits_one_alert_for_all_flows(monkeypatch) -> None:
     """All qualifying flows collected during a run must end up in exactly one
     Telegram message, not 1-per-flow. This is the headline fix for the 429
     rate-limit incident on 2026-09-17."""
-    monkeypatch.setenv("TELEGRAM_CHAT_ID_YEARN_MAINTANACE", "yearn_maintanace_chat_id")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID_YEARN_MAINTENANCE", "yearn_maintenance_chat_id")
     delivered: list[Alert] = []
     aggregator = monitor.FlowAggregator(max_flows=10, sender=delivered.append)
 
@@ -297,7 +297,7 @@ def test_flow_aggregator_emits_one_alert_for_all_flows(monkeypatch) -> None:
     aggregator.send_summary()
 
     assert len(delivered) == 1
-    assert delivered[0].channel == YEARN_MAINTANACE_CHANNEL
+    assert delivered[0].channel == YEARN_MAINTENANCE_CHANNEL
     assert delivered[0].severity is AlertSeverity.LOW
     assert delivered[0].protocol == "yearn-internal"
     body = delivered[0].message
@@ -325,7 +325,7 @@ def test_flow_aggregator_truncates_with_footer_past_the_cap(monkeypatch) -> None
     """Past the per-run cap, the aggregator counts the overflow but does not render
     those flows inline. The truncation is visible in Telegram via a footer on the
     aggregated message so reviewers can tell when they're seeing a partial view."""
-    monkeypatch.setenv("TELEGRAM_CHAT_ID_YEARN_MAINTANACE", "yearn_maintanace_chat_id")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID_YEARN_MAINTENANCE", "yearn_maintenance_chat_id")
     delivered: list[Alert] = []
     aggregator = monitor.FlowAggregator(max_flows=2, sender=delivered.append)
 
@@ -414,7 +414,7 @@ def test_flow_aggregator_groups_by_chain_and_sorts_chronologically(monkeypatch) 
     """The body must group flows by chain (alphabetical) and within each chain sort
     chronologically by (block_number, log_index) so reviewers can read top-to-bottom
     in event order rather than insertion order."""
-    monkeypatch.setenv("TELEGRAM_CHAT_ID_YEARN_MAINTANACE", "yearn_maintanace_chat_id")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID_YEARN_MAINTENANCE", "yearn_maintenance_chat_id")
     delivered: list[Alert] = []
     aggregator = monitor.FlowAggregator(max_flows=20, sender=delivered.append)
 
@@ -446,11 +446,11 @@ def test_flow_aggregator_drops_zero_record_send_summary() -> None:
     assert aggregator.total == 0
 
 
-def test_flow_aggregator_falls_back_to_yearn_channel_without_yearn_maintanace_chat(monkeypatch) -> None:
-    """When ``TELEGRAM_CHAT_ID_YEARN_MAINTANACE`` is unset the aggregated message should
+def test_flow_aggregator_falls_back_to_yearn_channel_without_yearn_maintenance_chat(monkeypatch) -> None:
+    """When ``TELEGRAM_CHAT_ID_YEARN_MAINTENANCE`` is unset the aggregated message should
     fall back to the protocol's own chat (mirrors ``CURATION_CHANNEL`` behavior) so
     operators see the alert until the dedicated group is configured."""
-    monkeypatch.delenv("TELEGRAM_CHAT_ID_YEARN_MAINTANACE", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID_YEARN_MAINTENANCE", raising=False)
     delivered: list[Alert] = []
     aggregator = monitor.FlowAggregator(max_flows=10, sender=delivered.append)
     aggregator(_record())

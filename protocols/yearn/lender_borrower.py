@@ -19,7 +19,7 @@ from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chainlink import CHAINLINK_ABI, RoundData
 from utils.chains import Chain
 from utils.logger import get_logger
-from utils.telegram import YEARN_MAINTANACE_CHANNEL, resolve_channel
+from utils.telegram import YEARN_MAINTENANCE_CHANNEL, resolve_channel
 from utils.web3_wrapper import ChainManager, Web3Client
 
 PROTOCOL = "yearn"
@@ -763,7 +763,7 @@ def run_strategy(config: StrategyConfig, *, checks: str = CHECK_ALL, dry_run: bo
                 AlertSeverity.MEDIUM,
                 message,
                 ALERT_PROTOCOL,
-                channel=resolve_channel(YEARN_MAINTANACE_CHANNEL, PROTOCOL),
+                channel=resolve_channel(YEARN_MAINTENANCE_CHANNEL, PROTOCOL),
             ),
             plain_text=True,
         )
@@ -798,7 +798,7 @@ def main() -> None:
                         f"Lender Borrower Monitor Error ({args.checks})\n"
                         f"{config.name}\n{error_type}: {exc}\n{config.strategy_url}",
                         ALERT_PROTOCOL,
-                        channel=resolve_channel(YEARN_MAINTANACE_CHANNEL, PROTOCOL),
+                        channel=resolve_channel(YEARN_MAINTENANCE_CHANNEL, PROTOCOL),
                     ),
                     plain_text=True,
                 )
