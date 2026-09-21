@@ -20,9 +20,12 @@ load_dotenv()
 
 logger = get_logger("yearn.check_timelock_delay")
 
-# Delay-check violations are an internal security concern, not public topic
-# noise — route them to the internal-only chat instead of YEARN_TIMELOCK.
-ALERT_PROTOCOL = "YEARN_TIMELOCK_INTERNAL"
+PROTOCOL = "yearn"
+# Violations go to the public Yearn timelock topic (stored as `yearn`) and are
+# mirrored to the internal-only chat, matching protocols/timelock/timelock_alerts.py.
+# The mirror keeps its own alert-history key so the Yearn page doesn't list it twice.
+PUBLIC_CHANNEL = "YEARN_TIMELOCK"
+INTERNAL_PROTOCOL = "YEARN_TIMELOCK_INTERNAL"
 
 TIMELOCK_ADDRESS = Web3.to_checksum_address("0x88ba032be87d5ef1fbe87336b7090767f367bf73")
 EXPECTED_MIN_DELAY_SECONDS = 7 * 24 * 60 * 60
@@ -109,10 +112,34 @@ def main() -> None:
         return
 
     message = build_alert_message(violations)
-    send_alert(Alert(AlertSeverity.HIGH, message, ALERT_PROTOCOL))
+    send_violation_alerts(message)
+
+
+def send_violation_alerts(message: str) -> None:
+    """Send the violation alert to the public timelock topic and the internal mirror.
+
+    Both destinations are attempted even if one fails; the first failure is
+    re-raised afterwards so ``run_with_alert`` still reports it.
+
+    Args:
+        message: The Markdown alert message.
+    """
+    alerts = (
+        Alert(AlertSeverity.HIGH, message, PROTOCOL, channel=PUBLIC_CHANNEL),
+        Alert(AlertSeverity.HIGH, message, INTERNAL_PROTOCOL),
+    )
+    error: Exception | None = None
+    for alert in alerts:
+        try:
+            send_alert(alert)
+        except Exception as exc:  # noqa: BLE001 - deliver to the other destination before failing
+            logger.exception("Failed to send timelock delay alert to %s", alert.channel or alert.protocol)
+            error = error or exc
+    if error is not None:
+        raise error
 
 
 if __name__ == "__main__":
     from utils.runner import run_with_alert
 
-    run_with_alert(main, ALERT_PROTOCOL)
+    run_with_alert(main, PROTOCOL)

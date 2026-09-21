@@ -13,7 +13,7 @@ Where each script in this folder sends its alerts. "Yearn" is the public channel
 | `alert_large_flows.py` | Large deposits/withdrawals | Yearn | — | `yearn` |
 | `check_shadow_debt.py` | Shadow debt | Yearn | — | `yearn` |
 | `check_stuck_triggers.py` | Stuck TKS triggers | Yearn | — | `yearn` |
-| `check_timelock_delay.py` | Timelock min delay below 7 days | Yearn timelock internal (`TELEGRAM_CHAT_ID_YEARN_TIMELOCK_INTERNAL`) | — | `YEARN_TIMELOCK_INTERNAL` |
+| `check_timelock_delay.py` | Timelock min delay below 7 days | Yearn timelock topic (`TELEGRAM_TOPIC_ID_YEARN_TIMELOCK`), mirrored to Yearn timelock internal (`TELEGRAM_CHAT_ID_YEARN_TIMELOCK_INTERNAL`) | — | `yearn` (mirror: `YEARN_TIMELOCK_INTERNAL`) |
 | `check_indexer_freshness.py` | Envio indexer lag / outage | Envio (`TELEGRAM_CHAT_ID_ENVIO`) | Errors, then Yearn | `yearn-internal` |
 
 Envio errors raised inside the flow monitors follow the same Envio → errors → Yearn chain; the small-flows monitor stores them as `yearn-internal`. Unhandled crashes from any script go through `run_with_alert` to the errors channel, falling back to Yearn.
@@ -324,6 +324,8 @@ All chains use the same contract address: `0x88ba032be87d5ef1fbe87336b7090767f36
 | Katana | [katanascan.com](https://katanascan.com/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
 
 Optimism is not covered: the Envio indexer stopped indexing it, so its timelock events are no longer available.
+
+Separately, `yearn/check_timelock_delay.py` reads `getMinDelay()` on every chain (including Optimism) and sends a HIGH alert when it drops below 7 days. Like the event alerts, it goes to the public Yearn timelock topic (stored as `yearn`) and is mirrored to the internal chat (`TELEGRAM_CHAT_ID_YEARN_TIMELOCK_INTERNAL`, stored as `YEARN_TIMELOCK_INTERNAL`).
 
 =======
 
