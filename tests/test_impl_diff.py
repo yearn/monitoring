@@ -78,13 +78,17 @@ NEW_ABI = _abi(
 )
 
 
-def _bundle(target_source: str, abi: str, name: str = "Vault") -> dict:
+def _bundle(
+    target_source: str, abi: str, name: str = "Vault", base: str = BASE_CONTRACT, extra: dict[str, str] | None = None
+) -> dict:
     """An Etherscan entry whose bundle mixes the target with an interface and a base."""
     sources = {
         "src/Vault.sol": {"content": target_source},
         "src/interfaces/IMorpho.sol": {"content": IMPORTED_INTERFACE},
-        "src/Base.sol": {"content": BASE_CONTRACT},
+        "src/Base.sol": {"content": base},
     }
+    for path, content in (extra or {}).items():
+        sources[path] = {"content": content}
     return {
         "SourceCode": "{" + json.dumps({"language": "Solidity", "sources": sources, "settings": {}}) + "}",
         "ABI": abi,
@@ -377,24 +381,103 @@ class TestStorageVerdicts(ImplDiffTestCase):
         self.assertNotIn("COMPATIBLE (", rendered)
 
 
+def _namespaced_base(members: str, namespace: str = "yearn.storage.Base") -> str:
+    """A base declaring an ERC-7201 namespace the standard way: on the struct."""
+    return f"""
+    abstract contract Base {{
+        /// @custom:storage-location erc7201:{namespace}
+        struct BaseStorage {{ {members} }}
+
+        function setProfitMaxUnlockTime(uint256 t) external virtual;
+    }}
+    """
+
+
 class TestNamespacedStorage(ImplDiffTestCase):
-    """An ERC-7201 target cannot be cleared by a positional layout match."""
+    """ERC-7201 namespaces never appear in the positional layout, so a positional
+    match must not clear them.
 
-    def setUp(self) -> None:
-        super().setUp()
-        annotated = TARGET_NEW.replace(
-            "contract Vault is Base {",
-            "/// @custom:storage-location erc7201:yearn.storage.Vault\ncontract Vault is Base {",
-        )
-        self.new_entry = _bundle(annotated, NEW_ABI)
+    Regression: only the natspec on the contract declaration was checked, but the
+    ERC puts the annotation on the struct *inside* the contract — usually in an
+    inherited base like OpenZeppelin's Initializable — so real namespaces were
+    never seen and a changed one could still read as COMPATIBLE.
+    """
 
-    def test_namespaced_target_downgrades_compatible_to_unknown(self) -> None:
+    def _with_bases(self, old_base: str, new_base: str) -> None:
+        self.old_entry = _bundle(TARGET_OLD, OLD_ABI, base=old_base)
+        self.new_entry = _bundle(TARGET_NEW, NEW_ABI, base=new_base)
+
+    def test_changed_inherited_namespace_downgrades_to_unknown(self) -> None:
+        self._with_bases(_namespaced_base("uint64 a; bool b;"), _namespaced_base("bool b; uint64 a;"))
         diff = self.run_diff()
         assert diff is not None
         self.assertEqual(diff.storage_status, StorageCompatibility.UNKNOWN)
-        self.assertIn("namespaced layout not validated", diff.storage.reason)
+        self.assertIn("namespaced storage could not be validated", diff.storage.reason)
+        self.assertIn("struct definition changed", format_impl_diff(diff))
+
+    def test_positional_detail_survives_the_downgrade(self) -> None:
+        self._with_bases(_namespaced_base("uint64 a;"), _namespaced_base("uint128 a;"))
+        diff = self.run_diff()
+        assert diff is not None
+        self.assertEqual([e.label for e in diff.storage.added], ["buffer", "__gap"])
+
+    def test_unchanged_inherited_namespace_keeps_compatible(self) -> None:
+        """OpenZeppelin v5 bases are namespaced; an untouched one must not block the verdict."""
+        base = _namespaced_base("uint64 _initialized; bool _initializing;", "openzeppelin.storage.Initializable")
+        self._with_bases(base, base)
+        diff = self.run_diff()
+        assert diff is not None
+        self.assertEqual(diff.storage_status, StorageCompatibility.COMPATIBLE)
+        self.assertEqual(diff.namespaces.unchanged, ["erc7201:openzeppelin.storage.Initializable"])
+        self.assertIn("Namespaced storage unchanged (ERC-7201)", format_impl_diff(diff))
+
+    def test_namespace_in_the_target_body_is_found(self) -> None:
+        body = "/// @custom:storage-location erc7201:yearn.storage.Vault\n    struct VaultStorage { uint256 x; }\n"
+        old = TARGET_OLD.replace("contract Vault is Base {", "contract Vault is Base {\n    " + body)
+        new = TARGET_NEW.replace(
+            "contract Vault is Base {", "contract Vault is Base {\n    " + body.replace("uint256 x", "int256 x")
+        )
+        self.old_entry = _bundle(old, OLD_ABI)
+        self.new_entry = _bundle(new, NEW_ABI)
+        diff = self.run_diff()
+        assert diff is not None
+        self.assertEqual(diff.storage_status, StorageCompatibility.UNKNOWN)
+
+    def test_added_namespace_is_not_validated(self) -> None:
+        self._with_bases(BASE_CONTRACT, _namespaced_base("uint256 x;"))
+        diff = self.run_diff()
+        assert diff is not None
+        self.assertEqual(diff.storage_status, StorageCompatibility.UNKNOWN)
+        self.assertIn("added in the new implementation", format_impl_diff(diff))
+
+    def test_user_defined_member_type_cannot_be_proven_unchanged(self) -> None:
+        """Identical text can hide a changed referenced type, so it isn't accepted."""
+        base = _namespaced_base("Status s; uint256 x;")
+        self._with_bases(base, base)
+        diff = self.run_diff()
+        assert diff is not None
+        self.assertEqual(diff.storage_status, StorageCompatibility.UNKNOWN)
+        self.assertIn("user-defined types", format_impl_diff(diff))
+
+    def test_imported_library_namespace_is_ignored(self) -> None:
+        """An imported helper is not the contract's storage — the original #367 failure."""
+        library = """
+        library StrategyStorageLib {
+            /// @custom:storage-location erc7201:yearn.storage.Strategy
+            struct StrategyData { uint256 totalAssets; }
+        }
+        """
+        changed = library.replace("uint256 totalAssets", "int256 totalAssets")
+        self.old_entry = _bundle(TARGET_OLD, OLD_ABI, extra={"src/lib/StrategyStorageLib.sol": library})
+        self.new_entry = _bundle(TARGET_NEW, NEW_ABI, extra={"src/lib/StrategyStorageLib.sol": changed})
+        diff = self.run_diff()
+        assert diff is not None
+        self.assertEqual(diff.storage_status, StorageCompatibility.COMPATIBLE)
+        self.assertEqual(diff.namespaces.unchanged, [])
 
     def test_positional_conflict_still_reported(self) -> None:
+        """An unvalidated namespace never hides a real positional conflict."""
+        self._with_bases(_namespaced_base("uint64 a;"), _namespaced_base("uint128 a;"))
         self.new_layout = _layout([(0, 0, "buffer", "t_address")])
         diff = self.run_diff()
         assert diff is not None

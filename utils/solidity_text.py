@@ -36,6 +36,17 @@ _HEADER_NOISE = frozenset({"virtual", "override"})
 
 _VISIBILITIES = frozenset({"external", "public", "internal", "private"})
 
+_ANY_DECLARATION_RE = re.compile(rf"(?:^|[\s;}}])(?:abstract\s+)?(?:{_DECL_KINDS})\s+(\w+)\b[^{{;]*\{{")
+
+# One entry of an `is` clause: `Base`, `Base(arg)`, or a qualified `Lib.Base`.
+_BASE_NAME_RE = re.compile(r"[A-Za-z_][\w.]*")
+
+_STRUCT_RE = re.compile(r"\bstruct\s+\w+\s*\{")
+
+# `@custom:storage-location erc7201:openzeppelin.storage.Initializable` — the
+# formula prefix is kept, so namespaces under different formulas never collide.
+_STORAGE_LOCATION_RE = re.compile(r"@custom:storage-location\s+([\w-]+:[^\s*]+)")
+
 # Solidity type aliases, expanded so `uint` and `uint256` key the same function.
 _TYPE_ALIASES = {"uint": "uint256", "int": "int256", "byte": "bytes1"}
 _ALIAS_RE = re.compile(r"^(?:" + "|".join(_TYPE_ALIASES) + r")(?=$|\[)")
@@ -118,6 +129,11 @@ def declares_contract(source: str, name: str) -> bool:
     return _find_declaration(strip_noise(source), name) is not None
 
 
+def declared_names(source: str) -> list[str]:
+    """Every contract, library and interface this file declares, in order."""
+    return [m.group(1) for m in _ANY_DECLARATION_RE.finditer(strip_noise(source))]
+
+
 def find_contract_span(source: str, name: str) -> tuple[int, int] | None:
     """Offsets of ``name``'s body within ``source`` (between its braces), or None."""
     cleaned = strip_noise(source)
@@ -139,23 +155,56 @@ def find_contract_body(source: str, name: str) -> str | None:
     return None if span is None else strip_noise(source)[span[0] : span[1]]
 
 
-def uses_namespaced_storage(source: str, name: str) -> bool:
-    """True if ``name`` is annotated with an ERC-7201 storage location.
+def parent_names(source: str, name: str) -> list[str]:
+    """Direct bases of ``name``, from its ``is A, B(args), C`` clause, in order.
 
-    Scoped to the natspec block attached to this one declaration. Checking the
-    whole file — let alone the whole bundle — is what previously let an imported
-    helper library's namespaced storage suppress the target's layout check.
+    Constructor arguments passed in the clause are dropped. Returns [] when the
+    contract has no bases or isn't declared in ``source``.
     """
     cleaned = strip_noise(source)
-    open_brace = _find_declaration(cleaned, name)
-    if open_brace is None:
-        return False
-    # The declaration's own natspec starts after the previous top-level statement.
-    # Comments are blanked in `cleaned` but offsets are preserved, so the same
-    # range read from the original source is exactly this declaration's natspec.
-    preceding = cleaned[:open_brace]
-    start = max(preceding.rfind("}"), preceding.rfind(";")) + 1
-    return "@custom:storage-location" in source[start:open_brace]
+    match = _declaration_match(cleaned, name)
+    if match is None:
+        return []
+    clause = re.search(r"\bis\b(.*)", match.group(1), re.S)
+    if clause is None:
+        return []
+    names: list[str] = []
+    for part in _split_top_level(clause.group(1)):
+        base = _BASE_NAME_RE.match(part.strip())
+        if base:
+            # `is Lib.Base` names the contract declared as `Base`.
+            names.append(base.group(0).split(".")[-1])
+    return names
+
+
+def namespaced_structs(source: str, name: str) -> dict[str, str]:
+    """ERC-7201 namespaces declared inside ``name``: namespace id → struct text.
+
+    ERC-7201 puts ``@custom:storage-location erc7201:<id>`` on the *struct*
+    holding the namespace, inside the contract — not on the contract itself —
+    so every struct in the body is checked for it. The returned text is the
+    struct definition with comments removed and whitespace collapsed, so two
+    versions compare equal exactly when their definitions do.
+    """
+    span = find_contract_span(source, name)
+    if span is None:
+        return {}
+    cleaned = strip_noise(source)
+    content = strip_comments(source)
+    out: dict[str, str] = {}
+    for m in _STRUCT_RE.finditer(cleaned, span[0], span[1]):
+        open_brace = m.end() - 1
+        close = _match_brace(cleaned, open_brace)
+        if close is None:
+            continue
+        # The struct's natspec is the comment run between the previous statement
+        # and the `struct` keyword — read from the original, where it survives.
+        preceding = cleaned[span[0] : m.start()]
+        start = span[0] + max(preceding.rfind("}"), preceding.rfind(";"), preceding.rfind("{")) + 1
+        location = _STORAGE_LOCATION_RE.search(source[start : m.start()])
+        if location:
+            out[location.group(1)] = " ".join(content[m.start() : close + 1].split())
+    return out
 
 
 def contract_functions(source: str, name: str) -> list[FunctionDef] | None:
@@ -221,12 +270,17 @@ def normalize_params(params: str) -> str:
     return ",".join(types)
 
 
+def _declaration_match(cleaned: str, name: str) -> re.Match[str] | None:
+    """Match for ``name``'s declaration header; group 1 is the text before its `{`."""
+    pattern = re.compile(
+        rf"(?:^|[\s;}}])(?:abstract\s+)?(?:{_DECL_KINDS})\s+{re.escape(name)}\b([^{{;]*)\{{",
+    )
+    return pattern.search(cleaned)
+
+
 def _find_declaration(cleaned: str, name: str) -> int | None:
     """Index of the `{` opening ``name``'s declaration body, or None."""
-    pattern = re.compile(
-        rf"(?:^|[\s;}}])(?:abstract\s+)?(?:{_DECL_KINDS})\s+{re.escape(name)}\b[^{{;]*\{{",
-    )
-    match = pattern.search(cleaned)
+    match = _declaration_match(cleaned, name)
     return None if match is None else match.end() - 1
 
 

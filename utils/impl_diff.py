@@ -30,11 +30,12 @@ this process. A section that fails its own check is dropped rather than shown.
 
 import difflib
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from utils.abi_surface import AbiSurfaceDiff, abi_functions, diff_abi_surface
 from utils.logger import get_logger
-from utils.solidity_text import FunctionDef, contract_functions, uses_namespaced_storage
+from utils.namespaced_storage import NamespaceComparison, collect_namespaces, compare_namespaces
+from utils.solidity_text import FunctionDef, contract_functions
 from utils.source_context import fetch_verified_contract
 from utils.sourcify_layout import fetch_storage_layout
 from utils.storage_layout import LayoutComparison, StorageCompatibility, compare_storage_layouts
@@ -59,7 +60,10 @@ _UNVALIDATED_INDIRECT = (
     "even when the target's own function bodies are unchanged"
 )
 _UNVALIDATED_MODIFIERS = "source-level modifiers are shown as written; they are not an authorization proof"
-_UNVALIDATED_NAMESPACED = "ERC-7201 namespaced storage layouts are not compared; only positional storage is"
+_UNVALIDATED_NAMESPACED = (
+    "namespaced storage reached through a library rather than inheritance, or declared without an "
+    "ERC-7201 annotation, was not checked"
+)
 
 # Added-surface sets seen in this process, so the same "additions" can't be
 # reported for two different contracts (the failure that started this).
@@ -128,6 +132,7 @@ class ImplDiff:
     storage: LayoutComparison
     unvalidated: list[str] = field(default_factory=list)
     surface_note: str = ""  # cross-diff provenance note, empty when nothing to flag
+    namespaces: NamespaceComparison = field(default_factory=NamespaceComparison)
 
     @property
     def storage_status(self) -> StorageCompatibility:
@@ -155,9 +160,10 @@ def diff_implementations(old_addr: str, new_addr: str, chain_id: int) -> ImplDif
     if not bodies.is_empty:
         unvalidated.append(_UNVALIDATED_MODIFIERS)
 
-    storage = _compare_storage(old, new, old_addr, new_addr, chain_id)
-    if storage.status is not StorageCompatibility.UNKNOWN:
-        unvalidated.append(_UNVALIDATED_NAMESPACED)
+    # Namespaces that couldn't be validated are listed in the storage section,
+    # beside the verdict they hold back; this only states what is never checked.
+    storage, namespaces = _compare_storage(old, new, old_addr, new_addr, chain_id)
+    unvalidated.append(_UNVALIDATED_NAMESPACED)
 
     surface_note = _provenance_note(new, surface)
     violations = _consistency_violations(old, new, surface, bodies)
@@ -178,6 +184,7 @@ def diff_implementations(old_addr: str, new_addr: str, chain_id: int) -> ImplDif
         storage=storage,
         unvalidated=unvalidated,
         surface_note=surface_note,
+        namespaces=namespaces,
     )
 
 
@@ -197,32 +204,27 @@ def _compare_storage(
     old_addr: str,
     new_addr: str,
     chain_id: int,
-) -> LayoutComparison:
-    """Compare compiler layouts, deferring to UNKNOWN for namespaced storage.
+) -> tuple[LayoutComparison, NamespaceComparison]:
+    """Compare positional layouts, and hold COMPATIBLE back for namespaces.
 
-    A positional layout that matches says nothing about ERC-7201 namespaces, so
-    a namespaced target cannot be called COMPATIBLE. A positional *conflict* is
-    still a real conflict, and is reported as such.
+    A matching positional layout says nothing about ERC-7201 namespaces, which
+    never appear in it. So COMPATIBLE also requires every namespace the deployed
+    contract or its bases declare to be provably unchanged; otherwise the
+    verdict drops to UNKNOWN, keeping the positional detail. A positional
+    *conflict* is still a real conflict and is reported as such.
     """
     comparison = compare_storage_layouts(
         fetch_storage_layout(chain_id, old_addr),
         fetch_storage_layout(chain_id, new_addr),
     )
-    if comparison.status is not StorageCompatibility.COMPATIBLE:
-        return comparison
-    if _target_is_namespaced(old) or _target_is_namespaced(new):
-        return LayoutComparison(
+    namespaces = compare_namespaces(collect_namespaces(old), collect_namespaces(new))
+    if comparison.status is StorageCompatibility.COMPATIBLE and not namespaces.is_validated:
+        comparison = replace(
+            comparison,
             status=StorageCompatibility.UNKNOWN,
-            reason="namespaced layout not validated (target declares ERC-7201 storage)",
+            reason="positional layout matches, but namespaced storage could not be validated",
         )
-    return comparison
-
-
-def _target_is_namespaced(contract: VerifiedContract) -> bool:
-    """ERC-7201 annotation on the deployed contract itself — not on any import."""
-    if not contract.contract_file:
-        return False
-    return uses_namespaced_storage(contract.target_source, contract.contract_name)
+    return comparison, namespaces
 
 
 def _diff_bodies(old: VerifiedContract, new: VerifiedContract) -> BodyDiff:
@@ -473,14 +475,17 @@ def _fmt_body_change(marker: str, change: BodyChange) -> str:
 def _fmt_storage(diff: ImplDiff) -> list[str]:
     """Render the storage section, including why a verdict is unavailable."""
     storage = diff.storage
+    namespace_lines = _fmt_namespaces(diff.namespaces)
     if storage.status is StorageCompatibility.UNKNOWN:
         reason = storage.reason or STORAGE_UNKNOWN_NOTE
         return [
             f"Storage compatibility: UNKNOWN — {reason}.",
             f"  {STORAGE_UNKNOWN_NOTE.capitalize()}.",
+            *namespace_lines,
         ]
 
     lines = [f"Storage compatibility: {storage.status.value} (compiler layouts, both implementations verified)."]
+    lines.extend(namespace_lines)
     if storage.conflicts:
         lines.append("  Conflicting slots:")
         for conflict in storage.conflicts[:MAX_LISTED_CONFLICTS]:
@@ -493,6 +498,13 @@ def _fmt_storage(diff: ImplDiff) -> list[str]:
         lines.append(f"  + {entry}")
     for before, after in storage.renamed:
         lines.append(f"  renamed (same slot, same type): {before.label} → {after.label}")
+    return lines
+
+
+def _fmt_namespaces(namespaces: NamespaceComparison) -> list[str]:
+    """Which ERC-7201 namespaces were proven unchanged, and which were not."""
+    lines = [f"  Namespaced storage unchanged (ERC-7201): {namespace}" for namespace in namespaces.unchanged]
+    lines.extend(f"  Namespaced storage NOT validated — {reason}" for reason in namespaces.unvalidated)
     return lines
 
 

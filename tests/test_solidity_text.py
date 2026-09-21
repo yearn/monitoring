@@ -4,10 +4,13 @@ import unittest
 
 from utils.solidity_text import (
     contract_functions,
+    declared_names,
     declares_contract,
     find_contract_body,
     iter_functions,
+    namespaced_structs,
     normalize_params,
+    parent_names,
     strip_comments,
     strip_noise,
 )
@@ -219,6 +222,69 @@ class TestContractFunctions(unittest.TestCase):
 
     def test_missing_contract_returns_none(self) -> None:
         self.assertIsNone(contract_functions("contract C {}", "Nope"))
+
+
+class TestInheritanceAndDeclarations(unittest.TestCase):
+    def test_parent_names_in_order(self) -> None:
+        self.assertEqual(parent_names(SOURCE, "Vault"), ["Base", "IVault"])
+
+    def test_parent_names_drop_constructor_arguments_and_qualifiers(self) -> None:
+        source = 'contract T is ERC20("Token", "TKN"), Lib.Ownable(msg.sender), Pausable {}'
+        self.assertEqual(parent_names(source, "T"), ["ERC20", "Ownable", "Pausable"])
+
+    def test_no_bases(self) -> None:
+        self.assertEqual(parent_names(SOURCE, "Other"), [])
+        self.assertEqual(parent_names(SOURCE, "Missing"), [])
+
+    def test_declared_names(self) -> None:
+        self.assertEqual(declared_names(SOURCE), ["IVault", "Base", "Vault", "Other"])
+
+    def test_commented_declaration_is_not_declared(self) -> None:
+        self.assertEqual(declared_names("// contract Ghost {}\ncontract Real {}"), ["Real"])
+
+
+class TestNamespacedStructs(unittest.TestCase):
+    """ERC-7201 annotates the struct inside the contract, not the contract itself."""
+
+    SOURCE = """
+    /// @custom:storage-location erc7201:wrong.place
+    contract Vault {
+        struct Plain { uint256 a; }
+
+        /// @custom:storage-location erc7201:app.main
+        struct MainStorage {
+            uint256 total; // running total
+            mapping(address => uint256) balances;
+        }
+
+        /**
+         * @dev Second namespace, block-comment natspec.
+         * @custom:storage-location erc7201:app.fees
+         */
+        struct FeeStorage { uint16 bps; }
+    }
+    """
+
+    def test_finds_struct_level_annotations(self) -> None:
+        self.assertEqual(
+            namespaced_structs(self.SOURCE, "Vault"),
+            {
+                "erc7201:app.main": "struct MainStorage { uint256 total; mapping(address => uint256) balances; }",
+                "erc7201:app.fees": "struct FeeStorage { uint16 bps; }",
+            },
+        )
+
+    def test_contract_level_annotation_is_not_a_namespace(self) -> None:
+        """Only an annotated struct defines storage; the old check looked here instead."""
+        self.assertNotIn("erc7201:wrong.place", namespaced_structs(self.SOURCE, "Vault"))
+
+    def test_unannotated_struct_is_skipped(self) -> None:
+        self.assertNotIn("struct Plain", " ".join(namespaced_structs(self.SOURCE, "Vault").values()))
+
+    def test_scoped_to_the_named_contract(self) -> None:
+        source = self.SOURCE + "\ncontract Other {}"
+        self.assertEqual(namespaced_structs(source, "Other"), {})
+        self.assertEqual(namespaced_structs(source, "Missing"), {})
 
 
 class TestNormalizeParams(unittest.TestCase):

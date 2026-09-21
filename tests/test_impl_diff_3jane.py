@@ -210,6 +210,19 @@ class ThreeJaneDiffTest(unittest.TestCase):
             ["supplyCapExempt", "ringFenceConduit", "ringFencedLiquidity", "__gap"],
         )
 
+    def test_inherited_initializable_namespace_is_found_and_proven_unchanged(self) -> None:
+        """Both contracts inherit OZ v5 Initializable, whose ERC-7201 struct sits inside the base.
+
+        It must be detected (checking only the contract's own natspec missed it)
+        and, being identical on both sides, must not hold USD3 back from COMPATIBLE.
+        """
+        for diff in (self.usd3, self.susd3):
+            assert diff is not None
+            self.assertEqual(diff.namespaces.unchanged, ["erc7201:openzeppelin.storage.Initializable"])
+            self.assertEqual(diff.namespaces.unvalidated, [])
+        assert self.usd3 is not None
+        self.assertEqual(self.usd3.storage_status, StorageCompatibility.COMPATIBLE)
+
     def test_renames_at_the_same_slot_are_not_incompatible(self) -> None:
         """USD3 renamed four variables to `__deprecated_*` without moving them."""
         assert self.usd3 is not None

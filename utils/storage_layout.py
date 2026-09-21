@@ -6,11 +6,14 @@ same slot and byte offset, with the same shape, under the new one?
 
 What that means in practice:
 
-- Identity is ``(slot, offset)`` plus the *structural* shape of the type —
-  recursively: encoding, byte width, array base/length, mapping key/value, and
-  struct members' own slot/offset/shape.
+- Identity is ``(slot, offset)`` plus the shape of the type — recursively:
+  encoding, byte width, array base/length, mapping key/value, struct members'
+  own slot/offset/shape, and at every level a normalized *kind*. Width alone is
+  not enough: ``uint256`` and ``bytes32`` fill the same 32 bytes, but reading one
+  as the other changes what the stored data means.
 - Compiler-internal noise is ignored: type ids (``t_contract(IMorpho)6874`` vs
   ``…6876`` for the same type), AST ids, and the declaring-contract label.
+  Contract types and ``address`` are one kind — that retype is intentional.
 - A rename is not an incompatibility. The slot doesn't move because the variable
   got a new name, so renames are reported for the reviewer and nothing more.
   The real 3Jane upgrade renamed four variables to ``__deprecated_*``.
@@ -19,7 +22,8 @@ What that means in practice:
 
 This module makes no claim about ERC-7201 namespaced storage: namespaced structs
 do not appear in the positional layout at all, so a compatible positional result
-says nothing about them (see ``utils.impl_diff`` for how that's surfaced).
+says nothing about them. ``utils.namespaced_storage`` checks those, and
+``utils.impl_diff`` combines the two into one verdict.
 """
 
 import re
@@ -33,6 +37,12 @@ _GAP_NAME_RE = re.compile(r"(?:^|_)gap$", re.IGNORECASE)
 
 # Depth guard for self-referential types (a struct holding a mapping to itself).
 _MAX_TYPE_DEPTH = 12
+
+# `t_enum(Status)123` / `t_userDefinedValueType(Id)6519` — named, with an AST id.
+_NAMED_TYPE_RE = re.compile(r"t_(enum|userDefinedValueType)\((\w+)\)")
+_NAMED_KINDS = {"enum": "enum", "userDefinedValueType": "udvt"}
+# A trailing AST id after a closing paren, for exotic ids such as function types.
+_AST_ID_RE = re.compile(r"(?<=\))\d+")
 
 
 class StorageCompatibility(str, Enum):
@@ -56,7 +66,8 @@ class SlotEntry:
     offset: int
     label: str
     type_label: str  # human-readable type, for display only
-    shape: str  # canonical structural shape — the thing actually compared
+    shape: str  # canonical shape including type kinds — the thing actually compared
+    width_shape: str = ""  # byte placement only, to explain *how* two shapes differ
 
     @property
     def position(self) -> tuple[int, int]:
@@ -106,7 +117,7 @@ def compare_storage_layouts(old: StorageLayout | None, new: StorageLayout | None
         if moved is None:
             conflicts.append(f"{entry} is gone in the new layout — that slot is no longer written the same way")
         elif moved.shape != entry.shape:
-            conflicts.append(f"slot {entry.slot}+{entry.offset}: {entry.type_label} {entry.label} → {moved}")
+            conflicts.append(_describe_type_change(entry, moved))
         elif moved.label != entry.label:
             renamed.append((entry, moved))
 
@@ -126,6 +137,22 @@ def _unknown(reason: str) -> LayoutComparison:
     return LayoutComparison(status=StorageCompatibility.UNKNOWN, reason=reason)
 
 
+def _describe_type_change(old: SlotEntry, new: SlotEntry) -> str:
+    """Say whether the bytes moved or were merely reinterpreted.
+
+    Both are incompatible, but they fail differently: a resized or restructured
+    slot garbles neighbouring data, while a same-width retype (``uint256`` →
+    ``bytes32``) leaves every byte in place and reads it as something else.
+    """
+    where = f"slot {old.slot}+{old.offset}"
+    if old.width_shape == new.width_shape:
+        return (
+            f"{where}: {old.type_label} {old.label} reinterpreted as {new.type_label} {new.label} "
+            "(same slot and width, different type)"
+        )
+    return f"{where}: {old.type_label} {old.label} → {new}"
+
+
 def _normalize(layout: StorageLayout) -> list[SlotEntry]:
     """Turn raw layout entries into comparable ones, ordered by position."""
     entries: list[SlotEntry] = []
@@ -142,6 +169,7 @@ def _normalize(layout: StorageLayout) -> list[SlotEntry]:
                 label=str(raw.get("label") or ""),
                 type_label=_type_label(layout.types, type_id),
                 shape=_type_shape(layout.types, type_id),
+                width_shape=_type_shape(layout.types, type_id, with_kind=False),
             )
         )
     return sorted(entries, key=lambda e: e.position)
@@ -162,14 +190,19 @@ def _type_label(types: dict[str, dict], type_id: str) -> str:
     return str(label) if label else type_id
 
 
-def _type_shape(types: dict[str, dict], type_id: str, depth: int = 0) -> str:
-    """Canonical structural description of a type.
+def _type_shape(types: dict[str, dict], type_id: str, depth: int = 0, *, with_kind: bool = True) -> str:
+    """Canonical description of a type: where its bytes live and how they're read.
 
-    Deliberately excludes every identifier the compiler regenerates between
-    builds — type ids, AST ids, declaring contract — and the type's own label,
-    so that renaming a struct or swapping one contract type for another of the
-    same width is not reported as a layout conflict. What's compared is what
-    determines where bytes live.
+    Byte placement alone is not enough: ``uint256`` and ``bytes32`` occupy the
+    same 32 bytes, but a new implementation reading a counter as an identifier
+    has changed what the stored data *means*. So each level also carries a
+    normalized kind (:func:`_type_kind`).
+
+    Everything the compiler regenerates between builds is still excluded — type
+    ids, AST ids, the declaring contract — and so are struct names: a struct is
+    compared member by member instead. ``with_kind=False`` gives the width-only
+    shape, used to tell a same-width reinterpretation apart from a moved or
+    resized slot when describing a conflict.
     """
     entry = types.get(type_id)
     if not isinstance(entry, dict) or depth > _MAX_TYPE_DEPTH:
@@ -177,26 +210,54 @@ def _type_shape(types: dict[str, dict], type_id: str, depth: int = 0) -> str:
         return f"?{type_id}"
 
     parts = [f"enc={entry.get('encoding', '')}", f"bytes={entry.get('numberOfBytes', '')}"]
+    if with_kind:
+        parts.insert(0, f"kind={_type_kind(type_id)}")
     base = entry.get("base")
     if isinstance(base, str):
-        parts.append(f"base=({_type_shape(types, base, depth + 1)})")
+        parts.append(f"base=({_type_shape(types, base, depth + 1, with_kind=with_kind)})")
     key, value = entry.get("key"), entry.get("value")
     if isinstance(key, str):
-        parts.append(f"key=({_type_shape(types, key, depth + 1)})")
+        parts.append(f"key=({_type_shape(types, key, depth + 1, with_kind=with_kind)})")
     if isinstance(value, str):
-        parts.append(f"value=({_type_shape(types, value, depth + 1)})")
+        parts.append(f"value=({_type_shape(types, value, depth + 1, with_kind=with_kind)})")
     members = entry.get("members")
     if isinstance(members, list):
-        rendered = [_member_shape(types, m, depth) for m in members if isinstance(m, dict)]
+        rendered = [_member_shape(types, m, depth, with_kind) for m in members if isinstance(m, dict)]
         parts.append("members=[" + ",".join(rendered) + "]")
     return ";".join(parts)
 
 
-def _member_shape(types: dict[str, dict], member: dict, depth: int) -> str:
+def _member_shape(types: dict[str, dict], member: dict, depth: int, with_kind: bool) -> str:
     """A struct member's position and shape — its name is display-only."""
     member_type = member.get("type")
-    shape = _type_shape(types, member_type, depth + 1) if isinstance(member_type, str) else "?"
+    shape = _type_shape(types, member_type, depth + 1, with_kind=with_kind) if isinstance(member_type, str) else "?"
     return f"{member.get('slot', '')}+{member.get('offset', '')}:({shape})"
+
+
+def _type_kind(type_id: str) -> str:
+    """How a slot's bytes are interpreted, with compiler-generated ids stripped.
+
+    - ``address``, ``address payable`` and every contract type are one kind: a
+      contract-typed variable *is* an address in storage, so retyping
+      ``IERC20 token`` as ``address token`` (or as another interface) is an
+      intentional, safe equivalence.
+    - Enums and user-defined value types keep their *name*
+      (``enum(Status)``, ``udvt(Id)``) but lose the AST id, so the same type in
+      two builds matches while a different type at the same width does not.
+    - Mappings, arrays and structs are compared through their components, so
+      their kind is just the category — a renamed struct type is not a change.
+    - Elementary types are compared exactly: ``uint256`` ≠ ``bytes32`` ≠ ``int256``.
+    """
+    if type_id.startswith(("t_address", "t_contract(")):
+        return "address"
+    named = _NAMED_TYPE_RE.match(type_id)
+    if named:
+        return f"{_NAMED_KINDS[named.group(1)]}({named.group(2)})"
+    for prefix, category in (("t_mapping(", "mapping"), ("t_array(", "array"), ("t_struct(", "struct")):
+        if type_id.startswith(prefix):
+            return category
+    # Elementary: `t_uint256`, `t_bool`, `t_string_storage`, `t_bytes_storage`.
+    return _AST_ID_RE.sub("", type_id.removeprefix("t_").removesuffix("_storage"))
 
 
 def _is_new_variable(entry: SlotEntry, previous: SlotEntry | None) -> bool:
