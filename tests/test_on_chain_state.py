@@ -262,6 +262,14 @@ class TestFormatStateReads(unittest.TestCase):
     def test_empty(self) -> None:
         self.assertEqual(format_state_reads([]), "")
 
+    def test_unavailable(self) -> None:
+        reads = [
+            StateRead(var_name="cap", type_str="", value=None, key_args=("0xA",), available=False),
+        ]
+        result = format_state_reads(reads)
+        self.assertIn("cap(0xA) = unavailable", result)
+        self.assertIn("could not be read", result)
+
 
 if __name__ == "__main__":
     unittest.main()

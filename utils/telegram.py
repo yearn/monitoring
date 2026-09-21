@@ -36,6 +36,16 @@ ENVIO_CHANNEL = "envio"
 # chat id falls back to the protocol's own group instead of dropping the alert.
 CURATION_CHANNEL = "curation"
 
+# Channel key for internal Yearn maintenance alerts — small parent-vault flows (see
+# ``protocols/yearn/alert_small_parent_flows.py``) and lender-borrower strategy risk
+# (see ``protocols/yearn/lender_borrower.py``). Operational noise for the Yearn team,
+# not public announcements, so they go to a dedicated standalone chat,
+# ``TELEGRAM_CHAT_ID_YEARN_MAINTENANCE``, served by the DEFAULT bot. Senders store these
+# alerts under the page-less ``yearn-internal`` key so they stay off the public Yearn
+# page. When the chat id is unset the channel falls back to the protocol's own chat,
+# matching ``CURATION_CHANNEL``'s "fail-open to the protocol group" semantics.
+YEARN_MAINTENANCE_CHANNEL = "yearn_maintenance"
+
 # Matches `bot<digits>:<token>` in Telegram API URLs. Used to scrub the bot
 # token out of exception messages — `requests.HTTPError.__str__()` includes
 # the full URL, so without this the token leaks into any log or alert that
@@ -342,7 +352,14 @@ def resolve_channel(channel: str, fallback: str) -> str:
     return channel if os.getenv(f"TELEGRAM_CHAT_ID_{channel.upper()}") else fallback
 
 
-def _send_labelled(message: str, protocol: str, channel: str, disable_notification: bool, source: str) -> None:
+def _send_labelled(
+    message: str,
+    protocol: str,
+    channel: str,
+    disable_notification: bool,
+    source: str,
+    alert_protocol: str | None = None,
+) -> None:
     """Send a `[protocol]`-labelled plain-text message to a shared channel."""
     send_telegram_message(
         f"[{protocol}] {escape_markdown(message)}",
@@ -350,7 +367,7 @@ def _send_labelled(message: str, protocol: str, channel: str, disable_notificati
         disable_notification,
         plain_text=True,
         source=source,
-        origin_protocol=protocol,
+        origin_protocol=alert_protocol or protocol,
         channel=channel,
     )
 
@@ -361,6 +378,7 @@ def send_error_message(
     disable_notification: bool = True,
     *,
     source: str = "ops_error",
+    alert_protocol: str | None = None,
 ) -> None:
     """Route an operational error/diagnostic to the dedicated errors channel.
 
@@ -378,9 +396,13 @@ def send_error_message(
         protocol: Originating protocol/channel, used as the ``[label]`` prefix
             and as the fallback channel when no errors destination is configured.
         disable_notification: If True (default), send silently.
+        source: Alert source tag recorded with the alert.
+        alert_protocol: Protocol key stored in alert history. Defaults to
+            ``protocol``; set it to keep an alert off a public protocol page
+            without changing its label or Telegram routing.
     """
     if _channel_configured(ERROR_CHANNEL):
-        _send_labelled(message, protocol, ERROR_CHANNEL, disable_notification, source)
+        _send_labelled(message, protocol, ERROR_CHANNEL, disable_notification, source, alert_protocol)
     else:
         send_telegram_message(
             escape_markdown(message),
@@ -388,7 +410,7 @@ def send_error_message(
             disable_notification,
             plain_text=True,
             source=source,
-            origin_protocol=protocol,
+            origin_protocol=alert_protocol or protocol,
             channel=protocol,
         )
 
@@ -399,6 +421,7 @@ def send_envio_error_message(
     disable_notification: bool = True,
     *,
     source: str = "envio_error",
+    alert_protocol: str | None = None,
 ) -> None:
     """Route an Envio indexer problem to the dedicated envio channel.
 
@@ -417,11 +440,13 @@ def send_envio_error_message(
             fallback routing.
         disable_notification: If True (default), send silently.
         source: Alert source tag recorded with the alert.
+        alert_protocol: Protocol key stored in alert history. Defaults to
+            ``protocol``; label and Telegram routing are unaffected.
     """
     if os.getenv(f"TELEGRAM_CHAT_ID_{ENVIO_CHANNEL.upper()}"):
-        _send_labelled(message, protocol, ENVIO_CHANNEL, disable_notification, source)
+        _send_labelled(message, protocol, ENVIO_CHANNEL, disable_notification, source, alert_protocol)
     else:
-        send_error_message(message, protocol, disable_notification, source=source)
+        send_error_message(message, protocol, disable_notification, source=source, alert_protocol=alert_protocol)
 
 
 def get_github_run_url() -> str:

@@ -46,7 +46,7 @@ protocols:
       - name: "Proof of Solvency"
         description: "Accountable collateral ratio <95% (CRITICAL) or <99% (HIGH)"
       - name: "Proof of Solvency Freshness"
-        description: "MEDIUM when a short-cadence report/source misses 2 periods or a >1h cadence misses 1; HIGH on first unavailable run, CRITICAL on the second consecutive miss"
+        description: "MEDIUM when the Accountable report or a source exceeds its freshness limit (1h for 15-minute cadence, 8.5d for weekly) or a required source is missing or malformed; HIGH on first unavailable run, CRITICAL on the second consecutive miss"
       - name: "Timelock"
         description: "CallScheduled events from 24h and 7-day TimelockControllers via Envio"
 
@@ -242,22 +242,22 @@ protocols:
 
   maple:
     display_name: "Maple Finance"
-    description: "Maple syrupUSDC pool monitoring"
+    description: "Maple syrupUSDC and syrupUSDG pool monitoring"
     cadence: "Hourly"
     disabled: true
     tasks:
       - protocols/maple/main.py
     monitors:
       - name: "Price Per Share"
-        description: "Any PPS decrease"
+        description: "Any PPS decrease per pool"
       - name: "TVL"
-        description: "Absolute TVL change >=15% using a baseline no older than 3 hours"
+        description: "Absolute TVL change >=15% per pool using a baseline no older than 3 hours"
       - name: "Unrealized Losses"
-        description: "Any non-zero on-chain unrealized losses; >=0.5% of pool assets via subgraph"
+        description: "Any non-zero on-chain unrealized losses (syrupUSDC); >=0.5% of pool assets via subgraph (all pools)"
       - name: "Withdrawal Queue"
-        description: "Pending exit value >1% of TVL"
+        description: "Pending exit value >1% of TVL per pool"
       - name: "Pool Liquidity"
-        description: "Pending withdrawals exceed pool cash"
+        description: "Pending withdrawals exceed pool cash per pool"
       - name: "Collateralization Ratio"
         description: "syrupGlobals collateralRatio <135%"
       - name: "Proof of Reserves Divergence"
@@ -265,7 +265,7 @@ protocols:
       - name: "Unknown Collateral"
         description: "Collateral assets not in risk mapping"
       - name: "Pool Delegate Cover"
-        description: "Cover balance drops to $0 or decreases vs cached prior; zero state re-armed after >3 hours"
+        description: "Cover balance drops to $0 or decreases vs cached prior per pool; zero state re-armed after >3 hours"
       - name: "Timelock"
         description: "Maple GovernorTimelock events via Envio"
       - name: "Safe Multisig"
@@ -459,16 +459,19 @@ protocols:
     tasks:
       - protocols/yearn/lender_borrower.py
       - protocols/yearn/alert_large_flows.py
+      - protocols/yearn/alert_small_parent_flows.py
       - protocols/yearn/check_timelock_delay.py
       - protocols/yearn/check_indexer_freshness.py
     monitors:
       - name: "Indexer Freshness"
         description: "Envio indexer lag per chain; alerts the Envio channel when a chain's newest indexed block is older than 60 minutes or the GraphQL endpoint is down"
       - name: "Lender-Borrower Risk"
-        description: "All configured lender-borrower strategies: collateral and borrow-token prices plus LTV/liquidation risk every 30m; lender and borrow APR availability, 24h net spread, and debt coverage every 6h"
+        description: "All configured lender-borrower strategies: collateral and borrow-token prices plus LTV/liquidation risk every 30m; lender and borrow APR availability, 24h net spread, and debt coverage every 6h; alerts go to the internal Yearn maintenance chat"
         severity: "MEDIUM"
       - name: "Large Flows"
         description: "Deposit/withdrawal flows >=$500k USD (Katana withdrawals >=$50k; or 10% of vault totalSupply fallback for unpriced tokens)"
+      - name: "Small Parent Vault Flows"
+        description: "Deposits and withdrawals with a raw ERC-4626 assets value below 10,000 for non-retired Yearn v3 parent vaults; aggregated into one Telegram message per run and routed to the internal Yearn maintenance chat"
       - name: "Timelock Delay"
         description: "Yearn TimelockController getMinDelay() < 7 days across Mainnet, Base, Arbitrum, Polygon, Optimism, Katana"
       - name: "Timelock Events"

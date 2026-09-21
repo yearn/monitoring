@@ -82,3 +82,43 @@ def format_duration(seconds: int) -> str:
     if minutes and not days:
         parts.append(f"{minutes}m")
     return " ".join(parts) if parts else f"{seconds}s"
+
+
+def format_age(seconds: int) -> str:
+    """Format elapsed time rounded up to a minute.
+
+    Rounding up makes a just-expired freshness limit visible in an alert.
+
+    Args:
+        seconds: Non-negative elapsed time in seconds.
+
+    Returns:
+        A compact age such as ``31m``, ``1h 1m``, or ``8d 1m``.
+    """
+    minutes = (max(0, seconds) + 59) // 60
+    days, remainder = divmod(minutes, 24 * 60)
+    hours, remaining_minutes = divmod(remainder, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if remaining_minutes or not parts:
+        parts.append(f"{remaining_minutes}m")
+    return " ".join(parts)
+
+
+def parse_wei(value: object) -> int:
+    """Parse a wei amount from untrusted JSON, defaulting to 0 instead of raising.
+
+    Upstream sources disagree on how a zero-value call is represented: the Safe
+    API and Envio may return an integer, a decimal string, an empty string, or
+    a JSON ``null``. ``int(None)`` and ``int("None")`` both raise, and a raise
+    here aborts a whole alert, so every unusable shape collapses to 0.
+    """
+    if value is None or value == "":
+        return 0
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0

@@ -37,7 +37,7 @@ CONFIG = AccountableFeedConfig(
         "Slope - Forward Flows",
         "USD3 On-Chain Reserves",
     ),
-    source_frequency_overrides=(("Slope - Forward Flows", "WEEKLY"),),
+    source_frequency_corrections=(("Slope - Forward Flows", "DAILY", "WEEKLY"),),
 )
 
 
@@ -52,6 +52,35 @@ def load_fresh_payload() -> dict[str, Any]:
     for source in payload["data"]["dataSources"].values():
         source["lastUpdated"] = str(FIXTURE_NOW_MS)
     return payload
+
+
+@pytest.mark.parametrize(
+    ("grace", "message"),
+    [
+        (((0, 1800),), "positive"),
+        (((900, -1),), "non-negative"),
+        (((900, 1800), (900, 3600)), "duplicate"),
+    ],
+)
+def test_rejects_invalid_source_grace_config(grace: tuple[tuple[int, int], ...], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        replace(CONFIG, grace_by_cadence_seconds=grace)
+
+
+@pytest.mark.parametrize(
+    ("corrections", "message"),
+    [
+        ((("Slope - Forward Flow", "DAILY", "WEEKLY"),), "not required"),
+        (
+            (("Slope - Forward Flows", "DAILY", "WEEKLY"), ("Slope - Forward Flows", "DAILY", "WEEKLY")),
+            "duplicate",
+        ),
+        ((("Slope - Forward Flows", "whenever", "WEEKLY"),), "unrecognised"),
+    ],
+)
+def test_rejects_invalid_frequency_corrections(corrections: tuple[tuple[str, str, str], ...], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        replace(CONFIG, source_frequency_corrections=corrections)
 
 
 # --- Parsing the real recorded payload ---
@@ -89,14 +118,12 @@ def test_coerces_numeric_strings() -> None:
     assert report.verifiability == Decimal("100")
 
 
-def test_recorded_live_payload_uses_slope_weekly_override() -> None:
+def test_recorded_payload_without_grace_flags_lendswift_and_corrects_slope() -> None:
     result = evaluate_report(parse_report(load_payload(), CONFIG, FIXTURE_NOW_MS))
 
     assert result.status is AccountableStatus.STALE
     assert result.report is not None
-    assert [source.name for source in result.report.stale_sources] == [
-        "LendSwift - Warehouse Senior Note",
-    ]
+    assert [source.name for source in result.report.stale_sources] == ["LendSwift - Warehouse Senior Note"]
     slope = next(source for source in result.report.sources if source.name == "Slope - Forward Flows")
     assert slope.frequency == "WEEKLY"
     assert not slope.is_stale
@@ -261,7 +288,8 @@ def test_aggregate_report_is_stale_only_after_more_than_two_cadence_periods() ->
     result = evaluate_report(parse_report(payload, CONFIG, FIXTURE_NOW_MS))
 
     assert result.status is AccountableStatus.STALE
-    assert "old" in result.reason
+    assert "31m old" in result.reason
+    assert "30m limit" in result.reason
 
 
 def test_weekly_aggregate_report_is_not_stale_after_six_hours() -> None:

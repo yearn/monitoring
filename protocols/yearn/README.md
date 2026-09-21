@@ -2,6 +2,22 @@
 
 This folder contains monitoring scripts for Yearn vault activity, Safe multisig queues, and timelock operations.
 
+## Alert Routing
+
+Where each script in this folder sends its alerts. "Yearn" is the public channel (`TELEGRAM_TOPIC_ID_YEARN` or `TELEGRAM_CHAT_ID_YEARN`). The DB tag is the alert-history protocol key; `yearn-internal` and `YEARN_TIMELOCK_INTERNAL` never show on the public Yearn monitoring page.
+
+| Script | Alerts | Telegram destination | Fallback when unset | DB tag |
+|---|---|---|---|---|
+| `lender_borrower.py` | LTV, spread, coverage warnings and monitor errors | Yearn maintenance (`TELEGRAM_CHAT_ID_YEARN_MAINTENANCE`) | Yearn | `yearn-internal` |
+| `alert_small_parent_flows.py` | Aggregated small parent-vault flows | Yearn maintenance (`TELEGRAM_CHAT_ID_YEARN_MAINTENANCE`) | Yearn | `yearn-internal` |
+| `alert_large_flows.py` | Large deposits/withdrawals | Yearn | — | `yearn` |
+| `check_shadow_debt.py` | Shadow debt | Yearn | — | `yearn` |
+| `check_stuck_triggers.py` | Stuck TKS triggers | Yearn | — | `yearn` |
+| `check_timelock_delay.py` | Timelock min delay below 7 days | Yearn timelock topic (`TELEGRAM_TOPIC_ID_YEARN_TIMELOCK`), mirrored to Yearn timelock internal (`TELEGRAM_CHAT_ID_YEARN_TIMELOCK_INTERNAL`) | — | `yearn` (mirror: `YEARN_TIMELOCK_INTERNAL`) |
+| `check_indexer_freshness.py` | Envio indexer lag / outage | Envio (`TELEGRAM_CHAT_ID_ENVIO`) | Errors, then Yearn | `yearn-internal` |
+
+Envio errors raised inside the flow monitors follow the same Envio → errors → Yearn chain; the small-flows monitor stores them as `yearn-internal`. Unhandled crashes from any script go through `run_with_alert` to the errors channel, falling back to Yearn.
+
 ## Lender-Borrower Risk
 
 The script `yearn/lender_borrower.py` monitors configured Morpho and Aave-compatible lender-borrower strategies. It currently covers Katana Morpho `vbWBTC/vbUSDC`, Ethereum Spark `wstETH/USDS` reached through its WETH accumulator, and Ethereum Spark `WETH/USDS`; each strategy supplies collateral, borrows a stablecoin, and lends the borrowed balance into a Yearn vault.
@@ -12,7 +28,7 @@ The script `yearn/lender_borrower.py` monitors configured Morpho and Aave-compat
 2. **Net spread**: derives the current borrow APR from Morpho's adaptive IRM or Spark's variable borrow rate and subtracts it from the lender vault APR returned by Yearn's APR oracle. A medium alert fires after at least three samples when the rolling 24-hour average is below `-1%`. A zero lender APR is treated as unavailable data, alerts, and is not stored as a rate sample. Runs every six hours.
 3. **Debt coverage**: compares `balanceOfLentAssets() + balanceOfBorrowToken()` with `balanceOfDebt()`. A medium alert fires when the deficit is both at least 10 basis points of debt and worth at least $100. Runs every six hours with the net-spread check.
 
-All breach, unavailable-data, and monitor-error alerts use `MEDIUM` severity and route to the internal curation Telegram channel, falling back to the Yearn channel when curation is not configured. MEDIUM sends Telegram without invoking the HIGH/CRITICAL emergency-dispatch hook. Persistent breaches and errors are deduplicated and reminded once per 24 hours. The monitor is read-only and does not initiate deleveraging.
+All breach, unavailable-data, and monitor-error alerts use `MEDIUM` severity and route to the internal Yearn maintenance Telegram chat (`TELEGRAM_CHAT_ID_YEARN_MAINTENANCE`), falling back to the Yearn channel when it is not configured. They are stored in alert history under the `yearn-internal` protocol key, so they do not appear on the public Yearn monitoring page. MEDIUM sends Telegram without invoking the HIGH/CRITICAL emergency-dispatch hook. Persistent breaches and errors are deduplicated and reminded once per 24 hours. The monitor is read-only and does not initiate deleveraging.
 
 ### Usage
 
@@ -54,6 +70,53 @@ Optional flags:
 - `--since-seconds` (default: `7200`)
 - `--chain-ids` (default: all vault chain IDs — `1,8453,42161,747474`)
 - `--no-cache` (disable caching)
+
+## Small Parent Vault Flows
+
+The script `yearn/alert_small_parent_flows.py` alerts on every deposit or withdrawal whose raw ERC-4626 `assets` value is strictly between 0 and 10,000 for an active Yearn v3 parent vault. The comparison happens before decimal normalization: 10,000 raw units equals 0.01 USDC, 0.0001 WBTC, or 0.00000000000001 WETH.
+
+### Data Sources
+
+- **Parent vault discovery**: Kong GraphQL, filtered to Yearn v3 `vaultType: 1` vaults and excluding retired entries. Hidden vaults stay monitored because `isHidden` only controls UI visibility; rows missing asset metadata are logged and skipped.
+- **Flow events**: Envio `Deposit` and `Withdraw` entities. The aggregate includes the amount, asset, vault, direction, and transaction link for each shown flow.
+- **Token decimals**: the parent vault's underlying asset metadata from Kong, used only to show a human-readable amount alongside the raw value.
+
+Deposits and withdrawals are processed with independent per-chain `(blockNumber, logIndex)` cursors stored in the monitoring database. The run stages cursor updates in memory and saves them only after the aggregate alert is delivered. A failed send leaves the flows available for the next run. A new deployment starts each stream with a two-hour lookback; that starting timestamp is persisted, so a stream that has not yet seen any event never slides its window forward and a long run gap cannot drop events.
+
+**Routing:** qualifying flows in a run are summarized in one Telegram message
+(per chain and direction, sorted chronologically) and sent to the internal Yearn maintenance
+chat, `TELEGRAM_CHAT_ID_YEARN_MAINTENANCE` (shared with lender-borrower alerts), so the
+volume doesn't spam the protocol's main chat or the curation group. If that chat id is unset the aggregated message falls
+back to the yearn group.
+
+The aggregated message and this monitor's Envio error messages are stored in alert
+history under the `yearn-internal` protocol key, so they do not appear on the public
+Yearn monitoring page (which queries `yearn`). Telegram routing and the `[yearn]`
+label on Envio errors are unchanged.
+
+A run with no qualifying flows does not produce a Telegram message — a quiet day
+shouldn't wake up the channel with an empty "0 flows" header.
+
+The aggregated message includes up to `--max-flows` entries (default 500) and
+fits within Telegram's message limit. Additional flows are counted in the
+message as truncated, with the same count logged for the run audit trail.
+The first Envio failure is reported once to the Envio channel
+and stops the run; unprocessed events are picked up on the next run.
+
+### Usage
+
+```bash
+uv run protocols/yearn/alert_small_parent_flows.py
+```
+
+Optional flags:
+
+- `--threshold-raw` (default: `10000`)
+- `--lookback-seconds` (default: `7200`, used only the first time a chain/flow stream runs)
+- `--page-size` (default: `1000`)
+- `--chain-ids` (default: `1,8453,42161,137,747474`, the chains indexed by [yearn-envio](https://github.com/yearn/yearn-envio))
+- `--max-flows` (default: `500`, hard cap on flows rendered into the aggregated message)
+- `--log-level` (default: `SMALL_PARENT_FLOWS_LOG_LEVEL`, then `LOG_LEVEL`, then `INFO`)
 
 =======
 
@@ -246,7 +309,7 @@ For each configured Safe on each chain:
 
 ## Timelock Monitoring
 
-Yearn TimelockController contracts are monitored across 6 chains via the shared [timelock monitoring script](../timelock/README.md). Alerts are routed to the `YEARN` Telegram channel.
+Yearn TimelockController contracts are monitored across 5 chains via the shared [timelock monitoring script](../timelock/README.md). Alerts are routed to the `YEARN` Telegram channel.
 
 ### Monitored Addresses
 
@@ -259,13 +322,16 @@ All chains use the same contract address: `0x88ba032be87d5ef1fbe87336b7090767f36
 | Arbitrum | [arbiscan.io](https://arbiscan.io/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
 | Polygon | [polygonscan.com](https://polygonscan.com/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
 | Katana | [katanascan.com](https://katanascan.com/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
-| Optimism | [optimistic.etherscan.io](https://optimistic.etherscan.io/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
+
+Optimism is not covered: the Envio indexer stopped indexing it, so its timelock events are no longer available.
+
+Separately, `yearn/check_timelock_delay.py` reads `getMinDelay()` on every chain (including Optimism) and sends a HIGH alert when it drops below 7 days. Like the event alerts, it goes to the public Yearn timelock topic (stored as `yearn`) and is mirrored to the internal chat (`TELEGRAM_CHAT_ID_YEARN_TIMELOCK_INTERNAL`, stored as `YEARN_TIMELOCK_INTERNAL`).
 
 =======
 
 ## Indexer Freshness
 
-The script `yearn/check_indexer_freshness.py` watches the [Envio indexer](https://github.com/chain-events/yearn-indexing-test) that feeds the large-flows, timelock and 3jane borrower monitors. It runs hourly, first in the [hourly profile](../../automation/jobs.yaml).
+The script `yearn/check_indexer_freshness.py` watches the [Envio indexer](https://github.com/yearn/yearn-envio) that feeds the large-flows, timelock and 3jane borrower monitors. It runs hourly, first in the [hourly profile](../../automation/jobs.yaml).
 
 An indexer stall is invisible to the monitors that depend on it: GraphQL keeps answering, it just stops returning new rows, so an outage looks exactly like a quiet hour. This check makes the silence loud.
 
@@ -279,14 +345,14 @@ Step 2 is what makes the check trustworthy. Envio parks `chain_metadata.block_he
 
 Step 3 covers the inverse trap: an empty result set is not good news. If a chain drops out of the indexer's config, or comes back from a restart with no processed block, it simply stops appearing in `chain_metadata` — and a check that only looks at what it was given would report every remaining chain fresh while that chain's monitors sit blind. `EXPECTED_CHAINS` is therefore the authority on what must be present, and anything absent from it alerts.
 
-`EXPECTED_CHAINS` lists the chains whose indexed events feed monitors here (Mainnet, Polygon, Base, Arbitrum, Katana). It is deliberately spelled out rather than derived from the `Chain` enum, so adding an enum member for an unrelated protocol doesn't start alerting that the indexer is missing a chain it was never asked to index — **add a chain here when its events start feeding a monitor.** The indexer also covers chains nothing here reads from (Gnosis, Berachain); those are logged and skipped. Optimism is deliberately absent — the indexer no longer covers it, so it must not be expected. A chain whose RPC is unreachable is skipped too rather than alerted on: a broken provider is not a stale indexer.
+`EXPECTED_CHAINS` lists the chains whose indexed events feed monitors here (Mainnet, Polygon, Base, Arbitrum, Katana). It is deliberately spelled out rather than derived from the `Chain` enum, so adding an enum member for an unrelated protocol doesn't start alerting that the indexer is missing a chain it was never asked to index — **add a chain here when its events start feeding a monitor.** Optimism is deliberately absent: the indexer no longer covers it, so it must not be expected. Any other chain the indexer reports is one nothing here reads from; those are logged and skipped. A chain whose RPC is unreachable is skipped too rather than alerted on: a broken provider is not a stale indexer.
 
 ### Alerts
 
-This monitor only ever reports Envio indexer problems, so all of its alerts go to the Envio chat (`TELEGRAM_CHAT_ID_ENVIO`) labelled `[yearn]`, alongside the other indexer failures (large flows, timelock). Every other yearn monitor's operational error still goes to the errors channel. If `TELEGRAM_CHAT_ID_ENVIO` is unset these fall back to the errors channel, and from there to the protocol's own chat.
+This monitor only ever reports Envio indexer problems, so all of its alerts go to the Envio chat (`TELEGRAM_CHAT_ID_ENVIO`) labelled `[yearn]`, alongside the other indexer failures (large flows, timelock). Every other yearn monitor's operational error still goes to the errors channel. If `TELEGRAM_CHAT_ID_ENVIO` is unset these fall back to the errors channel, and from there to the protocol's own chat. They are stored in alert history under the `yearn-internal` protocol key, so they do not appear on the public Yearn monitoring page.
 
 - **Stale or missing chains** — one message listing every lagging chain with its lag and last indexed block, plus every expected chain the indexer reported no sync state for.
-- **Indexer unavailable** — the GraphQL endpoint is unset, unreachable, returned errors, or reported no chains. Sent on every run for as long as it lasts.
+- **Indexer unavailable** — the GraphQL endpoint is unset, unreachable, returned errors, or reported no chains. Sent on every run for as long as it lasts, and — unlike the other Envio messages, which are silent — with a notification, since every Envio-backed monitor is blind until it recovers.
 - **Recovered** — sent once when a previously alerting chain catches up.
 
 A re-sync can run for days, so each chain alerts on the way into trouble and then at most once per `--alert-cooldown-hours` (default `6`) instead of every hourly run. The cooldown is tracked per chain, so one lagging chain never suppresses another's first alert. The last-alert timestamp is cached under `YEARN_INDEXER_STALE_ALERT_<chain_id>`.

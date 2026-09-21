@@ -269,5 +269,69 @@ class TestMapleProposalUnwrap(unittest.TestCase):
         self.assertIsNone(_maple_proposal_calls(event, chain_id=1))
 
 
+class TestAiExplanationCallGates(unittest.TestCase):
+    """Empty and short payloads must reach the explainer, including mixed batches."""
+
+    @patch("protocols.timelock.timelock_alerts.explain_transaction")
+    def test_empty_calldata_single_call_reaches_explainer(self, mock_explain: unittest.mock.MagicMock) -> None:
+        from protocols.timelock.timelock_alerts import _get_ai_explanation
+
+        mock_explain.return_value = None
+        event = _make_event(data="0x", value="1000")
+        _get_ai_explanation([event], TIMELOCK_INFO, 1)
+        mock_explain.assert_called_once()
+        self.assertEqual(mock_explain.call_args.kwargs["calldata"], "0x")
+        self.assertEqual(mock_explain.call_args.kwargs["value"], 1000)
+
+    @patch("protocols.timelock.timelock_alerts.explain_transaction")
+    def test_null_value_does_not_crash_explainer(self, mock_explain: unittest.mock.MagicMock) -> None:
+        from protocols.timelock.timelock_alerts import _get_ai_explanation
+
+        mock_explain.return_value = None
+        event = _make_event(data="0x8456cb59")
+        event["value"] = None
+        _get_ai_explanation([event], TIMELOCK_INFO, 1)
+        mock_explain.assert_called_once()
+        self.assertEqual(mock_explain.call_args.kwargs["value"], 0)
+
+    @patch("protocols.timelock.timelock_alerts.explain_transaction")
+    def test_short_calldata_single_call_reaches_explainer(self, mock_explain: unittest.mock.MagicMock) -> None:
+        from protocols.timelock.timelock_alerts import _get_ai_explanation
+
+        mock_explain.return_value = None
+        event = _make_event(data="0x12")
+        _get_ai_explanation([event], TIMELOCK_INFO, 1)
+        mock_explain.assert_called_once()
+        self.assertEqual(mock_explain.call_args.kwargs["calldata"], "0x12")
+
+    @patch("protocols.timelock.timelock_alerts.explain_batch_transaction")
+    def test_mixed_batch_keeps_empty_and_short_entries(self, mock_batch: unittest.mock.MagicMock) -> None:
+        from protocols.timelock.timelock_alerts import _get_ai_explanation
+
+        mock_batch.return_value = None
+        events = [
+            _make_event(data="0x8456cb59", target="0x" + "11" * 20),
+            _make_event(data="0x", target="0x" + "22" * 20, value="1"),
+            _make_event(data="0x12", target="0x" + "33" * 20),
+        ]
+        _get_ai_explanation(events, TIMELOCK_INFO, 1)
+        mock_batch.assert_called_once()
+        calls = mock_batch.call_args.kwargs["calls"]
+        self.assertEqual([c["data"] for c in calls], ["0x8456cb59", "0x", "0x12"])
+        self.assertEqual(calls[1]["value"], "1")
+
+    @patch("protocols.timelock.timelock_alerts.explain_transaction")
+    @patch("protocols.timelock.timelock_alerts.explain_batch_transaction")
+    def test_events_without_target_are_skipped(
+        self, mock_batch: unittest.mock.MagicMock, mock_single: unittest.mock.MagicMock
+    ) -> None:
+        from protocols.timelock.timelock_alerts import _get_ai_explanation
+
+        result = _get_ai_explanation([_make_event(target="", data="0x8456cb59")], TIMELOCK_INFO, 1)
+        self.assertIsNone(result)
+        mock_batch.assert_not_called()
+        mock_single.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

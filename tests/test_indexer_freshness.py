@@ -279,6 +279,20 @@ def test_main_alerts_when_indexer_is_unreachable(
     assert "Envio indexer unavailable" in sent[0]
 
 
+def test_main_unavailable_alert_notifies(monkeypatch: pytest.MonkeyPatch, envio_url: str) -> None:
+    """An unreachable indexer blinds every Envio monitor, so the alert must not be silent."""
+    calls: list[dict] = []
+    monkeypatch.setattr(freshness, "send_envio_error_message", lambda msg, protocol, **kwargs: calls.append(kwargs))
+    monkeypatch.setattr("sys.argv", ["check_indexer_freshness.py"])
+    monkeypatch.setattr(freshness, "request_with_retry", lambda *a, **kw: FakeResponse({"errors": ["down"]}))
+
+    freshness.main()
+
+    assert len(calls) == 1
+    assert calls[0]["disable_notification"] is False
+    assert calls[0]["alert_protocol"] == "yearn-internal"
+
+
 @pytest.mark.parametrize(
     "error",
     [
