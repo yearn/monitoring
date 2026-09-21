@@ -13,10 +13,14 @@ Two kinds of access are collected from the storage scope (``utils.storage_scope`
 
 Root resolution is deliberately bounded. Supported: a numeric literal; a
 ``bytes32`` constant (unique across the bundle); a local ``bytes32`` in the
-accessor; a zero-argument getter whose body is ``return <expr>;`` (every
-override must agree); and three standard hash forms —
+accessor that is never reassigned; a zero-argument getter whose body is
+``return <expr>;`` (every override must agree); and three standard hash forms —
 ``keccak256("id")``, ``bytes32(uint256(keccak256("id")) - 1)`` (EIP-1967) and
 the ERC-7201 formula. Anything else is unresolved, never guessed.
+
+Structs are identified by where they are declared, not by bare name:
+``Vault.Main`` and ``Lib.Main`` are different storage, and matching on ``Main``
+alone let one borrow the other's validation.
 """
 
 import re
@@ -24,8 +28,8 @@ from dataclasses import dataclass
 
 from eth_utils import keccak
 
-from utils.solidity_text import strip_comments
-from utils.storage_scope import ScopedFunction
+from utils.solidity_text import declarations, import_aliases, strip_comments, struct_definitions, struct_member_types
+from utils.storage_scope import ScopedFunction, inheritance_chain
 from utils.verified_contract import VerifiedContract
 
 _SLOT_ASSIGN_RE = re.compile(
@@ -64,12 +68,21 @@ class SlotAssignment:
 
     owner: str
     function: str
-    struct: str | None  # storage struct type, when the pointer is the function's return value
+    struct: str | None  # storage struct type as written, when the pointer is the function's return value
     root: int | None  # resolved root, None when written in an unsupported form
+    struct_owner: str | None = None  # contract/library (or file) declaring the struct, None if unresolved
+    struct_shape: tuple[str, ...] | None = None  # the struct's member types, names dropped
 
     @property
     def where(self) -> str:
         return f"{self.owner}.{self.function}"
+
+    @property
+    def struct_key(self) -> str | None:
+        """``Owner.Struct`` — the declaration this pointer uses, or None if unresolved."""
+        if self.struct is None or self.struct_owner is None:
+            return None
+        return f"{self.struct_owner}.{self.struct.split('.')[-1]}"
 
 
 @dataclass(frozen=True)
@@ -100,19 +113,77 @@ def find_storage_access(contract: VerifiedContract, scope: list[ScopedFunction])
     """Collect slot assignments (with resolved roots) and raw access in ``scope``."""
     constants = _bundle_constants(contract)
     getters = _getters(scope)
+    structs = _StructResolver(contract)
     assignments: list[SlotAssignment] = []
     raw: list[RawAccess] = []
     for scoped in scope:
         body = scoped.fn.body
         returned = _RETURNS_STORAGE_RE.search(scoped.fn.header)
         for pointer, expr in _SLOT_ASSIGN_RE.findall(body):
-            struct = returned.group(1).split(".")[-1] if returned and returned.group(2) == pointer else None
-            root = _resolve(expr, body, constants, getters, 0)
-            assignments.append(SlotAssignment(scoped.owner, scoped.fn.name, struct, root))
+            written = returned.group(1) if returned and returned.group(2) == pointer else None
+            origin, definition = structs.resolve(scoped, written) if written else (None, None)
+            assignments.append(
+                SlotAssignment(
+                    owner=scoped.owner,
+                    function=scoped.fn.name,
+                    struct=written,
+                    root=_resolve(expr, body, constants, getters, 0),
+                    struct_owner=origin,
+                    struct_shape=struct_member_types(definition) if definition else None,
+                )
+            )
         for kind, pattern in _RAW_ACCESS:
             if pattern.search(body):
                 raw.append(RawAccess(scoped.owner, scoped.fn.name, kind))
     return StorageAccess(assignments=assignments, raw=raw)
+
+
+class _StructResolver:
+    """Find which declaration a struct type name refers to, from where it is used.
+
+    Solidity's lookup, bounded: a qualified ``Q.Main`` names ``Q``'s struct (read
+    through the file's import aliases); a bare ``Main`` in a library is the
+    library's own; in a contract it is the one struct of that name anywhere in
+    the inheritance chain (Solidity forbids redeclaring one along a chain);
+    otherwise a file-level struct in the same file. Anything else is unresolved.
+    """
+
+    def __init__(self, contract: VerifiedContract) -> None:
+        self._contract = contract
+        self._chain = inheritance_chain(contract, contract.contract_file) if contract.contract_file else []
+        self._declared_in: dict[str, list[str]] = {}
+        for path, source in contract.sources.items():
+            for name, _ in declarations(source):
+                self._declared_in.setdefault(name, []).append(path)
+
+    def resolve(self, scoped: ScopedFunction, written: str) -> tuple[str | None, str | None]:
+        """(declaring owner, normalized definition) for ``written`` used in ``scoped``."""
+        qualifier, _, name = written.rpartition(".")
+        if qualifier:
+            owner = import_aliases(self._contract.sources[scoped.path]).get(qualifier, qualifier)
+            return self._unique(owner, name)
+        if scoped.owner_kind == "library":
+            found = self._in(scoped.path, scoped.owner, name)
+            if found:
+                return scoped.owner, found
+        elif scoped.owner_kind == "contract":
+            hits = [(owner, d) for owner, path in self._chain if (d := self._in(path, owner, name))]
+            if len(hits) == 1:
+                return hits[0]
+            if hits:
+                return None, None
+        file_level = self._in(scoped.path, None, name)
+        return (scoped.path, file_level) if file_level else (None, None)
+
+    def _unique(self, owner: str, name: str) -> tuple[str | None, str | None]:
+        paths = self._declared_in.get(owner, [])
+        if len(paths) != 1:
+            return None, None
+        found = self._in(paths[0], owner, name)
+        return (owner, found) if found else (None, None)
+
+    def _in(self, path: str, owner: str | None, name: str) -> str | None:
+        return struct_definitions(self._contract.sources[path], owner).get(name)
 
 
 def _bundle_constants(contract: VerifiedContract) -> dict[str, str | None]:
@@ -169,11 +240,30 @@ def _resolve(
     if re.fullmatch(r"[A-Za-z_]\w*", expr):
         local = re.search(_LOCAL_RE_TEMPLATE.format(name=re.escape(expr)), body)
         if local:
+            # The initializer only holds if nothing overwrites the local before
+            # the slot assignment; without flow analysis, any write disqualifies it.
+            if _is_reassigned(expr, body):
+                return None
             return _resolve(local.group(1), body, constants, getters, depth + 1)
         constant = constants.get(expr)
-        if constant:
+        # A constant is never assigned, so any write to this name in the body is
+        # a local (`let ROOT := …`, `uint256 ROOT = …`) shadowing the constant.
+        if constant and not re.search(rf"(?<![\w.$]){re.escape(expr)}\s*(?::=|=(?!=))", body):
             return _resolve(constant, "", constants, getters, depth + 1)
     return None
+
+
+def _is_reassigned(name: str, body: str) -> bool:
+    """True if ``name`` is written anywhere besides its declaration.
+
+    Covers Solidity assignment and compound assignment (``root = …``,
+    ``root += …``), Yul assignment (``root := …``) and tuple destructuring
+    (``(root, x) = …``). The declaration itself accounts for one match.
+    """
+    n = re.escape(name)
+    writes = re.findall(rf"(?<![\w.$]){n}\s*(?::=|(?:<<|>>|[-+*/%&|^])?=(?!=))", body)
+    destructured = re.search(rf"\([^()]*(?<![\w.$]){n}\b[^()]*\)\s*=(?!=)", body)
+    return len(writes) > 1 or destructured is not None
 
 
 def _keccak_int(text: str) -> int:

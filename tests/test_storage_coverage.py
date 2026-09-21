@@ -279,7 +279,9 @@ class TestNamespaceRoots(CoverageTestCase):
         self.assertEqual(diff.storage_status, COMPATIBLE)
         self.assertEqual(diff.namespaces.unchanged, ["erc7201:openzeppelin.storage.Initializable"])
 
-    def test_two_structs_on_one_root_is_incompatible(self) -> None:
+    def test_differently_shaped_structs_on_one_root_are_unresolved_not_a_conflict(self) -> None:
+        """Sharing a root isn't a proven conflict: without knowing how each struct is
+        used, a different shape is an unresolved overlap."""
         target = """
         contract Vault {
             uint256 cap;
@@ -290,7 +292,140 @@ class TestNamespaceRoots(CoverageTestCase):
         }
         """
         diff = self.diff({"src/Vault.sol": PLAIN_TARGET}, {"src/Vault.sol": target})
-        self.assertEqual(diff.storage_status, INCOMPATIBLE)
+        self.assertEqual(diff.storage_status, UNKNOWN)
+        self.assertIn("different shapes", format_impl_diff(diff))
+
+
+RAW_WRITE_LIBRARY = "library Lib { function write() internal { assembly { sstore(0x10, 1) } } }"
+
+
+class TestScopeResolution(CoverageTestCase):
+    """Code reached under another name, or outside any contract, still runs against
+    the proxy's storage (review of #368, second round)."""
+
+    def test_library_imported_under_an_alias_is_followed(self) -> None:
+        target = 'import {Lib as State} from "./Lib.sol"; contract Vault { uint256 cap; function f() external { State.write(); } }'
+        sources = {"src/Vault.sol": target, "src/Lib.sol": RAW_WRITE_LIBRARY}
+        diff = self.diff(sources, sources)
+        self.assertEqual(diff.storage_status, UNKNOWN)
+        self.assertIn("Lib.write", format_impl_diff(diff))
+
+    def test_aliased_using_for_is_followed(self) -> None:
+        target = (
+            'import {Lib as State} from "./Lib.sol"; '
+            "contract Vault { using State for uint256; uint256 cap; function f() external { cap.write(); } }"
+        )
+        sources = {"src/Vault.sol": target, "src/Lib.sol": RAW_WRITE_LIBRARY}
+        self.assertEqual(self.diff(sources, sources).storage_status, UNKNOWN)
+
+    def test_base_contract_imported_under_an_alias_is_inherited(self) -> None:
+        base = "abstract contract Base { function g() external { assembly { sstore(0x10, 1) } } }"
+        target = 'import {Base as B} from "./Base.sol"; contract Vault is B { uint256 cap; }'
+        sources = {"src/Vault.sol": target, "src/Base.sol": base}
+        self.assertEqual(self.diff(sources, sources).storage_status, UNKNOWN)
+
+    def test_reachable_free_function_is_inspected(self) -> None:
+        target = (
+            "function writeRaw() { assembly { sstore(0x10, 1) } } "
+            "contract Vault { uint256 cap; function f() external { writeRaw(); } }"
+        )
+        diff = self.diff({"src/Vault.sol": target}, {"src/Vault.sol": target})
+        self.assertEqual(diff.storage_status, UNKNOWN)
+        self.assertIn("writeRaw", format_impl_diff(diff))
+
+    def test_free_function_imported_under_an_alias_is_followed(self) -> None:
+        helpers = "function writeRaw() { assembly { sstore(0x10, 1) } }"
+        target = 'import {writeRaw as w} from "./Helpers.sol"; contract Vault { uint256 cap; function f() external { w(); } }'
+        sources = {"src/Vault.sol": target, "src/Helpers.sol": helpers}
+        self.assertEqual(self.diff(sources, sources).storage_status, UNKNOWN)
+
+    def test_unreached_free_function_is_ignored(self) -> None:
+        target = "function writeRaw() { assembly { sstore(0x10, 1) } } contract Vault { uint256 cap; }"
+        self.assertEqual(self.diff({"src/Vault.sol": target}, {"src/Vault.sol": target}).storage_status, COMPATIBLE)
+
+
+class TestRootAndStructIdentity(CoverageTestCase):
+    @staticmethod
+    def _namespaced(extra: str) -> dict[str, str]:
+        from utils.storage_access import erc7201_root
+
+        root = f"0x{erc7201_root('app.main'):064x}"
+        return {
+            "src/Vault.sol": f"""
+            contract Vault {{
+                uint256 cap;
+                /// @custom:storage-location erc7201:app.main
+                struct Main {{ uint256 a; }}
+                function _m() private pure returns (Main storage $) {{
+                    bytes32 root = {root};
+                    {extra}
+                    assembly {{ $.slot := root }}
+                }}
+            }}
+            """
+        }
+
+    def test_reassigned_local_root_is_unresolved(self) -> None:
+        """The initializer no longer holds at the assignment, so the root is unknown."""
+        diff = self.diff(self._namespaced(""), self._namespaced("root = bytes32(uint256(root) + 256);"))
+        self.assertEqual(diff.namespaces.unchanged, [])
+        self.assertEqual(diff.storage_status, UNKNOWN)
+
+    def test_reassigned_in_assembly_is_unresolved(self) -> None:
+        source = self._namespaced("assembly { root := add(root, 1) }")
+        diff = self.diff(source, source)
+        self.assertEqual(diff.namespaces.unchanged, [])
+
+    def test_unreassigned_local_root_still_verifies(self) -> None:
+        diff = self.diff(self._namespaced(""), self._namespaced(""))
+        self.assertEqual(diff.namespaces.unchanged, ["erc7201:app.main"])
+        self.assertEqual(diff.storage_status, COMPATIBLE)
+
+    def test_same_named_struct_in_a_library_does_not_borrow_validation(self) -> None:
+        """`Lib.Main` is not `Vault.Main`: matching bare names let an unannotated library
+        struct at the same root ride on the namespace's validation."""
+        from utils.storage_access import erc7201_root
+
+        root = f"0x{erc7201_root('app.main'):064x}"
+
+        def sources(member: str) -> dict[str, str]:
+            return {
+                "src/Vault.sol": f"""
+                contract Vault {{
+                    uint256 cap;
+                    /// @custom:storage-location erc7201:app.main
+                    struct Main {{ uint256 a; }}
+                    function _m() private pure returns (Main storage $) {{ assembly {{ $.slot := {root} }} }}
+                    function f() external {{ Lib.m().x = 1; }}
+                }}
+                """,
+                "src/Lib.sol": f"""
+                library Lib {{
+                    struct Main {{ {member} x; }}
+                    function m() internal pure returns (Main storage $) {{ assembly {{ $.slot := {root} }} }}
+                }}
+                """,
+            }
+
+        diff = self.diff(sources("uint256"), sources("bytes32"))
+        self.assertNotEqual(diff.storage_status, COMPATIBLE)
+        self.assertIn("Lib.m", format_impl_diff(diff))
+
+    def test_identically_shaped_structs_sharing_a_root_are_not_a_conflict(self) -> None:
+        """Two views of the same data at one root is a legitimate pattern."""
+        target = """
+        contract Vault {
+            uint256 cap;
+            struct A { uint256 x; }
+            struct B { uint256 y; }
+            function _a() private pure returns (A storage $) { assembly { $.slot := 0x05 } }
+            function _b() private pure returns (B storage $) { assembly { $.slot := 0x05 } }
+        }
+        """
+        diff = self.diff({"src/Vault.sol": target}, {"src/Vault.sol": target})
+        self.assertNotEqual(diff.storage_status, INCOMPATIBLE)
+        self.assertEqual(diff.namespaces.conflicts, [])
+        self.assertNotIn("different shapes", format_impl_diff(diff))
 
 
 class TestVerdictPrecedence(CoverageTestCase):

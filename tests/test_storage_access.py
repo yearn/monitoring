@@ -91,6 +91,68 @@ class TestRootResolution(unittest.TestCase):
             _roots(_accessor("ROOT", "bytes32 private constant ROOT = 0x07;"), {"src/Other.sol": other}), [None]
         )
 
+    def test_reassigned_local_is_unresolved(self) -> None:
+        """Any write after the declaration means the initializer may not hold at the assignment."""
+        for write in (
+            "root = bytes32(uint256(root) + 256);",
+            "root ^= bytes32(uint256(1));",
+            "assembly { root := add(root, 1) }",
+            "(root, x) = (bytes32(0), 1);",
+        ):
+            with self.subTest(write=write):
+                body = f"""
+                struct S {{ uint256 a; }}
+                function _s() private pure returns (S storage $) {{
+                    bytes32 root = 0x07; uint256 x;
+                    {write}
+                    assembly {{ $.slot := root }}
+                }}
+                """
+                self.assertEqual(_roots(body), [None])
+
+    def test_comparison_is_not_a_reassignment(self) -> None:
+        body = """
+        struct S { uint256 a; }
+        function _s() private pure returns (S storage $) {
+            bytes32 root = 0x07;
+            require(root != bytes32(0) && root == root);
+            assembly { $.slot := root }
+        }
+        """
+        self.assertEqual(_roots(body), [7])
+
+    def test_local_shadowing_a_constant_is_unresolved(self) -> None:
+        """`let ROOT := …` in assembly hides the constant of the same name."""
+        body = """
+        struct S { uint256 a; }
+        bytes32 private constant ROOT = 0x07;
+        function _s() private pure returns (S storage $) { assembly { let ROOT := 0x09 $.slot := ROOT } }
+        """
+        self.assertEqual(_roots(body), [None])
+
+    def test_struct_identity_is_its_declaration(self) -> None:
+        """`Main` in a library and `Main` in the contract are different structs."""
+        sources = {
+            "src/Vault.sol": """
+            contract Vault {
+                struct Main { uint256 a; }
+                function _m() private pure returns (Main storage $) { assembly { $.slot := 0x01 } }
+                function f() external { Lib.m(); }
+            }
+            """,
+            "src/Lib.sol": """
+            library Lib {
+                struct Main { bytes32 x; }
+                function m() internal pure returns (Main storage $) { assembly { $.slot := 0x02 } }
+            }
+            """,
+        }
+        contract = _contract(sources)
+        scope = storage_scope(contract)
+        assert scope is not None
+        keys = sorted((a.struct_key, a.struct_shape) for a in find_storage_access(contract, scope).assignments)
+        self.assertEqual(keys, [("Lib.Main", ("bytes32",)), ("Vault.Main", ("uint256",))])
+
     def test_unsupported_expression_is_unresolved(self) -> None:
         self.assertEqual(_roots(_accessor("add(ROOT, 1)", "bytes32 private constant ROOT = 0x07;")), [None])
 

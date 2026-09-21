@@ -38,6 +38,9 @@ _VISIBILITIES = frozenset({"external", "public", "internal", "private"})
 
 _ANY_DECLARATION_RE = re.compile(rf"(?:^|[\s;}}])(?:abstract\s+)?({_DECL_KINDS})\s+(\w+)\b[^{{;]*\{{")
 
+# `import {A as B, C} from "…";` — the braces hold the imported symbols.
+_IMPORT_SYMBOLS_RE = re.compile(r"\bimport\s*\{([^}]*)\}\s*from\b")
+
 # `type Id is bytes32;` — a user-defined value type, file- or contract-level.
 _UDVT_RE = re.compile(r"\btype\s+(\w+)\s+is\s+(\w+)\s*;")
 
@@ -140,6 +143,76 @@ def declared_names(source: str) -> list[str]:
 def declarations(source: str) -> list[tuple[str, str]]:
     """(name, kind) for every declaration in the file; kind is contract/library/interface."""
     return [(m.group(2), m.group(1)) for m in _ANY_DECLARATION_RE.finditer(strip_noise(source))]
+
+
+def import_aliases(source: str) -> dict[str, str]:
+    """``import {Lib as State, Other} from "…"`` → ``{"State": "Lib"}``.
+
+    Only renamed symbols appear. Whole-file imports (``import * as M``) need no
+    mapping: calls through them read ``M.Lib.f()``, which still names ``Lib``.
+    """
+    aliases: dict[str, str] = {}
+    for match in _IMPORT_SYMBOLS_RE.finditer(strip_noise(source)):
+        for part in match.group(1).split(","):
+            renamed = re.fullmatch(r"\s*([A-Za-z_]\w*)\s+as\s+([A-Za-z_]\w*)\s*", part)
+            if renamed:
+                aliases[renamed.group(2)] = renamed.group(1)
+    return aliases
+
+
+def free_functions(source: str) -> list[FunctionDef]:
+    """Functions declared at file level, outside any contract or library.
+
+    Spans index into ``source`` directly. Scanning the whole file works because
+    members of contracts sit one brace level deeper and are skipped.
+    """
+    return iter_functions(strip_noise(source), strip_comments(source))
+
+
+def struct_definitions(source: str, owner: str | None) -> dict[str, str]:
+    """Struct name → normalized definition, declared in ``owner`` or at file level.
+
+    ``owner=None`` returns only file-level structs. Nested scopes (a struct
+    inside a function) don't exist in Solidity, so depth zero of the scanned
+    region is exactly the declaration level.
+    """
+    cleaned = strip_noise(source)
+    content = strip_comments(source)
+    if owner is None:
+        start, end = 0, len(cleaned)
+    else:
+        span = find_contract_span(source, owner)
+        if span is None:
+            return {}
+        start, end = span
+    depths = _brace_depths(cleaned[start:end])
+    out: dict[str, str] = {}
+    for m in _STRUCT_RE.finditer(cleaned, start, end):
+        relative = m.start() - start
+        if (depths[relative - 1] if relative > 0 else 0) != 0:
+            continue
+        close = _match_brace(cleaned, m.end() - 1)
+        if close is not None:
+            name = re.match(r"struct\s+(\w+)", cleaned[m.start() :])
+            if name:
+                out[name.group(1)] = " ".join(content[m.start() : close + 1].split())
+    return out
+
+
+def struct_member_types(definition: str) -> tuple[str, ...]:
+    """The member types of a normalized struct definition, names dropped.
+
+    ``struct A { uint256 x; mapping(address => bool) m; }`` →
+    ``("uint256", "mapping(address => bool)")``. Two structs with equal member
+    types lay their data out identically.
+    """
+    body = definition[definition.find("{") + 1 : definition.rfind("}")]
+    types = []
+    for member in body.split(";"):
+        member = member.strip()
+        if member:
+            types.append(" ".join(re.sub(r"\s*\b[A-Za-z_]\w*\s*$", "", member).split()))
+    return tuple(types)
 
 
 def value_type_declarations(source: str) -> list[tuple[str, str]]:

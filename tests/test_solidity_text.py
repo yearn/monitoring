@@ -7,12 +7,16 @@ from utils.solidity_text import (
     declared_names,
     declares_contract,
     find_contract_body,
+    free_functions,
+    import_aliases,
     iter_functions,
     namespaced_structs,
     normalize_params,
     parent_names,
     strip_comments,
     strip_noise,
+    struct_definitions,
+    struct_member_types,
 )
 
 SOURCE = """
@@ -285,6 +289,43 @@ class TestNamespacedStructs(unittest.TestCase):
         source = self.SOURCE + "\ncontract Other {}"
         self.assertEqual(namespaced_structs(source, "Other"), {})
         self.assertEqual(namespaced_structs(source, "Missing"), {})
+
+
+class TestFileLevelDeclarations(unittest.TestCase):
+    SOURCE = """
+    import {Lib as State, Other} from "./Lib.sol";
+    import "./Whole.sol" as Whole;
+
+    struct Shared { uint256 a; }
+
+    function helper(uint256 x) pure returns (uint256) { return x; }
+
+    contract C {
+        struct Inner { address owner; mapping(address => bool) allowed; }
+        function member() external {}
+    }
+    """
+
+    def test_import_aliases_map_only_renamed_symbols(self) -> None:
+        self.assertEqual(import_aliases(self.SOURCE), {"State": "Lib"})
+
+    def test_free_functions_exclude_contract_members(self) -> None:
+        self.assertEqual([f.signature for f in free_functions(self.SOURCE)], ["helper(uint256)"])
+
+    def test_struct_definitions_are_scoped(self) -> None:
+        self.assertEqual(list(struct_definitions(self.SOURCE, None)), ["Shared"])
+        self.assertEqual(list(struct_definitions(self.SOURCE, "C")), ["Inner"])
+        self.assertEqual(struct_definitions(self.SOURCE, "Missing"), {})
+
+    def test_member_types_drop_names(self) -> None:
+        definition = struct_definitions(self.SOURCE, "C")["Inner"]
+        self.assertEqual(struct_member_types(definition), ("address", "mapping(address => bool)"))
+
+    def test_member_names_do_not_change_the_shape(self) -> None:
+        self.assertEqual(
+            struct_member_types("struct A { uint256 x; bool y; }"),
+            struct_member_types("struct B { uint256 p; bool q; }"),
+        )
 
 
 class TestNormalizeParams(unittest.TestCase):

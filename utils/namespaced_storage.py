@@ -8,9 +8,14 @@ against the proxy's storage (``utils.storage_scope``) and sorts what it finds
 into three buckets:
 
 - **conflicts** — proven incompatibilities: a storage root that moved between
-  versions, or two different structs aimed at the same root;
-- **gaps** (``unvalidated``) — storage that exists but can't be validated here;
+  versions;
+- **gaps** (``unvalidated``) — storage that exists but can't be validated here,
+  including differently shaped structs sharing a root (an overlap that may or
+  may not matter, depending on use this can't follow);
 - **unchanged** — ERC-7201 namespaces proven identical.
+
+Structs are matched by where they are declared (``Owner.Struct``), never by
+bare name: a same-named struct elsewhere is different storage.
 
 A namespace is proven unchanged only when, on both sides, it has the same id,
 an identical struct definition over elementary member types (a user-defined
@@ -44,6 +49,7 @@ class Namespace:
     owners: tuple[str, ...]  # contract(s)/library(ies) declaring it — more than one is ambiguous
     definitions: tuple[str, ...]  # normalized struct text per declaration
     roots: tuple[int | None, ...] = ()  # root of every accessor returning this struct; None = unresolved
+    struct_keys: tuple[str, ...] = ()  # `Owner.Struct` of each declaration — identity, never the bare name
 
 
 @dataclass(frozen=True)
@@ -72,12 +78,17 @@ def compare_non_positional(old: VerifiedContract, new: VerifiedContract) -> Name
     new_ns = _collect(new, new_scope, new_access)
 
     namespaces = compare_namespaces(old_ns, new_ns)
-    namespaced_structs_ = {_struct_name(d) for ns in (*old_ns.values(), *new_ns.values()) for d in ns.definitions}
-    accessors = _compare_accessors(old_access, new_access, namespaced_structs_)
+    namespaced_keys = {key for ns in (*old_ns.values(), *new_ns.values()) for key in ns.struct_keys}
+    accessors = _compare_accessors(old_access, new_access, namespaced_keys)
     return NamespaceComparison(
         unchanged=namespaces.unchanged,
-        unvalidated=namespaces.unvalidated + accessors.unvalidated + _raw_gaps(old_access, new_access),
-        conflicts=namespaces.conflicts + accessors.conflicts + _shared_roots(new_access),
+        unvalidated=(
+            namespaces.unvalidated
+            + accessors.unvalidated
+            + _raw_gaps(old_access, new_access)
+            + _shared_roots(new_access)
+        ),
+        conflicts=namespaces.conflicts + accessors.conflicts,
     )
 
 
@@ -124,12 +135,13 @@ def _collect(contract: VerifiedContract, scope: list[ScopedFunction], access: St
 
     namespaces: dict[str, Namespace] = {}
     for namespace_id, entries in found.items():
-        structs = {_struct_name(definition) for _, definition in entries}
+        keys = tuple(f"{owner}.{_struct_name(definition)}" for owner, definition in entries)
         namespaces[namespace_id] = Namespace(
             namespace_id=namespace_id,
             owners=tuple(owner for owner, _ in entries),
             definitions=tuple(definition for _, definition in entries),
-            roots=tuple(a.root for a in access.assignments if a.struct in structs),
+            roots=tuple(a.root for a in access.assignments if a.struct_key in keys),
+            struct_keys=keys,
         )
     return namespaces
 
@@ -186,9 +198,14 @@ def _resolved(roots: tuple[int | None, ...]) -> set[int] | None:
 
 
 def _compare_accessors(old: StorageAccess, new: StorageAccess, namespaced: set[str]) -> NamespaceComparison:
-    """Accessors not tied to an ERC-7201 namespace: pair by owner and function."""
-    old_by = {a.where: a for a in old.assignments if a.struct not in namespaced}
-    new_by = {a.where: a for a in new.assignments if a.struct not in namespaced}
+    """Accessors not tied to an ERC-7201 namespace: pair by owner and function.
+
+    Tied means the accessor's struct resolves to the namespace's own
+    declaration. A same-named struct declared elsewhere — or one whose
+    declaration can't be resolved — is a separate accessor and stays a gap.
+    """
+    old_by = {a.where: a for a in old.assignments if a.struct_key not in namespaced}
+    new_by = {a.where: a for a in new.assignments if a.struct_key not in namespaced}
     unvalidated: list[str] = []
     conflicts: list[str] = []
     for where in sorted(set(old_by) | set(new_by)):
@@ -200,7 +217,7 @@ def _compare_accessors(old: StorageAccess, new: StorageAccess, namespaced: set[s
             )
             continue
         present = after if after is not None else before
-        subject = present.struct if present is not None else None
+        subject = (present.struct_key or present.struct) if present is not None else None
         what = f"struct {subject}" if subject else "a storage pointer"
         unvalidated.append(f"storage accessor {where} aims {what} at a custom root; its layout is not validated")
     return NamespaceComparison(unvalidated=unvalidated, conflicts=conflicts)
@@ -219,16 +236,29 @@ def _raw_gaps(old: StorageAccess, new: StorageAccess) -> list[str]:
 
 
 def _shared_roots(access: StorageAccess) -> list[str]:
-    """Two different structs aimed at the same resolved root corrupt each other."""
-    by_root: dict[int, set[str]] = {}
+    """Different structs aimed at one root: an overlap to resolve, not a proven conflict.
+
+    Two views of the same data at one root is a legitimate pattern, so structs
+    with identical member types sharing a root are fine. Different (or
+    unresolvable) shapes might corrupt each other — or might never be used
+    together; without following how each is used there is no telling, so it is
+    reported as unresolved rather than as a conflict.
+    """
+    by_root: dict[int, dict[str, tuple[str, ...] | None]] = {}
     for a in access.assignments:
         if a.root is not None and a.struct:
-            by_root.setdefault(a.root, set()).add(a.struct)
-    return [
-        f"storage root {_hex({root})} is shared by different structs ({', '.join(sorted(structs))})"
-        for root, structs in sorted(by_root.items())
-        if len(structs) > 1
-    ]
+            by_root.setdefault(a.root, {})[a.struct_key or a.struct] = a.struct_shape
+    gaps: list[str] = []
+    for root, shapes in sorted(by_root.items()):
+        if len(shapes) < 2:
+            continue
+        if None not in shapes.values() and len(set(shapes.values())) == 1:
+            continue
+        gaps.append(
+            f"storage root {_hex({root})} is shared by structs with different shapes "
+            f"({', '.join(sorted(shapes))}); whether they overlap in use is not resolved"
+        )
+    return gaps
 
 
 def _struct_name(definition: str) -> str:
