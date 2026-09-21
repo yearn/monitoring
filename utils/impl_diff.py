@@ -11,8 +11,11 @@ evidence that grounds the alert, in four separated categories:
   internal/private members added or removed. Comparing only the functions both
   sides share would miss behavior *moved* into a new helper, or a deleted hook —
   neither of which has an ABI footprint.
-- **Storage compatibility** — COMPATIBLE / INCOMPATIBLE / UNKNOWN, from the
-  compiler storage layouts Sourcify serves for both implementations.
+- **Storage compatibility** — COMPATIBLE / INCOMPATIBLE / UNKNOWN, combining
+  the compiler storage layouts Sourcify serves for both implementations with
+  the storage those layouts can't describe (namespaces, custom-root accessors,
+  raw ``sstore``, ``delegatecall``). A proven conflict anywhere wins; anything
+  unseen makes it UNKNOWN; the positional result is shown on its own as well.
 - **Unvalidated items** — everything the above cannot see, stated explicitly so
   silence is never read as safety.
 
@@ -30,12 +33,12 @@ this process. A section that fails its own check is dropped rather than shown.
 
 import difflib
 import threading
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 from utils.abi_surface import AbiSurfaceDiff, abi_functions, diff_abi_surface
 from utils.logger import get_logger
-from utils.namespaced_storage import NamespaceComparison, collect_namespaces, compare_namespaces
-from utils.solidity_text import FunctionDef, contract_functions
+from utils.namespaced_storage import NamespaceComparison, compare_non_positional
+from utils.solidity_text import FunctionDef, contract_functions, value_type_declarations
 from utils.source_context import fetch_verified_contract
 from utils.sourcify_layout import fetch_storage_layout
 from utils.storage_layout import LayoutComparison, StorageCompatibility, compare_storage_layouts
@@ -60,10 +63,6 @@ _UNVALIDATED_INDIRECT = (
     "even when the target's own function bodies are unchanged"
 )
 _UNVALIDATED_MODIFIERS = "source-level modifiers are shown as written; they are not an authorization proof"
-_UNVALIDATED_NAMESPACED = (
-    "namespaced storage reached through a library rather than inheritance, or declared without an "
-    "ERC-7201 annotation, was not checked"
-)
 
 # Added-surface sets seen in this process, so the same "additions" can't be
 # reported for two different contracts (the failure that started this).
@@ -133,10 +132,12 @@ class ImplDiff:
     unvalidated: list[str] = field(default_factory=list)
     surface_note: str = ""  # cross-diff provenance note, empty when nothing to flag
     namespaces: NamespaceComparison = field(default_factory=NamespaceComparison)
+    # Positional and non-positional storage combined; ``storage`` alone is positional.
+    storage_verdict: StorageCompatibility = StorageCompatibility.UNKNOWN
 
     @property
     def storage_status(self) -> StorageCompatibility:
-        return self.storage.status
+        return self.storage_verdict
 
 
 def diff_implementations(old_addr: str, new_addr: str, chain_id: int) -> ImplDiff | None:
@@ -160,10 +161,9 @@ def diff_implementations(old_addr: str, new_addr: str, chain_id: int) -> ImplDif
     if not bodies.is_empty:
         unvalidated.append(_UNVALIDATED_MODIFIERS)
 
-    # Namespaces that couldn't be validated are listed in the storage section,
-    # beside the verdict they hold back; this only states what is never checked.
-    storage, namespaces = _compare_storage(old, new, old_addr, new_addr, chain_id)
-    unvalidated.append(_UNVALIDATED_NAMESPACED)
+    # Storage coverage gaps go in the storage section, beside the verdict they
+    # hold back — not in Unvalidated items, which never affect a verdict.
+    storage, namespaces, storage_verdict = _compare_storage(old, new, old_addr, new_addr, chain_id)
 
     surface_note = _provenance_note(new, surface)
     violations = _consistency_violations(old, new, surface, bodies)
@@ -185,6 +185,7 @@ def diff_implementations(old_addr: str, new_addr: str, chain_id: int) -> ImplDif
         unvalidated=unvalidated,
         surface_note=surface_note,
         namespaces=namespaces,
+        storage_verdict=storage_verdict,
     )
 
 
@@ -204,27 +205,43 @@ def _compare_storage(
     old_addr: str,
     new_addr: str,
     chain_id: int,
-) -> tuple[LayoutComparison, NamespaceComparison]:
-    """Compare positional layouts, and hold COMPATIBLE back for namespaces.
+) -> tuple[LayoutComparison, NamespaceComparison, StorageCompatibility]:
+    """Compare positional and non-positional storage, and combine the verdict.
 
-    A matching positional layout says nothing about ERC-7201 namespaces, which
-    never appear in it. So COMPATIBLE also requires every namespace the deployed
-    contract or its bases declare to be provably unchanged; otherwise the
-    verdict drops to UNKNOWN, keeping the positional detail. A positional
-    *conflict* is still a real conflict and is reported as such.
+    Precedence: any proven conflict, in either part, is INCOMPATIBLE; otherwise
+    anything the check could not see — an unresolved type, a namespace it
+    couldn't prove, a raw ``sstore``, a ``delegatecall`` — is UNKNOWN; only
+    full coverage is COMPATIBLE. The positional result is returned as-is so it
+    stays visible on its own even when the combined verdict is UNKNOWN.
     """
-    comparison = compare_storage_layouts(
+    positional = compare_storage_layouts(
         fetch_storage_layout(chain_id, old_addr),
         fetch_storage_layout(chain_id, new_addr),
+        _value_types(old),
+        _value_types(new),
     )
-    namespaces = compare_namespaces(collect_namespaces(old), collect_namespaces(new))
-    if comparison.status is StorageCompatibility.COMPATIBLE and not namespaces.is_validated:
-        comparison = replace(
-            comparison,
-            status=StorageCompatibility.UNKNOWN,
-            reason="positional layout matches, but namespaced storage could not be validated",
-        )
-    return comparison, namespaces
+    non_positional = compare_non_positional(old, new)
+    if positional.conflicts or non_positional.conflicts:
+        verdict = StorageCompatibility.INCOMPATIBLE
+    elif positional.status is not StorageCompatibility.COMPATIBLE or not non_positional.is_validated:
+        verdict = StorageCompatibility.UNKNOWN
+    else:
+        verdict = StorageCompatibility.COMPATIBLE
+    return positional, non_positional, verdict
+
+
+def _value_types(contract: VerifiedContract) -> dict[str, str | None]:
+    """Custom value type → underlying type, declared across this side's sources.
+
+    A name declared once — or several times over the same type — resolves. A
+    name declared over *different* types is ambiguous (None): without lexical
+    scope resolution there is no telling which declaration a slot uses.
+    """
+    underlying: dict[str, set[str]] = {}
+    for source in contract.sources.values():
+        for name, base in value_type_declarations(source):
+            underlying.setdefault(name, set()).add(base)
+    return {name: next(iter(bases)) if len(bases) == 1 else None for name, bases in underlying.items()}
 
 
 def _diff_bodies(old: VerifiedContract, new: VerifiedContract) -> BodyDiff:
@@ -472,39 +489,61 @@ def _fmt_body_change(marker: str, change: BodyChange) -> str:
     return head + "\n" + "\n".join(f"        {line}" for line in change.diff.splitlines())
 
 
-def _fmt_storage(diff: ImplDiff) -> list[str]:
-    """Render the storage section, including why a verdict is unavailable."""
-    storage = diff.storage
-    namespace_lines = _fmt_namespaces(diff.namespaces)
-    if storage.status is StorageCompatibility.UNKNOWN:
-        reason = storage.reason or STORAGE_UNKNOWN_NOTE
-        return [
-            f"Storage compatibility: UNKNOWN — {reason}.",
-            f"  {STORAGE_UNKNOWN_NOTE.capitalize()}.",
-            *namespace_lines,
-        ]
+_VERDICT_REASONS = {
+    StorageCompatibility.INCOMPATIBLE: "a conflict is proven (listed below)",
+    StorageCompatibility.UNKNOWN: "storage coverage is incomplete (gaps listed below)",
+    StorageCompatibility.COMPATIBLE: "positional layout and all detected non-positional storage validated",
+}
 
-    lines = [f"Storage compatibility: {storage.status.value} (compiler layouts, both implementations verified)."]
-    lines.extend(namespace_lines)
-    if storage.conflicts:
-        lines.append("  Conflicting slots:")
-        for conflict in storage.conflicts[:MAX_LISTED_CONFLICTS]:
-            lines.append(f"    {conflict}")
-        if len(storage.conflicts) > MAX_LISTED_CONFLICTS:
-            lines.append(f"    … and {len(storage.conflicts) - MAX_LISTED_CONFLICTS} more")
-    for gap in storage.consumed_gaps:
-        lines.append(f"  Reserved space consumed: {gap}")
-    for entry in storage.added:
-        lines.append(f"  + {entry}")
-    for before, after in storage.renamed:
-        lines.append(f"  renamed (same slot, same type): {before.label} → {after.label}")
+
+def _fmt_storage(diff: ImplDiff) -> list[str]:
+    """Render the combined verdict, then the positional and non-positional parts.
+
+    The positional result gets its own line even when the combined verdict is
+    UNKNOWN: "every declared variable kept its slot" is still worth knowing when
+    some other storage couldn't be checked.
+    """
+    verdict = diff.storage_verdict
+    lines = [f"Storage compatibility: {verdict.value} — {_VERDICT_REASONS[verdict]}."]
+    if verdict is StorageCompatibility.UNKNOWN:
+        lines.append(f"  {STORAGE_UNKNOWN_NOTE.capitalize()}.")
+    lines.extend(_fmt_positional(diff.storage))
+    lines.extend(_fmt_non_positional(diff.namespaces))
     return lines
 
 
-def _fmt_namespaces(namespaces: NamespaceComparison) -> list[str]:
-    """Which ERC-7201 namespaces were proven unchanged, and which were not."""
-    lines = [f"  Namespaced storage unchanged (ERC-7201): {namespace}" for namespace in namespaces.unchanged]
-    lines.extend(f"  Namespaced storage NOT validated — {reason}" for reason in namespaces.unvalidated)
+def _fmt_positional(storage: LayoutComparison) -> list[str]:
+    """The compiler-layout comparison, with its own status."""
+    status = storage.status.value
+    if storage.status is StorageCompatibility.UNKNOWN and storage.reason:
+        status += f" — {storage.reason}"
+    lines = [f"  Positional layout (compiler): {status}"]
+    if storage.conflicts:
+        lines.append("    Conflicting slots:")
+        lines.extend(f"      {conflict}" for conflict in storage.conflicts[:MAX_LISTED_CONFLICTS])
+        if len(storage.conflicts) > MAX_LISTED_CONFLICTS:
+            lines.append(f"      … and {len(storage.conflicts) - MAX_LISTED_CONFLICTS} more")
+    lines.extend(f"    Unresolved: {gap}" for gap in storage.gaps)
+    lines.extend(f"    Reserved space consumed: {gap}" for gap in storage.consumed_gaps)
+    lines.extend(f"    + {entry}" for entry in storage.added)
+    for before, after in storage.renamed:
+        lines.append(f"    renamed (same slot, same type): {before.label} → {after.label}")
+    for before, after in storage.retyped:
+        lines.append(
+            f"    retyped (same slot, same representation): {after.label} {before.type_label} → {after.type_label}"
+        )
+    return lines
+
+
+def _fmt_non_positional(namespaces: NamespaceComparison) -> list[str]:
+    """Storage outside the compiler layout: what was proven, and what couldn't be."""
+    lines = [f"  Namespaced storage unchanged (ERC-7201, root verified): {n}" for n in namespaces.unchanged]
+    if namespaces.conflicts:
+        lines.append("  Non-positional conflicts:")
+        lines.extend(f"    {conflict}" for conflict in namespaces.conflicts)
+    if namespaces.unvalidated:
+        lines.append("  Coverage gaps (storage this check cannot see):")
+        lines.extend(f"    - {gap}" for gap in namespaces.unvalidated)
     return lines
 
 

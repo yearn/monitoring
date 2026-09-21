@@ -313,20 +313,55 @@ class TestTypeIdentity(unittest.TestCase):
             with self.subTest(old=old_type, new=new_type):
                 self.assertEqual(self._retype(old_type, new_type).status, StorageCompatibility.COMPATIBLE)
 
-    def test_named_types_ignore_ast_ids_but_not_names(self) -> None:
-        self.assertEqual(
-            self._retype("t_userDefinedValueType(Id)6519", "t_userDefinedValueType(Id)6600").status,
-            StorageCompatibility.COMPATIBLE,
-        )
+    def test_enums_ignore_ast_ids(self) -> None:
         self.assertEqual(self._retype("t_enum(Status)3", "t_enum(Status)9").status, StorageCompatibility.COMPATIBLE)
-        self.assertEqual(
-            self._retype("t_userDefinedValueType(Id)6519", "t_userDefinedValueType(Other)11").status,
-            StorageCompatibility.INCOMPATIBLE,
+
+
+class TestValueTypeResolution(unittest.TestCase):
+    """A custom value type is its underlying type, resolved from each side's source.
+
+    Regression: value types were matched by *name*. `Id` redeclared over a
+    different type of the same width passed, while `Id` unwrapped to the very
+    type it wraps was flagged.
+    """
+
+    @staticmethod
+    def _compare(old_type: str, new_type: str, old_types=None, new_types=None):
+        return compare_storage_layouts(
+            layout((0, 0, "x", old_type)), layout((0, 0, "x", new_type)), old_types, new_types
         )
 
-    def test_udvt_unwrapped_to_its_underlying_type_is_flagged(self) -> None:
-        """The layout doesn't say what `Id` wraps, so `Id` → `bytes32` can't be proven equal."""
-        result = self._retype("t_userDefinedValueType(Id)6519", "t_bytes32")
+    def test_unwrap_to_the_underlying_type_is_compatible_and_reported(self) -> None:
+        result = self._compare("t_userDefinedValueType(Id)6519", "t_bytes32", {"Id": "bytes32"}, {})
+        self.assertEqual(result.status, StorageCompatibility.COMPATIBLE)
+        self.assertEqual([(a.type_label, b.type_label) for a, b in result.retyped], [("Id", "bytes32")])
+
+    def test_same_name_over_a_different_underlying_type_is_incompatible(self) -> None:
+        result = self._compare(
+            "t_userDefinedValueType(Id)6519", "t_userDefinedValueType(Id)6600", {"Id": "bytes32"}, {"Id": "uint256"}
+        )
+        self.assertEqual(result.status, StorageCompatibility.INCOMPATIBLE)
+
+    def test_different_names_over_the_same_type_are_compatible(self) -> None:
+        result = self._compare(
+            "t_userDefinedValueType(Id)6519", "t_userDefinedValueType(Other)11", {"Id": "bytes32"}, {"Other": "bytes32"}
+        )
+        self.assertEqual(result.status, StorageCompatibility.COMPATIBLE)
+
+    def test_unresolved_type_is_a_gap_even_when_names_match(self) -> None:
+        result = self._compare("t_userDefinedValueType(Id)6519", "t_userDefinedValueType(Id)6600")
+        self.assertEqual(result.status, StorageCompatibility.UNKNOWN)
+        self.assertIn("could not be resolved", result.gaps[0])
+
+    def test_ambiguous_declaration_is_a_gap(self) -> None:
+        result = self._compare(
+            "t_userDefinedValueType(Id)6519", "t_userDefinedValueType(Id)6600", {"Id": None}, {"Id": None}
+        )
+        self.assertEqual(result.status, StorageCompatibility.UNKNOWN)
+
+    def test_resize_is_proven_even_when_unresolved(self) -> None:
+        """Width is compiler-reported, so a resize needs no type resolution."""
+        result = self._compare("t_userDefinedValueType(Id)6519", "t_uint128")
         self.assertEqual(result.status, StorageCompatibility.INCOMPATIBLE)
 
 

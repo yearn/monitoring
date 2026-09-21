@@ -14,6 +14,7 @@ from utils.impl_diff import (
     reset_provenance_registry,
 )
 from utils.sourcify_layout import StorageLayout
+from utils.storage_access import erc7201_root
 from utils.storage_layout import StorageCompatibility
 from utils.verified_contract import parse_etherscan_entry
 
@@ -382,11 +383,16 @@ class TestStorageVerdicts(ImplDiffTestCase):
 
 
 def _namespaced_base(members: str, namespace: str = "yearn.storage.Base") -> str:
-    """A base declaring an ERC-7201 namespace the standard way: on the struct."""
+    """A base declaring an ERC-7201 namespace the standard way: annotated struct plus an
+    accessor at the root the annotation defines."""
     return f"""
     abstract contract Base {{
         /// @custom:storage-location erc7201:{namespace}
         struct BaseStorage {{ {members} }}
+
+        function _getBaseStorage() private pure returns (BaseStorage storage $) {{
+            assembly {{ $.slot := 0x{erc7201_root(namespace):064x} }}
+        }}
 
         function setProfitMaxUnlockTime(uint256 t) external virtual;
     }}
@@ -412,7 +418,7 @@ class TestNamespacedStorage(ImplDiffTestCase):
         diff = self.run_diff()
         assert diff is not None
         self.assertEqual(diff.storage_status, StorageCompatibility.UNKNOWN)
-        self.assertIn("namespaced storage could not be validated", diff.storage.reason)
+        self.assertEqual(diff.storage.status, StorageCompatibility.COMPATIBLE, "positional result kept")
         self.assertIn("struct definition changed", format_impl_diff(diff))
 
     def test_positional_detail_survives_the_downgrade(self) -> None:
@@ -429,7 +435,7 @@ class TestNamespacedStorage(ImplDiffTestCase):
         assert diff is not None
         self.assertEqual(diff.storage_status, StorageCompatibility.COMPATIBLE)
         self.assertEqual(diff.namespaces.unchanged, ["erc7201:openzeppelin.storage.Initializable"])
-        self.assertIn("Namespaced storage unchanged (ERC-7201)", format_impl_diff(diff))
+        self.assertIn("Namespaced storage unchanged (ERC-7201, root verified)", format_impl_diff(diff))
 
     def test_namespace_in_the_target_body_is_found(self) -> None:
         body = "/// @custom:storage-location erc7201:yearn.storage.Vault\n    struct VaultStorage { uint256 x; }\n"

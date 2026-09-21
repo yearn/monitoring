@@ -3,8 +3,10 @@
 import unittest
 
 from utils.namespaced_storage import collect_namespaces, compare_namespaces
+from utils.storage_access import erc7201_root
 from utils.verified_contract import VerifiedContract
 
+# OpenZeppelin v5's shape, including its published root constant.
 INITIALIZABLE = """
 abstract contract Initializable {
     /**
@@ -16,6 +18,12 @@ abstract contract Initializable {
         /// @dev Indicates that the contract has been initialized.
         uint64 _initialized;
         bool _initializing;
+    }
+
+    bytes32 private constant INITIALIZABLE_STORAGE = 0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00;
+
+    function _getInitializableStorage() private pure returns (InitializableStorage storage $) {
+        assembly { $.slot := INITIALIZABLE_STORAGE }
     }
 }
 """
@@ -76,17 +84,41 @@ class TestCollectNamespaces(unittest.TestCase):
 
 
 class TestCompareNamespaces(unittest.TestCase):
-    def _namespaces(self, members: str, owner_source: str | None = None):
-        source = (
-            owner_source
-            or f"""
+    def _namespaces(self, members: str, root: int | None = None):
+        """A base declaring `app.main` with an accessor at ``root`` (the correct one by default)."""
+        root = erc7201_root("app.main") if root is None else root
+        source = f"""
         abstract contract Base {{
             /// @custom:storage-location erc7201:app.main
             struct Main {{ {members} }}
+
+            function _main() private pure returns (Main storage $) {{
+                assembly {{ $.slot := 0x{root:064x} }}
+            }}
         }}
         """
-        )
         return collect_namespaces(_contract({"src/Vault.sol": "contract Vault is Base {}", "src/Base.sol": source}))
+
+    def test_moved_root_is_a_conflict(self) -> None:
+        result = compare_namespaces(self._namespaces("uint256 a;", root=1), self._namespaces("uint256 a;", root=2))
+        self.assertIn("storage root changed", result.conflicts[0])
+        self.assertEqual(result.unchanged, [])
+
+    def test_root_not_matching_the_annotation_is_not_validated(self) -> None:
+        ns = self._namespaces("uint256 a;", root=1)
+        result = compare_namespaces(ns, ns)
+        self.assertIn("does not match its annotation", result.unvalidated[0])
+
+    def test_namespace_without_an_accessor_is_not_validated(self) -> None:
+        """Without an accessor, the root actually in use is unknown."""
+        source = """
+        abstract contract Base {
+            /// @custom:storage-location erc7201:app.main
+            struct Main { uint256 a; }
+        }
+        """
+        ns = collect_namespaces(_contract({"src/Vault.sol": "contract Vault is Base {}", "src/Base.sol": source}))
+        self.assertIn("no accessor", compare_namespaces(ns, ns).unvalidated[0])
 
     def test_identical_elementary_namespace_is_unchanged(self) -> None:
         result = compare_namespaces(

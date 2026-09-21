@@ -136,9 +136,12 @@ Critical rules for parameter interpretation:
   didn't list it under. "Target-defined function changes" is where behavior lives: a changed
   body means the same signature now runs different code, and an added or removed
   internal/private member means logic moved or was deleted — say what the shown code does
-  rather than just naming it. "Storage compatibility: UNKNOWN" means the
-  layout was NOT checked: do not call the upgrade storage-safe, and do not call it unsafe
-  either. Treat every "Unvalidated items" entry as an unchecked area, not a clean result.
+  rather than just naming it. "Storage compatibility" is the combined verdict: INCOMPATIBLE
+  means a conflict is proven — say which; UNKNOWN means some storage could not be checked
+  (listed under "Coverage gaps") — do not call the upgrade storage-safe, and do not call it
+  unsafe either. A "Positional layout: COMPATIBLE" line under an UNKNOWN verdict means the
+  declared variables kept their slots, nothing more. Treat every "Unvalidated items" entry
+  as an unchecked area, not a clean result.
   Internal or private functions are not a governance control surface, and a modifier shown
   in source text is not proof of who may call something.
 - When a Safety Checks section is provided, treat each item as a verified hard fact

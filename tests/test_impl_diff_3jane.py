@@ -200,28 +200,46 @@ class ThreeJaneDiffTest(unittest.TestCase):
         for signature in ("setSupplyCapExempt(address,bool)", "setRingFenceConduit(address,bool)"):
             self.assertNotIn(signature, format_impl_diff(self.susd3))
 
-    def test_usd3_storage_is_compatible_from_compiler_layouts(self) -> None:
+    def test_usd3_positional_layout_is_compatible(self) -> None:
         """Slots 0–62 hold; three new vars take 63–65; the gap shrinks 40 → 37 at slot 66."""
         assert self.usd3 is not None
-        self.assertEqual(self.usd3.storage_status, StorageCompatibility.COMPATIBLE)
+        self.assertEqual(self.usd3.storage.status, StorageCompatibility.COMPATIBLE)
         self.assertEqual(self.usd3.storage.conflicts, [])
         self.assertEqual(
             [e.label for e in self.usd3.storage.added],
             ["supplyCapExempt", "ringFenceConduit", "ringFencedLiquidity", "__gap"],
         )
 
-    def test_inherited_initializable_namespace_is_found_and_proven_unchanged(self) -> None:
+    def test_inherited_initializable_namespace_is_found_and_root_verified(self) -> None:
         """Both contracts inherit OZ v5 Initializable, whose ERC-7201 struct sits inside the base.
 
-        It must be detected (checking only the contract's own natspec missed it)
-        and, being identical on both sides, must not hold USD3 back from COMPATIBLE.
+        It must be detected (checking only the contract's own natspec missed it),
+        and its root verified through OZ's `_initializableStorageSlot()` getter.
         """
         for diff in (self.usd3, self.susd3):
             assert diff is not None
             self.assertEqual(diff.namespaces.unchanged, ["erc7201:openzeppelin.storage.Initializable"])
-            self.assertEqual(diff.namespaces.unvalidated, [])
+            self.assertFalse(any("Initializable" in gap for gap in diff.namespaces.unvalidated))
+
+    def test_usd3_combined_verdict_is_unknown_until_storage_coverage_is_complete(self) -> None:
+        """USD3 writes storage the layout can't describe, so COMPATIBLE would overclaim.
+
+        Its positional layout is compatible, but USD3 itself sload/sstores computed
+        slots, its base delegatecalls TokenizedStrategy (which runs against the same
+        proxy storage), and a used library aims a struct at a custom root.
+        """
         assert self.usd3 is not None
-        self.assertEqual(self.usd3.storage_status, StorageCompatibility.COMPATIBLE)
+        self.assertEqual(self.usd3.storage_status, StorageCompatibility.UNKNOWN)
+        self.assertEqual(self.usd3.namespaces.conflicts, [])
+        gaps = "\n".join(self.usd3.namespaces.unvalidated)
+        self.assertIn("USD3._burnSharesFromSusd3", gaps)
+        self.assertIn("(sload/sstore)", gaps)
+        self.assertIn("BaseStrategyUpgradeable.fallback", gaps)
+        self.assertIn("(delegatecall)", gaps)
+        self.assertIn("TokenizedStrategyStorageLib.getStrategyStorage", gaps)
+        rendered = format_impl_diff(self.usd3)
+        self.assertIn("Storage compatibility: UNKNOWN", rendered)
+        self.assertIn("Positional layout (compiler): COMPATIBLE", rendered)
 
     def test_renames_at_the_same_slot_are_not_incompatible(self) -> None:
         """USD3 renamed four variables to `__deprecated_*` without moving them."""
@@ -229,7 +247,7 @@ class ThreeJaneDiffTest(unittest.TestCase):
         renames = {before.label: after.label for before, after in self.usd3.storage.renamed}
         self.assertEqual(renames["whitelistEnabled"], "__deprecated_whitelistEnabled")
         self.assertEqual(renames["depositTimestamp"], "__deprecated_depositTimestamp")
-        self.assertEqual(self.usd3.storage_status, StorageCompatibility.COMPATIBLE)
+        self.assertEqual(self.usd3.storage.status, StorageCompatibility.COMPATIBLE)
 
     def test_changed_compiler_type_id_for_the_same_type_is_not_a_conflict(self) -> None:
         """`morphoCredit` is t_contract(IMorpho)6874 in one build and …6876 in the other."""
@@ -245,10 +263,11 @@ class ThreeJaneDiffTest(unittest.TestCase):
         self.assertIn("new implementation", self.susd3.storage.reason)
         self.assertNotIn("COMPATIBLE —", rendered)
 
-    def test_imported_namespaced_helper_does_not_suppress_positional_analysis(self) -> None:
-        """TokenizedStrategyStorageLib is namespaced; USD3's own storage is positional."""
+    def test_storage_library_does_not_suppress_positional_analysis(self) -> None:
+        """TokenizedStrategyStorageLib's custom root is a gap — it never skips the layout check."""
         assert self.usd3 is not None
-        self.assertEqual(self.usd3.storage_status, StorageCompatibility.COMPATIBLE)
+        self.assertEqual(self.usd3.storage.status, StorageCompatibility.COMPATIBLE)
+        self.assertEqual(self.usd3.storage.conflicts, [])
 
     def test_every_line_carries_target_provenance(self) -> None:
         assert self.usd3 is not None and self.susd3 is not None

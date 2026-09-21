@@ -39,8 +39,17 @@ _GAP_NAME_RE = re.compile(r"(?:^|_)gap$", re.IGNORECASE)
 _MAX_TYPE_DEPTH = 12
 
 # `t_enum(Status)123` / `t_userDefinedValueType(Id)6519` — named, with an AST id.
-_NAMED_TYPE_RE = re.compile(r"t_(enum|userDefinedValueType)\((\w+)\)")
-_NAMED_KINDS = {"enum": "enum", "userDefinedValueType": "udvt"}
+# A contract-scoped type may be qualified (`C.Id`); lookups use the last segment.
+_NAMED_TYPE_RE = re.compile(r"t_(enum|userDefinedValueType)\(([\w.]+)\)")
+
+# Marks a custom value type whose underlying type couldn't be resolved from source.
+# Two such shapes can match textually without proving anything, so a slot carrying
+# one is a coverage gap rather than a pass.
+_UNRESOLVED_MARKER = "unresolved-udvt"
+
+# Custom value type name → underlying type, resolved from one side's verified source.
+# ``None`` means the name was declared ambiguously; a missing name was not declared.
+ValueTypes = dict[str, str | None]
 # A trailing AST id after a closing paren, for exotic ids such as function types.
 _AST_ID_RE = re.compile(r"(?<=\))\d+")
 
@@ -82,15 +91,27 @@ class LayoutComparison:
     """Outcome of comparing an old and a new storage layout."""
 
     status: StorageCompatibility
-    conflicts: list[str] = field(default_factory=list)  # why it's incompatible
+    conflicts: list[str] = field(default_factory=list)  # proven incompatibilities
+    gaps: list[str] = field(default_factory=list)  # slots whose compatibility couldn't be established
     added: list[SlotEntry] = field(default_factory=list)  # new variables (appended or into a gap)
     renamed: list[tuple[SlotEntry, SlotEntry]] = field(default_factory=list)  # same slot/shape, new name
+    retyped: list[tuple[SlotEntry, SlotEntry]] = field(default_factory=list)  # same representation, new type
     consumed_gaps: list[str] = field(default_factory=list)  # reserved space that was claimed
     reason: str = ""  # populated when status is UNKNOWN
 
 
-def compare_storage_layouts(old: StorageLayout | None, new: StorageLayout | None) -> LayoutComparison:
-    """Compare two layouts. Anything less than full coverage is UNKNOWN."""
+def compare_storage_layouts(
+    old: StorageLayout | None,
+    new: StorageLayout | None,
+    old_value_types: ValueTypes | None = None,
+    new_value_types: ValueTypes | None = None,
+) -> LayoutComparison:
+    """Compare two layouts: a proven conflict is INCOMPATIBLE, a gap is UNKNOWN.
+
+    ``*_value_types`` resolve custom value types to their underlying types for
+    each side (see :func:`_type_kind`). Without them every custom value type is
+    unresolved, which can only make a slot a gap — never a pass.
+    """
     if old is None and new is None:
         return _unknown("no Sourcify-verified compiler layout for either implementation")
     if old is None:
@@ -98,15 +119,17 @@ def compare_storage_layouts(old: StorageLayout | None, new: StorageLayout | None
     if new is None:
         return _unknown("no Sourcify-verified compiler layout for the new implementation")
 
-    old_entries = _normalize(old)
-    new_entries = _normalize(new)
+    old_entries = _normalize(old, old_value_types)
+    new_entries = _normalize(new, new_value_types)
     if not old_entries or not new_entries:
         return _unknown("compiler layout was empty for one of the implementations")
 
     new_by_position = {e.position: e for e in new_entries}
 
     conflicts: list[str] = []
+    gaps: list[str] = []
     renamed: list[tuple[SlotEntry, SlotEntry]] = []
+    retyped: list[tuple[SlotEntry, SlotEntry]] = []
     consumed_gaps: list[str] = []
 
     for entry in old_entries:
@@ -116,20 +139,44 @@ def compare_storage_layouts(old: StorageLayout | None, new: StorageLayout | None
         moved = new_by_position.get(entry.position)
         if moved is None:
             conflicts.append(f"{entry} is gone in the new layout — that slot is no longer written the same way")
-        elif moved.shape != entry.shape:
+            continue
+        # Width is compiler-reported fact, so a resize is proven whether or not
+        # every type resolved. Only a same-width comparison depends on resolution.
+        if moved.width_shape != entry.width_shape:
             conflicts.append(_describe_type_change(entry, moved))
-        elif moved.label != entry.label:
+            continue
+        if _UNRESOLVED_MARKER in entry.shape or _UNRESOLVED_MARKER in moved.shape:
+            gaps.append(
+                f"slot {entry.slot}+{entry.offset}: {entry.type_label} {entry.label} → {moved.type_label} — "
+                "a custom value type's underlying type could not be resolved from source"
+            )
+            continue
+        if moved.shape != entry.shape:
+            conflicts.append(_describe_type_change(entry, moved))
+            continue
+        if moved.type_label != entry.type_label:
+            retyped.append((entry, moved))
+        if moved.label != entry.label:
             renamed.append((entry, moved))
 
     old_by_position = {e.position: e for e in old_entries}
     added = [e for e in new_entries if _is_new_variable(e, old_by_position.get(e.position))]
 
+    if conflicts:
+        status, reason = StorageCompatibility.INCOMPATIBLE, ""
+    elif gaps:
+        status, reason = StorageCompatibility.UNKNOWN, "some slot types could not be resolved"
+    else:
+        status, reason = StorageCompatibility.COMPATIBLE, ""
     return LayoutComparison(
-        status=StorageCompatibility.INCOMPATIBLE if conflicts else StorageCompatibility.COMPATIBLE,
+        status=status,
         conflicts=conflicts,
+        gaps=gaps,
         added=added,
         renamed=renamed,
+        retyped=retyped,
         consumed_gaps=consumed_gaps,
+        reason=reason,
     )
 
 
@@ -153,7 +200,7 @@ def _describe_type_change(old: SlotEntry, new: SlotEntry) -> str:
     return f"{where}: {old.type_label} {old.label} → {new}"
 
 
-def _normalize(layout: StorageLayout) -> list[SlotEntry]:
+def _normalize(layout: StorageLayout, value_types: ValueTypes | None) -> list[SlotEntry]:
     """Turn raw layout entries into comparable ones, ordered by position."""
     entries: list[SlotEntry] = []
     for raw in layout.storage:
@@ -168,7 +215,7 @@ def _normalize(layout: StorageLayout) -> list[SlotEntry]:
                 offset=offset,
                 label=str(raw.get("label") or ""),
                 type_label=_type_label(layout.types, type_id),
-                shape=_type_shape(layout.types, type_id),
+                shape=_type_shape(layout.types, type_id, value_types=value_types),
                 width_shape=_type_shape(layout.types, type_id, with_kind=False),
             )
         )
@@ -190,7 +237,14 @@ def _type_label(types: dict[str, dict], type_id: str) -> str:
     return str(label) if label else type_id
 
 
-def _type_shape(types: dict[str, dict], type_id: str, depth: int = 0, *, with_kind: bool = True) -> str:
+def _type_shape(
+    types: dict[str, dict],
+    type_id: str,
+    depth: int = 0,
+    *,
+    with_kind: bool = True,
+    value_types: ValueTypes | None = None,
+) -> str:
     """Canonical description of a type: where its bytes live and how they're read.
 
     Byte placement alone is not enough: ``uint256`` and ``bytes32`` occupy the
@@ -211,39 +265,48 @@ def _type_shape(types: dict[str, dict], type_id: str, depth: int = 0, *, with_ki
 
     parts = [f"enc={entry.get('encoding', '')}", f"bytes={entry.get('numberOfBytes', '')}"]
     if with_kind:
-        parts.insert(0, f"kind={_type_kind(type_id)}")
+        parts.insert(0, f"kind={_type_kind(type_id, value_types)}")
     base = entry.get("base")
     if isinstance(base, str):
-        parts.append(f"base=({_type_shape(types, base, depth + 1, with_kind=with_kind)})")
+        parts.append(f"base=({_type_shape(types, base, depth + 1, with_kind=with_kind, value_types=value_types)})")
     key, value = entry.get("key"), entry.get("value")
     if isinstance(key, str):
-        parts.append(f"key=({_type_shape(types, key, depth + 1, with_kind=with_kind)})")
+        parts.append(f"key=({_type_shape(types, key, depth + 1, with_kind=with_kind, value_types=value_types)})")
     if isinstance(value, str):
-        parts.append(f"value=({_type_shape(types, value, depth + 1, with_kind=with_kind)})")
+        parts.append(f"value=({_type_shape(types, value, depth + 1, with_kind=with_kind, value_types=value_types)})")
     members = entry.get("members")
     if isinstance(members, list):
-        rendered = [_member_shape(types, m, depth, with_kind) for m in members if isinstance(m, dict)]
+        rendered = [_member_shape(types, m, depth, with_kind, value_types) for m in members if isinstance(m, dict)]
         parts.append("members=[" + ",".join(rendered) + "]")
     return ";".join(parts)
 
 
-def _member_shape(types: dict[str, dict], member: dict, depth: int, with_kind: bool) -> str:
+def _member_shape(
+    types: dict[str, dict], member: dict, depth: int, with_kind: bool, value_types: ValueTypes | None
+) -> str:
     """A struct member's position and shape — its name is display-only."""
     member_type = member.get("type")
-    shape = _type_shape(types, member_type, depth + 1, with_kind=with_kind) if isinstance(member_type, str) else "?"
+    shape = (
+        _type_shape(types, member_type, depth + 1, with_kind=with_kind, value_types=value_types)
+        if isinstance(member_type, str)
+        else "?"
+    )
     return f"{member.get('slot', '')}+{member.get('offset', '')}:({shape})"
 
 
-def _type_kind(type_id: str) -> str:
+def _type_kind(type_id: str, value_types: ValueTypes | None = None) -> str:
     """How a slot's bytes are interpreted, with compiler-generated ids stripped.
 
     - ``address``, ``address payable`` and every contract type are one kind: a
       contract-typed variable *is* an address in storage, so retyping
       ``IERC20 token`` as ``address token`` (or as another interface) is an
       intentional, safe equivalence.
-    - Enums and user-defined value types keep their *name*
-      (``enum(Status)``, ``udvt(Id)``) but lose the AST id, so the same type in
-      two builds matches while a different type at the same width does not.
+    - A user-defined value type is its *underlying* type, resolved from the
+      source (``type Id is bytes32`` → ``bytes32``): unwrapping ``Id`` to
+      ``bytes32`` keeps the representation, while ``Id`` redeclared over
+      ``uint256`` does not. The layout only names the type, so without a
+      resolved declaration it is marked unresolved and never matched by name.
+    - Enums keep their name (``enum(Status)``) minus the AST id.
     - Mappings, arrays and structs are compared through their components, so
       their kind is just the category — a renamed struct type is not a change.
     - Elementary types are compared exactly: ``uint256`` ≠ ``bytes32`` ≠ ``int256``.
@@ -252,7 +315,11 @@ def _type_kind(type_id: str) -> str:
         return "address"
     named = _NAMED_TYPE_RE.match(type_id)
     if named:
-        return f"{_NAMED_KINDS[named.group(1)]}({named.group(2)})"
+        kind, name = named.group(1), named.group(2).split(".")[-1]
+        if kind == "enum":
+            return f"enum({name})"
+        underlying = (value_types or {}).get(name)
+        return underlying if underlying else f"{_UNRESOLVED_MARKER}({name})"
     for prefix, category in (("t_mapping(", "mapping"), ("t_array(", "array"), ("t_struct(", "struct")):
         if type_id.startswith(prefix):
             return category

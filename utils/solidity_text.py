@@ -36,7 +36,10 @@ _HEADER_NOISE = frozenset({"virtual", "override"})
 
 _VISIBILITIES = frozenset({"external", "public", "internal", "private"})
 
-_ANY_DECLARATION_RE = re.compile(rf"(?:^|[\s;}}])(?:abstract\s+)?(?:{_DECL_KINDS})\s+(\w+)\b[^{{;]*\{{")
+_ANY_DECLARATION_RE = re.compile(rf"(?:^|[\s;}}])(?:abstract\s+)?({_DECL_KINDS})\s+(\w+)\b[^{{;]*\{{")
+
+# `type Id is bytes32;` — a user-defined value type, file- or contract-level.
+_UDVT_RE = re.compile(r"\btype\s+(\w+)\s+is\s+(\w+)\s*;")
 
 # One entry of an `is` clause: `Base`, `Base(arg)`, or a qualified `Lib.Base`.
 _BASE_NAME_RE = re.compile(r"[A-Za-z_][\w.]*")
@@ -131,7 +134,24 @@ def declares_contract(source: str, name: str) -> bool:
 
 def declared_names(source: str) -> list[str]:
     """Every contract, library and interface this file declares, in order."""
-    return [m.group(1) for m in _ANY_DECLARATION_RE.finditer(strip_noise(source))]
+    return [name for name, _ in declarations(source)]
+
+
+def declarations(source: str) -> list[tuple[str, str]]:
+    """(name, kind) for every declaration in the file; kind is contract/library/interface."""
+    return [(m.group(2), m.group(1)) for m in _ANY_DECLARATION_RE.finditer(strip_noise(source))]
+
+
+def value_type_declarations(source: str) -> list[tuple[str, str]]:
+    """(name, underlying type) for every ``type X is T;`` in the file.
+
+    The underlying type is alias-normalized (``uint`` → ``uint256``), so two
+    spellings of the same representation compare equal.
+    """
+    return [
+        (m.group(1), _ALIAS_RE.sub(lambda a: _TYPE_ALIASES[a.group(0)], m.group(2)))
+        for m in _UDVT_RE.finditer(strip_noise(source))
+    ]
 
 
 def find_contract_span(source: str, name: str) -> tuple[int, int] | None:
