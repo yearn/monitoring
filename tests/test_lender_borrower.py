@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+import protocols.yearn.lender_borrower as lender_borrower
 from protocols.yearn.lender_borrower import (
     CHECK_LTV,
     CHECK_RATES_AND_COVERAGE,
@@ -29,7 +30,9 @@ from protocols.yearn.lender_borrower import (
     prune_rate_samples,
     validate_borrow_price_round,
 )
+from utils.alert import Alert
 from utils.chainlink import RoundData
+from utils.telegram import YEARN_MAINTANACE_CHANNEL
 
 CONFIG = STRATEGIES[0]
 
@@ -225,3 +228,25 @@ def test_monitor_errors_are_deduplicated_and_reminded_daily() -> None:
     assert not _should_send_error(CONFIG, CHECK_LTV, "ValueError", now + 60)
     assert _should_send_error(CONFIG, CHECK_LTV, "ValueError", now + 24 * 60 * 60)
     assert _should_send_error(CONFIG, CHECK_LTV, "TimeoutError", now + 60)
+
+
+@pytest.mark.parametrize(
+    ("chat_id", "expected_channel"), [("maintanace_chat_id", YEARN_MAINTANACE_CHANNEL), ("", "yearn")]
+)
+def test_alerts_route_to_internal_maintanace_chat(
+    monkeypatch: pytest.MonkeyPatch, chat_id: str, expected_channel: str
+) -> None:
+    monkeypatch.setenv("TELEGRAM_CHAT_ID_YEARN_MAINTANACE", chat_id)
+    snapshot = _snapshot(current_ltv_wad=70 * WAD // 100)
+    sent: list[Alert] = []
+    monkeypatch.setattr(lender_borrower, "_read_snapshot", lambda config, include_rates: snapshot)
+    monkeypatch.setattr(lender_borrower, "_clear_error_state", lambda *args: None)
+    monkeypatch.setattr(lender_borrower, "_should_send_alert", lambda *args: True)
+    monkeypatch.setattr(lender_borrower, "_record_alert_sent", lambda *args: None)
+    monkeypatch.setattr(lender_borrower, "send_alert", lambda alert, **kwargs: sent.append(alert))
+
+    lender_borrower.run_strategy(CONFIG, checks=CHECK_LTV)
+
+    assert len(sent) == 1
+    assert sent[0].channel == expected_channel
+    assert sent[0].protocol == "yearn-internal"

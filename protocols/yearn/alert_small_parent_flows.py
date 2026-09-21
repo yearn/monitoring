@@ -21,7 +21,7 @@ from utils import store
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import EXPLORER_URLS, Chain
 from utils.logger import get_logger
-from utils.telegram import MAX_MESSAGE_LENGTH, SMALL_DEPOSITS_CHANNEL, resolve_channel, send_envio_error_message
+from utils.telegram import MAX_MESSAGE_LENGTH, YEARN_MAINTANACE_CHANNEL, resolve_channel, send_envio_error_message
 
 load_dotenv()
 
@@ -125,7 +125,7 @@ class FlowAggregator:
                 AlertSeverity.LOW,
                 message,
                 ALERT_PROTOCOL,
-                channel=resolve_channel(SMALL_DEPOSITS_CHANNEL, PROTOCOL),
+                channel=resolve_channel(YEARN_MAINTANACE_CHANNEL, PROTOCOL),
             )
         )
         self.truncated = truncated

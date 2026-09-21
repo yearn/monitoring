@@ -2,6 +2,22 @@
 
 This folder contains monitoring scripts for Yearn vault activity, Safe multisig queues, and timelock operations.
 
+## Alert Routing
+
+Where each script in this folder sends its alerts. "Yearn" is the public channel (`TELEGRAM_TOPIC_ID_YEARN` or `TELEGRAM_CHAT_ID_YEARN`). The DB tag is the alert-history protocol key; `yearn-internal` and `YEARN_TIMELOCK_INTERNAL` never show on the public Yearn monitoring page.
+
+| Script | Alerts | Telegram destination | Fallback when unset | DB tag |
+|---|---|---|---|---|
+| `lender_borrower.py` | LTV, spread, coverage warnings and monitor errors | Yearn maintenance (`TELEGRAM_CHAT_ID_YEARN_MAINTANACE`) | Yearn | `yearn-internal` |
+| `alert_small_parent_flows.py` | Aggregated small parent-vault flows | Yearn maintenance (`TELEGRAM_CHAT_ID_YEARN_MAINTANACE`) | Yearn | `yearn-internal` |
+| `alert_large_flows.py` | Large deposits/withdrawals | Yearn | — | `yearn` |
+| `check_shadow_debt.py` | Shadow debt | Yearn | — | `yearn` |
+| `check_stuck_triggers.py` | Stuck TKS triggers | Yearn | — | `yearn` |
+| `check_timelock_delay.py` | Timelock min delay below 7 days | Yearn timelock internal (`TELEGRAM_CHAT_ID_YEARN_TIMELOCK_INTERNAL`) | — | `YEARN_TIMELOCK_INTERNAL` |
+| `check_indexer_freshness.py` | Envio indexer lag / outage | Envio (`TELEGRAM_CHAT_ID_ENVIO`) | Errors, then Yearn | `yearn` |
+
+Envio errors raised inside the flow monitors follow the same Envio → errors → Yearn chain; the small-flows monitor stores them as `yearn-internal`. Unhandled crashes from any script go through `run_with_alert` to the errors channel, falling back to Yearn.
+
 ## Lender-Borrower Risk
 
 The script `yearn/lender_borrower.py` monitors configured Morpho and Aave-compatible lender-borrower strategies. It currently covers Katana Morpho `vbWBTC/vbUSDC`, Ethereum Spark `wstETH/USDS` reached through its WETH accumulator, and Ethereum Spark `WETH/USDS`; each strategy supplies collateral, borrows a stablecoin, and lends the borrowed balance into a Yearn vault.
@@ -12,7 +28,7 @@ The script `yearn/lender_borrower.py` monitors configured Morpho and Aave-compat
 2. **Net spread**: derives the current borrow APR from Morpho's adaptive IRM or Spark's variable borrow rate and subtracts it from the lender vault APR returned by Yearn's APR oracle. A medium alert fires after at least three samples when the rolling 24-hour average is below `-1%`. A zero lender APR is treated as unavailable data, alerts, and is not stored as a rate sample. Runs every six hours.
 3. **Debt coverage**: compares `balanceOfLentAssets() + balanceOfBorrowToken()` with `balanceOfDebt()`. A medium alert fires when the deficit is both at least 10 basis points of debt and worth at least $100. Runs every six hours with the net-spread check.
 
-All breach, unavailable-data, and monitor-error alerts use `MEDIUM` severity and route to the internal curation Telegram channel, falling back to the Yearn channel when curation is not configured. MEDIUM sends Telegram without invoking the HIGH/CRITICAL emergency-dispatch hook. Persistent breaches and errors are deduplicated and reminded once per 24 hours. The monitor is read-only and does not initiate deleveraging.
+All breach, unavailable-data, and monitor-error alerts use `MEDIUM` severity and route to the internal Yearn maintenance Telegram chat (`TELEGRAM_CHAT_ID_YEARN_MAINTANACE`), falling back to the Yearn channel when it is not configured. They are stored in alert history under the `yearn-internal` protocol key, so they do not appear on the public Yearn monitoring page. MEDIUM sends Telegram without invoking the HIGH/CRITICAL emergency-dispatch hook. Persistent breaches and errors are deduplicated and reminded once per 24 hours. The monitor is read-only and does not initiate deleveraging.
 
 ### Usage
 
@@ -68,9 +84,9 @@ The script `yearn/alert_small_parent_flows.py` alerts on every deposit or withdr
 Deposits and withdrawals are processed with independent per-chain `(blockNumber, logIndex)` cursors stored in the monitoring database. The run stages cursor updates in memory and saves them only after the aggregate alert is delivered. A failed send leaves the flows available for the next run. A new deployment starts each stream with a two-hour lookback; that starting timestamp is persisted, so a stream that has not yet seen any event never slides its window forward and a long run gap cannot drop events.
 
 **Routing:** qualifying flows in a run are summarized in one Telegram message
-(per chain and direction, sorted chronologically) and sent to a dedicated noisy-channel
-group, `TELEGRAM_CHAT_ID_SMALL_DEPOSITS`, so the volume doesn't spam the protocol's
-main chat or the curation group. If that chat id is unset the aggregated message falls
+(per chain and direction, sorted chronologically) and sent to the internal Yearn maintenance
+chat, `TELEGRAM_CHAT_ID_YEARN_MAINTANACE` (shared with lender-borrower alerts), so the
+volume doesn't spam the protocol's main chat or the curation group. If that chat id is unset the aggregated message falls
 back to the yearn group.
 
 The aggregated message and this monitor's Envio error messages are stored in alert
