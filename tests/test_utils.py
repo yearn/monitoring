@@ -6,7 +6,6 @@ import importlib
 import json
 import os
 import sys
-import types
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -899,20 +898,43 @@ class TestDispatch(unittest.TestCase):
 class TestDefiLlama(unittest.TestCase):
     """Tests for the DeFiLlama stablecoin price helper."""
 
-    def test_fetch_prices_raises_on_api_error(self):
-        fake_client = MagicMock()
-        fake_client.prices.getCurrentPrices.side_effect = RuntimeError("upstream timeout")
-        fake_sdk = types.ModuleType("defillama_sdk")
-        fake_sdk.DefiLlama = MagicMock(return_value=fake_client)
+    @patch("utils.defillama.request_with_retry")
+    def test_fetch_prices_uses_retrying_http_client(self, mock_request):
+        from decimal import Decimal
 
-        with patch.dict(sys.modules, {"defillama_sdk": fake_sdk}):
-            sys.modules.pop("utils.defillama", None)
-            defillama = importlib.import_module("utils.defillama")
-            try:
-                with self.assertRaises(RuntimeError):
-                    defillama.fetch_prices(["ethereum:0xtoken"])
-            finally:
-                sys.modules.pop("utils.defillama", None)
+        from utils.defillama import CURRENT_PRICES_URL, fetch_prices
+
+        response = MagicMock()
+        response.json.return_value = {
+            "coins": {
+                "ethereum:0xtoken": {"price": 1.01},
+                "ethereum:0xmissing": {"symbol": "MISSING"},
+            }
+        }
+        mock_request.return_value = response
+
+        prices = fetch_prices(["ethereum:0xtoken", "ethereum:0xmissing"])
+
+        self.assertEqual(prices, {"ethereum:0xtoken": Decimal("1.01")})
+        mock_request.assert_called_once_with(
+            "get",
+            f"{CURRENT_PRICES_URL}/ethereum:0xtoken,ethereum:0xmissing",
+            headers={"Accept": "application/json"},
+        )
+
+    @patch("utils.defillama.request_with_retry", side_effect=RuntimeError("upstream timeout"))
+    def test_fetch_prices_raises_on_api_error(self, _mock_request):
+        from utils.defillama import fetch_prices
+
+        with self.assertRaises(RuntimeError):
+            fetch_prices(["ethereum:0xtoken"])
+
+    @patch("utils.defillama.request_with_retry")
+    def test_fetch_prices_skips_request_for_empty_input(self, mock_request):
+        from utils.defillama import fetch_prices
+
+        self.assertEqual(fetch_prices([]), {})
+        mock_request.assert_not_called()
 
 
 class _FakeProvider:

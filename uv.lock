@@ -563,18 +563,6 @@ wheels = [
 ]
 
 [[package]]
-name = "defillama-sdk"
-version = "0.1.4"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "requests" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/4b/88/77450b82d1e1ddee45ac1e9553f2a6f15d56c6bebb38a5767557f5d421a3/defillama_sdk-0.1.4.tar.gz", hash = "sha256:0c723da4ec5e7250404e17e9f522296404121b0230d4c55d72f563c34ffa51e4", size = 23160, upload-time = "2026-02-10T07:13:50.585Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/4f/8e/6b4e2522f237080745aaed6ae34f1cd5a538c60cc5e538d2ef3208fd00a3/defillama_sdk-0.1.4-py3-none-any.whl", hash = "sha256:1d919f2f3c23bb0a3cc3671df22238d3658f5876bf46bb72ae9fb19b997f8ce6", size = 30121, upload-time = "2026-02-10T07:13:49.12Z" },
-]
-
-[[package]]
 name = "deprecated"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1066,7 +1054,6 @@ dependencies = [
     { name = "click" },
     { name = "cytoolz" },
     { name = "dataclasses-json" },
-    { name = "defillama-sdk" },
     { name = "deprecated" },
     { name = "eth-abi" },
     { name = "eth-account" },
@@ -1142,7 +1129,6 @@ requires-dist = [
     { name = "click", specifier = "==8.3.3" },
     { name = "cytoolz", specifier = "==1.1.0" },
     { name = "dataclasses-json", specifier = "==0.6.7" },
-    { name = "defillama-sdk", specifier = "==0.1.4" },
     { name = "deprecated", specifier = "==1.3.1" },
     { name = "eth-abi", specifier = "==5.2.0" },
     { name = "eth-account", specifier = "==0.13.7" },
