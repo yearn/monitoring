@@ -415,6 +415,32 @@ protocols:
       - name: "Timelock Events"
         description: "CallScheduled/ProposalQueued/QueueTransaction/StartVote/ProposalScheduled events across monitored timelocks via Envio"
 
+  unibtc:
+    display_name: "Bedrock uniBTC"
+    description: "Bedrock uniBTC minting, PoR, feeder, redemption, and peg monitoring on Mainnet"
+    cadence: "Hourly"
+    tasks:
+      - protocols/unibtc/main.py
+    monitors:
+      - name: "Unexpected Minting"
+        description: "uniBTC totalSupply delta +5 in ~1h (CRITICAL) or +5 in ~24h (HIGH); no event scanning"
+      - name: "Reserve Gate"
+        description: "Any change to Vault adequacyRatio, chainlinkReserveFeeder, uniBTCSupplyFeeder, or feederHeartbeat"
+      - name: "Vault or Router Paused"
+        description: "Vault outOfService()/paused() or live DelayRedeemRouter paused() is true"
+      - name: "Proof of Reserves"
+        description: "Chainlink PoR / Bedrock API supply <100% (CRITICAL) or <101% (HIGH); skipped when the API response is stale, missing a major chain, inconsistent with its own per-chain sum, or disagrees with on-chain Ethereum supply"
+      - name: "PoR Staleness"
+        description: "Chainlink PoR updatedAt older than the Vault feederHeartbeat, capped at 86,400s"
+      - name: "Supply Feeder"
+        description: "Feeder totalTokenSupply() is 0 (CRITICAL); feeder differs from validated Bedrock API supply by >2%, naming the matching chain (HIGH)"
+      - name: "Redemptions Underfunded"
+        description: "Uncleared WBTC router debt exceeds Vault WBTC for >24h and is growing"
+      - name: "Peg"
+        description: "DeFiLlama uniBTC/USD divided by Ethereum WBTC/USD < 0.985 WBTC per uniBTC (HIGH) or < 0.97 (CRITICAL)"
+      - name: "Safe Multisigs"
+        description: "uniBTC ops Safe and Bedrock admin Safe queues"
+
   ustb:
     display_name: "Superstate USTB"
     description: "Superstate USTB fund and oracle monitoring"
