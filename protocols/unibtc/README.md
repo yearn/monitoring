@@ -4,18 +4,14 @@ Hourly state polling for [Bedrock uniBTC](https://www.bedrock.technology/) on Et
 
 Queued Safe transactions are covered by the [Safe monitor](../safe/main.py). This script polls live state for the paths those queues cannot see — including the single-EOA unbacked-mint path through the legacy withdrawal router.
 
-[Risk assessment](https://github.com/yearn/risk-score/blob/master/reports/report/bedrock-unibtc.md) · [Issue #361](https://github.com/yearn/monitoring/issues/361)
-
-## Why this exists
-
-EOA [`0x3eea50ba10952e5e0dfaa50ecfcc5ab19ad591ef`](https://etherscan.io/address/0x3eea50ba10952e5e0dfaa50ecfcc5ab19ad591ef) is the proxy admin of the legacy withdrawal router, which still holds Vault `OPERATOR_ROLE`. Upgrading that router lets the EOA call `Vault.execute` → `uniBTC.mint` for any amount, with no reserve check. Other operational EOAs can change the reserve gate, supply feeder, and CCIP limits without a Safe transaction.
+[Risk assessment](https://github.com/yearn/risk-score/blob/master/reports/report/bedrock-unibtc.md)
 
 ## What it monitors
 
 | Check | Source | Alert when | Severity |
 |---|---|---|---|
-| Unexpected minting | uniBTC `totalSupply()` delta | +10 uniBTC in ~1h | CRITICAL |
-| Unexpected minting | uniBTC `totalSupply()` delta | +2 uniBTC in ~24h | HIGH |
+| Unexpected minting | uniBTC `totalSupply()` delta | +5 uniBTC in ~1h | CRITICAL |
+| Unexpected minting | uniBTC `totalSupply()` delta | +5 uniBTC in ~24h | HIGH |
 | Reserve gate | Vault `adequacyRatio`, `chainlinkReserveFeeder`, `uniBTCSupplyFeeder`, `feederHeartbeat` | Any change from 900 / PoR feed / supply feeder / 86400 | CRITICAL |
 | Vault or router paused | Vault `outOfService()`, `paused()`; live router `paused()` | Any `true` | HIGH |
 | Reserves below supply | Chainlink PoR `latestRoundData().answer` / validated Bedrock API `data.total_supply` | < 100% | CRITICAL |
@@ -23,11 +19,10 @@ EOA [`0x3eea50ba10952e5e0dfaa50ecfcc5ab19ad591ef`](https://etherscan.io/address/
 | PoR stale | `latestRoundData().updatedAt` | Older than the live Vault `feederHeartbeat`, capped at 86,400s (Vault `mint()` reverts) | HIGH |
 | Supply feeder zero | Feeder `totalTokenSupply()` | Returns 0 (Vault reserve check passes for any mint); no API needed | CRITICAL |
 | Supply feeder wrong | Feeder `totalTokenSupply()` vs validated API `total_supply` | Gap > 2%; names the chain whose supply matches the gap | HIGH |
-| Supply feeder stale | Feeder `totalTokenSupply()` | Unchanged for 48h (normally updates daily) | HIGH |
 | Redemptions underfunded | Router `tokenDebts(WBTC)` vs WBTC `balanceOf(Vault)` | Uncleared > Vault WBTC for > 24h and growing | HIGH |
 | Peg | DeFiLlama uniBTC/USD (`coingecko:universal-btc`, fallback: Ethereum token) divided by Ethereum WBTC/USD | < 0.985 WBTC per uniBTC (HIGH), < 0.97 (CRITICAL) | HIGH / CRITICAL |
 
-PoR-staleness, feeder-zero, feeder-gap, and feeder-stale alerts fire once while the condition holds and re-arm on recovery. Pause and reserve-gate alerts are keyed on *which* components are flagged, so a second tampered field or a newly paused component re-alerts instead of being hidden by the first alert. PoR coverage and peg alert on entering a worse band (HIGH then CRITICAL); moving to a better band is silent, and recovering fully re-arms. Peg levels come from a year of uniBTC/WBTC prices: median 0.9945, below 0.99 about 9% of the time (routine), below 0.97 only in four stress episodes. Minting alerts fire once per mint and repeat only once supply grows by another full threshold; a missing baseline re-arms the marker, so a stale one cannot suppress a real mint after a polling gap.
+PoR-staleness, feeder-zero, and feeder-gap alerts fire once while the condition holds and re-arm on recovery. Pause and reserve-gate alerts are keyed on *which* components are flagged, so a second tampered field or a newly paused component re-alerts instead of being hidden by the first alert. PoR coverage and peg alert on entering a worse band (HIGH then CRITICAL); moving to a better band is silent, and recovering fully re-arms. Peg levels come from a year of uniBTC/WBTC prices: median 0.9945, below 0.99 about 9% of the time (routine), below 0.97 only in four stress episodes. Minting alerts fire once per mint and repeat only once supply grows by another full threshold; a missing baseline re-arms the marker, so a stale one cannot suppress a real mint after a polling gap.
 
 A healthy feeder tracks the API total supply (ratio ~1.00 through 2026-09-12). Since 2026-09-13 the updater [`0x2C62803181243Fa99C659DE0d2A0530879a79911`](https://etherscan.io/address/0x2C62803181243Fa99C659DE0d2A0530879a79911) has, on alternating days, written a value about 701 uniBTC low — the BOB chain's supply — so the gap alert names the chain whose supply matches the gap.
 

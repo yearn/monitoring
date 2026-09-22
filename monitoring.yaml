@@ -423,7 +423,7 @@ protocols:
       - protocols/unibtc/main.py
     monitors:
       - name: "Unexpected Minting"
-        description: "uniBTC totalSupply delta +10 in ~1h (CRITICAL) or +2 in ~24h (HIGH); no event scanning"
+        description: "uniBTC totalSupply delta +5 in ~1h (CRITICAL) or +5 in ~24h (HIGH); no event scanning"
       - name: "Reserve Gate"
         description: "Any change to Vault adequacyRatio, chainlinkReserveFeeder, uniBTCSupplyFeeder, or feederHeartbeat"
       - name: "Vault or Router Paused"
@@ -433,7 +433,7 @@ protocols:
       - name: "PoR Staleness"
         description: "Chainlink PoR updatedAt older than the Vault feederHeartbeat, capped at 86,400s"
       - name: "Supply Feeder"
-        description: "Feeder totalTokenSupply() is 0 (CRITICAL); feeder differs from validated Bedrock API supply by >2%, naming the matching chain, or value unchanged for 48h (HIGH)"
+        description: "Feeder totalTokenSupply() is 0 (CRITICAL); feeder differs from validated Bedrock API supply by >2%, naming the matching chain (HIGH)"
       - name: "Redemptions Underfunded"
         description: "Uncleared WBTC router debt exceeds Vault WBTC for >24h and is growing"
       - name: "Peg"

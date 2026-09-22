@@ -265,7 +265,7 @@ def test_unexpected_minting_1h_is_critical(monkeypatch: pytest.MonkeyPatch) -> N
     now = 1_700_000_000
     unibtc.store_supply_snapshots([(now - 3600, 298_112_556_288)])
 
-    unibtc.check_unexpected_minting(make_state(total_supply=298_112_556_288 + 10 * 10**8, block_timestamp=now))
+    unibtc.check_unexpected_minting(make_state(total_supply=298_112_556_288 + 5 * 10**8, block_timestamp=now))
 
     assert len(alerts) == 1
     assert alerts[0].severity == AlertSeverity.CRITICAL
@@ -279,7 +279,7 @@ def test_unexpected_minting_24h_is_high(monkeypatch: pytest.MonkeyPatch) -> None
     now = 1_700_000_000
     unibtc.store_supply_snapshots([(now - 24 * 3600, 298_112_556_288)])
 
-    unibtc.check_unexpected_minting(make_state(total_supply=298_112_556_288 + 2 * 10**8, block_timestamp=now))
+    unibtc.check_unexpected_minting(make_state(total_supply=298_112_556_288 + 5 * 10**8, block_timestamp=now))
 
     assert len(alerts) == 1
     assert alerts[0].severity == AlertSeverity.HIGH
@@ -304,7 +304,7 @@ def test_unexpected_minting_24h_does_not_repeat_for_same_mint(monkeypatch: pytes
     monkeypatch.setattr(unibtc, "send_alert", alerts.append)
     now = 1_700_000_000
     base = 298_112_556_288
-    minted = base + 3 * 10**8
+    minted = base + 5 * 10**8
     unibtc.store_supply_snapshots([(now - 24 * 3600 - hour * 3600, base) for hour in range(6)])
 
     for hour in range(20):
@@ -322,9 +322,9 @@ def test_unexpected_minting_realerts_after_further_growth(monkeypatch: pytest.Mo
     base = 298_112_556_288
     unibtc.store_supply_snapshots([(now - 24 * 3600, base)])
 
-    unibtc.check_unexpected_minting(make_state(total_supply=base + 2 * 10**8, block_timestamp=now))
-    unibtc.check_unexpected_minting(make_state(total_supply=base + 3 * 10**8, block_timestamp=now + 3600))
-    unibtc.check_unexpected_minting(make_state(total_supply=base + 5 * 10**8, block_timestamp=now + 7200))
+    unibtc.check_unexpected_minting(make_state(total_supply=base + 5 * 10**8, block_timestamp=now))
+    unibtc.check_unexpected_minting(make_state(total_supply=base + 6 * 10**8, block_timestamp=now + 3600))
+    unibtc.check_unexpected_minting(make_state(total_supply=base + 10 * 10**8, block_timestamp=now + 7200))
 
     assert len(alerts) == 2
 
@@ -339,12 +339,12 @@ def test_unexpected_minting_rearms_after_baseline_gap(monkeypatch: pytest.Monkey
     base = 300 * btc
     unibtc.store_supply_snapshots([(now - 3600, base)])
 
-    unibtc.check_unexpected_minting(make_state(total_supply=base + 11 * btc, block_timestamp=now))
+    unibtc.check_unexpected_minting(make_state(total_supply=base + 6 * btc, block_timestamp=now))
     # Polling gap past the retention window, and supply falls back via redemptions.
     gap = now + 40 * 3600
     unibtc.check_unexpected_minting(make_state(total_supply=base, block_timestamp=gap))
     # A genuinely new mint, below the stale marker's level.
-    unibtc.check_unexpected_minting(make_state(total_supply=base + 10 * btc, block_timestamp=gap + 3600))
+    unibtc.check_unexpected_minting(make_state(total_supply=base + 5 * btc, block_timestamp=gap + 3600))
 
     assert len(alerts) == 2
     assert all(alert.severity == AlertSeverity.CRITICAL for alert in alerts)
@@ -371,7 +371,7 @@ def test_unexpected_minting_retries_after_delivery_failure(monkeypatch: pytest.M
     monkeypatch.setattr(unibtc, "send_alert", sender)
     now = 1_700_000_000
     base = 300 * 10**8
-    minted = base + 10 * 10**8
+    minted = base + 5 * 10**8
     unibtc.store_supply_snapshots([(now - 3600, base), (now - 24 * 3600, base)])
 
     with pytest.raises(RuntimeError):
@@ -387,7 +387,7 @@ def test_unexpected_minting_second_failure_keeps_first_marker(monkeypatch: pytes
     sender = _FlakySender(failures=0)
     now = 1_700_000_000
     base = 300 * 10**8
-    minted = base + 10 * 10**8
+    minted = base + 5 * 10**8
     unibtc.store_supply_snapshots([(now - 3600, base), (now - 24 * 3600, base)])
 
     def fail_24h(alert: Alert) -> None:
@@ -693,40 +693,6 @@ def test_validate_api_stats_passes_through_valid(monkeypatch: pytest.MonkeyPatch
     api = make_api()
     assert unibtc.validate_api_stats(api, make_state()) is api
     assert unibtc.validate_api_stats(None, make_state()) is None
-
-
-def test_supply_feeder_stale_after_48h(monkeypatch: pytest.MonkeyPatch) -> None:
-    alerts: list[Alert] = []
-    cache = stub_cache(monkeypatch)
-    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
-    now = 1_700_000_000
-    state = make_state(block_timestamp=now, feeder_supply=100)
-
-    unibtc.check_supply_feeder(state, None)
-    unibtc.check_supply_feeder(make_state(block_timestamp=now + 48 * 3600 + 1, feeder_supply=100), None)
-
-    assert len(alerts) == 1
-    assert "stale" in alerts[0].message
-    assert cache[unibtc.CACHE_KEY_FEEDER_VALUE] == "100"
-
-
-def test_supply_feeder_zero_value_still_goes_stale(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A feeder pinned at 0 must not read as a fresh observation every run.
-
-    Zero is what the cache returns for an unset key, and it is also the single most
-    dangerous reading: it satisfies the Vault mint gate outright. With the API down
-    the ratio check is skipped, so staleness is the only thing watching.
-    """
-    alerts: list[Alert] = []
-    stub_cache(monkeypatch)
-    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
-    now = 1_700_000_000
-
-    for day in range(4):
-        unibtc.check_supply_feeder(make_state(feeder_supply=0, block_timestamp=now + day * 86_400), None)
-
-    stale = [alert for alert in alerts if "supply feeder stale" in alert.message]
-    assert len(stale) == 1
 
 
 def test_feeder_zero_is_critical_on_first_run_without_api(monkeypatch: pytest.MonkeyPatch) -> None:

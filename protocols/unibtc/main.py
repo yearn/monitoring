@@ -1,6 +1,6 @@
 """Bedrock uniBTC hourly state polling (no event subscriptions).
 
-Detects unbacked minting, reserve-gate changes, pauses, PoR shortfalls, a stale
+Detects unbacked minting, reserve-gate changes, pauses, PoR shortfalls, a zero
 or wrong supply feeder, underfunded redemptions, and a BTC peg break. Queued
 Safe actions are covered by the Safe monitor; this script only polls current
 state.
@@ -46,8 +46,8 @@ EXPECTED_POR_FEEDER = POR_FEED
 EXPECTED_SUPPLY_FEEDER = SUPPLY_FEEDER
 EXPECTED_HEARTBEAT = 86_400
 
-MINT_1H_CRITICAL_RAW = 10 * 10**UNIBTC_DECIMALS
-MINT_24H_HIGH_RAW = 2 * 10**UNIBTC_DECIMALS
+MINT_1H_CRITICAL_RAW = 5 * 10**UNIBTC_DECIMALS
+MINT_24H_HIGH_RAW = 5 * 10**UNIBTC_DECIMALS
 MINT_1H_MAX_BASELINE_AGE = 3 * 60 * 60
 MINT_24H_MIN_BASELINE_AGE = 20 * 60 * 60
 MINT_24H_MAX_BASELINE_AGE = 36 * 60 * 60
@@ -60,7 +60,6 @@ POR_STALE_SECONDS = 86_400
 FEEDER_GAP_THRESHOLD = Decimal("0.02")
 # A chain whose supply is within this fraction of the feeder gap is named as the likely omission.
 FEEDER_CHAIN_MATCH_TOLERANCE = Decimal("0.05")
-FEEDER_STALE_SECONDS = 48 * 60 * 60
 REDEMPTION_UNDERFUNDED_SECONDS = 24 * 60 * 60
 # uniBTC/WBTC over 2025-09 → 2026-09 (4h samples): median 0.9945, <0.99 9% of the time
 # (~130 dips/yr, routine), <0.985 ~36 dips/yr, <0.97 4 dips (Dec-16, Apr-26, May-9/10 stress).
@@ -100,9 +99,6 @@ CACHE_KEY_PAUSED = "UNIBTC_PAUSED_ALERTED"
 CACHE_KEY_POR_BAND = "UNIBTC_POR_BAND"
 CACHE_KEY_POR_STALE = "UNIBTC_POR_STALE_ALERTED"
 CACHE_KEY_FEEDER_GAP = "UNIBTC_FEEDER_GAP_ALERTED"
-CACHE_KEY_FEEDER_VALUE = "UNIBTC_FEEDER_VALUE"
-CACHE_KEY_FEEDER_CHANGED_TS = "UNIBTC_FEEDER_CHANGED_TS"
-CACHE_KEY_FEEDER_STALE = "UNIBTC_FEEDER_STALE_ALERTED"
 CACHE_KEY_FEEDER_ZERO = "UNIBTC_FEEDER_ZERO_ALERTED"
 CACHE_KEY_REDEEM_SINCE = "UNIBTC_REDEEM_UNDERFUNDED_SINCE"
 CACHE_KEY_REDEEM_UNCLEARED = "UNIBTC_REDEEM_UNCLEARED"
@@ -945,7 +941,10 @@ def check_feeder_zero(state: UnibtcState) -> None:
 
 
 def check_supply_feeder(state: UnibtcState, api: ApiStats | None) -> None:
-    """Alert when the supply feeder reports zero, diverges from the API, or stops updating.
+    """Alert when the supply feeder reports zero or diverges from the API.
+
+    A flat ``totalTokenSupply`` is not treated as stale: real supply can sit still
+    for days, and the updater has no on-chain timestamp to tell those cases apart.
 
     Args:
         state: Current on-chain snapshot.
@@ -954,31 +953,6 @@ def check_supply_feeder(state: UnibtcState, api: ApiStats | None) -> None:
     check_feeder_zero(state)
     if api is not None:
         check_feeder_gap(state, api)
-
-    previous_value = _cache_int(CACHE_KEY_FEEDER_VALUE)
-    changed_ts = _cache_int(CACHE_KEY_FEEDER_CHANGED_TS)
-    # The timestamp, not the value, marks "never seen". The cache reads 0 for an unset
-    # key, so testing previous_value == 0 would treat a feeder genuinely reporting 0 as
-    # a fresh observation on every run and never report it stale — the one reading that
-    # most needs reporting, since a zero supply satisfies the Vault mint gate outright.
-    if changed_ts <= 0 or previous_value != state.feeder_supply:
-        _set_cache(CACHE_KEY_FEEDER_VALUE, state.feeder_supply)
-        _set_cache(CACHE_KEY_FEEDER_CHANGED_TS, state.block_timestamp)
-        if _cache_int(CACHE_KEY_FEEDER_STALE):
-            _set_cache(CACHE_KEY_FEEDER_STALE, 0)
-        return
-
-    unchanged_for = state.block_timestamp - changed_ts
-    stale = unchanged_for > FEEDER_STALE_SECONDS
-    logger.info("uniBTC feeder unchanged_for=%ss stale=%s", unchanged_for, stale)
-    message = (
-        "*uniBTC supply feeder stale*\n"
-        f"totalTokenSupply has been {_fmt_btc(state.feeder_supply)} uniBTC for "
-        f"{format_duration(unchanged_for)} (normally changes daily; threshold "
-        f"{format_duration(FEEDER_STALE_SECONDS)}).\n"
-        f"🔗 Feeder {_etherscan(SUPPLY_FEEDER)}"
-    )
-    _alert_while_true(CACHE_KEY_FEEDER_STALE, stale, Alert(AlertSeverity.HIGH, message, PROTOCOL))
 
 
 def uncleared_wbtc_debt(state: UnibtcState) -> int:
