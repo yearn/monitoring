@@ -63,12 +63,6 @@ These Safes are registered in [`protocols/safe/addresses.py`](../safe/addresses.
 | Chainlink uniBTC PoR | [`0xc590D9fb8eE78a0909dFF341ccf717000b7b7fF2`](https://etherscan.io/address/0xc590D9fb8eE78a0909dFF341ccf717000b7b7fF2) |
 | Supply feeder (`uniBTCRate`) | [`0xE542919E4b281f10b437F947c8Ba224DdfaBc716`](https://etherscan.io/address/0xE542919E4b281f10b437F947c8Ba224DdfaBc716) |
 
-## Gaps from skipping events
-
-- Detection comes up to an hour after an EOA action or mint, not in real time.
-- A supply jump shows that minting happened, not which minter did it.
-- Safe transactions executed without being queued in the Safe tx service are not seen beforehand; role grants made that way show up only through the supply-delta check.
-
 ## Usage
 
 ```bash
