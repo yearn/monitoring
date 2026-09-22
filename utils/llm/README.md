@@ -74,7 +74,8 @@ Requires `ETHERSCAN_TOKEN`. Failures degrade gracefully — no `--- Contract Sou
 
 Verified source/ABI lookups and Swiss Knife labels are cached under `CACHE_DIR` via `utils/disk_cache.py`:
 
-- `source-cache/`: Etherscan verified contract name, source, and ABI JSON.
+- `source-cache-v2/`: Etherscan verified record — per-file sources, compiler settings, ABI and resolved compilation target. The version is part of the namespace because positive entries never expire; a shape change must not read records written by an older version.
+- `sourcify-layout-v1/`: Sourcify compiler storage layouts. Misses use the negative TTL, since Sourcify coverage grows over time.
 - `label-cache/`: Swiss Knife address labels.
 
 Positive entries do not expire because verified source and curated labels are effectively stable for a given address. Negative entries use a short TTL so a newly verified contract or newly labeled address is picked up later. Tunables:
@@ -134,14 +135,21 @@ When an upgrade is detected the pipeline:
 
 1. Reads the **current implementation** from the EIP-1967 storage slot (`0x360894a...`) of the proxy, falling back to the legacy zeppelinos slot (`0x7050c9e...`) for pre-EIP-1967 proxies like USDC's `FiatTokenProxy`.
 2. Builds an Etherscan diff URL: `etherscan.io/contractdiffchecker?a1=old&a2=new`.
-3. Fetches the verified source of **both** implementations and runs a structural diff (`utils/impl_diff.py`):
-   - **Functions added / removed / changed visibility or modifiers**, identified by name + arg types so overloads are distinct.
-   - **Storage layout safety check** — slot-by-slot comparison. Safe iff the new layout begins with the old layout in the same order (append-only) OR an OZ trailing `uintN[K] __gap` array is consumed: any new vars inserted before the gap must be matched by an equal reduction in the gap's size. Gap underflow, no-shrink, and gap removal without consumption are flagged.
-   - **EIP-7201 namespaced storage** is detected (`_getXxxStorage() returns (XxxStorage storage $)`) and the positional layout check is skipped — namespaced storage lives at a constant slot, not slot 0+.
-   - Immutable/`constant` state vars are excluded from the layout check (they don't occupy a storage slot).
-   - State vars without an explicit visibility modifier (default-internal) ARE included — function locals are excluded by brace-depth tracking rather than by requiring a visibility keyword.
+3. Fetches the verified record of **both** implementations (`utils/verified_contract.py`) and diffs them (`utils/impl_diff.py`) in four separated categories, each line carrying the contract and file it came from:
+   - **External ABI changes** (`utils/abi_surface.py`) — additions, removals and `stateMutability` changes keyed by canonical signature (`setCaps((bytes32,uint128)[])`), derived from each implementation's own ABI. Generated public getters are included naturally; interfaces, comments, and internal/private functions never are.
+   - **Target-defined function changes** (`utils/solidity_text.py`) — scoped to the deployed contract's own definition in its own file: bodies that changed under an unchanged signature (with a short unified diff), plus internal/private members added or removed (added ones carry their source). ABI equality is not behavioral equality, and neither is an unchanged function list — comparing only the functions both sides share would miss behavior *moved* into a new internal helper, or a deleted transfer hook. External additions stay in the ABI section, so nothing is reported twice.
+   - **Storage compatibility** — one verdict from two parts. Precedence: any *proven* conflict is `INCOMPATIBLE`; otherwise anything the check could not see is `UNKNOWN`; only full coverage is `COMPATIBLE`. The positional result is always shown on its own line too.
+     - *Positional layout* (`utils/sourcify_layout.py`, `utils/storage_layout.py`): the compiler `storageLayout` Sourcify publishes for both implementations. Slot, byte offset and recursive type shape are compared, including a normalized type *kind* at every level — `uint256` and `bytes32` fill the same 32 bytes, but retyping one as the other changes what stored data means ("reinterpreted as"). Contract types and `address` count as one kind. Custom value types are compared by what they wrap, resolved from each side's source (`type Id is bytes32`): unwrapping `Id` to `bytes32` is compatible and reported as a retype, `Id` redeclared over `uint256` is not, and an unresolved or ambiguous declaration is a gap rather than a name match. Compiler ids and variable names are ignored, so renames are context. Reserved `__gap` space may be consumed freely.
+     - *Non-positional storage* (`utils/storage_scope.py`, `utils/storage_access.py`, `utils/namespaced_storage.py`): everything a layout can't describe, found in the code that can run against the proxy's storage — the deployed contract, its whole inheritance chain, and library and free (file-level) functions actually reachable from them, read through each file's import aliases (`import {Lib as State}`) — a merely imported library contributes nothing. ERC-7201 namespaces count as unchanged only with the same id, identical elementary struct text, and every accessor resolving to the root the annotation defines (ERC-7201 leaves enforcing that to the developer). Structs are identified by their declaration (`Vault.Main` ≠ `Lib.Main`), never by bare name. A root that provably moved is a conflict; differently shaped structs sharing a root are an unresolved overlap, not a conflict. Unannotated `s.slot := ROOT` accessors, raw `sload`/`sstore` and `delegatecall` are coverage gaps. Roots resolve only from bounded forms — literals, unique constants, one never-reassigned local or getter hop, and the `keccak256`, EIP-1967 and ERC-7201 expressions — never guessed.
+   - **Unvalidated items** — inherited bodies, libraries/free functions, ERC-7201 namespaces, and anything else not checked, stated explicitly so silence is never read as safety.
 
-The structural diff is injected into the prompt under `--- Implementation Diff ---`. Best-effort: if either impl is unverified or extraction fails, the diff section is silently omitted but the rest of the upgrade context still renders.
+Everything is target-scoped: the compilation target is resolved from `settings.compilationTarget` or the unique file declaring the contract, and if it can't be resolved unambiguously the body analysis reports itself unavailable instead of falling back to the bundle. The concatenated source survives only as an explicitly named search helper for natspec lookups (`fetch_source`), never as evidence.
+
+Storage coverage is partial by design: Sourcify verifies a subset of what Etherscan does, and one-sided coverage, a `match: null` response, a malformed payload or a network error all produce `UNKNOWN`. `UNKNOWN` is never a soft `COMPATIBLE` — it means a reviewer still has to look. No compiler is downloaded or executed in the monitoring path.
+
+Before rendering, a consistency gate re-derives each claim from its own source: every addition/removal must agree with the target ABI, and every changed body must belong to a function the target defines. A section that fails is withheld and logged rather than shown. Separately, if two different contracts in one process are handed the *same* set of additions — the shape of the original incident — the diff says so inline and logs a warning, but keeps the result: each set was proven against its own ABI, so two siblings genuinely gaining the same function is a real finding, not an error.
+
+The diff is injected into the prompt under `--- Proxy Upgrade ---`. Best-effort: if either impl is unverified the whole section is omitted, but the rest of the upgrade context still renders.
 
 ### 5b. Deterministic Safety Checks (`utils/llm/ai_explainer.py`, `utils/source_context.py`)
 
@@ -463,9 +471,17 @@ utils/llm/
 
 utils/related_tokens.py      # Token discovery from a contract's own zero-arg address getters
 utils/source_context.py      # Etherscan v2 source fetch + natspec extractor + proxy follow
+utils/verified_contract.py   # Structured verified record: per-file sources, settings, ABI, target
 utils/on_chain_state.py      # Before-state reader (auto-generated getters, mappings, diamond storage)
 utils/proxy.py               # EIP-1967 impl slot read + proxy-upgrade detection (3 selectors)
-utils/impl_diff.py           # Structural old-vs-new impl diff (functions, storage layout, gap-aware)
+utils/impl_diff.py           # Old-vs-new impl diff: ABI surface, bodies, storage, unvalidated items
+utils/abi_surface.py         # Canonical-signature external surface diff from two ABIs
+utils/solidity_text.py       # Brace-aware, contract-scoped scanning of one Solidity file
+utils/sourcify_layout.py     # Sourcify compiler storageLayout fetch + cache
+utils/storage_layout.py      # Slot/offset/type-shape layout comparison (COMPATIBLE/INCOMPATIBLE/UNKNOWN)
+utils/storage_scope.py       # Code that can touch proxy storage: inheritance chain + reachable library functions
+utils/storage_access.py      # Slot accessors (with bounded root resolution), raw sload/sstore, delegatecall
+utils/namespaced_storage.py  # Non-positional storage: namespaces, roots, gaps and conflicts
 utils/tenderly/simulation.py # Tenderly Simulation API client
 utils/calldata/              # Selector resolver + ABI decoder
 safe/multisend.py            # Safe MultiSendCallOnly inner-call extractor + DELEGATECALL context note
