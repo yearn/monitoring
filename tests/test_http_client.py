@@ -39,6 +39,34 @@ def test_request_with_retry_retries_rate_limit(monkeypatch: pytest.MonkeyPatch) 
     assert len(calls) == 2
 
 
+def test_request_with_retry_retries_tls_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    responses: Iterator[requests.Response | requests.exceptions.SSLError] = iter(
+        (requests.exceptions.SSLError("unexpected EOF"), _response(200))
+    )
+    calls: list[str] = []
+
+    def request(method: str, url: str, **_kwargs: object) -> requests.Response:
+        calls.append(f"{method}:{url}")
+        result = next(responses)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(http_client.requests, "request", request)
+    monkeypatch.setattr(http_client.time, "sleep", lambda _seconds: None)
+
+    response = http_client.request_with_retry(
+        "get",
+        "https://example.com/data",
+        retries=1,
+        backoff_factor=0,
+        timeout=1,
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 2
+
+
 def test_request_with_retry_does_not_retry_permanent_client_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
