@@ -257,13 +257,15 @@ def _is_reassigned(name: str, body: str) -> bool:
     """True if ``name`` is written anywhere besides its declaration.
 
     Covers Solidity assignment and compound assignment (``root = …``,
-    ``root += …``), Yul assignment (``root := …``) and tuple destructuring
-    (``(root, x) = …``). The declaration itself accounts for one match.
+    ``root += …``), Yul assignment (``root := …``), tuple destructuring
+    (``(root, x) = …``) and ``delete root`` (which zeroes it). The declaration
+    itself accounts for one assignment match.
     """
     n = re.escape(name)
     writes = re.findall(rf"(?<![\w.$]){n}\s*(?::=|(?:<<|>>|[-+*/%&|^])?=(?!=))", body)
     destructured = re.search(rf"\([^()]*(?<![\w.$]){n}\b[^()]*\)\s*=(?!=)", body)
-    return len(writes) > 1 or destructured is not None
+    deleted = re.search(rf"\bdelete\s+{n}\b", body)
+    return len(writes) > 1 or destructured is not None or deleted is not None
 
 
 def _keccak_int(text: str) -> int:

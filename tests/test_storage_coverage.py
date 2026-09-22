@@ -339,6 +339,37 @@ class TestScopeResolution(CoverageTestCase):
         sources = {"src/Vault.sol": target, "src/Helpers.sol": helpers}
         self.assertEqual(self.diff(sources, sources).storage_status, UNKNOWN)
 
+    def test_function_list_using_directive_is_followed(self) -> None:
+        """`using {Lib.write} for T` attaches one library function; `v.write()` calls it."""
+        library = "library Lib { function write(uint256 v) internal { assembly { sstore(0x10, v) } } }"
+        target = "contract Vault { using {Lib.write} for uint256; uint256 cap; function f() external { cap.write(); } }"
+        sources = {"src/Vault.sol": target, "src/Lib.sol": library}
+        diff = self.diff(sources, sources)
+        self.assertEqual(diff.storage_status, UNKNOWN)
+        self.assertIn("Lib.write", format_impl_diff(diff))
+
+    def test_function_list_using_free_function_and_operator_is_followed(self) -> None:
+        """A bound free function may only ever be invoked through an operator — no call text."""
+        target = (
+            "type Amount is uint256; "
+            "function add(Amount a, Amount b) returns (Amount) { assembly { sstore(0x10, 1) } return a; } "
+            "using {add as +} for Amount global; "
+            "contract Vault { uint256 cap; function f(Amount a) external { a + a; } }"
+        )
+        diff = self.diff({"src/Vault.sol": target}, {"src/Vault.sol": target})
+        self.assertEqual(diff.storage_status, UNKNOWN)
+
+    def test_same_named_libraries_in_different_files_are_both_followed(self) -> None:
+        """Without knowing which `Lib` a call binds to, both are in scope — a harmless
+        definition must not mask the one that writes storage."""
+        harmless = "library Lib { function write() internal pure {} }"
+        harmful = "library Lib { function write() internal { assembly { sstore(0x10, 1) } } }"
+        target = "contract Vault { uint256 cap; function f() external { Lib.write(); } }"
+        for first, second in ((harmless, harmful), (harmful, harmless)):
+            with self.subTest(harmful_first=first is harmful):
+                sources = {"src/Vault.sol": target, "src/a/Lib.sol": first, "src/b/Lib.sol": second}
+                self.assertEqual(self.diff(sources, sources).storage_status, UNKNOWN)
+
     def test_unreached_free_function_is_ignored(self) -> None:
         target = "function writeRaw() { assembly { sstore(0x10, 1) } } contract Vault { uint256 cap; }"
         self.assertEqual(self.diff({"src/Vault.sol": target}, {"src/Vault.sol": target}).storage_status, COMPATIBLE)
@@ -368,6 +399,12 @@ class TestRootAndStructIdentity(CoverageTestCase):
     def test_reassigned_local_root_is_unresolved(self) -> None:
         """The initializer no longer holds at the assignment, so the root is unknown."""
         diff = self.diff(self._namespaced(""), self._namespaced("root = bytes32(uint256(root) + 256);"))
+        self.assertEqual(diff.namespaces.unchanged, [])
+        self.assertEqual(diff.storage_status, UNKNOWN)
+
+    def test_deleted_local_root_is_unresolved(self) -> None:
+        """`delete root` zeroes it, so the initializer no longer holds at the assignment."""
+        diff = self.diff(self._namespaced(""), self._namespaced("delete root;"))
         self.assertEqual(diff.namespaces.unchanged, [])
         self.assertEqual(diff.storage_status, UNKNOWN)
 

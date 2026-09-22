@@ -16,9 +16,12 @@ against the proxy. That code is:
 A library that is merely imported contributes nothing (the original
 yearn/monitoring#367 failure was an imported helper suppressing the storage
 check). Reachability is by name: a library function counts once its library is
-referenced (``Lib.f(…)`` or ``using Lib for …``) and something reachable calls a
-function of that name; a free function counts once something reachable calls
-it. Names are read through each file's import aliases
+referenced (``Lib.f(…)``, ``using Lib for …`` or ``using {Lib.f} for …``) and
+something reachable calls a function of that name; a free function counts once
+something reachable calls it. A function bound by a ``using {…}`` list counts
+as called, since through an operator (``using {add as +}``) it has no call text.
+Two files declaring the same library are both kept: which one a call binds to
+isn't resolved, so neither may mask the other. Names are read through each file's import aliases
 (``import {Lib as State}``), so a renamed import is still followed. Receivers
 aren't resolved, so this over-approximates — it can only pull in more code to
 check, which fails toward UNKNOWN.
@@ -45,6 +48,8 @@ from utils.verified_contract import VerifiedContract
 _CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
 _QUALIFIER_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\.")
 _USING_RE = re.compile(r"\busing\s+([A-Za-z_][\w.]*)\s+for\b")
+# `using {Lib.f, g as +} for T` — binds individual functions, possibly to operators.
+_USING_LIST_RE = re.compile(r"\busing\s*\{([^}]*)\}\s*for\b")
 
 
 @dataclass(frozen=True)
@@ -100,7 +105,10 @@ def storage_scope(contract: VerifiedContract) -> list[ScopedFunction] | None:
     libraries = _declared_in(contract, kinds=("library",))
     free = {path: free_functions(source) for path, source in contract.sources.items()}
     aliases = _AliasCache(contract)
-    included: set[tuple[str, str]] = set()  # (owner, function signature)
+    # (owner, file, signature): two files may each declare a `Lib` with the same
+    # function. Which one a call binds to isn't resolved, so both stay in scope —
+    # keying on the name alone let a harmless one mask the one writing storage.
+    included: set[tuple[str, str, str]] = set()
 
     while True:
         called, referenced = _calls_and_references(contract, scope, aliases)
@@ -113,7 +121,7 @@ def storage_scope(contract: VerifiedContract) -> list[ScopedFunction] | None:
 
         added = False
         for scoped in additions:
-            key = (scoped.owner, scoped.fn.signature)
+            key = (scoped.owner, scoped.path, scoped.fn.signature)
             if key not in included:
                 included.add(key)
                 scope.append(scoped)
@@ -187,6 +195,17 @@ def _calls_and_references(
         referenced.update(aliases.resolve(scoped.path, name) for name in _QUALIFIER_RE.findall(text))
     paths = {path for _, path in scope_owners(contract, scope)} | {s.path for s in scope}
     for path in paths:
-        for name in _USING_RE.findall(strip_noise(contract.sources[path])):
+        text = strip_noise(contract.sources[path])
+        for name in _USING_RE.findall(text):
             referenced.add(aliases.resolve(path, name.split(".")[-1]))
+        # A listed function is bound, not necessarily called by name — through an
+        # operator (`using {add as +}`) it has no call text at all — so it counts
+        # as called outright, and a `Lib.` qualifier as a reference to `Lib`.
+        for listed in _USING_LIST_RE.findall(text):
+            for item in listed.split(","):
+                qualifier, _, name = item.split(" as ")[0].strip().rpartition(".")
+                if name:
+                    called.add(aliases.resolve(path, name))
+                if qualifier:
+                    referenced.add(aliases.resolve(path, qualifier.split(".")[-1]))
     return called, referenced
