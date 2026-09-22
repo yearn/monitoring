@@ -54,8 +54,8 @@ TYPES = {
         "numberOfBytes": "32",
     },
     # Same shape, different compiler-generated id — must compare equal.
-    "t_contract(IMorpho)6874": {"label": "contract IMorpho", "encoding": "inplace", "numberOfBytes": "20"},
-    "t_contract(IMorpho)6876": {"label": "contract IMorpho", "encoding": "inplace", "numberOfBytes": "20"},
+    "t_contract(IToken)6874": {"label": "contract IToken", "encoding": "inplace", "numberOfBytes": "20"},
+    "t_contract(IToken)6876": {"label": "contract IToken", "encoding": "inplace", "numberOfBytes": "20"},
     "t_struct(Params)10_storage": {
         "label": "struct Params",
         "encoding": "inplace",
@@ -161,8 +161,8 @@ class TestCompatibleChanges(unittest.TestCase):
 
     def test_compiler_type_id_change_for_same_shape(self) -> None:
         result = compare_storage_layouts(
-            layout((0, 0, "morpho", "t_contract(IMorpho)6874")),
-            layout((0, 0, "morpho", "t_contract(IMorpho)6876")),
+            layout((0, 0, "token", "t_contract(IToken)6874")),
+            layout((0, 0, "token", "t_contract(IToken)6876")),
         )
         self.assertEqual(result.status, StorageCompatibility.COMPATIBLE)
 
@@ -306,8 +306,8 @@ class TestTypeIdentity(unittest.TestCase):
     def test_address_and_contract_types_are_interchangeable(self) -> None:
         """Retyping `IERC20 token` as `address token` — or another interface — is intentional."""
         for old_type, new_type in (
-            ("t_address", "t_contract(IMorpho)6874"),
-            ("t_contract(IMorpho)6874", "t_contract(IBar)7"),
+            ("t_address", "t_contract(IToken)6874"),
+            ("t_contract(IToken)6874", "t_contract(IBar)7"),
             ("t_address", "t_address_payable"),
         ):
             with self.subTest(old=old_type, new=new_type):

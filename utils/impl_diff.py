@@ -22,8 +22,8 @@ evidence that grounds the alert, in four separated categories:
 Every fact carries provenance (which contract, in which file). Nothing is
 derived from the concatenated source bundle, because the bundle contains bases,
 libraries and imported interfaces that are not part of the deployed contract —
-attributing those to the proxy produced both false positives (an ``IMorpho``
-declaration reported as a new unpermissioned function) and false negatives (a
+attributing those to the proxy produced both false positives (an imported
+interface's declaration reported as a new unpermissioned function) and false negatives (a
 real addition masked by a same-signature declaration elsewhere in the bundle).
 
 Before anything is rendered, :func:`_consistency_violations` re-checks the

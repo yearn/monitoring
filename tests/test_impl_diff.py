@@ -1,7 +1,7 @@
 """Tests for utils/impl_diff.py.
 
-Focused fixtures for the failure modes in yearn/monitoring#367; the real 3Jane
-upgrade is pinned separately in `test_impl_diff_3jane.py`.
+Synthetic bundles modelling each failure mode from yearn/monitoring#367: a target
+mixed with imported interfaces and bases, commented-out code, body-only changes.
 """
 
 import json
@@ -51,8 +51,8 @@ contract Vault is Base {
 
 # An imported interface that declares functions the deployed contract does not have.
 IMPORTED_INTERFACE = """
-interface IMorpho {
-    function clearMarketWindDown(Id id) external;
+interface IExternal {
+    function externalOnly(Id id) external;
     function setCap(uint256 newCap) external;
 }
 """
@@ -85,7 +85,7 @@ def _bundle(
     """An Etherscan entry whose bundle mixes the target with an interface and a base."""
     sources = {
         "src/Vault.sol": {"content": target_source},
-        "src/interfaces/IMorpho.sol": {"content": IMPORTED_INTERFACE},
+        "src/interfaces/IExternal.sol": {"content": IMPORTED_INTERFACE},
         "src/Base.sol": {"content": base},
     }
     for path, content in (extra or {}).items():
@@ -168,7 +168,7 @@ class TestSurfaceIsAbiDerived(ImplDiffTestCase):
     def test_imported_interface_declarations_are_not_reported(self) -> None:
         diff = self.run_diff()
         assert diff is not None
-        self.assertNotIn("clearMarketWindDown", format_impl_diff(diff))
+        self.assertNotIn("externalOnly", format_impl_diff(diff))
 
     def test_commented_out_function_is_not_a_removal(self) -> None:
         diff = self.run_diff()

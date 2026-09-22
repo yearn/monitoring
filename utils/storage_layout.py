@@ -11,12 +11,12 @@ What that means in practice:
   own slot/offset/shape, and at every level a normalized *kind*. Width alone is
   not enough: ``uint256`` and ``bytes32`` fill the same 32 bytes, but reading one
   as the other changes what the stored data means.
-- Compiler-internal noise is ignored: type ids (``t_contract(IMorpho)6874`` vs
+- Compiler-internal noise is ignored: type ids (``t_contract(IToken)6874`` vs
   ``…6876`` for the same type), AST ids, and the declaring-contract label.
   Contract types and ``address`` are one kind — that retype is intentional.
 - A rename is not an incompatibility. The slot doesn't move because the variable
-  got a new name, so renames are reported for the reviewer and nothing more.
-  The real 3Jane upgrade renamed four variables to ``__deprecated_*``.
+  got a new name, so renames are reported for the reviewer and nothing more —
+  e.g. retiring variables as ``__deprecated_*``.
 - Reserved gaps (``uint256[N] __gap``) exist to be consumed. An old gap need not
   survive; the variables around it must.
 
