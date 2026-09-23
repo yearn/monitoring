@@ -895,7 +895,7 @@ def check_por_coverage(state: UnibtcState, api_total_supply: Decimal | None) -> 
         f"PoR / API supply = {ratio:.4%} "
         f"(CRITICAL < {POR_CRITICAL_RATIO:.0%}, HIGH < {POR_HIGH_RATIO:.0%})\n"
         f"Chainlink PoR: {format_decimal_amount(reserves)} BTC\n"
-        f"API total_supply: {format_decimal_amount(api_total_supply)} uniBTC\n"
+        f"API total supply: {format_decimal_amount(api_total_supply)} uniBTC\n"
         f"🔗 PoR {_etherscan(POR_FEED)}"
     )
     _alert_on_band_escalation(
@@ -1000,7 +1000,7 @@ def check_feeder_gap(state: UnibtcState, api: ApiStats) -> None:
         f"total supply (threshold {FEEDER_GAP_THRESHOLD:.0%}).\n"
         f"{hint}"
         f"Feeder totalTokenSupply: {_fmt_btc(state.feeder_supply)} uniBTC\n"
-        f"API total_supply: {format_decimal_amount(api.total_supply)} uniBTC\n"
+        f"API total supply: {format_decimal_amount(api.total_supply)} uniBTC\n"
         f"🔗 Feeder {_etherscan(SUPPLY_FEEDER)}"
     )
     _alert_while_true(CACHE_KEY_FEEDER_GAP, wrong, Alert(AlertSeverity.HIGH, message, PROTOCOL))
