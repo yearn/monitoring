@@ -21,6 +21,7 @@ from utils.llm.ai_explainer import (
     _generate_explanation,
     _parse_explanation,
     _sole_token_by_target,
+    _split_risk_tag,
     collect_unique_addresses,
     explain_batch_transaction,
     explain_transaction,
@@ -380,6 +381,23 @@ class TestStructuredOutput(unittest.TestCase):
         # Model put LOW in the prose but the validated risk_tag is HIGH — schema wins.
         exp = _explanation_from_json({"summary": "Grants admin role. LOW.", "detail": "d", "risk_tag": "HIGH"})
         self.assertEqual(exp.summary, "Grants admin role. HIGH")
+
+    def test_strips_colon_lead_in_before_tag(self) -> None:
+        # The report shows the prose without the tag; a colon must not be left dangling.
+        prose, tag = _split_risk_tag("Swaps the merkle root. Combined mint schedule plus tree replacement: MEDIUM")
+        self.assertEqual(prose, "Swaps the merkle root. Combined mint schedule plus tree replacement.")
+        self.assertEqual(tag, "MEDIUM")
+
+    def test_strips_risk_label_lead_in(self) -> None:
+        self.assertEqual(_split_risk_tag("Pauses the vault. Risk: LOW."), ("Pauses the vault.", "LOW"))
+        self.assertEqual(_split_risk_tag("Pauses the vault — HIGH"), ("Pauses the vault.", "HIGH"))
+
+    def test_keeps_risk_word_inside_prose(self) -> None:
+        self.assertEqual(_split_risk_tag("Carries low risk: LOW"), ("Carries low risk.", "LOW"))
+
+    def test_colon_lead_in_normalized_with_schema_tag(self) -> None:
+        exp = _explanation_from_json({"summary": "Rotates the root: LOW", "detail": "", "risk_tag": "MEDIUM"})
+        self.assertEqual(exp.summary, "Rotates the root. MEDIUM")
 
 
 class TestParseExplanation(unittest.TestCase):
