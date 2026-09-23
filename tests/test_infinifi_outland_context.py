@@ -12,6 +12,7 @@ from utils.llm.infinifi_outland_context import (
     FarmTypeContext,
     HubVaultContext,
     OracleAssignmentContext,
+    RouteConfig,
     format_outland_prompt,
     format_outland_report,
     resolve_outland_context,
@@ -27,6 +28,7 @@ BASE_VAULT = "0xf0d0F1fdEE5595628De17B37E4134a5bAc4441C3"
 ORACLE = "0x168DF792845BA1bd80d485399de63a4110b03242"
 USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
 PEER = "0x1111111111111111111111111111111111111111"
+NEW_PEER = "0x2222222222222222222222222222222222222222"
 
 
 def _call(name: str, *params: tuple[str, object]) -> DecodedCall:
@@ -142,7 +144,7 @@ class TestConnectorRoute(unittest.TestCase):
         ]
         contexts = self._resolve(calls, (ZERO_ADDRESS, 0, 0))
         # Both calls name chain 143, so it is read once.
-        self.assertEqual(contexts, [ConnectorRouteContext(CONNECTOR, 143, ZERO_ADDRESS, 0, 0, False)])
+        self.assertEqual(contexts, [ConnectorRouteContext(CONNECTOR, 143, RouteConfig(ZERO_ADDRESS, 0, 0))])
         prompt = format_outland_prompt(contexts)
         self.assertIn("NOT configured", prompt)
         self.assertIn("route is not live after this batch", prompt)
@@ -150,16 +152,49 @@ class TestConnectorRoute(unittest.TestCase):
 
     def test_configured_route_names_the_peer(self) -> None:
         contexts = self._resolve([_call("setCctpDomain", ("uint256", 143), ("uint32", 15))], (PEER, 200_000, 99))
-        self.assertIn(f"configured — peer {PEER}, gas limit 200,000", format_outland_prompt(contexts))
+        self.assertIn(
+            f"configured, unchanged by this batch — peer {PEER}, gas limit 200,000", format_outland_prompt(contexts)
+        )
         self.assertIn(PEER, contexts[0].addresses)
 
-    def test_configuration_in_the_same_batch_is_recognised(self) -> None:
-        calls = [
-            _call("setCctpDomain", ("uint256", 143), ("uint32", 15)),
-            _call("setConfiguration", ("uint256", 143), ("address", PEER), ("uint256", 99), ("uint256", 200_000)),
-        ]
+    @staticmethod
+    def _set_configuration(peer: str, selector: int, gas_limit: int) -> DecodedCall:
+        return _call(
+            "setConfiguration",
+            ("uint256", 143),
+            ("address", peer),
+            ("uint256", selector),
+            ("uint256", gas_limit),
+        )
+
+    def test_new_route_in_the_same_batch_shows_the_values_it_sets(self) -> None:
+        calls = [_call("setCctpDomain", ("uint256", 143), ("uint32", 15)), self._set_configuration(PEER, 99, 200_000)]
         contexts = self._resolve(calls, (ZERO_ADDRESS, 0, 0))
-        self.assertIn("this batch calls setConfiguration for it", format_outland_prompt(contexts))
+        self.assertEqual(contexts[0].after_batch, RouteConfig(PEER, 200_000, 99))
+        prompt = format_outland_prompt(contexts)
+        self.assertIn(f"this batch sets it via setConfiguration to peer {PEER}, gas limit 200,000", prompt)
+        self.assertIn("Before the batch: not configured", prompt)
+
+    def test_reconfiguring_a_live_route_reports_the_new_peer_not_the_old(self) -> None:
+        contexts = self._resolve([self._set_configuration(NEW_PEER, 99, 300_000)], (PEER, 200_000, 99))
+        prompt = format_outland_prompt(contexts)
+        self.assertIn(f"to peer {NEW_PEER}, gas limit 300,000", prompt)
+        self.assertIn(f"Before the batch: peer {PEER}", prompt)
+        self.assertNotIn("unchanged", prompt)
+        report = format_outland_report(contexts, 1, {})
+        self.assertIn(f"set by this batch — peer [`{NEW_PEER}`]", report)
+        self.assertIn(f"(was peer [`{PEER}`]", report)
+        self.assertEqual(contexts[0].addresses, [CONNECTOR, PEER, NEW_PEER])
+
+    def test_clearing_a_live_route_is_flagged(self) -> None:
+        contexts = self._resolve([self._set_configuration(ZERO_ADDRESS, 0, 0)], (PEER, 200_000, 99))
+        self.assertIn("this batch CLEARS the route", format_outland_prompt(contexts))
+        self.assertIn("**cleared** by this batch", format_outland_report(contexts, 1, {}))
+
+    def test_last_configuration_for_a_chain_wins(self) -> None:
+        calls = [self._set_configuration(PEER, 99, 200_000), self._set_configuration(NEW_PEER, 99, 300_000)]
+        contexts = self._resolve(calls, (ZERO_ADDRESS, 0, 0))
+        self.assertEqual(contexts[0].proposed, RouteConfig(NEW_PEER, 300_000, 99))
 
 
 class TestAbiExposure(unittest.TestCase):

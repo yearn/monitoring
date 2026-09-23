@@ -156,27 +156,46 @@ class HubVaultContext:
 
 
 @dataclass(frozen=True)
+class RouteConfig:
+    """A connector's send configuration for one destination chain."""
+
+    peer: str
+    gas_limit: int
+    chain_selector: int
+
+    @property
+    def is_configured(self) -> bool:
+        return self.peer != ZERO_ADDRESS and self.gas_limit != 0
+
+    def describe(self) -> str:
+        return f"peer {self.peer}, gas limit {self.gas_limit:,}, selector {self.chain_selector}"
+
+
+@dataclass(frozen=True)
 class ConnectorRouteContext:
     """Whether a connector can send to a chain once the batch executes."""
 
     connector: str
     chain_id: int
-    peer: str
-    gas_limit: int
-    chain_selector: int
-    configured_in_batch: bool
+    # chainConfig read on-chain, before the batch executes.
+    current: RouteConfig
+    # The last setConfiguration this batch makes for the chain, if any; it
+    # overrides ``current`` once the batch executes.
+    proposed: RouteConfig | None = None
 
     @property
     def addresses(self) -> list[str]:
-        return [self.connector] + ([self.peer] if self.peer != ZERO_ADDRESS else [])
+        peers = [config.peer for config in (self.current, self.proposed) if config and config.peer != ZERO_ADDRESS]
+        return list(dict.fromkeys([self.connector, *peers]))
 
     @property
     def labels(self) -> dict[str, str]:
         return {}
 
     @property
-    def is_configured(self) -> bool:
-        return self.peer != ZERO_ADDRESS and self.gas_limit != 0
+    def after_batch(self) -> RouteConfig:
+        """The configuration in force once the batch executes."""
+        return self.proposed or self.current
 
 
 OutlandContext = FarmTypeContext | OracleAssignmentContext | HubVaultContext | ConnectorRouteContext
@@ -271,6 +290,23 @@ def _hub_vault_context(chain_id: int, target: str, call: DecodedCall) -> HubVaul
     )
 
 
+def _proposed_route_configs(calls: list[DecodedCall]) -> dict[int, RouteConfig]:
+    """Route configs the batch's ``setConfiguration(chainId, peer, selector, gasLimit)`` calls set.
+
+    A later call for the same chain wins, as it would on execution.
+    """
+    configs: dict[int, RouteConfig] = {}
+    for call in calls:
+        if call.function_name != "setConfiguration":
+            continue
+        destination, peer = _uint_param(call, 0), _address_param(call, 1)
+        selector, gas_limit = _uint_param(call, 2), _uint_param(call, 3)
+        if destination is None or peer is None or selector is None or gas_limit is None:
+            continue
+        configs[destination] = RouteConfig(peer, gas_limit, selector)
+    return configs
+
+
 def _connector_contexts(chain_id: int, target: str, calls: list[DecodedCall]) -> list[ConnectorRouteContext]:
     """Read each touched destination chain's send configuration on a connector."""
     chain_ids = list(
@@ -284,7 +320,7 @@ def _connector_contexts(chain_id: int, target: str, calls: list[DecodedCall]) ->
     )
     if not chain_ids or not exposes(chain_id, target, {"chainConfig", "portal"}):
         return []
-    configured_in_batch = {_uint_param(call, 0) for call in calls if call.function_name == "setConfiguration"}
+    proposed = _proposed_route_configs(calls)
     client = ChainManager.get_client(Chain.from_chain_id(chain_id))
     connector = client.get_contract(target, _CONNECTOR_ABI)
     with client.batch_requests() as batch:
@@ -295,10 +331,8 @@ def _connector_contexts(chain_id: int, target: str, calls: list[DecodedCall]) ->
         ConnectorRouteContext(
             connector=target,
             chain_id=destination,
-            peer=to_checksum_address(str(peer)),
-            gas_limit=int(gas_limit),
-            chain_selector=int(selector),
-            configured_in_batch=destination in configured_in_batch,
+            current=RouteConfig(to_checksum_address(str(peer)), int(gas_limit), int(selector)),
+            proposed=proposed.get(destination),
         )
         for destination, (peer, gas_limit, selector) in zip(chain_ids, configs)
     ]
@@ -348,10 +382,20 @@ def _format_unit_price(context: OracleAssignmentContext) -> str:
 
 def _route_status(context: ConnectorRouteContext) -> str:
     """One sentence on whether the connector can send to the chain after this batch."""
-    if context.is_configured:
-        return f"configured — peer {context.peer}, gas limit {context.gas_limit:,}, selector {context.chain_selector}"
-    if context.configured_in_batch:
-        return "not configured on-chain yet; this batch calls setConfiguration for it"
+    current, proposed = context.current, context.proposed
+    before = current.describe() if current.is_configured else "not configured"
+    if proposed is not None:
+        if not proposed.is_configured:
+            return (
+                f"this batch CLEARS the route via setConfiguration ({proposed.describe()}); sendTokens to this "
+                f"chain reverts afterwards. Before the batch: {before}"
+            )
+        return (
+            f"this batch sets it via setConfiguration to {proposed.describe()} — the peer is the destination-side "
+            f"address that receives the bridged funds. Before the batch: {before}"
+        )
+    if current.is_configured:
+        return f"configured, unchanged by this batch — {current.describe()}"
     return (
         "NOT configured (peer, gas limit and selector all unset). sendTokens to this chain reverts "
         "(MissingPeer / NoGasLimit) until a separate setConfiguration(chainId, peer, selector, gasLimit) "
@@ -422,13 +466,16 @@ def format_outland_report(contexts: list[OutlandContext], chain_id: int, labels:
                 f"chains registered before: {registered}"
             )
         else:
-            status = (
-                "configured"
-                if context.is_configured
-                else "set in this batch"
-                if context.configured_in_batch
-                else "**not configured** — sends revert until a later `setConfiguration` sets the peer"
-            )
+            if context.proposed is not None:
+                change = "set" if context.proposed.is_configured else "**cleared**"
+                status = f"{change} by this batch — peer {address_link(context.proposed.peer, chain_id, labels)}"
+                status += f", gas limit `{context.proposed.gas_limit:,}`, selector `{context.proposed.chain_selector}`"
+                if context.current.is_configured:
+                    status += f" (was peer {address_link(context.current.peer, chain_id, labels)})"
+            elif context.current.is_configured:
+                status = f"configured, unchanged — peer {address_link(context.current.peer, chain_id, labels)}"
+            else:
+                status = "**not configured** — sends revert until a later `setConfiguration` sets the peer"
             lines.append(
                 f"- **Connector route to chain `{context.chain_id}`** "
                 f"({address_link(context.connector, chain_id, labels)}): {status}"
