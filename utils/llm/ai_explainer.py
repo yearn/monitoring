@@ -195,6 +195,12 @@ _RISK_TAGS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 _TRAILING_RISK_TAG_RE = re.compile(r"\s*\b(?:" + "|".join(_RISK_TAGS) + r")\b[\s.]*$", re.IGNORECASE)
 # Same match, but capturing, so the report header and gist title can name the risk.
 _TRAILING_RISK_TAG_CAPTURE_RE = re.compile(r"\b(" + "|".join(_RISK_TAGS) + r")\b[\s.]*$", re.IGNORECASE)
+# Lead-in left dangling once the tag is stripped: "…replacement: MEDIUM" or
+# "…vault. Risk: LOW". A "Risk" label is only removed at a sentence start so prose
+# like "low risk: LOW" keeps its words.
+_RISK_TAG_LEAD_IN_RE = re.compile(
+    r"(?:(?:^|(?<=[.!?]))\s*risk(?:\s+(?:level|tag|rating))?)?\s*[:;,=→–—-]+\s*$", re.IGNORECASE
+)
 DETAIL_REPORT_TITLE = "AI Transaction Analysis"
 
 # Where reports that failed to reach Wavey Gist are spilled, under CACHE_DIR.
@@ -1477,8 +1483,23 @@ def _parse_explanation(raw: str) -> Explanation:
 
 
 def _strip_trailing_risk_tag(text: str) -> str:
-    """Remove a trailing risk tag (with surrounding space/punctuation) from text."""
-    return _TRAILING_RISK_TAG_RE.sub("", text).rstrip()
+    """Remove a trailing risk tag (with surrounding space/punctuation) from text.
+
+    A separator that introduced the tag (``: MEDIUM``, ``— HIGH``, ``Risk: LOW``) is
+    removed with it and the sentence closed with a period, so the report's summary
+    never ends on a dangling colon.
+    """
+    stripped, count = _TRAILING_RISK_TAG_RE.subn("", text)
+    stripped = stripped.rstrip()
+    if not count:
+        return stripped
+    without_lead_in, lead_ins = _RISK_TAG_LEAD_IN_RE.subn("", stripped)
+    if not lead_ins:
+        return stripped
+    without_lead_in = without_lead_in.rstrip()
+    if without_lead_in and without_lead_in[-1] not in ".!?":
+        without_lead_in += "."
+    return without_lead_in
 
 
 def _split_risk_tag(summary: str) -> tuple[str, str]:
