@@ -4,9 +4,11 @@ import unittest
 from unittest.mock import patch
 
 from utils.tenderly.simulation import (
+    BundleCall,
     _merge_balance_override,
     _parse_asset_changes,
     _parse_state_changes,
+    simulate_bundle,
     simulate_transaction,
 )
 
@@ -204,6 +206,74 @@ class TestSimulateTransaction(unittest.TestCase):
         mock_fetch.return_value = None
         result = simulate_transaction(target="0xTarget", calldata="0x12345678", chain_id=1)
         self.assertIsNone(result)
+
+
+class TestSimulateBundle(unittest.TestCase):
+    """Tests for simulate_bundle."""
+
+    CALLS = [
+        BundleCall(target="0xOracleRegistry", calldata="0x5c38eb3a"),
+        BundleCall(target="0xFarm", calldata="0x6817031b", value=5),
+        BundleCall(target="0xRegistry", calldata="0x56d2ed05"),
+    ]
+
+    @patch("utils.tenderly.simulation.fetch_json")
+    @patch.dict("os.environ", {"TENDERLY_API_KEY": "test-key"}, clear=False)
+    def test_posts_calls_in_order_from_the_executor(self, mock_fetch: unittest.mock.MagicMock) -> None:
+        mock_fetch.return_value = {"simulation_results": [{"transaction": {"status": True}}] * 3}
+        simulate_bundle(self.CALLS, chain_id=1, from_address="0xTimelock")
+
+        url = mock_fetch.call_args.args[0]
+        self.assertTrue(url.endswith("/simulate-bundle"))
+        simulations = mock_fetch.call_args.kwargs["json"]["simulations"]
+        self.assertEqual([sim["to"] for sim in simulations], ["0xOracleRegistry", "0xFarm", "0xRegistry"])
+        self.assertTrue(all(sim["from"] == "0xTimelock" for sim in simulations))
+        # The executor is funded once, for the whole batch, before the first call.
+        self.assertEqual(simulations[0]["state_objects"], {"0xTimelock": {"balance": hex(5)}})
+        self.assertNotIn("state_objects", simulations[1])
+
+    @patch("utils.tenderly.simulation.fetch_json")
+    @patch.dict("os.environ", {"TENDERLY_API_KEY": "test-key"}, clear=False)
+    def test_results_align_with_calls_after_early_stop(self, mock_fetch: unittest.mock.MagicMock) -> None:
+        # Tenderly stops at the first revert, returning only the calls it ran.
+        mock_fetch.return_value = {
+            "simulation_results": [
+                {"transaction": {"status": True, "gas_used": 21000, "transaction_info": {"logs": [{"name": "Set"}]}}},
+                {
+                    "transaction": {
+                        "status": False,
+                        "transaction_info": {"stack_trace": [{"error_reason": "InvalidOracle"}]},
+                    }
+                },
+            ]
+        }
+        results = simulate_bundle(self.CALLS, chain_id=1, from_address="0xTimelock")
+
+        assert results is not None
+        self.assertEqual(len(results), 3)
+        first, second, third = results
+        assert first is not None and second is not None
+        self.assertTrue(first.success)
+        # Bundle results carry gas on the transaction, not inside transaction_info.
+        self.assertEqual(first.gas_used, 21000)
+        self.assertEqual(first.logs, [{"name": "Set"}])
+        self.assertFalse(second.success)
+        self.assertEqual(second.error_message, "InvalidOracle")
+        self.assertIsNone(third)
+
+    @patch("utils.tenderly.simulation.fetch_json", return_value=None)
+    @patch.dict("os.environ", {"TENDERLY_API_KEY": "test-key"}, clear=False)
+    def test_request_failure_returns_none(self, _mock_fetch: unittest.mock.MagicMock) -> None:
+        self.assertIsNone(simulate_bundle(self.CALLS, chain_id=1, from_address="0xTimelock"))
+
+    @patch("utils.tenderly.simulation.fetch_json", return_value={"simulation_results": []})
+    @patch.dict("os.environ", {"TENDERLY_API_KEY": "test-key"}, clear=False)
+    def test_empty_results_return_none(self, _mock_fetch: unittest.mock.MagicMock) -> None:
+        self.assertIsNone(simulate_bundle(self.CALLS, chain_id=1, from_address="0xTimelock"))
+
+    @patch.dict("os.environ", {"TENDERLY_API_KEY": ""}, clear=False)
+    def test_no_api_key_returns_none(self) -> None:
+        self.assertIsNone(simulate_bundle(self.CALLS, chain_id=1, from_address="0xTimelock"))
 
 
 if __name__ == "__main__":

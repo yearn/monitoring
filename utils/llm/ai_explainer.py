@@ -50,7 +50,7 @@ from utils.source_context import (
     get_verification_status,
 )
 from utils.telegram import escape_markdown
-from utils.tenderly.simulation import SimulationResult, simulate_transaction
+from utils.tenderly.simulation import BundleCall, SimulationResult, simulate_bundle, simulate_transaction
 from utils.wavey_gist import upload_to_gist
 
 logger = get_logger("utils.llm.ai_explainer")
@@ -355,6 +355,9 @@ class _PreparedCall:
     value: int
     decoded: DecodedCall | None
     simulation: SimulationResult | None = None
+    # True when simulated in batch order on the state left by the earlier calls;
+    # False for an independent simulation against the current chain state.
+    sequential: bool = False
 
 
 def _state_value_markdown(value: object, chain_id: int, labels: dict[str, str]) -> str:
@@ -435,7 +438,7 @@ def _decode_status(data: str, decoded: DecodedCall | None) -> str:
     return "unknown_selector"
 
 
-def _simulation_note(sim: SimulationResult | None, *, independent: bool) -> str:
+def _simulation_note(sim: SimulationResult | None, *, independent: bool, sequential: bool = False) -> str:
     """Deterministic per-call simulation line for the gist call flow.
 
     Failed sims are labeled as diagnostics so a reviewer can see them without
@@ -445,10 +448,17 @@ def _simulation_note(sim: SimulationResult | None, *, independent: bool) -> str:
         return ""
     if sim.success:
         gas = f", gas {sim.gas_used:,}" if sim.gas_used else ""
+        if sequential:
+            return f"**Batch simulation:** SUCCESS{gas} (run in batch order on the state left by the preceding calls)"
         if independent:
             return f"**Independent simulation:** SUCCESS{gas} (does not prove the batch succeeds atomically)"
         return f"**Simulation:** SUCCESS{gas}"
     error = sim.error_message or "reverted"
+    if sequential:
+        return (
+            f"**Batch simulation diagnostic:** {error} when run in batch order — not a predicted governance "
+            "failure (omitted from the risk prompt; later calls were simulated independently)"
+        )
     independent_note = "independent simulation; " if independent else ""
     return (
         f"**Simulation diagnostic:** {error} — not a predicted governance failure "
@@ -1148,7 +1158,7 @@ def _format_prepared_calldata(
 
 
 def _format_batch_simulation_section(items: list[_PreparedCall]) -> str:
-    """Prompt section for successful independent per-call simulations.
+    """Prompt section for successful per-call simulations (batch-order or independent).
 
     Failed and missing sims are omitted here (they bias the model toward a
     false revert). They are still logged and attached to the gist call flow.
@@ -1162,12 +1172,16 @@ def _format_batch_simulation_section(items: list[_PreparedCall]) -> str:
         if len(blocks) >= MAX_PROMPT_SIMULATIONS:
             omitted += 1
             continue
-        header = f"Call {item.index} (independent simulation; does not prove the batch succeeds atomically):"
+        header = (
+            f"Call {item.index} (simulated in batch order, after calls 1-{item.index - 1}):"
+            if item.sequential and item.index > 1
+            else f"Call {item.index} (simulated in batch order, first call):"
+            if item.sequential
+            else f"Call {item.index} (independent simulation; does not prove the batch succeeds atomically):"
+        )
         blocks.append(header + "\n" + _format_simulation_context(sim))
     if omitted:
-        blocks.append(
-            f"{omitted} further successful independent simulations omitted from this prompt; see the call flow."
-        )
+        blocks.append(f"{omitted} further successful simulations omitted from this prompt; see the call flow.")
     return "\n\n".join(blocks)
 
 
@@ -1857,29 +1871,57 @@ def _prepare_batch_items(
     from_address: str,
     skip_simulation: bool,
 ) -> list[_PreparedCall]:
-    """Decode and optionally simulate each input call, preserving original indices."""
-    items: list[_PreparedCall] = []
+    """Decode and optionally simulate each input call, preserving original indices.
+
+    Calls are simulated as one sequential bundle, so each sees the state the
+    earlier calls leave — the way a timelock ``executeBatch`` runs them. A batch
+    whose call depends on an earlier one (``setOracle`` then ``setVault``) would
+    otherwise show a false revert. Calls the bundle could not reach (after a
+    revert), or every call when the bundle request itself fails, fall back to an
+    independent simulation against the current chain state.
+    """
+    decoded_items: list[tuple[int, str, str, int, DecodedCall | None, str]] = []
     for i, call in enumerate(calls, start=1):
         target = call.get("target", "")
         data = _normalize_calldata(call.get("data"))
         value = parse_wei(call.get("value", 0))
         decoded = decode_calldata(data, chain_id=chain_id, target=target) if _has_function_selector(data) else None
-        status = _decode_status(data, decoded)
+        decoded_items.append((i, target, data, value, decoded, _decode_status(data, decoded)))
+
+    bundle: list[SimulationResult | None] | None = None
+    if not skip_simulation and len(decoded_items) > 1:
+        bundle = simulate_bundle(
+            [BundleCall(target=target, calldata=data, value=value) for _, target, data, value, _, _ in decoded_items],
+            chain_id=chain_id,
+            from_address=from_address,
+        )
+        if bundle is None:
+            logger.warning("Bundle simulation unavailable; simulating batch calls independently")
+
+    items: list[_PreparedCall] = []
+    for position, (i, target, data, value, decoded, status) in enumerate(decoded_items):
         simulation: SimulationResult | None = None
+        sequential = False
         # Empty calldata has no function to simulate; a SUCCESS here would look
-        # like confirmed native delivery, which we must not assert.
+        # like confirmed native delivery, which we must not assert. It still runs
+        # in the bundle so later calls see its value transfer.
         if not skip_simulation and status != "empty_calldata":
-            simulation = simulate_transaction(
-                target=target,
-                calldata=data,
-                chain_id=chain_id,
-                value=value,
-                from_address=from_address,
-            )
+            bundled = bundle[position] if bundle is not None else None
+            if bundled is not None:
+                simulation, sequential = bundled, True
+            else:
+                simulation = simulate_transaction(
+                    target=target,
+                    calldata=data,
+                    chain_id=chain_id,
+                    value=value,
+                    from_address=from_address,
+                )
             if simulation is not None and not simulation.success:
                 logger.warning(
-                    "Batch call %d simulation reported failure (%s); omitting from prompt",
+                    "Batch call %d %s simulation reported failure (%s); omitting from prompt",
                     i,
+                    "sequential" if sequential else "independent",
                     simulation.error_message,
                 )
         items.append(
@@ -1890,6 +1932,7 @@ def _prepare_batch_items(
                 value=value,
                 decoded=decoded,
                 simulation=simulation,
+                sequential=sequential,
             )
         )
     return items
@@ -1901,7 +1944,6 @@ def _call_entry_from_item(
     param_names: list[str] | None,
     role_names: dict[str, str],
     amount_token: RelatedToken | None,
-    independent_sim: bool,
 ) -> CallEntry:
     """Build a report entry that keeps unknown payloads visible."""
     return CallEntry(
@@ -1914,7 +1956,7 @@ def _call_entry_from_item(
         raw_calldata=item.data,
         original_index=item.index,
         decode_status=_decode_status(item.data, item.decoded),
-        simulation_note=_simulation_note(item.simulation, independent=independent_sim),
+        simulation_note=_simulation_note(item.simulation, independent=True, sequential=item.sequential),
     )
 
 
@@ -2002,7 +2044,6 @@ def _deterministic_undecoded_explanation(
                 param_names=None,
                 role_names={},
                 amount_token=None,
-                independent_sim=True,
             )
             for item in items
         ],
@@ -2167,7 +2208,6 @@ def explain_batch_transaction(
                 param_names=names_by_index.get(item.index),
                 role_names=roles_by_target.get(item.target.lower(), {}) if item.target else {},
                 amount_token=sole_tokens.get(item.target.lower()) if item.target else None,
-                independent_sim=True,
             )
             for item in items
         ],
