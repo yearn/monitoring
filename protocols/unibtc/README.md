@@ -4,6 +4,8 @@ Hourly state polling for [Bedrock uniBTC](https://www.bedrock.technology/) on Et
 
 Queued Safe transactions are covered by the [Safe monitor](../safe/main.py). This script polls live state for the paths those queues cannot see — including the single-EOA unbacked-mint path through the legacy withdrawal router.
 
+> **Paused (2026-09-23):** the hourly task is disabled in `automation/jobs.yaml` while we raise the supply feeder omitting BOB with the Bedrock team; its alerts would repeat until they respond. The Safe monitor below keeps running.
+
 [Risk assessment](https://github.com/yearn/risk-score/blob/master/reports/report/bedrock-unibtc.md)
 
 ## What it monitors

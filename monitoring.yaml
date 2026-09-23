@@ -419,6 +419,7 @@ protocols:
     display_name: "Bedrock uniBTC"
     description: "Bedrock uniBTC minting, PoR, feeder, redemption, and peg monitoring on Mainnet"
     cadence: "Hourly"
+    disabled: true
     tasks:
       - protocols/unibtc/main.py
     monitors:
