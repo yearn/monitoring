@@ -30,7 +30,7 @@ A healthy feeder tracks the API total supply (ratio ~1.00 through 2026-09-12). S
 
 Total supply across chains has no on-chain or Chainlink source, so it comes from `https://affiliate-api-eosin.vercel.app/api/v1/third/stats/unibtc`. It is the undocumented backend of Bedrock's own dashboard ([app.bedrock.technology](https://app.bedrock.technology) loads it), so it is the issuer's figure rather than independent evidence, and it has been observed dropping a whole chain from `supplies` (BOB on 2026-09-16), understating total supply by ~15%.
 
-An understated total is worse than no data: it inflates PoR coverage and hides a feeder that omits the same chain. Every response is therefore validated, and the PoR-coverage and feeder-gap checks are skipped for the run (with an error message) unless all of these hold:
+An understated total is worse than no data: it inflates PoR coverage and hides a feeder that omits the same chain. Every response is therefore validated, and the PoR-coverage and feeder-gap checks are skipped for the run unless all of these hold:
 
 - `time` is at most 1 hour older than the pinned block.
 - Every chain holding meaningful supply is present with a positive value: Ethereum (1), BSC (56), Base (8453), BOB (60808), Berachain (80094) — 99.4% of supply on 2026-09-16.
@@ -38,6 +38,8 @@ An understated total is worse than no data: it inflates PoR coverage and hides a
 - `total_supply` equals the sum of `supplies` within 0.01 uniBTC. The checks use the total, so the per-chain safeguards above only protect it when the two agree.
 
 The required-chain list is static; a new chain gaining material supply must be added to `API_REQUIRED_CHAINS`.
+
+The backend recomputes its figures every 5 minutes (at :x0:08 and :x5:08, so the hourly run often lands mid-recompute). A recompute takes 20-45s (requests hang meanwhile) and sometimes drops one chain (BOB, Berachain), while the next recompute is complete. Each run therefore makes up to 3 attempts: a failed request (30s timeout) is retried after 30s, a rejected snapshot after 5.5 minutes so the retry sees the next recompute. The run can take up to ~7 minutes in the worst case, and an error message is sent only when the API stays unusable for 3 consecutive runs. Skipping PoR coverage for an hour is harmless because the PoR feed itself updates daily.
 
 ## Safe monitor
 
