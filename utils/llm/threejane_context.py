@@ -150,6 +150,8 @@ class RewardsDistributorContext:
     """Distribution mode and reward accounting around a RewardsDistributor call."""
 
     distributor_address: str
+    # Sole caller of the onlyOwner setters (setEpochEmissions, updateRoot, setUseMint).
+    owner_address: str
     token_address: str
     token_symbol: str
     token_decimals: int
@@ -168,7 +170,7 @@ class RewardsDistributorContext:
 
     @property
     def addresses(self) -> list[str]:
-        return [self.distributor_address, self.token_address]
+        return [self.distributor_address, self.owner_address, self.token_address]
 
     @property
     def labels(self) -> dict[str, str]:
@@ -381,7 +383,16 @@ def _read_distributor_context(chain_id: int, target: str, calls: list[DecodedCal
         batch.add(distributor.functions.maxClaimable())
         batch.add(distributor.functions.totalClaimed())
         batch.add(distributor.functions.epoch())
-        use_mint, merkle_root, token_address, max_claimable, total_claimed, current_epoch = client.execute_batch(batch)
+        batch.add(distributor.functions.owner())
+        (
+            use_mint,
+            merkle_root,
+            token_address,
+            max_claimable,
+            total_claimed,
+            current_epoch,
+            owner,
+        ) = client.execute_batch(batch)
 
     token_address = to_checksum_address(str(token_address))
     metadata = fetch_erc20_metadata(chain_id, token_address)
@@ -409,6 +420,7 @@ def _read_distributor_context(chain_id: int, target: str, calls: list[DecodedCal
 
     return RewardsDistributorContext(
         distributor_address=address,
+        owner_address=to_checksum_address(str(owner)),
         token_address=token_address,
         token_symbol=metadata.symbol,
         token_decimals=metadata.decimals,
@@ -470,6 +482,19 @@ def _distribution_mode_line(context: RewardsDistributorContext) -> str:
     )
 
 
+def _ownership_line(context: RewardsDistributorContext) -> str:
+    """State the ownership direction, which the model has otherwise inverted.
+
+    Without it, a report described the executing timelock as "owned by the
+    distributor" — the reverse of what `owner()` returns.
+    """
+    return (
+        f"Ownership: RewardsDistributor.owner() = {context.owner_address}. The distributor is owned BY "
+        "this address (not the other way round); only it can call the onlyOwner setters "
+        "setEpochEmissions, updateRoot and setUseMint."
+    )
+
+
 def _emissions_line(context: RewardsDistributorContext) -> str:
     """Recent on-chain emissions, so a new allocation can be judged against them."""
     rendered = ", ".join(f"epoch {epoch}: {context.amount(value)}" for epoch, value in context.epoch_emissions)
@@ -485,6 +510,7 @@ def format_threejane_prompt(contexts: list[ThreeJaneContext]) -> str:
                 "\n".join(
                     [
                         f"RewardsDistributor: {context.distributor_address}",
+                        _ownership_line(context),
                         _distribution_mode_line(context),
                         f"Reward token: {context.token_address} ({context.token_symbol}, "
                         f"{context.token_decimals} decimals), current totalSupply "
@@ -526,6 +552,8 @@ def format_threejane_report(
         if isinstance(context, RewardsDistributorContext):
             lines = [
                 f"- **Rewards distributor:** {address_link(context.distributor_address, chain_id, labels)}",
+                f"- **Owner** (`owner()`, sole caller of the `onlyOwner` setters): "
+                f"{address_link(context.owner_address, chain_id, labels)}",
                 f"- **Reward token:** `{context.token_symbol}` ({context.token_decimals} decimals) — "
                 f"{address_link(context.token_address, chain_id)}",
                 f"- **Distribution mode:** `useMint = {str(context.use_mint).lower()}` — "
