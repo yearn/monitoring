@@ -197,6 +197,16 @@ def test_mint_delta_24h_none_without_window() -> None:
     assert unibtc.mint_delta_24h(200, now, snapshots) is None
 
 
+def test_baseline_warming_up_on_young_history() -> None:
+    now = 1_700_000_000
+    snapshots = [(now - 3_600 * hours, 1) for hours in range(1, 15)]
+
+    assert unibtc.baseline_warming_up(None, None, now, [])
+    assert unibtc.baseline_warming_up((0, 3_600), None, now, snapshots)
+    assert not unibtc.baseline_warming_up(None, None, now, [(now - 5 * 3_600, 1)])
+    assert not unibtc.baseline_warming_up((0, 3_600), None, now, [(now - 30 * 3_600, 1), (now - 3_600, 1)])
+
+
 def test_prune_snapshots_keeps_future_dated_entry() -> None:
     """A lagging RPC provider can move block_timestamp backwards; keep the snapshot."""
     now = 1_000_000
@@ -679,20 +689,69 @@ def test_api_rejected_when_mainnet_disagrees_with_chain() -> None:
     assert "differs from on-chain totalSupply" in problems[0]
 
 
-def test_validate_api_stats_reports_and_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    errors: list[str] = []
-    monkeypatch.setattr(unibtc, "send_error_message", lambda message, _protocol: errors.append(message))
+def stub_api_attempts(monkeypatch: pytest.MonkeyPatch, results: list[object]) -> list[str]:
+    """Serve ``results`` (ApiStats or ApiStatsError) to successive fetches; capture errors, skip sleeps."""
+    queue = list(results)
 
-    assert unibtc.validate_api_stats(make_api(drop_chain=60808), make_state()) is None
+    def fake_fetch() -> unibtc.ApiStats:
+        result = queue.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result  # type: ignore[return-value]
+
+    errors: list[str] = []
+    monkeypatch.setattr(unibtc, "fetch_api_stats", fake_fetch)
+    monkeypatch.setattr(unibtc.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(unibtc, "send_error_message", lambda message, _protocol: errors.append(message))
+    return errors
+
+
+def test_load_api_stats_retries_until_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Observed 2026-09-23: a timeout, then a recompute missing BOB, then a complete one."""
+    cache = stub_cache(monkeypatch)
+    cache[unibtc.CACHE_KEY_API_FAILURE_STREAK] = "2"
+    api = make_api()
+    errors = stub_api_attempts(
+        monkeypatch, [unibtc.ApiStatsError("request failed: timed out"), make_api(drop_chain=60808), api]
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(unibtc.time, "sleep", sleeps.append)
+
+    assert unibtc.load_api_stats(make_state()) is api
+    assert errors == []
+    # A failed request is retried shortly; a rejected snapshot waits for the next recompute.
+    assert sleeps == [unibtc.API_REQUEST_RETRY_DELAY_SECONDS, unibtc.API_REJECTED_RETRY_DELAY_SECONDS]
+    assert cache[unibtc.CACHE_KEY_API_FAILURE_STREAK] == "0"
+
+
+def test_load_api_stats_reports_only_sustained_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    cache = stub_cache(monkeypatch)
+    rejected = make_api(drop_chain=60808)
+    errors = stub_api_attempts(monkeypatch, [rejected] * unibtc.API_FETCH_ATTEMPTS * 4)
+    state = make_state()
+
+    for _ in range(unibtc.API_FAILURE_ALERT_RUNS - 1):
+        assert unibtc.load_api_stats(state) is None
+    assert errors == []
+
+    assert unibtc.load_api_stats(state) is None
     assert len(errors) == 1
+    assert "3 consecutive runs" in errors[0]
     assert "BOB (chain 60808) missing" in errors[0]
 
+    assert unibtc.load_api_stats(state) is None
+    assert len(errors) == 1
+    assert cache[unibtc.CACHE_KEY_API_FAILURE_STREAK] == str(unibtc.API_FAILURE_ALERT_RUNS + 1)
 
-def test_validate_api_stats_passes_through_valid(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(unibtc, "send_error_message", lambda _message, _protocol: pytest.fail("unexpected error"))
-    api = make_api()
-    assert unibtc.validate_api_stats(api, make_state()) is api
-    assert unibtc.validate_api_stats(None, make_state()) is None
+
+def test_request_api_payload_wraps_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    def timeout(*_args: object, **_kwargs: object) -> None:
+        raise unibtc.requests.exceptions.ReadTimeout("Read timed out. (read timeout=30)")
+
+    monkeypatch.setattr(unibtc.requests, "get", timeout)
+
+    with pytest.raises(unibtc.ApiStatsError, match="Read timed out"):
+        unibtc._request_api_payload()
 
 
 def test_feeder_zero_is_critical_on_first_run_without_api(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -898,8 +957,8 @@ def test_peg_skips_missing_price(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_fetch_api_stats_parses_data(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         unibtc,
-        "fetch_json",
-        lambda _url: {
+        "_request_api_payload",
+        lambda: {
             "code": 200,
             "data": {
                 "time": 1_789_550_408_224,
@@ -915,7 +974,6 @@ def test_fetch_api_stats_parses_data(monkeypatch: pytest.MonkeyPatch) -> None:
 
     stats = unibtc.fetch_api_stats()
 
-    assert stats is not None
     assert stats.total_supply == Decimal("4546.701382")
     assert stats.updated_at == 1_789_550_408
     assert [entry.chain_id for entry in stats.chain_supplies] == [1, 60808]
@@ -932,12 +990,10 @@ def test_fetch_api_stats_parses_data(monkeypatch: pytest.MonkeyPatch) -> None:
     ],
 )
 def test_fetch_api_stats_rejects_malformed(monkeypatch: pytest.MonkeyPatch, payload: object) -> None:
-    errors: list[str] = []
-    monkeypatch.setattr(unibtc, "fetch_json", lambda _url: payload)
-    monkeypatch.setattr(unibtc, "send_error_message", lambda message, _protocol: errors.append(message))
+    monkeypatch.setattr(unibtc, "_request_api_payload", lambda: payload)
 
-    assert unibtc.fetch_api_stats() is None
-    assert len(errors) == 1
+    with pytest.raises(unibtc.ApiStatsError):
+        unibtc.fetch_api_stats()
 
 
 def test_fetch_price_in_wbtc_prefers_coingecko_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1052,7 +1108,9 @@ def _stub_main(monkeypatch: pytest.MonkeyPatch, api: unibtc.ApiStats) -> dict[st
     assert isinstance(observed, list)
     monkeypatch.setattr(unibtc.ChainManager, "get_client", lambda _chain: object())
     monkeypatch.setattr(unibtc, "load_state", lambda _client: state)
+    stub_cache(monkeypatch)
     monkeypatch.setattr(unibtc, "fetch_api_stats", lambda: api)
+    monkeypatch.setattr(unibtc.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(unibtc, "send_error_message", lambda _message, _protocol: None)
     monkeypatch.setattr(unibtc, "fetch_price_in_wbtc", lambda: Decimal("0.992417"))
     monkeypatch.setattr(unibtc, "check_unexpected_minting", lambda _state: observed.append("mint"))
