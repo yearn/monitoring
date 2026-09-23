@@ -1152,3 +1152,18 @@ def test_main_withholds_rejected_api_from_checks(monkeypatch: pytest.MonkeyPatch
 
     assert received["por_supply"] is None
     assert received["feeder_api"] is None
+
+
+def test_feeder_gap_alert_is_valid_markdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare ``_`` (e.g. ``total_supply``) breaks Telegram Markdown V1 and forces a plain-text resend."""
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(unibtc, "send_alert", alerts.append)
+
+    unibtc.check_supply_feeder(make_state(feeder_supply=384_533_051_367), make_api())
+    unibtc.check_por_coverage(make_state(por_answer=4_000 * 10**18), make_api().total_supply)
+
+    assert len(alerts) == 2
+    for alert in alerts:
+        text = alert.message.replace("etherscan.io/address/", "")
+        assert "_" not in text.split("🔗")[0]
