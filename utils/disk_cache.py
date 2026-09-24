@@ -15,7 +15,7 @@ address that later gains a label — is not cached as missing forever.
 
 Concurrency: writes go through a temp file + :func:`os.replace` (atomic on
 POSIX), so a reader never observes a half-written entry even when the hourly and
-multisig cron profiles overlap. Eviction and reads are best-effort: any
+ten_minute cron profiles overlap. Eviction and reads are best-effort: any
 filesystem error degrades to a cache miss rather than raising.
 
 Sizing: each cache is bounded by ``max_entries`` and/or ``max_bytes``. When a

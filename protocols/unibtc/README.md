@@ -45,7 +45,7 @@ The backend recomputes its figures every 5 minutes (at :x0:08 and :x5:08, so the
 
 ## Safe monitor
 
-These Safes are registered in [`protocols/safe/addresses.py`](../safe/addresses.py) and polled every 10 minutes:
+These Safes are registered in [`protocols/safe/addresses.py`](../safe/addresses.py) and polled every 20 minutes:
 
 | Safe | Address | What queued txs reveal |
 |---|---|---|
