@@ -36,8 +36,41 @@ SAFE_WEBSITE_URL = "https://app.safe.global/transactions/queue?safe="
 provider_url_mainnet = os.getenv("PROVIDER_URL_MAINNET")
 provider_url_arb = os.getenv("PROVIDER_URL_ARBITRUM")
 
+# Values treated as "no key": unset env templates and serialized nulls.
+_PLACEHOLDER_KEYS = {"null", "none", "nil", "undefined", "false", "0", "changeme"}
+
+
+def _is_usable_api_key(value: str | None) -> bool:
+    """Return whether an env value looks like a real API key rather than empty or a placeholder."""
+    if value is None:
+        return False
+    value = value.strip().strip("\"'")
+    if not value or value.lower() in _PLACEHOLDER_KEYS:
+        return False
+    # .env.example ships "your-api-key" / "your-second-api-key"; <...> is another common template.
+    return not (value.lower().startswith("your-") or (value.startswith("<") and value.endswith(">")))
+
+
+def load_safe_api_keys() -> list[str]:
+    """Read SAFE_API_KEY, SAFE_API_KEY_2, SAFE_API_KEY_3, ... in order.
+
+    Stops at the first missing, empty, or placeholder value, so keys must be
+    numbered without gaps. Each key adds 50,000 requests per 30-day window.
+    """
+    keys: list[str] = []
+    index = 1
+    while True:
+        name = "SAFE_API_KEY" if index == 1 else f"SAFE_API_KEY_{index}"
+        value = os.getenv(name)
+        if not _is_usable_api_key(value):
+            break
+        keys.append(value.strip().strip("\"'"))  # type: ignore[union-attr]
+        index += 1
+    return keys
+
+
 # Round-robin iterator over available Safe API keys.
-_api_keys: list[str] = [k for k in [os.getenv("SAFE_API_KEY"), os.getenv("SAFE_API_KEY_2")] if k]
+_api_keys: list[str] = load_safe_api_keys()
 if not _api_keys:
     raise ValueError("At least one SAFE_API_KEY must be set.")
 _api_key_cycle = itertools.cycle(_api_keys)

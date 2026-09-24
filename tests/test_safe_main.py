@@ -536,3 +536,43 @@ class TestSafeApiQuota(unittest.TestCase):
 
         with patch.object(safe_main.ChainManager, "get_client", side_effect=ValueError("No providers")):
             self.assertIsNone(safe_main.get_safe_current_nonce("0x73b047fe6337183A454c5217241D780a932777bD", "mainnet"))
+
+
+class TestLoadSafeApiKeys(unittest.TestCase):
+    def _load(self, env: dict[str, str]) -> list[str]:
+        import protocols.safe.main as safe_main
+
+        clean = {k: v for k, v in os.environ.items() if not k.startswith("SAFE_API_KEY")}
+        with patch.dict(os.environ, {**clean, **env}, clear=True):
+            return safe_main.load_safe_api_keys()
+
+    def test_reads_numbered_keys_in_order(self):
+        env = {f"SAFE_API_KEY_{i}": f"k{i}" for i in range(2, 6)}
+        self.assertEqual(self._load({"SAFE_API_KEY": "k1", **env}), ["k1", "k2", "k3", "k4", "k5"])
+
+    def test_stops_at_first_missing_key(self):
+        keys = self._load({"SAFE_API_KEY": "k1", "SAFE_API_KEY_2": "k2", "SAFE_API_KEY_4": "k4"})
+        self.assertEqual(keys, ["k1", "k2"])
+
+    def test_stops_at_empty_or_placeholder_values(self):
+        for bad in ["", "   ", '""', "null", "None", "undefined", "your-api-key", "<key>", "0"]:
+            with self.subTest(bad=bad):
+                keys = self._load(
+                    {"SAFE_API_KEY": "k1", "SAFE_API_KEY_2": "k2", "SAFE_API_KEY_3": bad, "SAFE_API_KEY_4": "k4"}
+                )
+                self.assertEqual(keys, ["k1", "k2"])
+
+    def test_no_keys_when_first_is_placeholder(self):
+        self.assertEqual(self._load({"SAFE_API_KEY": "your-api-key", "SAFE_API_KEY_2": "k2"}), [])
+
+    def test_strips_whitespace_and_quotes(self):
+        self.assertEqual(self._load({"SAFE_API_KEY": ' "k1" ', "SAFE_API_KEY_2": "k2\n"}), ["k1", "k2"])
+
+    def test_three_keys_rotate(self):
+        with patch.dict(
+            os.environ, {"SAFE_API_KEY": "k1", "SAFE_API_KEY_2": "k2", "SAFE_API_KEY_3": "k3", "SAFE_API_KEY_4": ""}
+        ):
+            import protocols.safe.main as safe_main
+
+            safe_main = importlib.reload(safe_main)
+        self.assertEqual([safe_main._next_api_key() for _ in range(4)], ["k1", "k2", "k3", "k1"])
