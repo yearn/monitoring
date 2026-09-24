@@ -410,3 +410,126 @@ class TestSafeProtocolLabels(unittest.TestCase):
             [],
             f"Safe protocol labels must be usable as env-var suffixes, got: {invalid}",
         )
+
+
+class TestSafeApiQuota(unittest.TestCase):
+    def _import_safe_main(self, keys: dict[str, str]):
+        env = {"SAFE_API_KEY": "", "SAFE_API_KEY_2": "", **keys}
+        with patch.dict(os.environ, env):
+            import protocols.safe.main as safe_main
+
+            return importlib.reload(safe_main)
+
+    @staticmethod
+    def _response(status: int, remaining: str | None = None, reset: str = "3600", results=None) -> Mock:
+        response = Mock(status_code=status)
+        response.headers = {} if remaining is None else {"x-ratelimit-remaining": remaining, "x-ratelimit-reset": reset}
+        response.json.return_value = {"results": results or []}
+        return response
+
+    def test_exhausted_key_rotates_to_next_key_without_sleeping(self):
+        safe_main = self._import_safe_main({"SAFE_API_KEY": "k1", "SAFE_API_KEY_2": "k2"})
+        exhausted = self._response(429, remaining="0")
+        ok = self._response(200, results=[{"nonce": 7}])
+
+        with (
+            patch.object(safe_main.requests, "get", side_effect=[exhausted, ok]) as mock_get,
+            patch.object(safe_main.time, "sleep") as mock_sleep,
+        ):
+            result = safe_main.get_safe_transactions("0xSafe", "mainnet")
+
+        self.assertEqual(result, [{"nonce": 7}])
+        used_keys = [call.kwargs["headers"]["Authorization"] for call in mock_get.call_args_list]
+        self.assertEqual(used_keys, ["Bearer k1", "Bearer k2"])
+        mock_sleep.assert_not_called()
+
+        # The exhausted key is skipped for the rest of the run.
+        with patch.object(safe_main.requests, "get", return_value=ok) as mock_get:
+            safe_main.get_safe_transactions("0xSafe", "mainnet")
+            safe_main.get_safe_transactions("0xSafe", "mainnet")
+        self.assertEqual({c.kwargs["headers"]["Authorization"] for c in mock_get.call_args_list}, {"Bearer k2"})
+
+    def test_all_keys_exhausted_raises_with_earliest_reset(self):
+        safe_main = self._import_safe_main({"SAFE_API_KEY": "k1", "SAFE_API_KEY_2": "k2"})
+
+        with (
+            patch.object(
+                safe_main.requests,
+                "get",
+                side_effect=[self._response(429, "0", "355270"), self._response(429, "0", "1601328")],
+            ) as mock_get,
+            patch.object(safe_main.time, "sleep") as mock_sleep,
+            self.assertRaises(safe_main.SafeApiQuotaExhausted) as ctx,
+        ):
+            safe_main.get_safe_transactions("0xSafe", "mainnet")
+
+        self.assertEqual(ctx.exception.reset_seconds, 355270)
+        self.assertEqual(mock_get.call_count, 2)
+        mock_sleep.assert_not_called()
+
+    def test_short_term_rate_limit_still_backs_off(self):
+        safe_main = self._import_safe_main({"SAFE_API_KEY": "k1"})
+
+        with (
+            patch.object(
+                safe_main.requests,
+                "get",
+                side_effect=[self._response(429, "12"), self._response(200, results=[{"nonce": 1}])],
+            ),
+            patch.object(safe_main.time, "sleep") as mock_sleep,
+        ):
+            self.assertEqual(safe_main.get_safe_transactions("0xSafe", "mainnet"), [{"nonce": 1}])
+        mock_sleep.assert_called_once_with(1)
+
+    def test_main_stops_and_alerts_once_per_quota_window(self):
+        safe_main = self._import_safe_main({"SAFE_API_KEY": "k1"})
+        cache: dict[str, object] = {}
+        safes = [["LIDO", "mainnet", "0x1"], ["LIDO", "mainnet", "0x2"]]
+
+        with (
+            patch.object(safe_main, "ALL_SAFE_ADDRESSES", safes),
+            patch.object(safe_main, "run_for_network", side_effect=safe_main.SafeApiQuotaExhausted(3600)) as mock_run,
+            patch.object(safe_main, "get_last_value_for_key_from_file", side_effect=lambda _f, k: cache.get(k, 0)),
+            patch.object(safe_main, "write_last_value_to_file", side_effect=lambda _f, k, v: cache.__setitem__(k, v)),
+            patch.object(safe_main, "send_telegram_message") as mock_send,
+        ):
+            safe_main.main()
+            safe_main.main()
+
+        self.assertEqual(mock_run.call_count, 2)  # one safe per run, then stop
+        mock_send.assert_called_once()
+        message, channel = mock_send.call_args.args
+        self.assertEqual(channel, "yearn")
+        self.assertIn("Safe API quota exhausted", message)
+
+    def test_unknown_nonce_skips_safe_api_call(self):
+        safe_main = self._import_safe_main({"SAFE_API_KEY": "k1"})
+
+        with (
+            patch.object(safe_main, "get_last_executed_nonce_from_file", return_value=0),
+            patch.object(safe_main, "get_safe_current_nonce", return_value=None),
+            patch.object(safe_main, "get_safe_transactions") as mock_txs,
+        ):
+            self.assertEqual(safe_main.get_pending_transactions("0xSafe", "mainnet"), [])
+        mock_txs.assert_not_called()
+
+    def test_current_nonce_is_read_onchain(self):
+        safe_main = self._import_safe_main({"SAFE_API_KEY": "k1"})
+        client = Mock()
+        client.eth.contract.return_value.functions.nonce.return_value.call.return_value = 42
+
+        with (
+            patch.object(safe_main.ChainManager, "get_client", return_value=client) as mock_get_client,
+            patch.object(safe_main.requests, "get") as mock_http,
+        ):
+            nonce = safe_main.get_safe_current_nonce("0x73b047fe6337183A454c5217241D780a932777bD", "katana-main")
+
+        self.assertEqual(nonce, 42)
+        mock_get_client.assert_called_once_with(safe_main.Chain.KATANA)
+        mock_http.assert_not_called()
+
+    def test_current_nonce_rpc_failure_returns_none(self):
+        safe_main = self._import_safe_main({"SAFE_API_KEY": "k1"})
+
+        with patch.object(safe_main.ChainManager, "get_client", side_effect=ValueError("No providers")):
+            self.assertIsNone(safe_main.get_safe_current_nonce("0x73b047fe6337183A454c5217241D780a932777bD", "mainnet"))

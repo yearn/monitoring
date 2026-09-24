@@ -45,7 +45,8 @@ FLOW_TYPES = ("deposit", "withdrawal")
 FLOW_ENTITY = {"deposit": "Deposit", "withdrawal": "Withdraw"}
 # Chains indexed by yearn-envio (https://github.com/yearn/yearn-envio/blob/main/config.yaml).
 # Optimism is a `Chain` member but is not indexed, so its flows would silently never arrive.
-ENVIO_CHAINS: tuple[Chain, ...] = (Chain.MAINNET, Chain.BASE, Chain.ARBITRUM, Chain.POLYGON, Chain.KATANA)
+# Polygon is indexed but has no active parent vaults, so it only produced a warning every run.
+ENVIO_CHAINS: tuple[Chain, ...] = (Chain.MAINNET, Chain.BASE, Chain.ARBITRUM, Chain.KATANA)
 
 logger = get_logger("yearn.alert_small_parent_flows")
 

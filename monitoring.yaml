@@ -330,7 +330,7 @@ protocols:
   safe:
     display_name: "Safe Multisigs"
     description: "Cross-protocol Safe multisig transaction monitoring"
-    cadence: "Every 10 minutes"
+    cadence: "Every 20 minutes"
     tasks:
       - protocols/safe/main.py
     monitors:

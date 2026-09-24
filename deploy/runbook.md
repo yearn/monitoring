@@ -71,7 +71,7 @@ uv run python -m automation run hourly --dry-run
 uv run python -m automation run hourly
 ```
 
-Available profiles: `half_hourly`, `six_hourly`, `hourly`, `daily`, `multisig`
+Available profiles: `half_hourly`, `six_hourly`, `hourly`, `daily`, `multisig`, `safe`
 (see `automation/jobs.yaml`).
 
 ---
