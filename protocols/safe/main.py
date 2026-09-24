@@ -55,7 +55,8 @@ def load_safe_api_keys() -> list[str]:
     """Read SAFE_API_KEY, SAFE_API_KEY_2, SAFE_API_KEY_3, ... in order.
 
     Stops at the first missing, empty, or placeholder value, so keys must be
-    numbered without gaps. Each key adds 50,000 requests per 30-day window.
+    numbered without gaps. Quota is 50,000 requests per 30-day window per developer
+    account; keys on the same account share it.
     """
     keys: list[str] = []
     index = 1
@@ -74,8 +75,8 @@ _api_keys: list[str] = load_safe_api_keys()
 if not _api_keys:
     raise ValueError("At least one SAFE_API_KEY must be set.")
 _api_key_cycle = itertools.cycle(_api_keys)
-# Keys whose quota window is used up this run. Each key allows 50,000 requests per
-# window; a 429 with ``x-ratelimit-remaining: 0`` means retrying only burns requests.
+# Keys whose account quota is used up this run. A 429 with ``x-ratelimit-remaining: 0``
+# means retrying only burns requests. Extra keys on the same account share one quota.
 _exhausted_api_keys: dict[str, int] = {}  # key -> seconds until its quota resets
 
 CACHE_KEY_QUOTA_ALERTED_UNTIL = "SAFE_API_QUOTA_ALERTED_UNTIL"

@@ -115,11 +115,13 @@ profiles:
     # Every 20 min, offset 2 min so it never starts mid-sync of the ten_minute profile.
     cron: "2-59/20 * * * *"
     description: "Safe multisig queue polling every 20 minutes."
-    # Safe API budget: 50,000 requests per 30-day window per key (SAFE_API_KEY,
-    # SAFE_API_KEY_2, ...; 2 keys = 100k). One request per safe per run (the nonce is
-    # read over RPC): 35 safes x 72 runs/day ~ 76k/window.
-    # At the old 10-min cadence with two requests per safe (~300k/window) both keys
-    # ran dry on 2026-09-23. Re-check the budget when adding safes.
+    # Safe API budget: 50,000 requests per 30-day window per developer account.
+    # Keys on the same account share that allowance; extra keys do not add quota.
+    # One request per safe per run (the nonce is read over RPC): 21 safes x 72
+    # runs/day ~ 45k/window, which fits one Builder account. Two more safes would
+    # put a 30-day window on the limit. At the old 10-min cadence with two requests
+    # per safe (~300k/window) the account ran dry on 2026-09-23.
+    # Re-check the budget when adding safes.
     # No env override: nonces land in the default nonces.txt under $CACHE_DIR.
     tasks:
       - { name: "safe",    script: protocols/safe/main.py }
