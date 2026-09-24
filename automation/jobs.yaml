@@ -6,7 +6,7 @@
 #     crontab on start (see deploy/runbook.md).
 #
 # Adding or removing a task in an existing profile: edit its `tasks:` and merge to main. The
-# multisig profile's pre-run sync (sync_before_run, below) lands it on the box within
+# ten_minute profile's pre-run sync (sync_before_run, below) lands it on the box within
 # ~10 min — no restart needed. Adding/removing a profile or changing `cron:` requires sync +
 # `sudo systemctl restart monitoring` to re-render the crontab (see deploy/runbook.md).
 #
@@ -95,10 +95,9 @@ profiles:
       - { name: "yearn-check-timelock-delay", script: protocols/yearn/check_timelock_delay.py }
       - { name: "prune-alerts",         script: utils/prune_alerts.py }
 
-  multisig:
+  ten_minute:
     cron: "0/10 * * * *"
-    description: "Ten-minute stables polling and code-sync heartbeat (Safe polling moved to the safe profile)."
-    #
+    description: "Ten-minute stables polling and code-sync heartbeat."
     # This is the box's code-sync heartbeat. Being the most frequent profile, a
     # forced sync to origin/main before it (sync_before_run) keeps the whole
     # checkout current at a 10-min cadence — every other profile re-spawns fresh
@@ -112,8 +111,8 @@ profiles:
     tasks:
       - { name: "stables", script: protocols/stables/main.py }
 
-  safe:
-    # Every 20 min, offset 2 min so it never starts mid-sync of the multisig profile.
+  twenty_minute:
+    # Every 20 min, offset 2 min so it never starts mid-sync of the ten_minute profile.
     cron: "2-59/20 * * * *"
     description: "Safe multisig queue polling every 20 minutes."
     # Safe API budget: 2 keys x 50,000 requests per 30-day window. One request per

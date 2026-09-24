@@ -17,7 +17,13 @@ from utils.telegram import get_github_run_url, send_error_message
 logger = get_logger("utils.runner")
 
 
-def run_with_alert(entrypoint: Callable[[], None], protocol: str, name: str | None = None) -> None:
+def run_with_alert(
+    entrypoint: Callable[[], None],
+    protocol: str,
+    name: str | None = None,
+    *,
+    alert_protocol: str | None = None,
+) -> None:
     """Run entrypoint(); on unhandled exception, send a Telegram alert and return.
 
     KeyboardInterrupt and SystemExit are re-raised so explicit exits aren't
@@ -32,6 +38,9 @@ def run_with_alert(entrypoint: Callable[[], None], protocol: str, name: str | No
         protocol: Telegram protocol key used to label the crash alert and as the
             fallback channel.
         name: Optional display name for the script. Defaults to entrypoint.__module__.
+        alert_protocol: Protocol key stored in alert history. Defaults to
+            ``protocol``; set it (e.g. ``"yearn-internal"``) to keep the crash off a
+            public protocol page.
     """
     try:
         entrypoint()
@@ -45,6 +54,6 @@ def run_with_alert(entrypoint: Callable[[], None], protocol: str, name: str | No
         if run_url:
             lines.append(f"Run: {run_url}")
         try:
-            send_error_message("\n".join(lines), protocol, source="crash")
+            send_error_message("\n".join(lines), protocol, source="crash", alert_protocol=alert_protocol)
         except Exception:  # noqa: BLE001 - alerting must not itself crash the wrapper
             logger.exception("Failed to send crash alert for %s", script)

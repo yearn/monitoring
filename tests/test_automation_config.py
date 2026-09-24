@@ -151,7 +151,7 @@ class TestRepoJobsYaml(unittest.TestCase):
         repo_yaml = Path(__file__).resolve().parent.parent / "automation" / "jobs.yaml"
         cfg = load_jobs_config(repo_yaml)
         self.assertGreaterEqual(len(cfg.profiles), 3)
-        for expected in ("hourly", "daily", "multisig"):
+        for expected in ("hourly", "daily", "ten_minute", "twenty_minute"):
             self.assertIn(expected, cfg.profiles, f"missing profile {expected}")
 
 

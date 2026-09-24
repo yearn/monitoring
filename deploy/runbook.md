@@ -71,7 +71,7 @@ uv run python -m automation run hourly --dry-run
 uv run python -m automation run hourly
 ```
 
-Available profiles: `half_hourly`, `six_hourly`, `hourly`, `daily`, `multisig`, `safe`
+Available profiles: `half_hourly`, `six_hourly`, `hourly`, `daily`, `ten_minute`, `twenty_minute`
 (see `automation/jobs.yaml`).
 
 ---
@@ -82,7 +82,7 @@ Contributors merge to `main` through PRs; nobody normally SSHes in to ship code.
 Two things move `main` onto the box, split on *"does the change need the
 scheduler restarted to take effect?"*
 
-**Auto-sync (no restart, the common case).** The `multisig` profile fetches
+**Auto-sync (no restart, the common case).** The `ten_minute` profile fetches
 `origin main` and runs `git reset --hard origin/main` before its tasks every 10
 minutes (`sync_before_run: true` in `jobs.yaml`). Since supercronic re-spawns
 every profile fresh against the on-disk tree, that one sync keeps the whole
@@ -90,13 +90,13 @@ checkout current for *all* profiles within ~10 minutes — every other profile
 rides along for free. Tracked local edits are intentionally discarded in favor
 of reviewed `main`, so the VPS does not get stuck on a divergent local branch or
 operator hotfix. The sync is best-effort: a failure is logged (`journalctl -u
-monitoring | grep 'pre-run git sync'`) and the multisig checks run against the
+monitoring | grep 'pre-run git sync'`) and the profile's checks run against the
 existing checkout anyway, so a git hiccup never silences an alert. This covers
 **scripts, config modules, data, and `jobs.yaml` task bodies** — anything read
 fresh by a subprocess.
 
 So for the common case — a script tweak, a new task in a profile — **merge the
-PR and the next ~10-min multisig tick syncs it in; no SSH needed.**
+PR and the next ~10-min `ten_minute` tick syncs it in; no SSH needed.**
 
 **Manual restart (cadence + deps).** Two kinds of change land on disk via the
 auto-sync but stay inert until a restart, because they're read once at scheduler
@@ -110,7 +110,7 @@ For those, after the PR merges:
 
 ```sh
 cd /srv/monitoring
-git fetch origin main && git reset --hard origin/main  # or let the next multisig tick land it
+git fetch origin main && git reset --hard origin/main  # or let the next ten_minute tick land it
 uv sync --frozen --extra ai   # only if pyproject.toml / uv.lock changed (--extra ai: openai client for the AI explainer)
 sudo systemctl restart monitoring   # re-renders the crontab and re-points supercronic at the tree
 ```
@@ -287,7 +287,7 @@ Remove the variable and restart to return to SQLite-backed cache state.
   `/etc/systemd/system/monitoring-api.service`.
 - Rendered crontab: `/tmp/crontab` (per-service `PrivateTmp`; regenerated on
   every start).
-- Code sync: no separate unit — the `multisig` profile's pre-run `git fetch
+- Code sync: no separate unit — the `ten_minute` profile's pre-run `git fetch
   origin main` + `git reset --hard origin/main` (`sync_before_run` in
   `jobs.yaml`) every 10 min. The unit grants
   the repo write access via `ReadWritePaths=/srv/cache /srv/monitoring` so the

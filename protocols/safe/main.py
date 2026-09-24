@@ -26,7 +26,7 @@ from utils.chains import Chain, safe_network_to_chain_id
 from utils.formatting import parse_wei
 from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
 from utils.logger import get_logger
-from utils.telegram import escape_markdown, send_telegram_message
+from utils.telegram import escape_markdown, send_error_message, send_telegram_message
 from utils.web3_wrapper import ChainManager
 
 load_dotenv()
@@ -46,8 +46,11 @@ _api_key_cycle = itertools.cycle(_api_keys)
 _exhausted_api_keys: dict[str, int] = {}  # key -> seconds until its quota resets
 
 CACHE_KEY_QUOTA_ALERTED_UNTIL = "SAFE_API_QUOTA_ALERTED_UNTIL"
-# Crash and quota alerts for this multi-safe script go to the general ops channel.
-OPS_CHANNEL = "yearn"
+# Crash and quota alerts are operational: they go to the internal errors channel with a
+# ``[yearn]`` label and are stored as ``yearn-internal`` so they stay off the public
+# Yearn monitoring page. Never send them to a protocol's public channel or topic.
+ERROR_LABEL = "yearn"
+ALERT_PROTOCOL = "yearn-internal"
 
 SAFE_NONCE_ABI = [
     {"inputs": [], "name": "nonce", "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"}
@@ -474,14 +477,16 @@ def report_quota_exhausted(exc: SafeApiQuotaExhausted, now: float | None = None)
     if now < alerted_until:
         return
     reset_at = now + exc.reset_seconds
-    send_telegram_message(
-        "🚨 *Safe API quota exhausted*\n"
+    send_error_message(
+        "🚨 Safe API quota exhausted\n"
         f"All {len(_api_keys)} Safe API keys have used up their quota; pending Safe transactions "
-        f"are NOT being monitored until the earliest reset "
+        "are NOT being monitored until the earliest reset "
         f"({time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(reset_at))}).\n"
-        f"Add a fresh key to {escape_markdown('SAFE_API_KEY')} or {escape_markdown('SAFE_API_KEY_2')} "
-        "in /etc/monitoring/.env.",
-        OPS_CHANNEL,
+        "Add a fresh key to SAFE_API_KEY or SAFE_API_KEY_2 in /etc/monitoring/.env.",
+        ERROR_LABEL,
+        disable_notification=False,
+        source="safe_api_quota",
+        alert_protocol=ALERT_PROTOCOL,
     )
     write_last_value_to_file(cache_filename, CACHE_KEY_QUOTA_ALERTED_UNTIL, int(reset_at))
 
@@ -505,5 +510,5 @@ def main():
 if __name__ == "__main__":
     from utils.runner import run_with_alert
 
-    # Multi-safe script with per-safe routing; crash alerts go to the general ops channel.
-    run_with_alert(main, OPS_CHANNEL)
+    # Multi-safe script with per-safe routing; crashes go to the internal errors channel.
+    run_with_alert(main, ERROR_LABEL, alert_protocol=ALERT_PROTOCOL)

@@ -491,15 +491,18 @@ class TestSafeApiQuota(unittest.TestCase):
             patch.object(safe_main, "run_for_network", side_effect=safe_main.SafeApiQuotaExhausted(3600)) as mock_run,
             patch.object(safe_main, "get_last_value_for_key_from_file", side_effect=lambda _f, k: cache.get(k, 0)),
             patch.object(safe_main, "write_last_value_to_file", side_effect=lambda _f, k, v: cache.__setitem__(k, v)),
-            patch.object(safe_main, "send_telegram_message") as mock_send,
+            patch.object(safe_main, "send_error_message") as mock_error,
+            patch.object(safe_main, "send_telegram_message") as mock_public,
         ):
             safe_main.main()
             safe_main.main()
 
         self.assertEqual(mock_run.call_count, 2)  # one safe per run, then stop
-        mock_send.assert_called_once()
-        message, channel = mock_send.call_args.args
-        self.assertEqual(channel, "yearn")
+        mock_public.assert_not_called()  # never to a public channel/topic
+        mock_error.assert_called_once()
+        message, label = mock_error.call_args.args
+        self.assertEqual(label, "yearn")
+        self.assertEqual(mock_error.call_args.kwargs["alert_protocol"], "yearn-internal")
         self.assertIn("Safe API quota exhausted", message)
 
     def test_unknown_nonce_skips_safe_api_call(self):
