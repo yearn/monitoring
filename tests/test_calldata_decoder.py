@@ -133,6 +133,18 @@ class TestFormatParamValue(unittest.TestCase):
         self.assertEqual(_format_param_value("string", "a`b"), '"a\'b"')
         self.assertNotIn("`", _format_param_value("bytes32", b"a`b".ljust(32, b"\x00")))
 
+    def test_tuple_length_mismatch_falls_back_to_untyped(self):
+        # Two declared components but three values: types can't be paired, bytes must still render as hex.
+        self.assertEqual(_format_param_value("(address,uint256)", (b"\xde\xad", 1, "a`b")), "(0xdead, 1, a'b)")
+
+    def test_non_bytes_value_for_bytes_type_is_sanitized(self):
+        self.assertEqual(_format_param_value("bytes32", "a`b"), "a'b")
+        self.assertEqual(_format_param_value("bytes", ("x`",)), "(x')")
+
+    def test_single_char_bytes32_stays_hex(self):
+        value = b"A".ljust(32, b"\x00")
+        self.assertEqual(_format_param_value("bytes32", value), "0x" + value.hex())
+
     def test_untyped_bytes_render_as_hex(self):
         self.assertEqual(_format_param_value("tuple", (b"\xde\xad", 1)), "(0xdead, 1)")
 

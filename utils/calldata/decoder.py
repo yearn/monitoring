@@ -216,6 +216,9 @@ def _bytes32_text(value: bytes) -> str | None:
 
     Keys such as ``bytes32("USDC")`` are stored left-aligned and zero-padded;
     hashes (role ids, keccak keys) essentially never are, so they stay hex-only.
+    A single character is not decoded: a lone printable leading byte is as
+    likely a packed flag as a one-letter string, and a wrong label is worse
+    than none.
     """
     text = value.rstrip(b"\x00")
     if len(text) < 2 or len(text) == len(value) or not all(0x20 <= byte < 0x7F for byte in text):
@@ -263,14 +266,14 @@ def _format_param_value(type_str: str, value: Any) -> str:
             text = _bytes32_text(value)
             hex_str = "0x" + value.hex()
             return f'{hex_str} ("{_no_backticks(text)}")' if text else hex_str
-        return str(value)
+        return _format_untyped(value)
     if type_str.startswith("bytes"):
         if isinstance(value, bytes):
             hex_str = "0x" + value.hex()
             if len(hex_str) > 66:
                 return hex_str[:66] + "..."
             return hex_str
-        return str(value)
+        return _format_untyped(value)
     if type_str.startswith("uint") or type_str.startswith("int"):
         return str(value)
     if type_str == "bool":
