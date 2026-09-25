@@ -3,6 +3,8 @@
 import unittest
 from unittest.mock import patch
 
+from eth_utils import to_checksum_address
+
 from utils.calldata.decoder import (
     DecodedCall,
     _format_param_value,
@@ -102,6 +104,37 @@ class TestFormatParamValue(unittest.TestCase):
 
     def test_fallback(self):
         self.assertEqual(_format_param_value("tuple", (1, 2)), "(1, 2)")
+
+    def test_bytes32_array_renders_hex_not_python_repr(self):
+        # grantRoles(bytes32[],address[]): a role id whose repr contains a backtick broke the alert's Markdown.
+        role = bytes.fromhex("7acae89731724567295a2260bb65592d5cc94b3f3dab0ef27155ae400b6cc960")
+        other = bytes.fromhex("32e7b1b8f94d17cc574fbf53e469e19ce98919f6247af687cfd4dfc4f2be6525")
+        result = _format_param_value("bytes32[]", (role, other))
+        self.assertEqual(result, f"[0x{role.hex()}, 0x{other.hex()}]")
+        self.assertNotIn("b'", result)
+
+    def test_address_array_is_checksummed(self):
+        result = _format_param_value("address[]", ("0x68afd386d2a882d3afcbfc1586ae722568052ff6",))
+        self.assertEqual(result, "[0x68Afd386D2A882D3aFCBfC1586AE722568052FF6]")
+
+    def test_tuple_components_use_their_types(self):
+        result = _format_param_value("(address,bytes32,uint256)[]", [("0x" + "ab" * 20, b"\x01" * 32, 7)])
+        self.assertEqual(result, f"[({to_checksum_address('0x' + 'ab' * 20)}, 0x{'01' * 32}, 7)]")
+
+    def test_bytes32_short_string_is_decoded(self):
+        value = b"USDC".ljust(32, b"\x00")
+        self.assertEqual(_format_param_value("bytes32", value), f'0x{value.hex()} ("USDC")')
+
+    def test_bytes32_hash_is_not_decoded(self):
+        value = bytes.fromhex("1a6838efa4183e08fe3607359d1259272af9d4716f65e1a7b5921f78fd5a3c6a")
+        self.assertEqual(_format_param_value("bytes32", value), "0x" + value.hex())
+
+    def test_backticks_cannot_break_the_code_span(self):
+        self.assertEqual(_format_param_value("string", "a`b"), '"a\'b"')
+        self.assertNotIn("`", _format_param_value("bytes32", b"a`b".ljust(32, b"\x00")))
+
+    def test_untyped_bytes_render_as_hex(self):
+        self.assertEqual(_format_param_value("tuple", (b"\xde\xad", 1)), "(0xdead, 1)")
 
 
 class TestResolveSelector(unittest.TestCase):
