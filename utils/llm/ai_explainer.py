@@ -364,10 +364,12 @@ class _PreparedCall:
     # True when simulated in batch order on the state left by the earlier calls;
     # False for an independent simulation against the current chain state.
     sequential: bool = False
-    # 1-based index of the nearest earlier call to the same target. An
-    # independent revert then likely reflects state that call sets up
-    # (``add_strategy`` before ``update_max_debt_for_strategy``).
-    earlier_same_target: int | None = None
+    # Why a batch call has no simulation: ``bundle_unavailable`` when the
+    # bundle request failed, ``not_reached`` when an earlier call reverted
+    # first. Empty otherwise.
+    unsimulated_reason: str = ""
+    # 1-based index of the call whose revert stopped the bundle, for ``not_reached``.
+    reverted_at: int | None = None
 
 
 def _state_value_markdown(value: object, chain_id: int, labels: dict[str, str]) -> str:
@@ -453,15 +455,22 @@ def _simulation_note(
     *,
     independent: bool,
     sequential: bool = False,
-    earlier_same_target: int | None = None,
+    unsimulated_reason: str = "",
+    reverted_at: int | None = None,
 ) -> str:
     """Deterministic per-call simulation line for the gist call flow.
 
     Failed sims are labeled as diagnostics so a reviewer can see them without
-    treating them as a predicted governance revert. An independent revert on a
-    target an earlier call already touched names that call: the simulation ran
-    without the state it sets up, which is the usual cause.
+    treating them as a predicted governance revert. A batch call with no
+    simulation says why, so a missing line is never mistaken for a pass.
     """
+    if unsimulated_reason == "bundle_unavailable":
+        return (
+            "**Batch simulation:** unavailable — the Tenderly bundle request failed, so no call in this batch "
+            "was simulated (calls are not simulated one by one: out of batch order they revert falsely)"
+        )
+    if unsimulated_reason == "not_reached":
+        return f"**Batch simulation:** not reached — call {reverted_at} reverted first in batch order"
     if sim is None:
         return ""
     if sim.success:
@@ -475,20 +484,13 @@ def _simulation_note(
     if sequential:
         return (
             f"**Batch simulation diagnostic:** {error} when run in batch order — not a predicted governance "
-            "failure (omitted from the risk prompt; later calls were simulated independently)"
+            "failure (omitted from the risk prompt; later calls were not simulated)"
         )
     independent_note = "independent simulation; " if independent else ""
-    dependency = (
-        f" Call {earlier_same_target} targets the same contract earlier in this batch and was not applied "
-        "first, so the revert may only reflect state that call sets up."
-        if independent and earlier_same_target
-        else ""
-    )
-    note = (
+    return (
         f"**Simulation diagnostic:** {error} — not a predicted governance failure "
         f"({independent_note}omitted from the risk prompt)"
     )
-    return f"{note}.{dependency}" if dependency else note
 
 
 def _collect_state_reads(
@@ -1202,11 +1204,16 @@ def _format_prepared_calldata(
 
 
 def _format_batch_simulation_section(items: list[_PreparedCall]) -> str:
-    """Prompt section for successful per-call simulations (batch-order or independent).
+    """Prompt section for the successful calls of the batch-order simulation.
 
     Failed and missing sims are omitted here (they bias the model toward a
     false revert). They are still logged and attached to the gist call flow.
     """
+    if any(item.unsimulated_reason == "bundle_unavailable" for item in items):
+        return (
+            "Batch simulation unavailable: the bundle request failed, so no call was simulated. "
+            "Do not infer that any call succeeds or reverts."
+        )
     blocks: list[str] = []
     omitted = 0
     for item in items:
@@ -1218,10 +1225,8 @@ def _format_batch_simulation_section(items: list[_PreparedCall]) -> str:
             continue
         header = (
             f"Call {item.index} (simulated in batch order, after calls 1-{item.index - 1}):"
-            if item.sequential and item.index > 1
+            if item.index > 1
             else f"Call {item.index} (simulated in batch order, first call):"
-            if item.sequential
-            else f"Call {item.index} (independent simulation; does not prove the batch succeeds atomically):"
         )
         blocks.append(header + "\n" + _format_simulation_context(sim))
     if omitted:
@@ -1917,12 +1922,14 @@ def _prepare_batch_items(
 ) -> list[_PreparedCall]:
     """Decode and optionally simulate each input call, preserving original indices.
 
-    Calls are simulated as one sequential bundle, so each sees the state the
-    earlier calls leave — the way a timelock ``executeBatch`` runs them. A batch
-    whose call depends on an earlier one (``setOracle`` then ``setVault``) would
-    otherwise show a false revert. Calls the bundle could not reach (after a
-    revert), or every call when the bundle request itself fails, fall back to an
-    independent simulation against the current chain state.
+    Calls are simulated together as one sequential bundle from the executor, so
+    each sees the state the earlier calls leave — the way a timelock
+    ``executeBatch`` runs them. They are never simulated one by one: out of
+    batch order, a call that depends on an earlier one (``add_strategy`` then
+    ``update_max_debt_for_strategy``) reverts falsely, and an alert once
+    reported exactly those false reverts after the bundle request failed. When
+    the bundle is unavailable no call is simulated; calls after a bundle revert
+    are marked not reached.
     """
     decoded_items: list[tuple[int, str, str, int, DecodedCall | None, str]] = []
     for i, call in enumerate(calls, start=1):
@@ -1933,45 +1940,39 @@ def _prepare_batch_items(
         decoded_items.append((i, target, data, value, decoded, _decode_status(data, decoded)))
 
     bundle: list[SimulationResult | None] | None = None
-    if not skip_simulation and len(decoded_items) > 1:
+    if not skip_simulation and decoded_items:
         bundle = simulate_bundle(
             [BundleCall(target=target, calldata=data, value=value) for _, target, data, value, _, _ in decoded_items],
             chain_id=chain_id,
             from_address=from_address,
         )
         if bundle is None:
-            logger.warning("Bundle simulation unavailable; simulating batch calls independently")
+            logger.warning("Bundle simulation unavailable; batch calls left unsimulated")
+    reverted_at = next(
+        (decoded_items[pos][0] for pos, sim in enumerate(bundle or []) if sim is not None and not sim.success),
+        None,
+    )
 
     items: list[_PreparedCall] = []
-    last_index_by_target: dict[str, int] = {}
     for position, (i, target, data, value, decoded, status) in enumerate(decoded_items):
-        earlier_same_target = last_index_by_target.get(target.lower()) if target else None
-        if target:
-            last_index_by_target[target.lower()] = i
         simulation: SimulationResult | None = None
-        sequential = False
+        unsimulated_reason = ""
         # Empty calldata has no function to simulate; a SUCCESS here would look
         # like confirmed native delivery, which we must not assert. It still runs
         # in the bundle so later calls see its value transfer.
         if not skip_simulation and status != "empty_calldata":
-            bundled = bundle[position] if bundle is not None else None
-            if bundled is not None:
-                simulation, sequential = bundled, True
+            if bundle is None:
+                unsimulated_reason = "bundle_unavailable"
             else:
-                simulation = simulate_transaction(
-                    target=target,
-                    calldata=data,
-                    chain_id=chain_id,
-                    value=value,
-                    from_address=from_address,
-                )
-            if simulation is not None and not simulation.success:
-                logger.warning(
-                    "Batch call %d %s simulation reported failure (%s); omitting from prompt",
-                    i,
-                    "sequential" if sequential else "independent",
-                    simulation.error_message,
-                )
+                simulation = bundle[position]
+                if simulation is None:
+                    unsimulated_reason = "not_reached"
+                elif not simulation.success:
+                    logger.warning(
+                        "Batch call %d simulation reported failure in batch order (%s); omitting from prompt",
+                        i,
+                        simulation.error_message,
+                    )
         items.append(
             _PreparedCall(
                 index=i,
@@ -1980,8 +1981,9 @@ def _prepare_batch_items(
                 value=value,
                 decoded=decoded,
                 simulation=simulation,
-                sequential=sequential,
-                earlier_same_target=earlier_same_target,
+                sequential=simulation is not None,
+                unsimulated_reason=unsimulated_reason,
+                reverted_at=reverted_at if unsimulated_reason == "not_reached" else None,
             )
         )
     return items
@@ -2009,7 +2011,8 @@ def _call_entry_from_item(
             item.simulation,
             independent=True,
             sequential=item.sequential,
-            earlier_same_target=item.earlier_same_target,
+            unsimulated_reason=item.unsimulated_reason,
+            reverted_at=item.reverted_at,
         ),
     )
 
