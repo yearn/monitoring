@@ -19,7 +19,7 @@ import pytest
 def _isolate_from_live_apis(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Block accidental live API/RPC calls and reset cross-test singletons.
 
-    Strips `ETHERSCAN_TOKEN`, every `PROVIDER_URL_*`, every `TELEGRAM_*`
+    Strips `ETHERSCAN_TOKEN`, `TENDERLY_API_KEY`, every `PROVIDER_URL_*`, every `TELEGRAM_*`
     credential, and emergency webhook credentials so a missing mock short-circuits cheaply via
     the "no token / no provider / no credentials" code paths that already exist
     for production use. Also clears `DEFAULT_PROVIDER_URLS` so a public HyperEVM
@@ -36,7 +36,7 @@ def _isolate_from_live_apis(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     repo and never leak entries between tests.
     """
     for key in list(os.environ):
-        if key in {"ETHERSCAN_TOKEN", "LIQUIDITY_WEBHOOK_SECRET"} or key.startswith(
+        if key in {"ETHERSCAN_TOKEN", "LIQUIDITY_WEBHOOK_SECRET", "TENDERLY_API_KEY"} or key.startswith(
             ("PROVIDER_URL_", "TELEGRAM_", "LIQUIDITY_WEBHOOK_")
         ):
             monkeypatch.delenv(key, raising=False)

@@ -1752,6 +1752,114 @@ class TestBatchUndecodedCalls(unittest.TestCase):
         self.assertNotIn("b'", prompt)
 
 
+class TestBatchSequentialSimulation(unittest.TestCase):
+    """Batch calls are simulated in order on shared state, as the timelock executes them."""
+
+    CALLS = [
+        {"target": "0xT1", "data": PAUSE_DATA, "value": "0"},
+        {"target": "0xT2", "data": PAUSE_DATA, "value": "0"},
+        {"target": "0xT3", "data": PAUSE_DATA, "value": "0"},
+    ]
+
+    def _provider(self) -> MagicMock:
+        provider = MagicMock()
+        provider.supports_structured_output = False
+        provider.complete.return_value = "TLDR: three calls. LOW.\n\nDETAIL:\nanalysis."
+        provider.model_name = "test"
+        return provider
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction")
+    @patch("utils.llm.ai_explainer.simulate_bundle")
+    @patch("utils.llm.ai_explainer.decode_calldata", return_value=PAUSE)
+    def test_bundle_results_are_labeled_batch_order(
+        self,
+        _mock_decode: MagicMock,
+        mock_bundle: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+    ) -> None:
+        mock_bundle.return_value = [
+            SimulationResult(success=True, gas_used=111),
+            SimulationResult(success=True, gas_used=222),
+            SimulationResult(success=True, gas_used=333),
+        ]
+        provider = self._provider()
+        mock_get_provider.return_value = provider
+
+        result = explain_batch_transaction(calls=self.CALLS, chain_id=1, from_address="0xTimelock", refine=False)
+
+        assert result is not None
+        bundle_calls = mock_bundle.call_args.args[0]
+        self.assertEqual([call.target for call in bundle_calls], ["0xT1", "0xT2", "0xT3"])
+        self.assertEqual(mock_bundle.call_args.kwargs["from_address"], "0xTimelock")
+        mock_simulate.assert_not_called()
+        prompt = provider.complete.call_args[0][0]
+        self.assertIn("Call 1 (simulated in batch order, first call):", prompt)
+        self.assertIn("Call 3 (simulated in batch order, after calls 1-2):", prompt)
+        self.assertNotIn("independent simulation", prompt)
+        self.assertIn("**Batch simulation:** SUCCESS, gas 333", result.report)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction")
+    @patch("utils.llm.ai_explainer.simulate_bundle")
+    @patch("utils.llm.ai_explainer.decode_calldata", return_value=PAUSE)
+    def test_calls_after_a_bundle_revert_fall_back_to_independent(
+        self,
+        _mock_decode: MagicMock,
+        mock_bundle: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+    ) -> None:
+        mock_bundle.return_value = [
+            SimulationResult(success=True, gas_used=111),
+            SimulationResult(success=False, error_message="execution reverted: not authorized"),
+            None,
+        ]
+        mock_simulate.return_value = SimulationResult(success=True, gas_used=333)
+        provider = self._provider()
+        mock_get_provider.return_value = provider
+
+        result = explain_batch_transaction(calls=self.CALLS, chain_id=1, refine=False)
+
+        assert result is not None
+        self.assertEqual(mock_simulate.call_count, 1)
+        self.assertEqual(mock_simulate.call_args.kwargs["target"], "0xT3")
+        prompt = provider.complete.call_args[0][0]
+        self.assertIn("Call 1 (simulated in batch order, first call):", prompt)
+        self.assertIn("Call 3 (independent simulation", prompt)
+        self.assertNotIn("not authorized", prompt)
+        self.assertIn("**Batch simulation diagnostic:** execution reverted: not authorized", result.report)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction")
+    @patch("utils.llm.ai_explainer.simulate_bundle")
+    @patch("utils.llm.ai_explainer.decode_calldata", return_value=PAUSE)
+    def test_skip_simulation_skips_the_bundle(
+        self,
+        _mock_decode: MagicMock,
+        mock_bundle: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+    ) -> None:
+        mock_get_provider.return_value = self._provider()
+        explain_batch_transaction(calls=self.CALLS, chain_id=1, skip_simulation=True, refine=False)
+        mock_bundle.assert_not_called()
+        mock_simulate.assert_not_called()
+
+
 class TestBatchSimulationsAttributed(unittest.TestCase):
     @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
     @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
@@ -2056,7 +2164,7 @@ class TestPromptSizeGuards(unittest.TestCase):
         assert result is not None
         prompt = provider.complete.call_args[0][0]
         self.assertEqual(prompt.count("(independent simulation;"), MAX_PROMPT_SIMULATIONS)
-        self.assertIn("2 further successful independent simulations omitted", prompt)
+        self.assertIn("2 further successful simulations omitted", prompt)
 
     @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
     @patch("utils.llm.ai_explainer.get_contract_label", return_value="")

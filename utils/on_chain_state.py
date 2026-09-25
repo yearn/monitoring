@@ -82,11 +82,14 @@ def _parse_var_declaration(snippet: str, var_name: str) -> tuple[str, list[str]]
     decl = " ".join(line.strip() for line in decl_lines).strip()
     decl = decl.rstrip(";")
 
-    # Mapping case: mapping(K => V) public name
-    m = re.match(r"mapping\s*\(\s*(\w+)\s*=>\s*(.+?)\s*\)\s+(?:public|external)\s+\w+\s*$", decl)
+    # Mapping case: mapping(K => V) public name. Solidity >=0.8.18 also allows
+    # named parameters — mapping(uint256 chainId => bool configured) — whose
+    # names must be dropped, or the declaration falls through to the setter-
+    # signature guess and reports the wrong value type.
+    m = re.match(r"mapping\s*\(\s*(\w+)(?:\s+\w+)?\s*=>\s*(.+?)\s*\)\s+(?:public|external)\s+\w+\s*$", decl)
     if m:
         key_type = m.group(1).strip()
-        value_type = m.group(2).strip()
+        value_type = re.sub(r"^(\w+)\s+\w+$", r"\1", m.group(2).strip())
         if "mapping" in value_type or "[" in value_type:
             return None  # nested mapping or array value — skip
         if not _is_simple_type(value_type):
