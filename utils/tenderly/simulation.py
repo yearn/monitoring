@@ -183,7 +183,11 @@ def simulate_transaction(
 def _parse_transaction(tx: dict[str, Any], raw_response: dict[str, Any]) -> SimulationResult:
     """Parse one simulated ``transaction`` object (single or bundle response)."""
     tx_info = tx.get("transaction_info", {}) or {}
-    success = bool(tx.get("status", False))
+    status = tx.get("status", False)
+    if isinstance(status, str):
+        success = status == "success"
+    else:
+        success = status is True
     # Single simulations report gas inside transaction_info; bundle results only on the transaction.
     gas_used = int(tx_info.get("gas_used") or tx.get("gas_used") or 0)
     error_message = "" if success else ((tx_info.get("stack_trace") or [{}])[0].get("error_reason") or "")
