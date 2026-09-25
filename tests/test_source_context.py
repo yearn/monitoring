@@ -49,6 +49,12 @@ class TestExtractFunctionSnippet(unittest.TestCase):
         self.assertIn("set the max tolerated slippage", snippet)
         self.assertIn("function setMaxSlippage(uint256 _maxSlippage) external", snippet)
 
+    def test_crlf_source_keeps_decorators_and_docstring(self) -> None:
+        # Etherscan returned the Yearn V3 vault source with CRLF line endings.
+        snippet = _extract_function_snippet(VYPER_VAULT_SOURCE.replace("\n", "\r\n"), "add_strategy")
+        self.assertIn("@external", snippet)
+        self.assertIn("@notice Add a new strategy.", snippet)
+
     def test_missing_function_returns_empty(self) -> None:
         snippet = _extract_function_snippet(INFINIFI_FARM_SOURCE, "doesNotExist")
         self.assertEqual(snippet, "")
@@ -491,6 +497,129 @@ class TestFetchFunctionInputNames(unittest.TestCase):
         mock_impl.return_value = "0x" + "11" * 20  # type: ignore[attr-defined]
         names = fetch_function_input_names(1, "0xProxy", "setMaxSlippage")
         self.assertEqual(names, ["_maxSlippage"])
+
+
+class TestOverloadedInputNames(unittest.TestCase):
+    """A Vyper default argument compiles to one ABI entry per arity."""
+
+    # Yearn V3 vault: add_strategy(new_strategy: address, add_to_queue: bool=True)
+    _ABI = (
+        '[{"type":"function","name":"add_strategy","inputs":[{"name":"new_strategy","type":"address"}],'
+        '"outputs":[]},'
+        '{"type":"function","name":"add_strategy","inputs":[{"name":"new_strategy","type":"address"},'
+        '{"name":"add_to_queue","type":"bool"}],"outputs":[]}]'
+    )
+
+    def setUp(self) -> None:
+        reset_cache()
+
+    def _mock(self, mock_fetch: object) -> None:
+        mock_fetch.return_value = {  # type: ignore[attr-defined]
+            "status": "1",
+            "result": [{"SourceCode": "# vyper", "ContractName": "Yearn V3 Vault", "ABI": self._ABI}],
+        }
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_signature_selects_matching_overload(self, mock_fetch: object) -> None:
+        self._mock(mock_fetch)
+        names = fetch_function_input_names(1, "0xabc", "add_strategy", "add_strategy(address,bool)")
+        self.assertEqual(names, ["new_strategy", "add_to_queue"])
+        self.assertEqual(
+            fetch_function_input_names(1, "0xabc", "add_strategy", "add_strategy(address)"), ["new_strategy"]
+        )
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_overload_without_signature_is_ambiguous(self, mock_fetch: object) -> None:
+        # Picking the first overload labeled the two-argument call with one name.
+        self._mock(mock_fetch)
+        self.assertIsNone(fetch_function_input_names(1, "0xabc", "add_strategy"))
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_unmatched_signature_returns_none(self, mock_fetch: object) -> None:
+        self._mock(mock_fetch)
+        self.assertIsNone(fetch_function_input_names(1, "0xabc", "add_strategy", "add_strategy(uint256)"))
+
+
+VYPER_VAULT_SOURCE = '''
+interface IStrategy:
+    def asset() -> address: view
+    def totalAssets() -> (uint256): view
+
+@internal
+def _add_strategy(new_strategy: address, add_to_queue: bool):
+    assert new_strategy not in [self, empty(address)], "strategy cannot be zero address"
+
+@external
+def add_strategy(new_strategy: address, add_to_queue: bool=True):
+    """
+    @notice Add a new strategy.
+    @param new_strategy The new strategy to add.
+    """
+    self._enforce_role(msg.sender, Roles.ADD_STRATEGY_MANAGER)
+    self._add_strategy(new_strategy, add_to_queue)
+
+@external
+@nonreentrant("lock")
+def update_debt(
+    strategy: address,
+    target_debt: uint256,
+    max_loss: uint256 = MAX_BPS
+) -> uint256:
+    """
+    @notice Update the debt for a strategy.
+    """
+    return self._update_debt(strategy, target_debt, max_loss)
+
+@view
+@external
+def totalAssets() -> uint256:
+    """
+    @notice Get the total assets held by the vault.
+    """
+    return self._total_assets()
+'''
+
+
+class TestVyperFunctionSnippet(unittest.TestCase):
+    """Vyper natspec lives in a docstring below the signature."""
+
+    def test_extracts_decorators_signature_and_docstring(self) -> None:
+        snippet = _extract_function_snippet(VYPER_VAULT_SOURCE, "add_strategy")
+        self.assertTrue(
+            snippet.startswith("@external\ndef add_strategy(new_strategy: address, add_to_queue: bool=True):")
+        )
+        self.assertIn("@notice Add a new strategy.", snippet)
+        self.assertNotIn("_enforce_role", snippet)
+
+    def test_does_not_match_private_prefix(self) -> None:
+        # `_add_strategy` must not satisfy a lookup for `add_strategy`, and vice versa.
+        self.assertNotIn(
+            "_add_strategy(new_strategy: address, add_to_queue: bool):",
+            _extract_function_snippet(VYPER_VAULT_SOURCE, "add_strategy"),
+        )
+
+    def test_multiline_signature_with_return_type(self) -> None:
+        snippet = _extract_function_snippet(VYPER_VAULT_SOURCE, "update_debt")
+        self.assertIn('@nonreentrant("lock")', snippet)
+        self.assertIn("max_loss: uint256 = MAX_BPS\n) -> uint256:", snippet)
+        self.assertIn("@notice Update the debt for a strategy.", snippet)
+
+    def test_prefers_definition_over_interface_stub(self) -> None:
+        snippet = _extract_function_snippet(VYPER_VAULT_SOURCE, "totalAssets")
+        self.assertIn("@notice Get the total assets held by the vault.", snippet)
+        self.assertIn("@view\n@external", snippet)
+
+    def test_crlf_source_keeps_decorators_and_docstring(self) -> None:
+        # Etherscan returned the Yearn V3 vault source with CRLF line endings.
+        snippet = _extract_function_snippet(VYPER_VAULT_SOURCE.replace("\n", "\r\n"), "add_strategy")
+        self.assertIn("@external", snippet)
+        self.assertIn("@notice Add a new strategy.", snippet)
+
+    def test_missing_function_returns_empty(self) -> None:
+        self.assertEqual(_extract_function_snippet(VYPER_VAULT_SOURCE, "set_role"), "")
 
 
 class TestFunctionSignatureFromAbi(unittest.TestCase):

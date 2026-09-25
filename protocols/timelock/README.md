@@ -165,7 +165,7 @@ The alert format varies by timelock type:
 🔗 Tx: https://etherscan.io/tx/0x...
 ```
 
-For batch operations (`scheduleBatch`), all calls are included in a single message with `--- Call N ---` separators.
+For batch operations (`scheduleBatch`), all calls are included in a single message with `--- Call N ---` separators. Calls are numbered from 1 (the on-chain batch index + 1) so they match the numbering in the AI report's call flow.
 
 ## Usage
 

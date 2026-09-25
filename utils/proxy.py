@@ -92,6 +92,35 @@ def detect_proxy_upgrade(data_hex: str, target: str = "") -> ProxyUpgrade | None
     return None
 
 
+# EIP-1167 minimal proxy (clone) runtime bytecode: a fixed 10-byte prefix, the
+# 20-byte implementation address, and a fixed 15-byte suffix. Clones cannot be
+# upgraded, so they carry no implementation slot for `get_current_implementation`
+# to read — but every Yearn V3 vault is one, so token metadata and ABI lookups
+# must see through them.
+_EIP1167_PREFIX = "363d3d373d3d3d363d73"
+_EIP1167_SUFFIX = "5af43d82803e903d91602b57fd5bf3"
+_EIP1167_CODE_LEN = len(_EIP1167_PREFIX) + 40 + len(_EIP1167_SUFFIX)
+
+
+def minimal_proxy_implementation(code: bytes | str) -> str | None:
+    """Return the implementation an EIP-1167 clone delegates to, or None.
+
+    Args:
+        code: Deployed runtime bytecode, as bytes or hex (with or without ``0x``).
+
+    Returns:
+        The checksummed implementation address when ``code`` is exactly an
+        EIP-1167 minimal proxy, else None.
+    """
+    hex_code = code.hex() if isinstance(code, (bytes, bytearray)) else str(code)
+    hex_code = hex_code.lower().removeprefix("0x")
+    if len(hex_code) != _EIP1167_CODE_LEN:
+        return None
+    if not (hex_code.startswith(_EIP1167_PREFIX) and hex_code.endswith(_EIP1167_SUFFIX)):
+        return None
+    return to_checksum_address("0x" + hex_code[len(_EIP1167_PREFIX) : len(_EIP1167_PREFIX) + 40])
+
+
 # Getters non-standard proxies expose instead of using a known storage slot.
 # Compound's Unitroller, for example, points at its logic via
 # comptrollerImplementation() rather than the EIP-1967 slot.

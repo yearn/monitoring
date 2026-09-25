@@ -17,7 +17,7 @@ from eth_utils import function_signature_to_4byte_selector, to_checksum_address
 from utils.cache import cache_path
 from utils.calldata.decoder import MAX_BYTES_RECURSION_DEPTH, DecodedCall, decode_calldata, try_decode_inner_calldata
 from utils.calldata.role_names import normalize_role_hash, resolve_role_names
-from utils.erc20_metadata import fetch_erc20_metadata
+from utils.erc20_metadata import ERC20Metadata, fetch_erc20_metadata
 from utils.formatting import format_decimal_amount, normalize_token_amount, parse_wei
 from utils.impl_diff import diff_implementations, format_impl_diff
 from utils.llm import get_llm_provider
@@ -115,7 +115,10 @@ Critical rules for parameter interpretation:
   tokens with different decimals — say so explicitly rather than guessing. Quote the raw
   value plus its 1e18-normalized form, and name the candidates when there are several.
 - When a Protocol Context section is provided, treat its farm identity, accounting asset,
-  normalized totalAssets, and configured token targets as verified deterministic facts. Distinguish
+  normalized totalAssets, and configured token targets as verified deterministic facts. When it
+  states the unit a parameter is denominated in (e.g. a Yearn V3 max_debt in the vault asset),
+  use that unit and its normalized amounts without hedging, even if Related Tokens lists several
+  candidate tokens. Prefer its contract names over raw labels. Distinguish
   the accounting asset from non-accounting ERC20 targets configured in an escrow whitelist;
   whitelisting proves permission to interact, but not how a token is valued or used downstream.
 - A bytes32 argument the Protocol Context or a Role Names section resolves to a keccak256
@@ -131,6 +134,9 @@ Critical rules for parameter interpretation:
   funding: minting expands supply on claim, transferring draws down the stated balance.
   Compare a new allocation against the prior values the section lists before calling it large.
 - Never assign HIGH/CRITICAL risk on the basis of a guessed unit interpretation.
+- Do not call a contract audited, battle-tested, low-fee, safe, or reputable, and do not
+  characterize its fees or track record, unless a section of this prompt states it. A label
+  names a contract; it is not evidence about its quality.
 - When a Risk Anchors section is provided, treat it as a typical floor/ceiling, not a
   verdict. Adjust up or down based on the specific parameters (e.g. grantRole of a
   minor role can be LOW; an upgrade to fresh-bytecode code can be CRITICAL).
@@ -358,6 +364,10 @@ class _PreparedCall:
     # True when simulated in batch order on the state left by the earlier calls;
     # False for an independent simulation against the current chain state.
     sequential: bool = False
+    # 1-based index of the nearest earlier call to the same target. An
+    # independent revert then likely reflects state that call sets up
+    # (``add_strategy`` before ``update_max_debt_for_strategy``).
+    earlier_same_target: int | None = None
 
 
 def _state_value_markdown(value: object, chain_id: int, labels: dict[str, str]) -> str:
@@ -438,11 +448,19 @@ def _decode_status(data: str, decoded: DecodedCall | None) -> str:
     return "unknown_selector"
 
 
-def _simulation_note(sim: SimulationResult | None, *, independent: bool, sequential: bool = False) -> str:
+def _simulation_note(
+    sim: SimulationResult | None,
+    *,
+    independent: bool,
+    sequential: bool = False,
+    earlier_same_target: int | None = None,
+) -> str:
     """Deterministic per-call simulation line for the gist call flow.
 
     Failed sims are labeled as diagnostics so a reviewer can see them without
-    treating them as a predicted governance revert.
+    treating them as a predicted governance revert. An independent revert on a
+    target an earlier call already touched names that call: the simulation ran
+    without the state it sets up, which is the usual cause.
     """
     if sim is None:
         return ""
@@ -460,10 +478,17 @@ def _simulation_note(sim: SimulationResult | None, *, independent: bool, sequent
             "failure (omitted from the risk prompt; later calls were simulated independently)"
         )
     independent_note = "independent simulation; " if independent else ""
-    return (
+    dependency = (
+        f" Call {earlier_same_target} targets the same contract earlier in this batch and was not applied "
+        "first, so the revert may only reflect state that call sets up."
+        if independent and earlier_same_target
+        else ""
+    )
+    note = (
         f"**Simulation diagnostic:** {error} — not a predicted governance failure "
         f"({independent_note}omitted from the risk prompt)"
     )
+    return f"{note}.{dependency}" if dependency else note
 
 
 def _collect_state_reads(
@@ -962,14 +987,33 @@ def _collect_address_labels(
             logger.info("ERC20 metadata fetch failed for %s: %s", checksum, e)
             meta = None
         if meta:
-            decorated = (
-                f"{base} ({meta.symbol}, {meta.decimals} dec)" if base else f"{meta.symbol}, {meta.decimals} dec"
-            )
-            return (checksum, decorated)
+            return (checksum, _token_label(base, meta))
         return (checksum, base) if base else None
 
     results = _parallel_map(fetch, candidates)
     return {checksum: label for entry in results if entry for checksum, label in [entry]}
+
+
+def _token_label(base: str, meta: ERC20Metadata) -> str:
+    """Label a token with its on-chain name when the base label doesn't already carry it.
+
+    Explorer labels are often the contract *type* shared by every deployment —
+    all Yearn V3 vaults verify as "Yearn V3 Vault", and a Spark looper verifies
+    as "LSTAaveLooper" — which left the LLM unable to tell two vaults apart and
+    led it to call the looper an Aave strategy. ``name()`` is the deployment's
+    own identity, so it leads; the base label is kept after it for provenance.
+    """
+    suffix = f"({meta.symbol}, {meta.decimals} dec)"
+    name = (meta.name or "").strip()
+    if name and not _label_mentions(base, name):
+        return f"{name} {suffix} — {base}" if base else f"{name} {suffix}"
+    return f"{base} {suffix}" if base else f"{meta.symbol}, {meta.decimals} dec"
+
+
+def _label_mentions(base: str, name: str) -> bool:
+    """True when one label already contains the other, ignoring case."""
+    base_lower, name_lower = base.lower(), name.lower()
+    return bool(base_lower) and (name_lower in base_lower or base_lower in name_lower)
 
 
 def _collect_risk_anchors(decoded_calls: list[DecodedCall]) -> str:
@@ -1015,7 +1059,7 @@ def _collect_param_names(
         if not target or not decoded.function_name:
             return None
         try:
-            return fetch_function_input_names(chain_id, target, decoded.function_name)
+            return fetch_function_input_names(chain_id, target, decoded.function_name, decoded.signature)
         except Exception as e:  # noqa: BLE001 - best-effort enrichment
             logger.info("Param name fetch failed for %s.%s: %s", target, decoded.function_name, e)
             return None
@@ -1899,7 +1943,11 @@ def _prepare_batch_items(
             logger.warning("Bundle simulation unavailable; simulating batch calls independently")
 
     items: list[_PreparedCall] = []
+    last_index_by_target: dict[str, int] = {}
     for position, (i, target, data, value, decoded, status) in enumerate(decoded_items):
+        earlier_same_target = last_index_by_target.get(target.lower()) if target else None
+        if target:
+            last_index_by_target[target.lower()] = i
         simulation: SimulationResult | None = None
         sequential = False
         # Empty calldata has no function to simulate; a SUCCESS here would look
@@ -1933,6 +1981,7 @@ def _prepare_batch_items(
                 decoded=decoded,
                 simulation=simulation,
                 sequential=sequential,
+                earlier_same_target=earlier_same_target,
             )
         )
     return items
@@ -1956,7 +2005,12 @@ def _call_entry_from_item(
         raw_calldata=item.data,
         original_index=item.index,
         decode_status=_decode_status(item.data, item.decoded),
-        simulation_note=_simulation_note(item.simulation, independent=True, sequential=item.sequential),
+        simulation_note=_simulation_note(
+            item.simulation,
+            independent=True,
+            sequential=item.sequential,
+            earlier_same_target=item.earlier_same_target,
+        ),
     )
 
 

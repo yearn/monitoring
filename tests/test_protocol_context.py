@@ -80,7 +80,8 @@ class TestResolveProtocolContext(unittest.TestCase):
 
     def test_registered_adapters_cover_the_known_protocols(self) -> None:
         self.assertEqual(
-            {adapter.name for adapter in protocol_context._ADAPTERS}, {"infinifi", "infinifi-outland", "3jane"}
+            {adapter.name for adapter in protocol_context._ADAPTERS},
+            {"infinifi", "infinifi-outland", "3jane", "yearn-v3"},
         )
 
 

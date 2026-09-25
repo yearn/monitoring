@@ -22,6 +22,7 @@ from utils.llm.ai_explainer import (
     _parse_explanation,
     _sole_token_by_target,
     _split_risk_tag,
+    _token_label,
     collect_unique_addresses,
     explain_batch_transaction,
     explain_transaction,
@@ -1561,7 +1562,7 @@ class TestBatchUndecodedCalls(unittest.TestCase):
             return None
 
         mock_decode.side_effect = decode
-        mock_names.side_effect = lambda _chain, _target, fname: {
+        mock_names.side_effect = lambda _chain, _target, fname, _signature=None: {
             "setOwner": ["newOwner"],
             "setCap": ["asset", "cap"],
         }[fname]
@@ -2271,3 +2272,73 @@ class TestPromptSizeGuards(unittest.TestCase):
         self.assertIn("Call 2: UNDECODED", prompt)
         self.assertIn("2. **Undecoded calldata**", result.report)
         self.assertIn("3. **Empty calldata**", result.report)
+
+
+class TestTokenLabel(unittest.TestCase):
+    """On-chain name() distinguishes deployments that share a contract-type label."""
+
+    def test_name_leads_when_base_is_generic(self) -> None:
+        meta = ERC20Metadata("yETH-Recovery", 18, "Yearn yETH Recovery Vault")
+        self.assertEqual(
+            _token_label("Yearn V3 Vault", meta), "Yearn yETH Recovery Vault (yETH-Recovery, 18 dec) — Yearn V3 Vault"
+        )
+
+    def test_base_kept_when_it_already_names_the_token(self) -> None:
+        meta = ERC20Metadata("USDC", 6, "USD Coin")
+        self.assertEqual(_token_label("Centre: USD Coin", meta), "Centre: USD Coin (USDC, 6 dec)")
+
+    def test_name_without_base(self) -> None:
+        meta = ERC20Metadata("ysWETH", 18, "wstETH/WETH Spark Looper")
+        self.assertEqual(_token_label("", meta), "wstETH/WETH Spark Looper (ysWETH, 18 dec)")
+
+    def test_no_name_keeps_previous_format(self) -> None:
+        self.assertEqual(
+            _token_label("Circle: USDC Token", ERC20Metadata("USDC", 6)), "Circle: USDC Token (USDC, 6 dec)"
+        )
+        self.assertEqual(_token_label("", ERC20Metadata("USDC", 6)), "USDC, 6 dec")
+
+
+class TestIndependentRevertNamesDependency(unittest.TestCase):
+    """Without a bundle, a revert after an earlier call to the same target names that call."""
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction")
+    @patch("utils.llm.ai_explainer.simulate_bundle", return_value=None)
+    @patch("utils.llm.ai_explainer.decode_calldata", return_value=PAUSE)
+    def test_same_target_dependency_is_noted(
+        self,
+        _mock_decode: MagicMock,
+        _mock_bundle: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+    ) -> None:
+        mock_simulate.side_effect = [
+            SimulationResult(success=True, gas_used=111),
+            SimulationResult(success=False, error_message="inactive strategy"),
+            SimulationResult(success=False, error_message="not authorized"),
+        ]
+        provider = MagicMock()
+        provider.supports_structured_output = False
+        provider.complete.return_value = "TLDR: three calls. LOW.\n\nDETAIL:\nanalysis."
+        provider.model_name = "test"
+        mock_get_provider.return_value = provider
+
+        result = explain_batch_transaction(
+            calls=[
+                {"target": "0xT1", "data": PAUSE_DATA, "value": "0"},
+                {"target": "0xT1", "data": PAUSE_DATA, "value": "0"},
+                {"target": "0xT2", "data": PAUSE_DATA, "value": "0"},
+            ],
+            chain_id=1,
+            refine=False,
+        )
+
+        assert result is not None
+        call2 = result.report[result.report.index("2. **`pause()`**") : result.report.index("3. **`pause()`**")]
+        call3 = result.report[result.report.index("3. **`pause()`**") :]
+        self.assertIn("Call 1 targets the same contract earlier in this batch", call2)
+        self.assertNotIn("targets the same contract", call3)
