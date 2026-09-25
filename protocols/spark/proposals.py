@@ -10,6 +10,7 @@ import requests
 
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
+from utils.http_client import request_with_retry
 from utils.logger import get_logger
 from utils.telegram import escape_markdown, send_error_message
 
@@ -42,12 +43,12 @@ query Proposals($space: String!) {
 
 def fetch_proposals() -> list[dict]:
     """Fetch the most recent proposals from the Snapshot hub GraphQL API."""
-    response = requests.post(
+    response = request_with_retry(
+        "post",
         SNAPSHOT_GRAPHQL_URL,
         json={"query": PROPOSALS_QUERY, "variables": {"space": SNAPSHOT_SPACE}},
         timeout=30,
     )
-    response.raise_for_status()
     payload = response.json()
     if payload.get("errors"):
         raise ValueError(f"Snapshot GraphQL errors: {payload['errors']}")

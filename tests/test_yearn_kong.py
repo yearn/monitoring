@@ -43,17 +43,18 @@ def _vault_payload() -> dict:
 def test_fetch_kong_vaults_uses_all_strategies_by_default(monkeypatch) -> None:
     calls = []
 
-    def fake_post(url: str, json: dict, timeout: int) -> FakeResponse:
-        calls.append((url, json, timeout))
+    def fake_request_with_retry(method: str, url: str, *, json: dict, timeout: int) -> FakeResponse:
+        calls.append((method, url, json, timeout))
         return FakeResponse(_vault_payload())
 
-    monkeypatch.setattr(kong.requests, "post", fake_post)
+    monkeypatch.setattr(kong, "request_with_retry", fake_request_with_retry)
 
     vaults = kong.fetch_kong_vaults(Chain.MAINNET)
 
-    assert calls[0][0] == kong.KONG_GQL_URL
-    assert calls[0][1]["variables"] == {"chainId": Chain.MAINNET.chain_id}
-    assert calls[0][2] == 30
+    assert calls[0][0] == "post"
+    assert calls[0][1] == kong.KONG_GQL_URL
+    assert calls[0][2]["variables"] == {"chainId": Chain.MAINNET.chain_id}
+    assert calls[0][3] == 30
     assert vaults == [
         {
             "address": "0xabc",
@@ -67,8 +68,8 @@ def test_fetch_kong_vaults_uses_all_strategies_by_default(monkeypatch) -> None:
 
 def test_fetch_kong_vaults_can_use_default_queue(monkeypatch) -> None:
     monkeypatch.setattr(
-        kong.requests,
-        "post",
+        kong,
+        "request_with_retry",
         lambda *_args, **_kwargs: FakeResponse(_vault_payload()),
     )
 
@@ -83,7 +84,7 @@ def test_fetch_kong_vaults_can_use_default_queue(monkeypatch) -> None:
 
 def test_fetch_kong_vaults_raises_on_graphql_errors(monkeypatch) -> None:
     payload = {"errors": [{"message": "bad query"}]}
-    monkeypatch.setattr(kong.requests, "post", lambda *_args, **_kwargs: FakeResponse(payload))
+    monkeypatch.setattr(kong, "request_with_retry", lambda *_args, **_kwargs: FakeResponse(payload))
 
     with pytest.raises(kong.KongRequestError):
         kong.fetch_kong_vaults(Chain.MAINNET)
@@ -143,16 +144,16 @@ def test_fetch_kong_parent_vaults_filters_retired_and_malformed_vaults(monkeypat
     }
     calls = []
 
-    def fake_post(url: str, json: dict, timeout: int) -> FakeResponse:
-        calls.append((url, json, timeout))
+    def fake_request_with_retry(method: str, url: str, *, json: dict, timeout: int) -> FakeResponse:
+        calls.append((method, url, json, timeout))
         return FakeResponse(payload)
 
-    monkeypatch.setattr(kong.requests, "post", fake_post)
+    monkeypatch.setattr(kong, "request_with_retry", fake_request_with_retry)
 
     vaults = kong.fetch_kong_parent_vaults(Chain.MAINNET)
 
-    assert "vaultType: 1" in calls[0][1]["query"]
-    assert calls[0][1]["variables"] == {"chainId": 1}
+    assert "vaultType: 1" in calls[0][2]["query"]
+    assert calls[0][2]["variables"] == {"chainId": 1}
     assert vaults == [
         {
             "address": "0xParent",
