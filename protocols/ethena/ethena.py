@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
-from utils.http_client import request_with_retry
+from utils.http_client import fetch_json
 from utils.logger import get_logger
 from utils.telegram import send_error_message
 from utils.web3_wrapper import Chain, ChainManager
@@ -26,16 +26,6 @@ REQUEST_TIMEOUT = 15  # seconds
 
 # Label alerts with the data source they came from.
 ETHENA_SOURCE = "Ethena API"
-
-
-def fetch_json(url: str) -> dict | None:
-    """Helper that fetches JSON with retry and basic error handling."""
-    try:
-        resp = request_with_retry("get", url, timeout=REQUEST_TIMEOUT)
-        return resp.json()
-    except Exception as e:
-        logger.error("Failed to fetch %s: %s", url, e)
-        return None
 
 
 def _parse_timestamp(ts: str) -> datetime | None:
@@ -71,7 +61,7 @@ def is_stale_timestamp(ts: str, max_age_hours: int = 3) -> bool:
 
 def get_usde_supply() -> float | None:
     """Return total circulating USDe supply in USD terms (raw token amount / 1e18)."""
-    data = fetch_json(SUPPLY_URL)
+    data = fetch_json(SUPPLY_URL, timeout=REQUEST_TIMEOUT)
     if not data:
         return None
 
@@ -94,7 +84,7 @@ def get_total_collateral_usd() -> float | None:
     e.g. $4.14B vs $4.03B) but is a stale snapshot (items lag several hours). We
     use the fresh net figure and add the reserve fund as the buffer.
     """
-    data = fetch_json(COLLATERAL_URL)
+    data = fetch_json(COLLATERAL_URL, timeout=REQUEST_TIMEOUT)
     if not data:
         return None
 
@@ -108,7 +98,7 @@ def get_reserve_fund() -> float | None:
     ``{timestamp, value}`` points; we take the most recent one and treat stale
     data (older than 3 hours) as unavailable.
     """
-    data = fetch_json(RESERVE_FUND_URL)
+    data = fetch_json(RESERVE_FUND_URL, timeout=REQUEST_TIMEOUT)
     if not data:
         return None
 
