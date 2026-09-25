@@ -2,7 +2,7 @@
 
 ## Utilization
 
-Automation on our VPS runs hourly and sends a telegram message if there is a market with utilization above `99%`. [Python script code](https://github.com/yearn/monitoring/blob/main/aave/main.py).
+Automation on our VPS runs hourly and sends a telegram message if there is a market with utilization above `99%` for 2 or more consecutive checks (a single spike does not alert). [Python script code](https://github.com/yearn/monitoring/blob/main/aave/main.py).
 
 ## Governance
 

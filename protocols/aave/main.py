@@ -7,6 +7,12 @@ when thresholds are exceeded.
 
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
+from utils.cache import (
+    HOURLY_CACHE_STALE_AFTER_SECONDS,
+    cache_filename,
+    get_fresh_last_value_for_key_from_file,
+    write_last_value_with_timestamp_to_file,
+)
 from utils.chains import Chain
 from utils.logger import get_logger
 from utils.telegram import send_error_message
@@ -80,13 +86,60 @@ ADDRESSES_BY_CHAIN = {
 }
 
 THRESHOLD_UR = 0.99
+# Alert only after this many consecutive runs above THRESHOLD_UR to filter out short spikes
+MIN_CONSECUTIVE_HIGH_UR = 2
+
+
+def high_ur_streak_key(chain_name: str, token_name: str) -> str:
+    """Build the cache key holding the consecutive high-utilization count for a market.
+
+    Args:
+        chain_name: Name of the chain.
+        token_name: Symbol of the market asset.
+
+    Returns:
+        Cache key string.
+    """
+    return f"{PROTOCOL}_high_ur_streak_{chain_name}_{token_name}"
+
+
+def update_high_ur_streak(chain_name: str, token_name: str, ur: float) -> int:
+    """Update and return the number of consecutive runs with utilization above threshold.
+
+    The streak resets when utilization drops to or below the threshold, or when the
+    previous observation is stale (e.g. missed runs).
+
+    Args:
+        chain_name: Name of the chain.
+        token_name: Symbol of the market asset.
+        ur: Current utilization rate.
+
+    Returns:
+        Current streak length, 0 if utilization is not above threshold.
+    """
+    key = high_ur_streak_key(chain_name, token_name)
+    if ur > THRESHOLD_UR:
+        previous = int(get_fresh_last_value_for_key_from_file(cache_filename, key, HOURLY_CACHE_STALE_AFTER_SECONDS))
+        streak = previous + 1
+    else:
+        streak = 0
+    write_last_value_with_timestamp_to_file(cache_filename, key, streak)
+    return streak
 
 
 def print_stuff(chain_name: str, token_name: str, ur: float) -> None:
     logger.debug(f"Chain: {chain_name}, Token: {token_name}, UR: {ur}")
-    if ur > THRESHOLD_UR:
-        message = f"**BEEP BOP**\n💎 Market asset: {token_name}\n📊 Utilization rate: {ur:.2%}\n🌐 Chain: {chain_name}"
+    streak = update_high_ur_streak(chain_name, token_name, ur)
+    if streak >= MIN_CONSECUTIVE_HIGH_UR:
+        message = (
+            f"**BEEP BOP**\n💎 Market asset: {token_name}\n📊 Utilization rate: {ur:.2%}\n🌐 Chain: {chain_name}\n"
+            f"⏱️ Above {THRESHOLD_UR:.0%} for {streak} consecutive checks"
+        )
         send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
+    elif streak > 0:
+        logger.info(
+            "%s on %s above threshold (%.2f%%), streak %d - not alerting yet", token_name, chain_name, ur * 100, streak
+        )
 
 
 def process_assets(chain: Chain) -> None:

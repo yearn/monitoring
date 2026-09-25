@@ -59,7 +59,7 @@ protocols:
       - protocols/aave/proposals.py
     monitors:
       - name: "Market Utilization"
-        description: "Utilization rate >99% on Mainnet"
+        description: "Utilization rate >99% on Mainnet for 2+ consecutive checks"
       - name: "Governance Proposals"
         description: "Queued proposals via Aave governance cache API"
       - name: "Timelock"
