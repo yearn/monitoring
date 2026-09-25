@@ -1,6 +1,5 @@
 from decimal import Decimal
 
-import requests
 from web3 import Web3
 
 from utils.abi import load_abi
@@ -15,6 +14,7 @@ from utils.cache import (
 )
 from utils.chains import Chain
 from utils.config import Config
+from utils.http_client import request_with_retry
 from utils.logger import get_logger
 from utils.telegram import send_error_message
 from utils.web3_wrapper import ChainManager
@@ -62,12 +62,8 @@ def fetch_api_data():
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            logger.error("API Error %s for %s: %s", response.status_code, url, response.text[:200])
-            return None
+        response = request_with_retry("get", url, headers=headers, timeout=10)
+        return response.json()
     except Exception as e:
         logger.error("API Request Failed for %s: %s", url, e)
         return None

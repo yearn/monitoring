@@ -10,9 +10,9 @@ import json
 import os
 from pathlib import Path
 
-import requests
 from dotenv import load_dotenv
 
+from utils.http_client import request_with_retry
 from utils.logger import get_logger
 
 load_dotenv()
@@ -38,9 +38,7 @@ def get_response_hash(data: dict) -> str:
 def fetch_alerts() -> dict:
     """Fetch alerts from Tenderly API."""
     headers = {"Accept": "application/json", "X-Access-Key": TENDERLY_API_KEY}
-    response = requests.get(TENDERLY_API_URL, headers=headers)
-    if response.status_code != 200:
-        raise Exception(f"Failed to get alerts: {response.status_code} - {response.text}")
+    response = request_with_retry("get", TENDERLY_API_URL, headers=headers)
     return response.json()
 
 

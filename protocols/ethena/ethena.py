@@ -1,9 +1,8 @@
 from datetime import datetime, timedelta, timezone
 
-import requests
-
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
+from utils.http_client import request_with_retry
 from utils.logger import get_logger
 from utils.telegram import send_error_message
 from utils.web3_wrapper import Chain, ChainManager
@@ -30,12 +29,9 @@ ETHENA_SOURCE = "Ethena API"
 
 
 def fetch_json(url: str) -> dict | None:
-    """Helper that fetches JSON with basic error handling."""
+    """Helper that fetches JSON with retry and basic error handling."""
     try:
-        resp = requests.get(url, timeout=REQUEST_TIMEOUT)
-        if resp.status_code != 200:
-            logger.error("HTTP %s for %s\n%s", resp.status_code, url, resp.text)
-            return None
+        resp = request_with_retry("get", url, timeout=REQUEST_TIMEOUT)
         return resp.json()
     except Exception as e:
         logger.error("Failed to fetch %s: %s", url, e)

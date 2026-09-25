@@ -38,14 +38,14 @@ def test_compound_alert_uses_timeout_escapes_title_and_updates_reported_id():
     }
 
     with (
-        patch("protocols.compound.proposals.requests.post", return_value=_Response(payload)) as mock_post,
+        patch("protocols.compound.proposals.request_with_retry", return_value=_Response(payload)) as mock_request,
         patch("protocols.compound.proposals.get_last_queued_id_from_file", return_value=40),
         patch("protocols.compound.proposals.send_alert") as mock_send,
         patch("protocols.compound.proposals.write_last_queued_id_to_file") as mock_write,
     ):
         get_proposals()
 
-    assert mock_post.call_args.kwargs["timeout"] == 30
+    assert mock_request.call_args.kwargs["timeout"] == 30
     mock_send.assert_called_once()
     alert = mock_send.call_args.args[0]
     assert alert.protocol == "comp"
@@ -57,7 +57,7 @@ def test_compound_alert_uses_timeout_escapes_title_and_updates_reported_id():
 
 def test_compound_processing_error_alert_uses_plain_text():
     with (
-        patch("protocols.compound.proposals.requests.post", return_value=_Response({"data": {}})),
+        patch("protocols.compound.proposals.request_with_retry", return_value=_Response({"data": {}})),
         patch("protocols.compound.proposals.send_error_message") as mock_send,
     ):
         get_proposals()
@@ -71,7 +71,7 @@ def test_compound_processing_error_alert_uses_plain_text():
 
 def test_compound_fetch_error_alert_uses_plain_text():
     with (
-        patch("protocols.compound.proposals.requests.post", side_effect=requests.Timeout("timed out")),
+        patch("protocols.compound.proposals.request_with_retry", side_effect=requests.RequestException("timed out")),
         patch("protocols.compound.proposals.send_error_message") as mock_send,
     ):
         get_proposals()
