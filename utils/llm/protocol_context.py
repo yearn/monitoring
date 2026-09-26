@@ -9,7 +9,10 @@ alert's protocol.
 
 Adapters are responsible for their own guards: each returns an empty list for
 protocols and chains it does not handle, so registration order carries no
-meaning and adding a protocol is one row in ``_ADAPTERS``.
+meaning and adding a protocol is one row in ``_ADAPTERS``. Most guard on the
+alert's protocol; the Yearn V3 adapter guards on call shape and an on-chain
+``apiVersion()`` instead, because the same vault code is governed by Yearn and
+third-party curators alike.
 """
 
 from collections.abc import Callable
@@ -32,6 +35,11 @@ from utils.llm.threejane_context import (
     format_threejane_report,
     resolve_threejane_context,
 )
+from utils.llm.yearn_v3_context import (
+    format_yearn_v3_prompt,
+    format_yearn_v3_report,
+    resolve_yearn_v3_context,
+)
 from utils.logger import get_logger
 
 logger = get_logger("utils.llm.protocol_context")
@@ -51,6 +59,7 @@ _ADAPTERS: tuple[_Adapter, ...] = (
     _Adapter("infinifi", resolve_infinifi_context, format_infinifi_prompt, format_infinifi_report),
     _Adapter("infinifi-outland", resolve_outland_context, format_outland_prompt, format_outland_report),
     _Adapter("3jane", resolve_threejane_context, format_threejane_prompt, format_threejane_report),
+    _Adapter("yearn-v3", resolve_yearn_v3_context, format_yearn_v3_prompt, format_yearn_v3_report),
 )
 
 

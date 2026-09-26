@@ -12,6 +12,7 @@ from utils.proxy import (
     ProxyUpgrade,
     detect_proxy_upgrade,
     get_current_implementation,
+    minimal_proxy_implementation,
 )
 
 
@@ -158,6 +159,24 @@ class TestGetCurrentImplementation(unittest.TestCase):
 
     def test_returns_none_when_nothing_resolves(self) -> None:
         self.assertIsNone(self._run({}, getter_addr=None))
+
+
+class TestMinimalProxyImplementation(unittest.TestCase):
+    """EIP-1167 runtime bytecode embeds the implementation address."""
+
+    IMPL = _cs("0xd8063123bba3b480569244ae66bfe72b6c84b00d")
+    CODE = "363d3d373d3d3d363d73" + IMPL[2:].lower() + "5af43d82803e903d91602b57fd5bf3"
+
+    def test_extracts_implementation_from_hex_and_bytes(self) -> None:
+        self.assertEqual(minimal_proxy_implementation("0x" + self.CODE), self.IMPL)
+        self.assertEqual(minimal_proxy_implementation(bytes.fromhex(self.CODE)), self.IMPL)
+
+    def test_rejects_other_bytecode(self) -> None:
+        self.assertIsNone(minimal_proxy_implementation(""))
+        self.assertIsNone(minimal_proxy_implementation("0x6080604052"))
+        # Right prefix, wrong length (e.g. a longer contract that starts the same way).
+        self.assertIsNone(minimal_proxy_implementation(self.CODE + "00"))
+        self.assertIsNone(minimal_proxy_implementation(self.CODE[:-2] + "00"))
 
 
 if __name__ == "__main__":

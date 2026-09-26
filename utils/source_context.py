@@ -12,6 +12,8 @@ import re
 import threading
 from dataclasses import dataclass
 
+from eth_utils.abi import collapse_if_tuple
+
 from utils.disk_cache import MISS, DiskCache
 from utils.http_client import fetch_json
 from utils.logger import get_logger
@@ -224,19 +226,31 @@ def fetch_abi_entries(chain_id: int, address: str) -> list[dict] | None:
     return None if record is None or not record.abi else record.abi
 
 
-def fetch_function_input_names(chain_id: int, address: str, function_name: str) -> list[str] | None:
+def fetch_function_input_names(
+    chain_id: int, address: str, function_name: str, signature: str | None = None
+) -> list[str] | None:
     """Return parameter names for ``function_name`` on the verified ABI, or None.
 
     Used by the explainer to render decoded calldata with named parameters
     (``_maxSlippage: 95e16``) instead of bare types (``uint256: 95e16``).
     Follows EIP-1967 to the implementation when the target is a generic
     proxy — the proxy's ABI has the proxy's own functions, not the impl's.
+
+    Args:
+        chain_id: Chain the contract lives on.
+        address: Contract (or proxy) address.
+        function_name: Bare function name, e.g. ``add_strategy``.
+        signature: Canonical signature of the decoded call, e.g.
+            ``add_strategy(address,bool)``. Selects the right entry when the
+            function is overloaded — a Vyper default argument compiles to one
+            ABI entry per arity, and the names of one overload must never be
+            applied to another's parameters.
     """
     record = _fetch_etherscan_contract(chain_id, address)
     if record is None:
         return None
 
-    names = _function_input_names_from_abi(record.abi, function_name)
+    names = _function_input_names_from_abi(record.abi, function_name, signature)
     if names is not None:
         return names
 
@@ -252,7 +266,7 @@ def fetch_function_input_names(chain_id: int, address: str, function_name: str) 
     impl_record = _fetch_etherscan_contract(chain_id, impl)
     if impl_record is None:
         return None
-    return _function_input_names_from_abi(impl_record.abi, function_name)
+    return _function_input_names_from_abi(impl_record.abi, function_name, signature)
 
 
 def get_verification_status(chain_id: int, address: str) -> bool | None:
@@ -394,38 +408,94 @@ def _function_state_mutability_from_abi(abi: list[dict], function_name: str) -> 
     return "payable" if "payable" in muts else muts[0]
 
 
-def _function_input_names_from_abi(abi: list[dict], function_name: str) -> list[str] | None:
+def _abi_entry_signature(entry: dict) -> str | None:
+    """Canonical ``name(type,...)`` signature of an ABI function entry, or None if malformed."""
+    try:
+        types = ",".join(collapse_if_tuple(inp) for inp in entry.get("inputs") or [])
+    except (KeyError, TypeError):
+        return None
+    return f"{entry.get('name')}({types})"
+
+
+def _function_input_names_from_abi(
+    abi: list[dict], function_name: str, signature: str | None = None
+) -> list[str] | None:
     """Pull input names for ``function_name`` out of parsed ABI entries.
 
     Returns ``None`` if the function isn't present; an empty list if the
     function has no parameters. If any input is unnamed (anonymous param),
     return ``None`` rather than a mix — the LLM is better off without than
     with partial labels.
+
+    Overloads are disambiguated by ``signature``. Without a matching one, an
+    overloaded name returns ``None``: picking the first entry mislabeled
+    ``add_strategy(address,bool)`` with the one-argument overload's names,
+    leaving the flag that decides queue placement unnamed. A name with a
+    single entry is used as before.
     """
-    for entry in abi:
-        if not isinstance(entry, dict) or entry.get("type") != "function":
-            continue
-        if entry.get("name") != function_name:
-            continue
-        inputs = entry.get("inputs") or []
-        names = [(inp.get("name") or "") for inp in inputs if isinstance(inp, dict)]
-        if any(not n for n in names):
-            return None
-        return names
-    return None
+    candidates = [
+        entry
+        for entry in abi
+        if isinstance(entry, dict) and entry.get("type") == "function" and entry.get("name") == function_name
+    ]
+    if len(candidates) > 1:
+        wanted = (signature or "").replace(" ", "")
+        candidates = [entry for entry in candidates if _abi_entry_signature(entry) == wanted]
+    if len(candidates) != 1:
+        return None
+    inputs = candidates[0].get("inputs") or []
+    names = [(inp.get("name") or "") for inp in inputs if isinstance(inp, dict)]
+    if any(not n for n in names):
+        return None
+    return names
 
 
 def _extract_function_snippet(source: str, function_name: str) -> str:
-    """Find a function definition and any preceding natspec comment block."""
+    """Find a function definition and any preceding natspec comment block.
+
+    Falls back to Vyper syntax when no Solidity ``function`` matches, so Vyper
+    contracts (every Yearn V3 vault) get their signature and docstring too.
+    """
     pattern = re.compile(
         rf"({_NATSPEC_BLOCK})([ \t]*function\s+{re.escape(function_name)}\b[^{{;]*[{{;])",
         re.MULTILINE,
     )
     match = pattern.search(source)
     if not match:
-        return ""
+        return _extract_vyper_function_snippet(source, function_name)
     natspec = match.group(1) or ""
     return f"{natspec.rstrip()}\n{match.group(2).strip()}".strip()
+
+
+def _extract_vyper_function_snippet(source: str, function_name: str) -> str:
+    """Find a Vyper ``def`` with its decorators and docstring, or "".
+
+    Vyper puts natspec in a docstring *below* the signature, and a signature
+    may span lines and carry defaults such as ``= empty(address)`` — hence the
+    lazy match up to the first ``):`` / ``) -> T:`` that closes the header.
+    A decorated definition wins over an undecorated interface stub of the
+    same name.
+    Default values are kept: ``add_to_queue: bool=True`` is exactly the detail
+    a reviewer needs when calldata passes the flag explicitly.
+    """
+    pattern = re.compile(
+        rf"^((?:[ \t]*@\w+(?:\([^)\n]*\))?[ \t]*\n)*)"
+        rf"([ \t]*def[ \t]+{re.escape(function_name)}[ \t]*\([\s\S]*?\)[ \t]*(?:->[ \t]*[^:\n]+)?:)"
+        rf"(?:[ \t]*\n[ \t]*(\"\"\"[\s\S]*?\"\"\"))?",
+        re.MULTILINE,
+    )
+    # Etherscan serves some Vyper sources with CRLF line endings.
+    matches = list(pattern.finditer(source.replace("\r\n", "\n")))
+    if not matches:
+        return ""
+    # Interface stubs (``def totalAssets() -> uint256: view``) carry no
+    # decorators; the contract's own definition always does.
+    match = next((m for m in matches if (m.group(1) or "").strip()), matches[0])
+    decorators = "\n".join(line.strip() for line in (match.group(1) or "").splitlines() if line.strip())
+    parts = [decorators, match.group(2).strip()]
+    if match.group(3):
+        parts.append("    " + match.group(3).strip())
+    return "\n".join(part for part in parts if part)
 
 
 def find_state_var_writes(source: str, function_name: str) -> list[str]:

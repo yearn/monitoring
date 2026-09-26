@@ -61,10 +61,14 @@ Result: `DecodedCall(function_name="upgradeTo", signature="upgradeTo(address)", 
 
 ### 2. Verified Source Context (`utils/source_context.py`)
 
-For each `(target, function)` pair, fetches the verified Solidity source via the Etherscan v2 multichain API and extracts:
+For each `(target, function)` pair, fetches the verified source via the Etherscan v2 multichain API and extracts:
 
 - The function's preceding natspec block + signature line
 - Declarations + natspec for state variables the function writes
+
+Vyper sources (every Yearn V3 vault) are handled too: when no Solidity `function` matches, the extractor takes the Vyper `def` with its decorators, full signature (including default values such as `add_to_queue: bool=True`) and the docstring below it. A decorated definition wins over an undecorated `interface` stub of the same name, and CRLF line endings are normalized first. Vyper state-variable writes are not extracted.
+
+Decoded parameters are named from the verified ABI (`fetch_function_input_names`). Entries are matched on the full canonical signature, not the bare name: a Vyper default argument compiles to one ABI entry per arity (`add_strategy(address)` and `add_strategy(address,bool)`), and taking the first entry once left the queue flag unnamed. An overloaded name without a signature returns no names rather than guessing.
 
 If the function isn't found in the target's source (e.g., the target is an `ERC1967Proxy` / `TransparentUpgradeableProxy`), follows the EIP-1967 implementation slot and retries against the impl source. Caches per `(chain_id, address)` for the workflow run.
 
@@ -117,7 +121,7 @@ Requires `TENDERLY_API_KEY`. Simulation failure is non-blocking — the pipeline
 
 Callers can pass `skip_simulation=True` to bypass Tenderly entirely. Used for Safe transactions with `operation=DELEGATECALL` (typically multiSend batches), where our plain-CALL simulator can't model the real execution and would produce a spurious "revert" verdict.
 
-Timelock batches are simulated as one **sequential bundle** (`simulate_bundle`, Tenderly `simulate-bundle`): every call is sent from the executor in batch order, and each sees the state the earlier calls left — the way `executeBatch` runs them. Simulating calls one by one against current state produced false reverts for calls that depend on an earlier one in the same batch (e.g. `Accounting.setOracle(vault, oracle)` followed by `OutlandFarm.setVault(vault)`, which requires that oracle). Tenderly stops at the first revert; calls it never reached, and every call when the bundle request itself fails, fall back to an independent simulation against current state. Results are attributed to their original call index and labeled by mode (`Batch simulation` vs `Independent simulation`). Failed simulations of either kind are omitted from the risk prompt (Tenderly often false-reverts governance calls) but kept as call-flow diagnostics so a reviewer can see them without treating them as a predicted on-chain failure.
+Timelock batches are simulated as one **sequential bundle** (`simulate_bundle`, Tenderly `simulate-bundle`): every call is sent from the executor in batch order, and each sees the state the earlier calls left — the way `executeBatch` runs them. Calls are **never simulated one by one**: out of batch order, a call that depends on an earlier one reverts falsely (`update_max_debt_for_strategy` before its `add_strategy`, or `OutlandFarm.setVault(vault)` before the `Accounting.setOracle` it needs), and an alert once reported exactly those false reverts after the bundle request failed and the code fell back to single-call simulations. Tenderly stops at the first revert; calls after it are marked `not reached`. When the bundle request itself fails, no call is simulated: the call flow says `Batch simulation: unavailable` and the prompt tells the model not to infer success or failure. Failed simulations are omitted from the risk prompt (Tenderly often false-reverts governance calls) but kept as call-flow diagnostics so a reviewer can see them without treating them as a predicted on-chain failure.
 
 ### 5. Proxy Upgrade Detection & Implementation Diff (`utils/proxy.py`, `utils/impl_diff.py`)
 
@@ -180,6 +184,8 @@ Token Flows only covers calls that *move* a token. A governance call like `setEp
   jane() -> 0x33333333…3404 (JANE, 18 decimals)
 ```
 
+`fetch_erc20_metadata` resolves the implementation of EIP-1967 proxies and of EIP-1167 minimal-proxy clones (every Yearn V3 vault is one) before checking for the `symbol()`/`decimals()` selectors, and also reads `name()` when the bytecode dispatches it. Address labels then lead with that on-chain name when the explorer label is only the contract type — `Yearn yETH Recovery Vault (yETH-Recovery, 18 dec) — Yearn V3 Vault` rather than a bare `Yearn V3 Vault` shared by every vault.
+
 Filtering on "is it actually an ERC20" is what makes this need no configuration — `owner()` drops out on its own, no name blocklist. The target being itself a token is reported as `getter="self"`. Capped at `MAX_GETTER_CALLS` (8) per target, memoized per `(chain_id, target)`, and best-effort: any failure yields `[]` and the alert proceeds unchanged.
 
 The system prompt treats **exactly one** related token as verified decimals only for parameters that Token Flows or a known ERC20 movement signature identifies as token quantities. A sole related token does **not** mean every uint is a token amount — timestamps, IDs, rates, epochs, shares, and unnamed integers stay raw. Share quantities must not inherit an underlying asset's decimals.
@@ -224,9 +230,21 @@ For 3Jane mainnet alerts, the adapter:
 
 Token amounts are truncated to whole tokens, matching the call flow's amount hints. Failures are best-effort and never block the governance alert.
 
+### 5f-2. Yearn V3 Vault Context (`utils/llm/yearn_v3_context.py`)
+
+Strategy-management calls on a Yearn V3 vault arrive as `add_strategy(address,bool)` and `update_max_debt_for_strategy(address,uint256)` with raw integers. Without context the model hedged that `max_debt` had "units unconfirmed" (the vault's Related Tokens list its own shares, `asset()` and `accountant()`), called the queue flag uninterpretable, and could not size a cap.
+
+The adapter runs for any protocol and chain: the same vault code is governed by Yearn and by third-party curators, so it keys on call shape (`add_strategy`, `revoke_strategy`, `force_revoke_strategy`, `update_max_debt_for_strategy`, `update_debt`, `set_default_queue`, `set_use_default_queue`, `set_deposit_limit`, `set_minimum_total_idle`) and confirms the target with an on-chain `apiVersion()` of `3.x`. For each vault it reads:
+
+1. Name, symbol, API version, asset (symbol/decimals), `totalAssets` / `totalDebt` / `totalIdle`, `deposit_limit`, `use_default_queue` and shutdown state.
+2. The default queue, with each strategy's name, `current_debt` and `max_debt`.
+3. For each strategy the calls name: its registration (`strategies()`), `asset()` (a mismatch makes `add_strategy` revert), `totalAssets`, and whether it is itself a V3 vault (an allocator) together with the strategies it allocates to.
+
+It then states each proposed value in the vault asset against that state, in batch order: the cap as a share or multiple of `totalAssets`, whether it matches the other queue strategies' caps and the deposit limit, and whether a strategy left out of the default queue can still be withdrawn from (it cannot while `use_default_queue` is true). It also states that funds move only through `update_debt`. The system prompt treats a unit the Protocol Context states as verified, so the model normalizes `max_debt` without hedging. Failures are best-effort and never block the governance alert.
+
 ### 5g. Adapter Registry (`utils/llm/protocol_context.py`)
 
-Adapters register in `_ADAPTERS`; `resolve_protocol_context()` fans one call out to all of them and merges the rendered prompt text, report text, introduced addresses, and address labels. Each adapter guards its own protocol and chain, so registration order carries no meaning and one adapter raising is logged and skipped rather than dropping the alert.
+Adapters register in `_ADAPTERS`; `resolve_protocol_context()` fans one call out to all of them and merges the rendered prompt text, report text, introduced addresses, and address labels. Each adapter guards itself, so registration order carries no meaning and one adapter raising is logged and skipped rather than dropping the alert. Most guard on protocol and chain; the Yearn V3 adapter guards on call shape and `apiVersion()`.
 
 ### 6. LLM Prompt & Completion (`utils/llm/ai_explainer.py`)
 
@@ -237,6 +255,8 @@ The prompt is split into a **system** prompt (static instructions) and a **user*
 - Summary is plain text (it goes to Telegram); the detail is markdown and must render **every address as a block-explorer hyperlink**, copied verbatim from the prompt's `--- Address Links ---` section so the model never assembles an explorer URL or picks the wrong chain's explorer
 - Refuses to assume parameter units from function name alone; uses the Related Tokens section's decimals when exactly one token resolves, and hedges only when zero or several do
 - Trusts source-context natspec over prior assumptions
+- Takes a unit stated by a Protocol Context section as verified, even when Related Tokens lists several candidates
+- Never calls a contract audited, low-fee, or safe unless a prompt section says so — a label is not evidence
 - Quotes concrete before→after deltas when state reads are available
 - Flags any divergence between a proposal's **stated intent** and the decoded actions
 
@@ -478,13 +498,14 @@ utils/llm/
 ├── protocol_context.py      # Registry fanning one call out to every protocol adapter
 ├── report.py                # Gist report: metadata header + deterministic call flow + analysis
 ├── threejane_context.py     # 3Jane adapter: hashed config keys/roles, rewards distribution mode
+├── yearn_v3_context.py      # Yearn V3 adapter: vault state, queue, strategy caps in asset units
 └── README.md                # This file
 
 utils/related_tokens.py      # Token discovery from a contract's own zero-arg address getters
 utils/source_context.py      # Etherscan v2 source fetch + natspec extractor + proxy follow
 utils/verified_contract.py   # Structured verified record: per-file sources, settings, ABI, target
 utils/on_chain_state.py      # Before-state reader (auto-generated getters, mappings, diamond storage)
-utils/proxy.py               # EIP-1967 impl slot read + proxy-upgrade detection (3 selectors)
+utils/proxy.py               # EIP-1967 impl slot read, EIP-1167 clone decode, proxy-upgrade detection
 utils/impl_diff.py           # Old-vs-new impl diff: ABI surface, bodies, storage, unvalidated items
 utils/abi_surface.py         # Canonical-signature external surface diff from two ABIs
 utils/solidity_text.py       # Brace-aware, contract-scoped scanning of one Solidity file
