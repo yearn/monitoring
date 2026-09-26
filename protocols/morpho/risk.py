@@ -100,6 +100,7 @@ MARKETS_RISK_2 = {
         "0xa128dddc761075df9a9a60689f3a41a989b245aad506352c509c0c3a76a9ec6b",  # WBTC/RLUSD -> lltv 86%, oracle: Chainlink WBTC/BTC, Chainlink BTC/USD and Chainlink RLUSD/USD.
         "0xea4bfb18df0ee6bffb7b3f0270899a8adb92ab6b684709634c8276128813cfd4",  # weETH/RLUSD -> lltv 86%, oracle: chainlink weETH/ETH and chainlink ETH/USD and Chainlink RLUSD/USD.
         "0x88abdf8693e663144c3544b9442e9b04520016d6ebc57aa76424c00ab1683c9d",  # wstETH/RLUSD -> lltv 86%, oracle: Compound wstETH/ETH price feed, chainlink ETH/USD and Chainlink RLUSD/USD.
+        "0xd9d2fc090bdbab1804ea960dd6669b62357787e5816f575f14ca4e6d999614bf",  # USDe/RLUSD -> lltv 91.5%, oracle: MorphoChainlinkOracleV2 — Chainlink USDe/USD + Chainlink RLUSD/USD.
         "0x48a0da254e4df7b1046baa5ef11beb7916203886ce153a07a6d28c5d63cf8fad",  # sUSDe/RLUSD -> lltv 91.5%, oracle: sUSDe ERC4626 vault, chainlink USDe/USD and Chainlink RLUSD/USD.
         "0xf5c5df23559b0fb56560a7578ea17d81e245153ba64b8132df026c9358864d27",  # wstETH/PYUSD -> lltv 86%, oracle: Compound wstETH/ETH feed, chainlink ETH/USD and Chainlink PYUSD/USD.
         "0xa5beccdffd156dfe8c0871f143648c512f0a34f37c8a4ae2ff31ebfe944641d1",  # sUSDS/PYUSD -> lltv 94.5%, oracle: sUSDS ERC4626 vault, chainlink USDS/USD and Chainlink PYUSD/USD.
