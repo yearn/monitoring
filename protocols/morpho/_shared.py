@@ -1,11 +1,13 @@
 """Shared helpers used by both v1 and v2 Morpho monitors."""
 
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 
 from utils.chains import Chain
+from utils.config import Config
 from utils.http_client import request_with_retry
 from utils.logger import get_logger
 
@@ -24,6 +26,11 @@ class MorphoV2MonitoringError(MorphoMonitoringError):
     """Raised when configured Morpho Vault V2 monitoring is incomplete."""
 
 
+def _is_retryable_graphql_error(error: dict[str, Any]) -> bool:
+    """Return True for transient GraphQL error statuses that may resolve on retry."""
+    return error.get("status") == "INTERNAL_SERVER_ERROR"
+
+
 def execute_graphql(
     query: str,
     variables: dict[str, Any],
@@ -31,23 +38,47 @@ def execute_graphql(
     *,
     error_type: type[MorphoMonitoringError] = MorphoMonitoringError,
 ) -> dict[str, Any]:
-    """Execute a strict Morpho GraphQL request and return its data object."""
-    try:
-        response = request_with_retry("post", API_URL, json={"query": query, "variables": variables})
-    except requests.RequestException as exc:
-        raise error_type(f"Failed to fetch {context}: {exc}") from exc
+    """Execute a strict Morpho GraphQL request and return its data object.
 
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise error_type(f"Morpho returned invalid JSON while fetching {context}") from exc
+    Retries on transient GraphQL body-level errors (e.g. INTERNAL_SERVER_ERROR)
+    in addition to the HTTP-level retries performed by ``request_with_retry``.
+    """
+    retries = Config.get_retry_count()
+    backoff_factor = Config.get_backoff_factor()
 
-    if payload.get("errors"):
-        raise error_type(f"Morpho GraphQL errors fetching {context}: {payload['errors']}")
-    data = payload.get("data")
-    if not isinstance(data, dict):
-        raise error_type(f"Morpho GraphQL returned no data while fetching {context}")
-    return data
+    for attempt in range(retries + 1):
+        try:
+            response = request_with_retry("post", API_URL, json={"query": query, "variables": variables})
+        except requests.RequestException as exc:
+            raise error_type(f"Failed to fetch {context}: {exc}") from exc
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise error_type(f"Morpho returned invalid JSON while fetching {context}") from exc
+
+        errors = payload.get("errors")
+        if errors:
+            if all(_is_retryable_graphql_error(e) for e in errors) and attempt < retries:
+                wait_time = backoff_factor * (2**attempt)
+                logger.warning(
+                    "Morpho GraphQL transient error (attempt %d/%d): %s. Retrying in %.1fs...",
+                    attempt + 1,
+                    retries + 1,
+                    errors,
+                    wait_time,
+                )
+                time.sleep(wait_time)
+                continue
+            raise error_type(f"Morpho GraphQL errors fetching {context}: {errors}")
+
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise error_type(f"Morpho GraphQL returned no data while fetching {context}")
+        return data
+
+    # Unreachable — loop always returns or raises.
+    raise error_type(f"Morpho GraphQL failed after {retries + 1} attempts for {context}")
 
 
 def require_configured_keys(
