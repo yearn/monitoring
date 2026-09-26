@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from automation.config import REPO_ROOT, JobsConfig, JobsConfigError, load_jobs_config
-from automation.crontab import render_crontab
+from automation.crontab import is_scheduler_run, render_crontab
 from automation.runner import run_profile, sync_repo
 
 logger = logging.getLogger(__name__)
@@ -49,8 +49,9 @@ def cmd_run(config: JobsConfig, profile_name: str, *, dry_run: bool) -> int:
         print(f"known profiles: {', '.join(config.profiles)}", file=sys.stderr)
         # A stale crontab still calling a renamed or removed profile must not stop the box
         # from pulling code, so sync anyway. The sync also rewrites the live crontab, which
-        # stops these calls.
-        if not dry_run:
+        # stops these calls. Only under the scheduler: the sync hard-resets the checkout, and
+        # a typo in a local run must not discard an operator's edits.
+        if not dry_run and is_scheduler_run():
             sync_repo(REPO_ROOT)
         return 2
     if not profile.enabled:

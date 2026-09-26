@@ -33,6 +33,14 @@ CRONTAB_PATH_ENV = "CRONTAB_PATH"
 logger = logging.getLogger(__name__)
 
 
+def is_scheduler_run() -> bool:
+    """Return True when running under the systemd/supercronic scheduler.
+
+    Only the monitoring unit sets `CRONTAB_PATH`, so local and operator runs return False.
+    """
+    return bool(os.environ.get(CRONTAB_PATH_ENV))
+
+
 def render_crontab(config: JobsConfig) -> str:
     """Render a supercronic-compatible crontab, one line per enabled profile.
 

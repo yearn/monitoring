@@ -104,7 +104,8 @@ sync the runner re-renders the crontab from the pulled `jobs.yaml` and rewrites
 `$CRONTAB_PATH` (`/tmp/crontab`) when it differs; supercronic runs with
 `-inotify` and reloads it. Look for `jobs.yaml schedule changed; rewrote` in the
 journal. If the crontab still calls a profile that no longer exists, that call
-syncs anyway before exiting with `unknown profile`, so a rename of the
+syncs anyway before exiting with `unknown profile` (only under the scheduler,
+i.e. when `CRONTAB_PATH` is set, so a local typo never hard-resets a checkout), so a rename of the
 `sync_before_run` profile cannot stop the box from pulling code (this happened
 on 2026-09-24 and stalled syncs for two days).
 

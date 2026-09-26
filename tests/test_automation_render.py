@@ -1,6 +1,7 @@
 """Tests for `python -m automation render-crontab`."""
 
 import io
+import os
 import textwrap
 import unittest
 from contextlib import redirect_stdout
@@ -10,6 +11,7 @@ from unittest.mock import patch
 
 from automation.__main__ import cmd_render_crontab, cmd_run
 from automation.config import load_jobs_config
+from automation.crontab import CRONTAB_PATH_ENV
 
 
 def _write_yaml(tmp: Path, body: str) -> Path:
@@ -106,18 +108,27 @@ class TestRunUnknownProfile(unittest.TestCase):
             )
         )
 
-    def test_unknown_profile_still_syncs(self):
-        with TemporaryDirectory() as d, patch("automation.__main__.sync_repo") as mock_sync:
-            with redirect_stdout(io.StringIO()):
-                rc = cmd_run(self._config(d), "multisig", dry_run=False)
+    def _run(self, *, scheduler: bool, dry_run: bool = False):
+        env = {CRONTAB_PATH_ENV: "/tmp/crontab"} if scheduler else {}
+        with (
+            TemporaryDirectory() as d,
+            patch.dict(os.environ, env),
+            patch("automation.__main__.sync_repo") as mock_sync,
+        ):
+            if not scheduler:
+                os.environ.pop(CRONTAB_PATH_ENV, None)
+            rc = cmd_run(self._config(d), "multisig", dry_run=dry_run)
         self.assertEqual(rc, 2)
-        mock_sync.assert_called_once()
+        return mock_sync
+
+    def test_unknown_profile_under_scheduler_still_syncs(self):
+        self._run(scheduler=True).assert_called_once()
+
+    def test_unknown_profile_outside_scheduler_does_not_sync(self):
+        self._run(scheduler=False).assert_not_called()
 
     def test_unknown_profile_dry_run_does_not_sync(self):
-        with TemporaryDirectory() as d, patch("automation.__main__.sync_repo") as mock_sync:
-            rc = cmd_run(self._config(d), "multisig", dry_run=True)
-        self.assertEqual(rc, 2)
-        mock_sync.assert_not_called()
+        self._run(scheduler=True, dry_run=True).assert_not_called()
 
 
 if __name__ == "__main__":
