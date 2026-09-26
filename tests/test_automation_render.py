@@ -1,14 +1,17 @@
 """Tests for `python -m automation render-crontab`."""
 
 import io
+import os
 import textwrap
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from automation.__main__ import cmd_render_crontab
+from automation.__main__ import cmd_render_crontab, cmd_run
 from automation.config import load_jobs_config
+from automation.crontab import CRONTAB_PATH_ENV
 
 
 def _write_yaml(tmp: Path, body: str) -> Path:
@@ -87,6 +90,45 @@ class TestRenderCrontab(unittest.TestCase):
             text = buf.getvalue()
             self.assertIn("/tmp/automation.hourly.lock", text)
             self.assertIn("/tmp/automation.yearn-stuck-triggers.lock", text)
+
+
+class TestRunUnknownProfile(unittest.TestCase):
+    """A stale crontab calling a renamed profile must still sync the checkout."""
+
+    def _config(self, d: str):
+        return load_jobs_config(
+            _write_yaml(
+                Path(d),
+                """
+                profiles:
+                  ten_minute:
+                    cron: "0/10 * * * *"
+                    tasks: [{ name: "a", script: a/main.py }]
+                """,
+            )
+        )
+
+    def _run(self, *, scheduler: bool, dry_run: bool = False):
+        env = {CRONTAB_PATH_ENV: "/tmp/crontab"} if scheduler else {}
+        with (
+            TemporaryDirectory() as d,
+            patch.dict(os.environ, env),
+            patch("automation.__main__.sync_repo") as mock_sync,
+        ):
+            if not scheduler:
+                os.environ.pop(CRONTAB_PATH_ENV, None)
+            rc = cmd_run(self._config(d), "multisig", dry_run=dry_run)
+        self.assertEqual(rc, 2)
+        return mock_sync
+
+    def test_unknown_profile_under_scheduler_still_syncs(self):
+        self._run(scheduler=True).assert_called_once()
+
+    def test_unknown_profile_outside_scheduler_does_not_sync(self):
+        self._run(scheduler=False).assert_not_called()
+
+    def test_unknown_profile_dry_run_does_not_sync(self):
+        self._run(scheduler=True, dry_run=True).assert_not_called()
 
 
 if __name__ == "__main__":

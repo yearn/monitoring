@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from automation.config import Profile, Task
+from automation.git_sync import SyncResult
 from automation.runner import ProfileResult, TaskResult, build_argv, run_profile
 
 
@@ -82,6 +83,36 @@ class TestRunProfileSuccess(unittest.TestCase):
             run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
 
         mock_sync.assert_called_once_with(Path("/srv/repo"))
+
+    def test_successful_sync_refreshes_live_crontab(self):
+        profile = _profile([Task(name="x", script="x.py")], sync_before_run=True)
+
+        class _Result:
+            returncode = 0
+
+        with (
+            patch("automation.runner.git_sync.sync_to_remote_main", return_value=SyncResult(ok=True, output="")),
+            patch("automation.runner.crontab.refresh_live_crontab") as mock_refresh,
+            patch("automation.runner.subprocess.run", return_value=_Result()),
+        ):
+            run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
+
+        mock_refresh.assert_called_once_with(Path("/srv/repo/automation/jobs.yaml"))
+
+    def test_failed_sync_leaves_crontab_alone(self):
+        profile = _profile([Task(name="x", script="x.py")], sync_before_run=True)
+
+        class _Result:
+            returncode = 0
+
+        with (
+            patch("automation.runner.git_sync.sync_to_remote_main", return_value=SyncResult(ok=False, output="boom")),
+            patch("automation.runner.crontab.refresh_live_crontab") as mock_refresh,
+            patch("automation.runner.subprocess.run", return_value=_Result()),
+        ):
+            run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
+
+        mock_refresh.assert_not_called()
 
 
 class TestRunProfileContinuesOnFailure(unittest.TestCase):

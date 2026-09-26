@@ -8,17 +8,12 @@ from __future__ import annotations
 
 import argparse
 import logging
-import shlex
 import sys
 from pathlib import Path
 
 from automation.config import REPO_ROOT, JobsConfig, JobsConfigError, load_jobs_config
-from automation.runner import run_profile
-
-# Lock dir for `flock -n` wrappers emitted by render-crontab. /tmp is fine — under the
-# yearn-monitor systemd unit it's a per-service PrivateTmp that survives across cron ticks but
-# not service restarts, which is the correct scope.
-LOCK_DIR = "/tmp"
+from automation.crontab import is_scheduler_run, render_crontab
+from automation.runner import run_profile, sync_repo
 
 logger = logging.getLogger(__name__)
 
@@ -42,22 +37,8 @@ def cmd_list(config: JobsConfig) -> int:
 
 
 def cmd_render_crontab(config: JobsConfig) -> int:
-    """Emit a supercronic-compatible crontab.
-
-    Each enabled profile becomes one line, wrapped in `flock -n` to prevent overlapping runs
-    of the same profile (mirrors `concurrency: cancel-in-progress: true` on the existing GH
-    Actions workflows). `flock -n` returns non-zero immediately if the lock is held —
-    supercronic logs the skip, and the next tick tries again.
-
-    The crontab calls `python -m automation run <profile>`; `python` resolves to the venv's
-    interpreter because the image's PATH starts with /app/.venv/bin.
-    """
-    lines: list[str] = []
-    for profile in config.enabled_profiles:
-        lock_path = f"{LOCK_DIR}/automation.{profile.name}.lock"
-        command = shlex.join(["python", "-m", "automation", "run", profile.name])
-        lines.append(f"{profile.cron}\tflock -n {lock_path} {command}")
-    print("\n".join(lines))
+    """Emit a supercronic-compatible crontab (see `automation.crontab.render_crontab`)."""
+    print(render_crontab(config), end="")
     return 0
 
 
@@ -66,6 +47,12 @@ def cmd_run(config: JobsConfig, profile_name: str, *, dry_run: bool) -> int:
     if profile is None:
         print(f"error: unknown profile {profile_name!r}", file=sys.stderr)
         print(f"known profiles: {', '.join(config.profiles)}", file=sys.stderr)
+        # A stale crontab still calling a renamed or removed profile must not stop the box
+        # from pulling code, so sync anyway. The sync also rewrites the live crontab, which
+        # stops these calls. Only under the scheduler: the sync hard-resets the checkout, and
+        # a typo in a local run must not discard an operator's edits.
+        if not dry_run and is_scheduler_run():
+            sync_repo(REPO_ROOT)
         return 2
     if not profile.enabled:
         print(f"profile {profile_name!r} is disabled, skipping", file=sys.stderr)

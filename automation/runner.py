@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from automation import git_sync
+from automation import crontab, git_sync
 from automation.config import Profile, Task
 from utils.telegram import TelegramError, escape_markdown, send_telegram_message
 
@@ -170,7 +170,7 @@ def run_profile(
     result = ProfileResult(profile=profile.name, started_at=started_wall, finished_at=started_wall, dry_run=dry_run)
 
     if profile.sync_before_run and not dry_run:
-        _sync_repo(repo_root)
+        sync_repo(repo_root)
 
     for task in profile.enabled_tasks:
         result.tasks.append(_run_task(task, profile=profile, repo_root=repo_root, dry_run=dry_run))
@@ -182,16 +182,18 @@ def run_profile(
     return result
 
 
-def _sync_repo(repo_root: Path) -> None:
-    """Force the checkout to origin/main before running the profile's tasks.
+def sync_repo(repo_root: Path) -> None:
+    """Force the checkout to origin/main, then refresh the live crontab from it.
 
     Best-effort: a failed sync is logged but never blocks the run — these are
     read-only checks, so running slightly older code is harmless, and we never
-    want a transient git hiccup to silence an alert. See `automation.git_sync`.
+    want a transient git hiccup to silence an alert. See `automation.git_sync`
+    and `automation.crontab.refresh_live_crontab`.
     """
     result = git_sync.sync_to_remote_main(repo_root)
     if result.ok:
         logger.info("pre-run git sync: %s", result.output or "already up to date")
+        crontab.refresh_live_crontab(repo_root / "automation" / "jobs.yaml")
     else:
         logger.warning("pre-run git sync failed (running existing checkout): %s", result.output)
 

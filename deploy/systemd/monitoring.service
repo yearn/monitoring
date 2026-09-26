@@ -39,6 +39,11 @@ Environment=PYTHONUNBUFFERED=1
 # resolves every cache file against this; it's the one writable path below
 # (ReadWritePaths=__CACHE_DIR__), created by deploy/install.sh.
 Environment=CACHE_DIR=__CACHE_DIR__
+# The crontab supercronic runs. Each pre-run git sync re-renders it from the
+# pulled jobs.yaml and rewrites it when the schedule changed; `-inotify` below
+# makes supercronic reload it, so profile renames and cadence changes need no
+# restart (see automation/crontab.py).
+Environment=CRONTAB_PATH=/tmp/crontab
 
 # Require the operator-supplied env file before starting. The operator drops
 # __ETC_DIR__/.env (RPC URLs, Telegram tokens, API keys) once, mode
@@ -61,7 +66,7 @@ EnvironmentFile=__ETC_DIR__/.env
 # instead of becoming a silent no-op. /tmp is per-service (PrivateTmp=yes), and
 # it also holds the flock lock files render-crontab points at (/tmp/automation.<profile>.lock).
 ExecStartPre=/bin/bash -c '__REPO_DIR__/.venv/bin/python -m automation render-crontab > /tmp/crontab && echo "[monitoring] rendered crontab:" && sed "s/^/  /" /tmp/crontab'
-ExecStart=/usr/local/bin/supercronic /tmp/crontab
+ExecStart=/usr/local/bin/supercronic -inotify /tmp/crontab
 
 # Restart on crash; cap at 5 restarts per 60s window to surface a wedged runner
 # to the operator instead of crash-looping silently.
