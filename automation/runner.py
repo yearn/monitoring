@@ -169,8 +169,13 @@ def run_profile(
     started_wall = time.time()
     result = ProfileResult(profile=profile.name, started_at=started_wall, finished_at=started_wall, dry_run=dry_run)
 
+    # Only under the scheduler: the sync hard-resets the checkout, and a manual run of the
+    # sync profile must not discard an operator's local edits.
     if profile.sync_before_run and not dry_run:
-        sync_repo(repo_root)
+        if crontab.is_scheduler_run():
+            sync_repo(repo_root)
+        else:
+            logger.info("skipping pre-run git sync: not running under the scheduler (CRONTAB_PATH unset)")
 
     for task in profile.enabled_tasks:
         result.tasks.append(_run_task(task, profile=profile, repo_root=repo_root, dry_run=dry_run))

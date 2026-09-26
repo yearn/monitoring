@@ -98,6 +98,10 @@ fresh by a subprocess.
 So for the common case — a script tweak, a new task in a profile — **merge the
 PR and the next ~10-min `ten_minute` tick syncs it in; no SSH needed.**
 
+Both the pre-run sync and the crontab rewrite only happen under the scheduler
+(`CRONTAB_PATH` set by the unit). Running `python -m automation run ten_minute`
+by hand runs the tasks without touching the checkout.
+
 **Schedule changes (no restart).** Adding, removing or renaming a profile, or
 changing its `cron:` cadence, also lands on the next sync. After each successful
 sync the runner re-renders the crontab from the pulled `jobs.yaml` and rewrites
