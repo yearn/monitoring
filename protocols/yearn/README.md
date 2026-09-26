@@ -114,7 +114,7 @@ Optional flags:
 - `--threshold-raw` (default: `10000`)
 - `--lookback-seconds` (default: `7200`, used only the first time a chain/flow stream runs)
 - `--page-size` (default: `1000`)
-- `--chain-ids` (default: `1,8453,42161,137,747474`, the chains indexed by [yearn-envio](https://github.com/yearn/yearn-envio))
+- `--chain-ids` (default: `1,8453,42161,747474`, the chains indexed by [yearn-envio](https://github.com/yearn/yearn-envio) that have active parent vaults; Polygon is excluded)
 - `--max-flows` (default: `500`, hard cap on flows rendered into the aggregated message)
 - `--log-level` (default: `SMALL_PARENT_FLOWS_LOG_LEVEL`, then `LOG_LEVEL`, then `INFO`)
 
@@ -292,7 +292,7 @@ uv run yearn/check_stuck_triggers.py --include-strategies 0x1234...,0x5678...
 
 ## Safe Multisig Monitoring
 
-Yearn Safe multisigs are monitored via the shared [Safe monitoring script](../safe/main.py). The script polls the [Safe Transaction Service](https://docs.safe.global/core-api/transaction-service-reference) for queued transactions and sends Telegram alerts when unexpected pending txs appear. It runs every 10 minutes via the [monitoring runner](../automation/jobs.yaml).
+Yearn Safe multisigs are monitored via the shared [Safe monitoring script](../safe/main.py). The script polls the [Safe Transaction Service](https://docs.safe.global/core-api/transaction-service-reference) for queued transactions and sends Telegram alerts when unexpected pending txs appear. It runs every 20 minutes via the [monitoring runner](../automation/jobs.yaml).
 
 Yearn multisig config lives in [`safe/addresses.py`](../safe/addresses.py) under `YEARN_MULTISIGS`. The same workflow also monitors non-Yearn protocol multisigs (LIDO, AAVE, etc.) configured in `ALL_SAFE_ADDRESSES`.
 

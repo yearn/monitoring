@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 import requests
 
 from utils.chains import Chain
+from utils.http_client import request_with_retry
 from utils.logger import get_logger
 
 logger = get_logger("yearn.kong")
@@ -55,12 +56,15 @@ class KongRequestError(requests.RequestException):
 
 def _post_graphql(query: str, variables: Dict[str, object]) -> Dict[str, Any]:
     """Execute a Kong GraphQL query and return the response data."""
-    response = requests.post(
-        KONG_GQL_URL,
-        json={"query": query, "variables": variables},
-        timeout=30,
-    )
-    response.raise_for_status()
+    try:
+        response = request_with_retry(
+            "post",
+            KONG_GQL_URL,
+            json={"query": query, "variables": variables},
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        raise KongRequestError(f"Kong request failed: {e}") from e
 
     try:
         payload = response.json()

@@ -59,7 +59,7 @@ protocols:
       - protocols/aave/proposals.py
     monitors:
       - name: "Market Utilization"
-        description: "Utilization rate >99% on Mainnet"
+        description: "Utilization rate >99% on Mainnet for 2+ consecutive checks"
       - name: "Governance Proposals"
         description: "Queued proposals via Aave governance cache API"
       - name: "Timelock"
@@ -330,7 +330,7 @@ protocols:
   safe:
     display_name: "Safe Multisigs"
     description: "Cross-protocol Safe multisig transaction monitoring"
-    cadence: "Every 10 minutes"
+    cadence: "Every 20 minutes"
     tasks:
       - protocols/safe/main.py
     monitors:
@@ -419,6 +419,7 @@ protocols:
     display_name: "Bedrock uniBTC"
     description: "Bedrock uniBTC minting, PoR, feeder, redemption, and peg monitoring on Mainnet"
     cadence: "Hourly"
+    disabled: true
     tasks:
       - protocols/unibtc/main.py
     monitors:

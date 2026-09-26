@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
+from utils.http_client import request_with_retry
 from utils.logger import get_logger
 from utils.telegram import escape_markdown, send_error_message
 
@@ -86,13 +87,13 @@ def get_proposals():
     }
 
     try:
-        response = requests.post(
+        response = request_with_retry(
+            "post",
             TALLY_API_URL,
             json={"query": query, "variables": variables},
             headers=headers,
             timeout=30,
         )
-        response.raise_for_status()
         data = response.json()
 
         if "errors" in data:

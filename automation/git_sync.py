@@ -8,7 +8,7 @@ in favor of the reviewed remote ``main`` branch. The worst case of a failed sync
 is that we run slightly older read-only code, which is harmless. Callers
 therefore log and carry on rather than skipping the run.
 
-Anchored on the most frequent profile (`multisig`, every 10 min via
+Anchored on the most frequent profile (`ten_minute`, every 10 min via
 `sync_before_run` in jobs.yaml): one sync there keeps the whole tree current for
 every other profile, since supercronic re-spawns each profile fresh against
 whatever is on disk.

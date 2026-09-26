@@ -4,6 +4,7 @@ import requests
 
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
+from utils.http_client import request_with_retry
 from utils.logger import get_logger
 from utils.telegram import escape_markdown, send_error_message
 
@@ -16,8 +17,7 @@ SKY_EXECUTIVE_URL = "https://vote.sky.money/executive/"
 
 def fetch_executive_proposals() -> list[dict]:
     """Fetch executive proposals from the Sky governance API."""
-    response = requests.get(SKY_EXECUTIVE_API, timeout=30)
-    response.raise_for_status()
+    response = request_with_retry("get", SKY_EXECUTIVE_API, timeout=30)
     return response.json()
 
 

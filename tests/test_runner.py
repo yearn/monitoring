@@ -36,6 +36,16 @@ class TestRunWithAlert(unittest.TestCase):
         # the protocol is forwarded as the label / fallback channel.
         self.assertEqual(call_args.args[1], "yearn")
 
+    def test_alert_protocol_is_forwarded_for_internal_crashes(self) -> None:
+        def boom() -> None:
+            raise RuntimeError("kaboom")
+
+        with patch("utils.runner.send_error_message") as mock_send:
+            run_with_alert(boom, "yearn", alert_protocol="yearn-internal")
+
+        self.assertEqual(mock_send.call_args.args[1], "yearn")
+        self.assertEqual(mock_send.call_args.kwargs["alert_protocol"], "yearn-internal")
+
     def test_alert_includes_github_run_url_when_present(self) -> None:
         def boom() -> None:
             raise ValueError("x")

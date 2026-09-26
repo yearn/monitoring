@@ -174,34 +174,110 @@ def simulate_transaction(
         return None
 
     try:
-        tx = data.get("transaction", {})
-        tx_info = tx.get("transaction_info", {})
-
-        success = tx.get("status", False)
-        gas_used = int(tx_info.get("gas_used", 0))
-        error_message = tx_info.get("stack_trace", [{}])[0].get("error_reason", "") if not success else ""
-
-        # Parse asset changes
-        raw_asset_changes = tx_info.get("asset_changes", []) or []
-        asset_changes = _parse_asset_changes(raw_asset_changes)
-
-        # Parse state changes
-        raw_state_diff = tx_info.get("state_diff", []) or []
-        state_changes = _parse_state_changes(raw_state_diff)
-
-        # Parse logs/events
-        logs = tx_info.get("logs", []) or []
-
-        return SimulationResult(
-            success=success,
-            gas_used=gas_used,
-            asset_changes=asset_changes,
-            state_changes=state_changes,
-            logs=logs,
-            error_message=error_message,
-            raw_response=data,
-        )
-
+        return _parse_transaction(data.get("transaction", {}) or {}, raw_response=data)
     except Exception:
         logger.exception("Failed to parse Tenderly simulation response")
         return None
+
+
+def _parse_transaction(tx: dict[str, Any], raw_response: dict[str, Any]) -> SimulationResult:
+    """Parse one simulated ``transaction`` object (single or bundle response)."""
+    tx_info = tx.get("transaction_info", {}) or {}
+    status = tx.get("status", False)
+    if isinstance(status, str):
+        success = status == "success"
+    else:
+        success = status is True
+    # Single simulations report gas inside transaction_info; bundle results only on the transaction.
+    gas_used = int(tx_info.get("gas_used") or tx.get("gas_used") or 0)
+    error_message = "" if success else ((tx_info.get("stack_trace") or [{}])[0].get("error_reason") or "")
+    return SimulationResult(
+        success=success,
+        gas_used=gas_used,
+        asset_changes=_parse_asset_changes(tx_info.get("asset_changes", []) or []),
+        state_changes=_parse_state_changes(tx_info.get("state_diff", []) or []),
+        logs=tx_info.get("logs", []) or [],
+        error_message=error_message,
+        raw_response=raw_response,
+    )
+
+
+@dataclass(frozen=True)
+class BundleCall:
+    """One call in a sequential bundle simulation."""
+
+    target: str
+    calldata: str
+    value: int = 0
+
+
+def simulate_bundle(
+    calls: list[BundleCall],
+    chain_id: int,
+    from_address: str,
+) -> list[SimulationResult | None] | None:
+    """Simulate calls in order on shared state, as a timelock batch executes them.
+
+    Each call sees the state left by the ones before it, so a call that depends
+    on an earlier one (``setOracle`` then ``setVault``) is not reported as a
+    false revert. Tenderly stops at the first failure: the result list is
+    aligned with ``calls`` and holds ``None`` for every call after it.
+
+    Args:
+        calls: Calls in batch order, all sent from ``from_address``.
+        chain_id: Chain ID (e.g. 1 for mainnet).
+        from_address: The executor (``msg.sender`` of every call in the batch).
+
+    Returns:
+        One entry per call, or None when the bundle could not be simulated at
+        all (no API key, request failure, unparsable response).
+    """
+    api_key = os.getenv("TENDERLY_API_KEY")
+    if not api_key:
+        logger.warning("TENDERLY_API_KEY not set, skipping bundle simulation")
+        return None
+    if not calls:
+        return []
+
+    overrides = _merge_balance_override(None, from_address, sum(call.value for call in calls))
+    simulations: list[dict[str, Any]] = []
+    for index, call in enumerate(calls):
+        simulation: dict[str, Any] = {
+            "network_id": str(chain_id),
+            "from": from_address,
+            "to": call.target,
+            "input": call.calldata,
+            "value": str(call.value),
+            "save": False,
+            "save_if_fails": False,
+            "simulation_type": "full",
+        }
+        # Overrides apply before the first call; later calls inherit the state.
+        if index == 0 and overrides:
+            simulation["state_objects"] = overrides
+        simulations.append(simulation)
+
+    logger.info("Simulating bundle: %d calls from=%s chain=%s", len(calls), from_address, chain_id)
+    data = fetch_json(
+        f"{_get_simulation_url()}-bundle",
+        method="post",
+        json={"simulations": simulations},
+        headers={"X-Access-Key": api_key},
+        timeout=60,
+    )
+    if not data:
+        logger.error("Tenderly bundle simulation returned no data")
+        return None
+
+    try:
+        raw_results = data.get("simulation_results", []) or []
+        results: list[SimulationResult | None] = [
+            _parse_transaction(item.get("transaction", {}) or {}, raw_response=item) for item in raw_results
+        ]
+    except Exception:
+        logger.exception("Failed to parse Tenderly bundle simulation response")
+        return None
+    if not results:
+        logger.error("Tenderly bundle simulation returned no results")
+        return None
+    return (results + [None] * len(calls))[: len(calls)]

@@ -79,7 +79,9 @@ class TestResolveProtocolContext(unittest.TestCase):
         self.assertEqual(seen, {TARGET: "Timelock", TOKEN: "Token"})
 
     def test_registered_adapters_cover_the_known_protocols(self) -> None:
-        self.assertEqual({adapter.name for adapter in protocol_context._ADAPTERS}, {"infinifi", "3jane"})
+        self.assertEqual(
+            {adapter.name for adapter in protocol_context._ADAPTERS}, {"infinifi", "infinifi-outland", "3jane"}
+        )
 
 
 if __name__ == "__main__":

@@ -75,6 +75,17 @@ class TestParseVarDeclaration(unittest.TestCase):
         result = _parse_var_declaration(snippet, "values")
         self.assertEqual(result, ("uint256", ["bytes32"]))
 
+    def test_named_mapping_parameters(self) -> None:
+        # ConnectorCCTP_Chainlink: the bool value was misreported as the setter's uint32.
+        snippet = "/// @notice Sentinel\nmapping(uint256 chainId => bool) public cctpDomainConfigured;"
+        self.assertEqual(_parse_var_declaration(snippet, "cctpDomainConfigured"), ("bool", ["uint256"]))
+        snippet = "mapping(uint256 chainId => uint32 domain) public cctpDomains;"
+        self.assertEqual(_parse_var_declaration(snippet, "cctpDomains"), ("uint32", ["uint256"]))
+
+    def test_named_nested_mapping_skipped(self) -> None:
+        snippet = "mapping(address owner => mapping(address spender => uint256)) public allowances;"
+        self.assertIsNone(_parse_var_declaration(snippet, "allowances"))
+
     def test_nested_mapping_skipped(self) -> None:
         snippet = "mapping(bytes32 => mapping(address => uint256)) public nested;"
         result = _parse_var_declaration(snippet, "nested")

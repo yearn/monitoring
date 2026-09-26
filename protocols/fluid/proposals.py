@@ -4,6 +4,7 @@ import requests
 
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import get_last_queued_id_from_file, write_last_queued_id_to_file
+from utils.http_client import request_with_retry
 from utils.logger import get_logger
 from utils.telegram import escape_markdown, send_error_message
 
@@ -62,8 +63,7 @@ def get_proposals():
     """Fetch and process Fluid governance proposals"""
     try:
         # Fetch queued proposals
-        response = requests.get(f"{FLUID_API_URL}?status=queued", timeout=30)
-        response.raise_for_status()
+        response = request_with_retry("get", f"{FLUID_API_URL}?status=queued", timeout=30)
         data = response.json()
 
         if "data" not in data or not data["data"]:

@@ -97,36 +97,36 @@ ALL_SAFE_ADDRESSES = [
         "0x9F6e831c8F8939DC0C830C6e492e7cEf4f9C2F5f",
         "tBTC bridge owner multisig. aka, Council Multisig",
     ],  # tBTC bridge owner multisig (Council Multisig)
-    [
-        "USDAI",
-        "arbitrum-main",
-        "0xF223F8d92465CfC303B3395fA3A25bfaE02AED51",
-        "USDai Admin Safe",
-    ],
-    [
-        "USDAI",
-        "arbitrum-main",
-        "0x783B08aA21DE056717173f72E04Be0E91328A07b",
-        "sUSDai Admin Safe",
-    ],
+    # [
+    #     "USDAI",
+    #     "arbitrum-main",
+    #     "0xF223F8d92465CfC303B3395fA3A25bfaE02AED51",
+    #     "USDai Admin Safe",
+    # ],
+    # [
+    #     "USDAI",
+    #     "arbitrum-main",
+    #     "0x783B08aA21DE056717173f72E04Be0E91328A07b",
+    #     "sUSDai Admin Safe",
+    # ],
     [
         "CAP",
         "mainnet",
         "0xb8FC49402dF3ee4f8587268FB89fda4d621a8793",
         "Cap Money Multisig",
     ],
-    [
-        "MAPLE",
-        "mainnet",
-        "0xd6d4Bcde6c816F17889f1Dd3000aF0261B03a196",
-        "Maple DAO Multisig (syrupUSDC)",
-    ],
-    [
-        "STRATA",
-        "mainnet",
-        "0xA27cA9292268ee0f0258B749f1D5740c9Bb68B50",
-        "Strata Admin Multisig (3/4)",
-    ],
+    # [
+    #     "MAPLE",
+    #     "mainnet",
+    #     "0xd6d4Bcde6c816F17889f1Dd3000aF0261B03a196",
+    #     "Maple DAO Multisig (syrupUSDC)",
+    # ],
+    # [
+    #     "STRATA",
+    #     "mainnet",
+    #     "0xA27cA9292268ee0f0258B749f1D5740c9Bb68B50",
+    #     "Strata Admin Multisig (3/4)",
+    # ],
     [
         "unibtc",
         "mainnet",
@@ -157,8 +157,8 @@ YEARN_PROPOSER_BOTS: dict[str, str] = {
 # 5th field: key into YEARN_PROPOSER_BOTS.
 YEARN_MULTISIGS: list[list[str]] = [
     ["YEARN_MS", "mainnet", "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52", "yChad (Yearn multisig/daddy)", "chad"],
-    ["YEARN_MS", "base-main", "0xbfAABa9F56A39B814281D68d2Ad949e88D06b02E", "bChad Multisig", "chad"],
-    ["YEARN_MS", "katana-main", "0xe6ad5A88f5da0F276C903d9Ac2647A937c917162", "kChad Multisig", "chad"],
+    # ["YEARN_MS", "base-main", "0xbfAABa9F56A39B814281D68d2Ad949e88D06b02E", "bChad Multisig", "chad"],
+    # ["YEARN_MS", "katana-main", "0xe6ad5A88f5da0F276C903d9Ac2647A937c917162", "kChad Multisig", "chad"],
     [
         "YEARN_MS",
         "mainnet",
@@ -166,20 +166,20 @@ YEARN_MULTISIGS: list[list[str]] = [
         "Strategist Multisig (brain.ychad.eth)",
         "strategist",
     ],
-    ["YEARN_MS", "base-main", "0x01fE3347316b2223961B20689C65eaeA71348e93", "Strategist Multisig (base)", "strategist"],
-    [
-        "YEARN_MS",
-        "katana-main",
-        "0xBe7c7efc1ef3245d37E3157F76A512108D6D7aE6",
-        "Strategist Multisig (katana)",
-        "strategist",
-    ],
-    ["YEARN_MS", "mainnet", "0xe5e2Baf96198c56380dDD5E992D7d1ADa0e989c0", "SAM Multisig (mainnet)", "curation"],
-    ["YEARN_MS", "base-main", "0xFEaE2F855250c36A77b8C68dB07C4dD9711fE36F", "SAM Multisig (base)", "curation"],
-    ["YEARN_MS", "katana-main", "0x518C21DC88D9780c0A1Be566433c571461A70149", "SAM Multisig (katana)", "curation"],
-    ["YEARN_MS", "mainnet", "0x90D0f26025571295D18a6c041E47450B81886B51", "Curation Multisig (mainnet)", "curation"],
-    ["YEARN_MS", "base-main", "0x90D0f26025571295D18a6c041E47450B81886B51", "Curation Multisig (base)", "curation"],
-    ["YEARN_MS", "katana-main", "0x90D0f26025571295D18a6c041E47450B81886B51", "Curation Multisig (katana)", "curation"],
+    # ["YEARN_MS", "base-main", "0x01fE3347316b2223961B20689C65eaeA71348e93", "Strategist Multisig (base)", "strategist"],
+    # [
+    #     "YEARN_MS",
+    #     "katana-main",
+    #     "0xBe7c7efc1ef3245d37E3157F76A512108D6D7aE6",
+    #     "Strategist Multisig (katana)",
+    #     "strategist",
+    # ],
+    # ["YEARN_MS", "mainnet", "0xe5e2Baf96198c56380dDD5E992D7d1ADa0e989c0", "SAM Multisig (mainnet)", "curation"],
+    # ["YEARN_MS", "base-main", "0xFEaE2F855250c36A77b8C68dB07C4dD9711fE36F", "SAM Multisig (base)", "curation"],
+    # ["YEARN_MS", "katana-main", "0x518C21DC88D9780c0A1Be566433c571461A70149", "SAM Multisig (katana)", "curation"],
+    # ["YEARN_MS", "mainnet", "0x90D0f26025571295D18a6c041E47450B81886B51", "Curation Multisig (mainnet)", "curation"],
+    # ["YEARN_MS", "base-main", "0x90D0f26025571295D18a6c041E47450B81886B51", "Curation Multisig (base)", "curation"],
+    # ["YEARN_MS", "katana-main", "0x90D0f26025571295D18a6c041E47450B81886B51", "Curation Multisig (katana)", "curation"],
 ]
 
 ALL_SAFE_ADDRESSES += YEARN_MULTISIGS

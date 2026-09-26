@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+import requests
 from web3 import Web3
 
 from utils.abi import load_abi
@@ -22,7 +24,6 @@ from utils.cache import cache_filename, get_last_value_for_key_from_file, write_
 from utils.chains import Chain
 from utils.defillama import fetch_prices
 from utils.formatting import format_decimal_amount, format_duration, normalize_token_amount
-from utils.http_client import fetch_json
 from utils.logger import get_logger
 from utils.telegram import send_error_message
 from utils.web3_wrapper import ChainManager
@@ -70,6 +71,18 @@ PEG_CRITICAL_FLOOR = Decimal("0.97")
 # issuer's figure, not independent, and has been observed dropping whole chains from
 # ``supplies`` (BOB, ~700 uniBTC, on 2026-09-16), so every response is validated before use.
 RESERVE_API_URL = "https://affiliate-api-eosin.vercel.app/api/v1/third/stats/unibtc"
+# The backend recomputes every 5 minutes (at :x0:08 and :x5:08, so the hourly run at
+# :05 often lands mid-recompute). A recompute takes 20-45s, requests hang meanwhile, and
+# one recompute can drop a chain (BOB, Berachain on 2026-09-23) while the next is
+# complete. A failed request is retried shortly; a rejected snapshot is served until
+# the next recompute, so it is retried after one refresh period plus recompute time.
+API_TIMEOUT_SECONDS = 30
+API_FETCH_ATTEMPTS = 3
+API_REQUEST_RETRY_DELAY_SECONDS = 30
+API_REJECTED_RETRY_DELAY_SECONDS = 5 * 60 + 30
+# Skipping PoR coverage for a run is harmless (the PoR feed updates daily), so only a
+# failure streak this long is reported.
+API_FAILURE_ALERT_RUNS = 3
 API_MAX_AGE_SECONDS = 60 * 60
 # The API's Ethereum entry must match our block-pinned totalSupply within this fraction.
 API_MAINNET_SUPPLY_TOLERANCE = Decimal("0.01")
@@ -104,6 +117,7 @@ CACHE_KEY_REDEEM_SINCE = "UNIBTC_REDEEM_UNDERFUNDED_SINCE"
 CACHE_KEY_REDEEM_UNCLEARED = "UNIBTC_REDEEM_UNCLEARED"
 CACHE_KEY_REDEEM_ALERTED = "UNIBTC_REDEEM_ALERTED"
 CACHE_KEY_PEG_BAND = "UNIBTC_PEG_BAND"
+CACHE_KEY_API_FAILURE_STREAK = "UNIBTC_API_FAILURE_STREAK"
 
 ABI_ERC20 = load_abi("common-abi/ERC20.json")
 ABI_CHAINLINK = load_abi("common-abi/ChainlinkAggregator.json")
@@ -170,6 +184,10 @@ ABI_FEEDER = [
         "type": "function",
     },
 ]
+
+
+class ApiStatsError(Exception):
+    """Raised when the Bedrock reserve API cannot be fetched or parsed."""
 
 
 @dataclass(frozen=True)
@@ -486,32 +504,40 @@ def _parse_chain_supplies(raw: Any) -> tuple[ChainSupply, ...] | None:
     return tuple(supplies)
 
 
-def fetch_api_stats() -> ApiStats | None:
-    """Fetch and parse Bedrock API supply figures, or None on failure.
+def _request_api_payload() -> Any:
+    """GET the Bedrock reserve API and decode its JSON body.
 
-    Parsing only; use :func:`validate_api_stats` before trusting the figures.
+    Raises:
+        ApiStatsError: On timeout, connection error, non-2xx status, or invalid JSON.
     """
-    payload = fetch_json(RESERVE_API_URL)
-    if not payload:
-        send_error_message(f"Bedrock reserve API unavailable: {RESERVE_API_URL}", PROTOCOL)
-        return None
+    try:
+        response = requests.get(RESERVE_API_URL, timeout=API_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        return response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise ApiStatsError(f"request failed: {exc}") from exc
+
+
+def fetch_api_stats() -> ApiStats:
+    """Fetch and parse Bedrock API supply figures.
+
+    Parsing only; use :func:`api_stats_problems` before trusting the figures.
+
+    Raises:
+        ApiStatsError: When the request fails or the response is malformed.
+    """
+    payload = _request_api_payload()
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, dict):
-        send_error_message(f"Bedrock reserve API response has no data object: {payload!r}", PROTOCOL)
-        return None
+        raise ApiStatsError(f"response has no data object: {payload!r}"[:300])
     try:
         total_supply = Decimal(str(data["total_supply"]))
         updated_at = int(data["time"]) // 1000
-    except (KeyError, TypeError, ValueError, ArithmeticError):
-        send_error_message("Bedrock reserve API missing total_supply or time", PROTOCOL)
-        return None
+    except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+        raise ApiStatsError("response missing total_supply or time") from exc
     chain_supplies = _parse_chain_supplies(data.get("supplies"))
     if total_supply <= 0 or chain_supplies is None:
-        send_error_message(
-            f"Bedrock reserve API returned total_supply={total_supply} and supplies={data.get('supplies')!r}",
-            PROTOCOL,
-        )
-        return None
+        raise ApiStatsError(f"response has total_supply={total_supply} and supplies={data.get('supplies')!r}"[:300])
     return ApiStats(total_supply=total_supply, updated_at=updated_at, chain_supplies=chain_supplies)
 
 
@@ -559,31 +585,71 @@ def api_stats_problems(stats: ApiStats, state: UnibtcState) -> list[str]:
     return problems
 
 
-def validate_api_stats(stats: ApiStats | None, state: UnibtcState) -> ApiStats | None:
-    """Return ``stats`` only when every safeguard passes; otherwise report and return None.
+def _api_attempt(state: UnibtcState) -> tuple[ApiStats | None, list[str], int]:
+    """Fetch the API once.
 
-    A rejected response skips the PoR-coverage and feeder-gap checks for this run.
-    Using it instead would be worse than skipping: a dropped chain understates total
-    supply, which inflates PoR coverage and hides a feeder that omits the same chain.
+    Returns:
+        ``(stats, [], 0)`` when usable, else ``(None, problems, retry delay in seconds)``.
+    """
+    try:
+        stats = fetch_api_stats()
+    except ApiStatsError as exc:
+        return None, [str(exc)], API_REQUEST_RETRY_DELAY_SECONDS
+    problems = api_stats_problems(stats, state)
+    if problems:
+        return None, problems, API_REJECTED_RETRY_DELAY_SECONDS
+    return stats, [], 0
+
+
+def record_api_failure(problems: list[str]) -> None:
+    """Count a run without usable API figures; report once the streak is long enough.
 
     Args:
-        stats: Parsed API figures, or None when the fetch failed.
-        state: Current on-chain snapshot.
+        problems: Reasons from the last attempt of this run.
+    """
+    streak = _cache_int(CACHE_KEY_API_FAILURE_STREAK) + 1
+    _set_cache(CACHE_KEY_API_FAILURE_STREAK, streak)
+    logger.warning("Bedrock reserve API unusable (%d consecutive runs): %s", streak, problems)
+    if streak != API_FAILURE_ALERT_RUNS:
+        return
+    send_error_message(
+        f"Bedrock reserve API unusable for {streak} consecutive runs; PoR coverage and feeder gap checks skipped:\n"
+        + "\n".join(f"- {problem}" for problem in problems),
+        PROTOCOL,
+    )
+
+
+def load_api_stats(state: UnibtcState) -> ApiStats | None:
+    """Return validated Bedrock API figures, retrying transient failures; None when unusable.
+
+    An unusable response skips the PoR-coverage and feeder-gap checks for this run.
+    Using a rejected one instead would be worse than skipping: a dropped chain
+    understates total supply, which inflates PoR coverage and hides a feeder that
+    omits the same chain.
+
+    Args:
+        state: Current on-chain snapshot, used to validate the figures.
 
     Returns:
         The validated figures, or None.
     """
-    if stats is None:
-        return None
-    problems = api_stats_problems(stats, state)
-    if not problems:
-        return stats
-    logger.warning("Rejecting Bedrock reserve API response: %s", problems)
-    send_error_message(
-        "Bedrock reserve API response rejected; PoR coverage and feeder gap checks skipped:\n"
-        + "\n".join(f"- {problem}" for problem in problems),
-        PROTOCOL,
-    )
+    problems: list[str] = []
+    for attempt in range(1, API_FETCH_ATTEMPTS + 1):
+        stats, problems, retry_delay = _api_attempt(state)
+        if stats is not None:
+            if _cache_int(CACHE_KEY_API_FAILURE_STREAK):
+                _set_cache(CACHE_KEY_API_FAILURE_STREAK, 0)
+            return stats
+        if attempt < API_FETCH_ATTEMPTS:
+            logger.info(
+                "Bedrock reserve API attempt %d/%d unusable, retrying in %ss: %s",
+                attempt,
+                API_FETCH_ATTEMPTS,
+                retry_delay,
+                problems,
+            )
+            time.sleep(retry_delay)
+    record_api_failure(problems)
     return None
 
 
@@ -648,6 +714,24 @@ def mint_alert_due(key: str, delta: int | None, current_supply: int, threshold: 
     return not (last_alert_supply and current_supply < last_alert_supply + threshold)
 
 
+def baseline_warming_up(
+    delta_1h: tuple[int, int] | None,
+    delta_24h: tuple[int, int] | None,
+    now: int,
+    snapshots: list[tuple[int, int]],
+) -> bool:
+    """Return whether missing baselines are only due to a young snapshot history.
+
+    True on a first run (no snapshots) and when the 1h baseline exists but no
+    snapshot is yet old enough for the 24h window. A gap in an established
+    history is not warm-up.
+    """
+    if not snapshots:
+        return True
+    oldest_age = now - min(ts for ts, _ in snapshots)
+    return delta_1h is not None and delta_24h is None and oldest_age < MINT_24H_MIN_BASELINE_AGE
+
+
 def check_unexpected_minting(state: UnibtcState) -> None:
     """Alert on large uniBTC ``totalSupply`` increases over 1h and 24h windows.
 
@@ -665,9 +749,11 @@ def check_unexpected_minting(state: UnibtcState) -> None:
         delta_24h,
     )
     if delta_1h is None or delta_24h is None:
-        # Expected on a first run; otherwise the window is blind (missed runs, or a
-        # gap longer than the retention window) and the mint check cannot fire.
-        logger.warning(
+        # Expected on a first run and while history is shorter than the 24h window;
+        # otherwise the window is blind (missed runs, or a gap longer than the
+        # retention window) and the mint check cannot fire.
+        log = logger.info if baseline_warming_up(delta_1h, delta_24h, now, snapshots) else logger.warning
+        log(
             "uniBTC mint baseline missing (1h=%s 24h=%s) from %s cached snapshots",
             delta_1h is not None,
             delta_24h is not None,
@@ -1043,7 +1129,7 @@ def main() -> None:
     """Run all Bedrock uniBTC state-polling checks."""
     client = ChainManager.get_client(Chain.MAINNET)
     state = load_state(client)
-    api = validate_api_stats(fetch_api_stats(), state)
+    api = load_api_stats(state)
     price_in_wbtc = fetch_price_in_wbtc()
 
     check_unexpected_minting(state)

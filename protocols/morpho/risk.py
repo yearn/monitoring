@@ -115,6 +115,7 @@ MARKETS_RISK_2 = {
         "0xba3ba077d9c838696b76e29a394ae9f0d1517a372e30fd9a0fc19c516fb4c5a7",  # cbBTC/USDC -> lltv 86%, oracle: MorphoChainlinkOracleV2, Api3 cbBTC/USD + Api3 USDC/USD.
         "0x15bb2a6af0c909eed19fb1f2ceeead34ecbdcba626de752c6b09389ee14eec32",  # kBTC/RLUSD -> lltv 86%, oracle: Chainlink BTC/USD and Chainlink RLUSD/USD.
         "0xe51f9aaad25d0e755429cf77076b3c2d37cb1228ed81f8a5482f2102c220eef5",  # kBTC/PYUSD -> lltv 86%, oracle: Chainlink BTC/USD and Chainlink PYUSD/USD.
+        "0xbe50eed784490d6c32f398902b55eb5e1bd5af89e1f554993ad5fea899be090b",  # WBTC/PYUSD -> lltv 86%, oracle: Chainlink WBTC/BTC, Chainlink BTC/USD and Chainlink PYUSD/USD.
     ],
     Chain.BASE: [
         "0x6aa81f51dfc955df598e18006deae56ce907ac02b0b5358705f1a28fcea23cc0",  # wstETH/WETH -> lltv 96.5%, oracle: Chainlink wstETH-stETH Exchange Rate
@@ -222,6 +223,7 @@ MARKETS_RISK_4 = {
         "0x8b1bc4d682b04a16309a8adf77b35de0c42063a7944016cfc37a79ccac0007b6",  # slvlUSD/USDC -> lltv 91.5%, oracle: slvlUSD vault rate. lvlUSD = USDC
         "0x95c28d447950ca6c8bbfd25fc05b80b1fd7a1cdd17a3610b4b3f1ffc8dc2e2ed",  # mHYPER/USDC -> lltv 86%, oracle: MHyperCustomAggregatorFeed
         "0xe83d72fa5b00dcd46d9e0e860d95aa540d5ec106da5833108a9f826f21f36f52",  # AA_FalconXUSDC/USDC -> lltv 77%, oracle: TranchesChainlinkOracle virtual price of current tranches.
+        "0x4fa31e3f8ba345227d44e1cf48559eea53a90dd5311dc006984c060f2f311d96",  # FXRP/RLUSD -> lltv 77%, oracle: RedStone Price Feed for XRP and Chainlink RLUSD/USD. FXRP priced as XRP.
     ],
     Chain.BASE: [
         "0xff0f2bd52ca786a4f8149f96622885e880222d8bed12bbbf5950296be8d03f89",  # USR/USDC -> lltv 91.5%, oracle: pyth USR/USD and pyth USDC/USD

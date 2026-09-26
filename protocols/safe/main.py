@@ -4,6 +4,7 @@ import time
 
 import requests
 from dotenv import load_dotenv
+from web3 import Web3
 
 from protocols.safe.addresses import (
     ALL_SAFE_ADDRESSES,
@@ -15,14 +16,18 @@ from protocols.safe.addresses import (
 from protocols.safe.multisend import build_context_note, extract_inner_calls, safe_utility_label
 from protocols.safe.specific import handle_pendle
 from utils.cache import (
+    cache_filename,
     get_last_executed_nonce_from_file,
+    get_last_value_for_key_from_file,
     write_last_executed_nonce_to_file,
+    write_last_value_to_file,
 )
-from utils.chains import safe_network_to_chain_id
+from utils.chains import Chain, safe_network_to_chain_id
 from utils.formatting import parse_wei
 from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
 from utils.logger import get_logger
-from utils.telegram import escape_markdown, send_telegram_message
+from utils.telegram import escape_markdown, send_error_message, send_telegram_message
+from utils.web3_wrapper import ChainManager
 
 load_dotenv()
 logger = get_logger("safe")
@@ -31,11 +36,86 @@ SAFE_WEBSITE_URL = "https://app.safe.global/transactions/queue?safe="
 provider_url_mainnet = os.getenv("PROVIDER_URL_MAINNET")
 provider_url_arb = os.getenv("PROVIDER_URL_ARBITRUM")
 
+# Values treated as "no key": unset env templates and serialized nulls.
+_PLACEHOLDER_KEYS = {"null", "none", "nil", "undefined", "false", "0", "changeme"}
+
+
+def _is_usable_api_key(value: str | None) -> bool:
+    """Return whether an env value looks like a real API key rather than empty or a placeholder."""
+    if value is None:
+        return False
+    value = value.strip().strip("\"'")
+    if not value or value.lower() in _PLACEHOLDER_KEYS:
+        return False
+    # .env.example ships "your-api-key" / "your-second-api-key"; <...> is another common template.
+    return not (value.lower().startswith("your-") or (value.startswith("<") and value.endswith(">")))
+
+
+def load_safe_api_keys() -> list[str]:
+    """Read SAFE_API_KEY, SAFE_API_KEY_2, SAFE_API_KEY_3, ... in order.
+
+    Stops at the first missing, empty, or placeholder value, so keys must be
+    numbered without gaps. Quota is 50,000 requests per 30-day window per developer
+    account; keys on the same account share it.
+    """
+    keys: list[str] = []
+    index = 1
+    while True:
+        name = "SAFE_API_KEY" if index == 1 else f"SAFE_API_KEY_{index}"
+        value = os.getenv(name)
+        if not _is_usable_api_key(value):
+            break
+        keys.append(value.strip().strip("\"'"))  # type: ignore[union-attr]
+        index += 1
+    return keys
+
+
 # Round-robin iterator over available Safe API keys.
-_api_keys: list[str] = [k for k in [os.getenv("SAFE_API_KEY"), os.getenv("SAFE_API_KEY_2")] if k]
+_api_keys: list[str] = load_safe_api_keys()
 if not _api_keys:
     raise ValueError("At least one SAFE_API_KEY must be set.")
 _api_key_cycle = itertools.cycle(_api_keys)
+# Keys whose account quota is used up this run. A 429 with ``x-ratelimit-remaining: 0``
+# means retrying only burns requests. Extra keys on the same account share one quota.
+_exhausted_api_keys: dict[str, int] = {}  # key -> seconds until its quota resets
+
+CACHE_KEY_QUOTA_ALERTED_UNTIL = "SAFE_API_QUOTA_ALERTED_UNTIL"
+# Crash and quota alerts are operational: they go to the internal errors channel with a
+# ``[yearn]`` label and are stored as ``yearn-internal`` so they stay off the public
+# Yearn monitoring page. Never send them to a protocol's public channel or topic.
+ERROR_LABEL = "yearn"
+ALERT_PROTOCOL = "yearn-internal"
+
+SAFE_NONCE_ABI = [
+    {"inputs": [], "name": "nonce", "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"}
+]
+
+
+class SafeApiQuotaExhausted(Exception):
+    """Raised when every Safe API key has used up its request quota."""
+
+    def __init__(self, reset_seconds: int) -> None:
+        super().__init__(f"all Safe API keys exhausted; quota resets in {reset_seconds}s")
+        self.reset_seconds = reset_seconds
+
+
+def _next_api_key() -> str | None:
+    """Return the next API key that still has quota, or None when all are exhausted."""
+    for _ in range(len(_api_keys)):
+        key = next(_api_key_cycle)
+        if key not in _exhausted_api_keys:
+            return key
+    return None
+
+
+def _quota_reset_seconds(response: requests.Response) -> int | None:
+    """Return seconds until quota reset when a 429 means the key's quota is used up, else None."""
+    if response.headers.get("x-ratelimit-remaining") != "0":
+        return None
+    try:
+        return int(response.headers.get("x-ratelimit-reset", "0"))
+    except ValueError:
+        return 0
 
 
 def get_safe_transactions(
@@ -43,6 +123,10 @@ def get_safe_transactions(
 ) -> list[dict]:
     """
     Docs: https://docs.safe.global/core-api/transaction-service-reference/mainnet#List-a-Safe's-Multisig-Transactions
+
+    Raises:
+        SafeApiQuotaExhausted: When every API key has used up its quota; retrying
+            would only burn requests until the window resets.
     """
 
     base_url = safe_apis[network_name] + "/api/v2"
@@ -53,13 +137,13 @@ def get_safe_transactions(
     if executed is not None:
         params["executed"] = str(executed).lower()
 
-    api_key = next(_api_key_cycle)
+    attempt = 0
+    while attempt < max_retries:
+        api_key = _next_api_key()
+        if api_key is None:
+            raise SafeApiQuotaExhausted(min(_exhausted_api_keys.values()))
+        headers = {"Authorization": f"Bearer {api_key}"}
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-    }
-
-    for attempt in range(max_retries):
         try:
             response = requests.get(endpoint, params=params, headers=headers, timeout=10)
         except requests.exceptions.RequestException as e:
@@ -74,6 +158,7 @@ def get_safe_transactions(
                 max_retries,
             )
             time.sleep(wait_time)
+            attempt += 1
             continue
 
         if response.status_code == 200:
@@ -81,10 +166,17 @@ def get_safe_transactions(
         elif response.status_code == 401:
             raise ValueError("Invalid API key. Please check your SAFE_API_KEY.")
         elif response.status_code == 429:
-            # rate limit - wait and retry
+            reset_seconds = _quota_reset_seconds(response)
+            if reset_seconds is not None:
+                # Quota used up: drop the key for this run and try the next one at once.
+                _exhausted_api_keys[api_key] = reset_seconds
+                logger.error("Safe API key quota exhausted; resets in %ss", reset_seconds)
+                continue
+            # Short-term rate limit - wait and retry
             wait_time = 2**attempt
             logger.warning("Rate limit hit, waiting %ss before retry...", wait_time)
             time.sleep(wait_time)
+            attempt += 1
             continue
         elif response.status_code >= 500:
             # server error - wait and retry with exponential backoff
@@ -97,6 +189,7 @@ def get_safe_transactions(
                 max_retries,
             )
             time.sleep(wait_time)
+            attempt += 1
             continue
         else:
             logger.error("Error: %s\nResponse text: %s", response.status_code, response.text)
@@ -107,20 +200,18 @@ def get_safe_transactions(
 
 
 def get_safe_current_nonce(safe_address: str, network_name: str) -> int | None:
-    """Fetch the safe's current onchain nonce (next nonce to use).
+    """Read the safe's current onchain nonce (next nonce to use) over RPC.
 
-    Uses the v1 Safe-info endpoint (v2 returns 404 for this resource). Returns
-    None if the call fails so callers can fall back gracefully.
+    Read on-chain rather than from the Safe API so each safe costs one API
+    request per run instead of two. Returns None if the call fails so callers
+    can fail closed.
     """
-    base_url = safe_apis[network_name] + "/api/v1"
-    endpoint = f"{base_url}/safes/{safe_address}/"
-    api_key = next(_api_key_cycle)
-    headers = {"Authorization": f"Bearer {api_key}"}
     try:
-        response = requests.get(endpoint, headers=headers, timeout=10)
-        response.raise_for_status()
-        return int(response.json()["nonce"])
-    except (requests.RequestException, KeyError, ValueError) as e:
+        chain = Chain.from_chain_id(safe_network_to_chain_id(network_name))
+        client = ChainManager.get_client(chain)
+        safe = client.eth.contract(address=Web3.to_checksum_address(safe_address), abi=SAFE_NONCE_ABI)
+        return int(safe.functions.nonce().call())
+    except Exception as e:
         logger.warning("Failed to fetch current nonce for %s on %s: %s", safe_address, network_name, e)
         return None
 
@@ -150,15 +241,13 @@ def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]
     and (b) ``currentNonce - 1`` (the last *executed* nonce, when we could
     fetch it). A tx is eligible iff ``nonce > baseline``.
 
-    When ``currentNonce`` is unknown (e.g. Safe v1 endpoint 429'd), the chain
+    When ``currentNonce`` is unknown (e.g. the RPC read failed), the chain
     baseline can't be computed safely, so we fail closed and skip alerts for
     this safe until the next run. That prevents dead-slot txs from alerting as
     queued after a competing tx at the same nonce has already executed.
     """
     last_cached_nonce = get_last_executed_nonce_from_file(safe_address)
     current_safe_nonce = get_safe_current_nonce(safe_address, network_name)
-    pending_txs = get_safe_transactions(safe_address, network_name, executed=False)
-
     if current_safe_nonce is None:
         logger.warning(
             "Skipping pending tx alerts for %s on %s because currentNonce could not be fetched",
@@ -166,6 +255,7 @@ def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]
             network_name,
         )
         return []
+    pending_txs = get_safe_transactions(safe_address, network_name, executed=False)
 
     baseline = last_cached_nonce
     chain_baseline = current_safe_nonce - 1
@@ -405,6 +495,36 @@ def run_for_network(network_name: str, safe_address: str, protocol: str) -> None
     check_for_pending_transactions(safe_address, network_name, protocol)
 
 
+def report_quota_exhausted(exc: SafeApiQuotaExhausted, now: float | None = None) -> None:
+    """Alert once per quota window that Safe queue monitoring is blind.
+
+    Args:
+        exc: The exhaustion error, carrying seconds until the earliest key resets.
+        now: Current unix time; defaults to ``time.time()``.
+    """
+    now = time.time() if now is None else now
+    logger.error("Safe monitoring skipped: %s", exc)
+    try:
+        alerted_until = float(get_last_value_for_key_from_file(cache_filename, CACHE_KEY_QUOTA_ALERTED_UNTIL))
+    except (TypeError, ValueError):
+        alerted_until = 0.0
+    if now < alerted_until:
+        return
+    reset_at = now + exc.reset_seconds
+    send_error_message(
+        "🚨 Safe API quota exhausted\n"
+        f"All {len(_api_keys)} Safe API keys have used up their quota; pending Safe transactions "
+        "are NOT being monitored until the earliest reset "
+        f"({time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(reset_at))}).\n"
+        "Add a fresh key to SAFE_API_KEY or SAFE_API_KEY_2 in /etc/monitoring/.env.",
+        ERROR_LABEL,
+        disable_notification=False,
+        source="safe_api_quota",
+        alert_protocol=ALERT_PROTOCOL,
+    )
+    write_last_value_to_file(cache_filename, CACHE_KEY_QUOTA_ALERTED_UNTIL, int(reset_at))
+
+
 def main():
     last_api_call_time = 0
     request_counter = 0
@@ -412,12 +532,17 @@ def main():
     for safe in ALL_SAFE_ADDRESSES:
         logger.info("Running for %s on %s", safe[0], safe[1])
         last_api_call_time, request_counter = check_api_limit(last_api_call_time, request_counter)
-        run_for_network(safe[1], safe[2], safe[0])
+        try:
+            run_for_network(safe[1], safe[2], safe[0])
+        except SafeApiQuotaExhausted as exc:
+            # Every remaining safe would hit the same exhausted keys; stop the run.
+            report_quota_exhausted(exc)
+            return
         request_counter += 1
 
 
 if __name__ == "__main__":
     from utils.runner import run_with_alert
 
-    # Multi-safe script with per-safe routing; crash alerts go to the general ops channel.
-    run_with_alert(main, "yearn")
+    # Multi-safe script with per-safe routing; crashes go to the internal errors channel.
+    run_with_alert(main, ERROR_LABEL, alert_protocol=ALERT_PROTOCOL)

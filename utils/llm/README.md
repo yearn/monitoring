@@ -117,7 +117,7 @@ Requires `TENDERLY_API_KEY`. Simulation failure is non-blocking — the pipeline
 
 Callers can pass `skip_simulation=True` to bypass Tenderly entirely. Used for Safe transactions with `operation=DELEGATECALL` (typically multiSend batches), where our plain-CALL simulator can't model the real execution and would produce a spurious "revert" verdict.
 
-Timelock batches still simulate each inner call independently. Successful results are attributed to their original call index and labeled as independent simulations — they do not prove the batch succeeds atomically. Failed simulations are omitted from the risk prompt (Tenderly often false-reverts governance calls) but kept as call-flow diagnostics so a reviewer can see them without treating them as a predicted on-chain failure.
+Timelock batches are simulated as one **sequential bundle** (`simulate_bundle`, Tenderly `simulate-bundle`): every call is sent from the executor in batch order, and each sees the state the earlier calls left — the way `executeBatch` runs them. Simulating calls one by one against current state produced false reverts for calls that depend on an earlier one in the same batch (e.g. `Accounting.setOracle(vault, oracle)` followed by `OutlandFarm.setVault(vault)`, which requires that oracle). Tenderly stops at the first revert; calls it never reached, and every call when the bundle request itself fails, fall back to an independent simulation against current state. Results are attributed to their original call index and labeled by mode (`Batch simulation` vs `Independent simulation`). Failed simulations of either kind are omitted from the risk prompt (Tenderly often false-reverts governance calls) but kept as call-flow diagnostics so a reviewer can see them without treating them as a predicted on-chain failure.
 
 ### 5. Proxy Upgrade Detection & Implementation Diff (`utils/proxy.py`, `utils/impl_diff.py`)
 
@@ -198,6 +198,17 @@ For Infinifi mainnet alerts, the adapter:
 4. Reconstructs the escrow's current whitelist from `WhitelistUpdated` events and identifies non-accounting targets that verify as ERC20 tokens. Token names, symbols, and decimals are read on-chain.
 
 The result is added to the LLM prompt as verified protocol context and rendered independently in the Wavey Gist under `## Protocol Context`. The report distinguishes the escrow's accounting asset from non-accounting ERC20 targets it is allowed to interact with; whitelist membership does not establish how a token is valued downstream. Failures are best-effort and never block the governance alert.
+
+### 5e-2. Infinifi Outland Context (`utils/llm/infinifi_outland_context.py`)
+
+Onboarding a chain to Infinifi's cross-chain Outland spans several contracts whose calls carry no reviewable facts on their own. For Infinifi mainnet alerts, the adapter:
+
+1. Names the `FarmRegistry.addFarms` / `removeFarms` farm type from the `FarmTypes` library (`0 PROTOCOL`, `1 LIQUID`, `2 MATURITY`). No RPC.
+2. For `Accounting.setOracle(asset, oracle)`, reads the oracle's `price()` and the asset's decimals and states the whole-token value in the reference unit (`price * 10^decimals / 1e36`, the `IOracle` convention under which USDC is ~1e30).
+3. For `PortalHub.setVault(vault)`, reads the vault's `chainId()` and the hub's registered chains, and says whether the call adds a chain or replaces a live vault.
+4. For connector calls naming a destination chain (`enableChainAsset`, `setCctpDomain`, …), reads `chainConfig(chainId)` and states whether the route can send. An unset peer/gas limit means `sendTokens` reverts until a separate `setConfiguration` — the call that sets the destination-side recipient of bridged funds — executes.
+
+Contracts are identified by the functions their verified ABI exposes (`utils/llm/abi_exposure.py`, following EIP-1967), not by hard-coded addresses. Failures are best-effort and never block the governance alert.
 
 ### 5f. 3Jane Governance Context (`utils/llm/threejane_context.py`)
 

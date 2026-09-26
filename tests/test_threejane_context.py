@@ -22,6 +22,7 @@ DISTRIBUTOR = "0xaC6985D4dBcd89CCAD71DB9bf0309eaF57F064e8"
 JANE = "0x333333330522F64EE8d0b3039c460b41670e3404"
 PROTOCOL_CONFIG = "0x6b276A2A7dd8b629adBA8A06AD6573d01C84f34E"
 SAFE = "0x33333333Bd7045F1A601A1E289D7AB21036fB5EF"
+TIMELOCK = "0x1dCcD4628d48a50C1A7adEA3848bcC869f08f8C2"
 
 WAD = 10**18
 
@@ -45,6 +46,7 @@ def _set_config_call(key: str = "MAX_LTV", value: int = 4 * 10**17) -> DecodedCa
 def _distributor_context(use_mint: bool = True, is_minter: bool = True) -> RewardsDistributorContext:
     return RewardsDistributorContext(
         distributor_address=DISTRIBUTOR,
+        owner_address=TIMELOCK,
         token_address=JANE,
         token_symbol="JANE",
         token_decimals=18,
@@ -151,6 +153,7 @@ class TestCheckedInAbis(unittest.TestCase):
         names = {entry["name"] for entry in threejane_context._abi("RewardsDistributor")}
         self.assertTrue(threejane_context._DISTRIBUTOR_GETTERS.issubset(names))
         self.assertIn("epoch", names)
+        self.assertIn("owner", names)
 
     def test_jane_abi_covers_the_token_reads(self) -> None:
         names = {entry["name"] for entry in threejane_context._abi("Jane")}
@@ -286,9 +289,19 @@ class TestDistributorRendering(unittest.TestCase):
         context = replace(_distributor_context(), proposed_emissions=())
         self.assertNotIn("Proposed", format_threejane_prompt([context]))
 
+    def test_prompt_states_ownership_direction(self) -> None:
+        prompt = format_threejane_prompt([_distributor_context()])
+        self.assertIn(f"RewardsDistributor.owner() = {TIMELOCK}", prompt)
+        self.assertIn("owned BY this address", prompt)
+
+    def test_report_links_the_owner(self) -> None:
+        report = format_threejane_report([_distributor_context()], 1, {TIMELOCK: "3Jane 24h TimelockController"})
+        self.assertIn("**Owner**", report)
+        self.assertIn(f"https://etherscan.io/address/{TIMELOCK}", report)
+
     def test_context_contributes_addresses_and_labels(self) -> None:
         context = _distributor_context()
-        self.assertEqual(context.addresses, [DISTRIBUTOR, JANE])
+        self.assertEqual(context.addresses, [DISTRIBUTOR, TIMELOCK, JANE])
         self.assertEqual(context.labels[JANE], "JANE token")
 
 
