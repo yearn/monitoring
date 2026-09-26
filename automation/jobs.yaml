@@ -7,8 +7,9 @@
 #
 # Adding or removing a task in an existing profile: edit its `tasks:` and merge to main. The
 # ten_minute profile's pre-run sync (sync_before_run, below) lands it on the box within
-# ~10 min — no restart needed. Adding/removing a profile or changing `cron:` requires sync +
-# `sudo systemctl restart monitoring` to re-render the crontab (see deploy/runbook.md).
+# ~10 min — no restart needed. Adding/removing/renaming a profile or changing `cron:` also
+# lands on that sync: it re-renders the live crontab and supercronic reloads it via inotify
+# (see automation/crontab.py). Keep exactly one profile with `sync_before_run: true`.
 #
 # Each task invokes one script. CLI flags go under `args:` as `key: value` and are emitted as
 # `--key=value` in the declared order. Cache files resolve against $CACHE_DIR (set to
@@ -104,8 +105,9 @@ profiles:
     # against whatever is on disk, so they ride along for free. Best-effort: a
     # failed sync is logged and the checks run anyway (see automation/git_sync.py).
     # Tracked local edits are intentionally discarded in favor of reviewed main.
-    # NOTE: this lands new *code/config* only. Cron-cadence changes in this file
-    # and dependency changes (pyproject.toml/uv.lock) still need a manual
+    # The sync also rewrites the live crontab when profiles or cadences change, and
+    # a stale crontab calling a renamed profile still syncs (automation/__main__.py).
+    # NOTE: dependency changes (pyproject.toml/uv.lock) still need a manual
     # `uv sync --frozen --extra ai` + `systemctl restart monitoring`.
     sync_before_run: true
     tasks:

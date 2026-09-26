@@ -6,8 +6,9 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from automation.__main__ import cmd_render_crontab
+from automation.__main__ import cmd_render_crontab, cmd_run
 from automation.config import load_jobs_config
 
 
@@ -87,6 +88,36 @@ class TestRenderCrontab(unittest.TestCase):
             text = buf.getvalue()
             self.assertIn("/tmp/automation.hourly.lock", text)
             self.assertIn("/tmp/automation.yearn-stuck-triggers.lock", text)
+
+
+class TestRunUnknownProfile(unittest.TestCase):
+    """A stale crontab calling a renamed profile must still sync the checkout."""
+
+    def _config(self, d: str):
+        return load_jobs_config(
+            _write_yaml(
+                Path(d),
+                """
+                profiles:
+                  ten_minute:
+                    cron: "0/10 * * * *"
+                    tasks: [{ name: "a", script: a/main.py }]
+                """,
+            )
+        )
+
+    def test_unknown_profile_still_syncs(self):
+        with TemporaryDirectory() as d, patch("automation.__main__.sync_repo") as mock_sync:
+            with redirect_stdout(io.StringIO()):
+                rc = cmd_run(self._config(d), "multisig", dry_run=False)
+        self.assertEqual(rc, 2)
+        mock_sync.assert_called_once()
+
+    def test_unknown_profile_dry_run_does_not_sync(self):
+        with TemporaryDirectory() as d, patch("automation.__main__.sync_repo") as mock_sync:
+            rc = cmd_run(self._config(d), "multisig", dry_run=True)
+        self.assertEqual(rc, 2)
+        mock_sync.assert_not_called()
 
 
 if __name__ == "__main__":

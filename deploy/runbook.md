@@ -98,21 +98,24 @@ fresh by a subprocess.
 So for the common case — a script tweak, a new task in a profile — **merge the
 PR and the next ~10-min `ten_minute` tick syncs it in; no SSH needed.**
 
-**Manual restart (cadence + deps).** Two kinds of change land on disk via the
-auto-sync but stay inert until a restart, because they're read once at scheduler
-boot, not per-tick:
+**Schedule changes (no restart).** Adding, removing or renaming a profile, or
+changing its `cron:` cadence, also lands on the next sync. After each successful
+sync the runner re-renders the crontab from the pulled `jobs.yaml` and rewrites
+`$CRONTAB_PATH` (`/tmp/crontab`) when it differs; supercronic runs with
+`-inotify` and reloads it. Look for `jobs.yaml schedule changed; rewrote` in the
+journal. If the crontab still calls a profile that no longer exists, that call
+syncs anyway before exiting with `unknown profile`, so a rename of the
+`sync_before_run` profile cannot stop the box from pulling code (this happened
+on 2026-09-24 and stalled syncs for two days).
 
-- adding/removing a profile or changing a profile's `cron:` *cadence* in
-  `jobs.yaml` (the crontab is rendered at unit start by `ExecStartPre`), and
-- a `pyproject.toml` / `uv.lock` change (the venv).
-
-For those, after the PR merges:
+**Manual restart (deps).** A `pyproject.toml` / `uv.lock` change lands on disk
+via the auto-sync but stays inert until the venv is rebuilt. After the PR merges:
 
 ```sh
 cd /srv/monitoring
 git fetch origin main && git reset --hard origin/main  # or let the next ten_minute tick land it
-uv sync --frozen --extra ai   # only if pyproject.toml / uv.lock changed (--extra ai: openai client for the AI explainer)
-sudo systemctl restart monitoring   # re-renders the crontab and re-points supercronic at the tree
+uv sync --frozen --extra ai   # --extra ai: openai client for the AI explainer
+sudo systemctl restart monitoring
 ```
 
 The restart re-renders the crontab and points supercronic at the freshly-pulled
