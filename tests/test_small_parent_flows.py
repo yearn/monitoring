@@ -330,7 +330,7 @@ def test_legacy_cursor_without_timestamp_looks_it_up(monkeypatch, looked_up, exp
     since_values = []
     lookups = []
 
-    def fake_lookup(flow_type, chain_id, addresses, block_number):
+    def fake_lookup(flow_type, chain_id, block_number):
         lookups.append((flow_type, chain_id, block_number))
         return looked_up
 
@@ -368,10 +368,12 @@ def test_load_block_timestamp_uses_block_equality(monkeypatch) -> None:
 
     monkeypatch.setattr(monitor, "gql_request", fake_gql)
 
-    assert monitor.load_block_timestamp("withdrawal", 1, ["0xParent"], 100) == 1_700_000_000
+    assert monitor.load_block_timestamp("withdrawal", 1, 100) == 1_700_000_000
     assert "Withdraw(" in captured["query"]
     assert "blockNumber: { _eq: $blockNumber }" in captured["query"]
-    assert captured["variables"]["blockNumber"] == 100
+    # A cursor from a retired vault must still resolve, so the lookup is not vault-filtered.
+    assert "vaultAddress" not in captured["query"]
+    assert captured["variables"] == {"chainId": 1, "blockNumber": 100}
 
 
 def test_first_run_lookback_floor_persists_without_events(monkeypatch) -> None:

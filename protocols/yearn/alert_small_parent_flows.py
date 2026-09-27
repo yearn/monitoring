@@ -385,19 +385,20 @@ def load_events(
     return [{**event, "flow_type": flow_type} for event in events]
 
 
-def load_block_timestamp(flow_type: str, chain_id: int, vault_addresses: list[str], block_number: int) -> int | None:
+def load_block_timestamp(flow_type: str, chain_id: int, block_number: int) -> int | None:
     """Return the timestamp of ``block_number`` from any flow event in it, or None if none is indexed.
 
-    Used once for cursors persisted before ``block_timestamp`` was stored. An equality
-    match on ``blockNumber`` is selective, unlike the range the main query uses.
+    Used once for cursors persisted before ``block_timestamp`` was stored. Deliberately not
+    filtered by vault: the cursor may belong to a vault that has since left the active set,
+    and every event in a block shares its timestamp. An equality match on ``blockNumber``
+    is selective, unlike the range the main query uses.
     """
     entity = FLOW_ENTITY[flow_type]
     query = """
-    query SmallParentFlowBlockTimestamp($chainId: Int!, $addresses: [String!]!, $blockNumber: Int!) {
+    query SmallParentFlowBlockTimestamp($chainId: Int!, $blockNumber: Int!) {
       events: __ENTITY__(
         where: {
           chainId: { _eq: $chainId }
-          vaultAddress: { _in: $addresses }
           blockNumber: { _eq: $blockNumber }
         }
         limit: 1
@@ -406,7 +407,7 @@ def load_block_timestamp(flow_type: str, chain_id: int, vault_addresses: list[st
       }
     }
     """.replace("__ENTITY__", entity)
-    response = gql_request(query, {"chainId": chain_id, "addresses": vault_addresses, "blockNumber": block_number})
+    response = gql_request(query, {"chainId": chain_id, "blockNumber": block_number})
     events = (response.get("data") or {}).get("events")
     if not events:
         return None
@@ -568,7 +569,7 @@ def monitor_flow_type(
         cursor = persisted_cursor
         since_ts = cursor.block_timestamp
         if since_ts is None:
-            since_ts = load_block_timestamp(flow_type, chain_id, addresses, cursor.block_number)
+            since_ts = load_block_timestamp(flow_type, chain_id, cursor.block_number)
         if since_ts is None:
             logger.warning(
                 "No indexed %s event at cursor block %s on chain %s; querying without a timestamp floor",
