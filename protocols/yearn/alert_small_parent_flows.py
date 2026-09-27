@@ -8,18 +8,18 @@ import json
 import logging
 import os
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal, getcontext
 from typing import Callable
 
+import requests
 from dotenv import load_dotenv
 
 from protocols.yearn.kong import fetch_kong_parent_vaults
 from utils import store
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import EXPLORER_URLS, Chain
+from utils.http_client import request_with_retry
 from utils.logger import get_logger
 from utils.telegram import MAX_MESSAGE_LENGTH, YEARN_MAINTENANCE_CHANNEL, resolve_channel, send_envio_error_message
 
@@ -28,6 +28,8 @@ load_dotenv()
 getcontext().prec = 60
 
 ENVIO_GRAPHQL_URL = os.getenv("ENVIO_GRAPHQL_URL")
+# Per-attempt timeout; request_with_retry retries 5xx/timeouts so a brief Envio stall does not skip the run.
+ENVIO_REQUEST_TIMEOUT_SECONDS = 10
 DEFAULT_LOG_LEVEL = os.getenv("SMALL_PARENT_FLOWS_LOG_LEVEL") or os.getenv("LOG_LEVEL", "INFO")
 DEFAULT_THRESHOLD_RAW = 10_000
 DEFAULT_LOOKBACK_SECONDS = 7200
@@ -249,18 +251,29 @@ class EventCursor:
 
 
 def http_json(url: str, body: dict) -> dict:
-    """POST a JSON body and return the decoded response."""
-    request = urllib.request.Request(
+    """POST a JSON body with retries on transient errors and return the decoded response."""
+    response = request_with_retry(
+        "post",
         url,
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Accept": "application/json", "Content-Type": "application/json"},
-        method="POST",
+        timeout=ENVIO_REQUEST_TIMEOUT_SECONDS,
+        json=body,
+        headers={"Accept": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        payload: object = json.loads(response.read().decode("utf-8"))
+    payload: object = response.json()
     if not isinstance(payload, dict):
         raise ValueError("Envio returned a non-object JSON response")
     return payload
+
+
+def describe_request_error(exc: Exception) -> str:
+    """Return a short failure description that does not leak the Envio endpoint URL."""
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        return f"HTTP {exc.response.status_code} {exc.response.reason}".strip()
+    if isinstance(exc, requests.Timeout):
+        return f"timed out after {ENVIO_REQUEST_TIMEOUT_SECONDS}s"
+    if isinstance(exc, requests.ConnectionError):
+        return "connection error"
+    return str(exc)
 
 
 def gql_request(query: str, variables: dict) -> dict:
@@ -274,15 +287,16 @@ def gql_request(query: str, variables: dict) -> dict:
 
     try:
         payload = http_json(ENVIO_GRAPHQL_URL, {"query": query, "variables": variables})
-    except (urllib.error.HTTPError, urllib.error.URLError, ConnectionError, OSError, ValueError) as exc:
+    except (requests.RequestException, OSError, ValueError) as exc:
+        detail = describe_request_error(exc)
         send_envio_error_message(
-            f"Small parent flow monitor: Envio GraphQL request failed ({exc}). Skipping this run.",
+            f"Small parent flow monitor: Envio GraphQL request failed ({detail}). Skipping this run.",
             PROTOCOL,
             source="small_parent_flows",
             alert_protocol=ALERT_PROTOCOL,
         )
-        logger.error("Envio request failed: %s", exc)
-        raise EnvioUnavailableError(f"Envio request failed: {exc}") from exc
+        logger.error("Envio request failed: %s", detail)
+        raise EnvioUnavailableError(f"Envio request failed: {detail}") from exc
 
     if payload.get("errors"):
         send_envio_error_message(
