@@ -269,6 +269,113 @@ def test_gql_request_reports_status_without_url_after_retries(monkeypatch) -> No
     assert "envio.example" not in reported[0]
 
 
+def test_load_events_filters_on_timestamp_index_outside_or(monkeypatch) -> None:
+    captured = {}
+
+    def fake_gql(query, variables):
+        captured["query"] = query
+        captured["variables"] = variables
+        return {"data": {"events": []}}
+
+    monkeypatch.setattr(monitor, "gql_request", fake_gql)
+
+    monitor.load_events("deposit", 1, ["0xParent"], monitor.EventCursor(100, 2), 1_700_000_000, 100)
+
+    where = captured["query"].split("_or:")[0]
+    assert "blockTimestamp: { _gte: $sinceTs }" in where
+    assert captured["variables"]["sinceTs"] == 1_700_000_000
+
+
+def test_cursor_round_trips_block_timestamp() -> None:
+    monitor.save_cursor(1, "deposit", monitor.EventCursor(100, 2, 1_700_000_000))
+
+    cursor = monitor.load_cursor(1, "deposit")
+
+    assert cursor == monitor.EventCursor(100, 2)
+    assert cursor is not None and cursor.block_timestamp == 1_700_000_000
+
+
+def test_persisted_cursor_timestamp_is_query_floor(monkeypatch) -> None:
+    since_values = []
+    lookups = []
+    event = make_event(block_number=101, log_index=0)
+    event["blockTimestamp"] = 1_700_000_500
+
+    def fake_load(_flow_type, _chain_id, _addresses, _cursor, since_ts, _limit):
+        since_values.append(since_ts)
+        return [event] if len(since_values) == 1 else []
+
+    monkeypatch.setattr(monitor, "load_cursor", lambda _chain, _flow: monitor.EventCursor(100, 2, 1_700_000_000))
+    monkeypatch.setattr(monitor, "load_block_timestamp", lambda *args: lookups.append(args))
+    monkeypatch.setattr(monitor, "load_events", fake_load)
+
+    monitor.monitor_flow_type(
+        1,
+        "deposit",
+        ["0xParent"],
+        {"0xparent": VAULT},
+        10_000,
+        lookback_seconds=7200,
+        page_size=1,
+        pending_cursors={},
+        alert_sender=lambda _record: None,
+    )
+
+    assert since_values == [1_700_000_000, 1_700_000_500]
+    assert lookups == []
+
+
+@pytest.mark.parametrize(("looked_up", "expected_floor"), [(1_699_999_000, 1_699_999_000), (None, 0)])
+def test_legacy_cursor_without_timestamp_looks_it_up(monkeypatch, looked_up, expected_floor) -> None:
+    since_values = []
+    lookups = []
+
+    def fake_lookup(flow_type, chain_id, block_number):
+        lookups.append((flow_type, chain_id, block_number))
+        return looked_up
+
+    def fake_load(_flow_type, _chain_id, _addresses, _cursor, since_ts, _limit):
+        since_values.append(since_ts)
+        return []
+
+    monkeypatch.setattr(monitor, "load_cursor", lambda _chain, _flow: monitor.EventCursor(100, 2))
+    monkeypatch.setattr(monitor, "load_block_timestamp", fake_lookup)
+    monkeypatch.setattr(monitor, "load_events", fake_load)
+
+    monitor.monitor_flow_type(
+        747474,
+        "withdrawal",
+        ["0xParent"],
+        {"0xparent": VAULT},
+        10_000,
+        lookback_seconds=7200,
+        page_size=100,
+        pending_cursors={},
+        alert_sender=lambda _record: None,
+    )
+
+    assert lookups == [("withdrawal", 747474, 100)]
+    assert since_values == [expected_floor]
+
+
+def test_load_block_timestamp_uses_block_equality(monkeypatch) -> None:
+    captured = {}
+
+    def fake_gql(query, variables):
+        captured["query"] = query
+        captured["variables"] = variables
+        return {"data": {"events": [{"blockTimestamp": 1_700_000_000}]}}
+
+    monkeypatch.setattr(monitor, "gql_request", fake_gql)
+
+    assert monitor.load_block_timestamp("withdrawal", 1, 100) == 1_700_000_000
+    assert "Withdraw(" in captured["query"]
+    assert "blockNumber: { _eq: $blockNumber }" in captured["query"]
+    # A cursor from a retired vault must still resolve, so the lookup is not vault-filtered.
+    assert "vaultAddress" not in captured["query"]
+    assert captured["variables"] == {"chainId": 1, "blockNumber": 100}
+
+
 def test_first_run_lookback_floor_persists_without_events(monkeypatch) -> None:
     since_values = []
 

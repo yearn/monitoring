@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, getcontext
 from typing import Callable
 
@@ -244,10 +244,16 @@ def render_flow_line(flow: SmallFlowRecord) -> str:
 
 @dataclass(frozen=True, order=True)
 class EventCursor:
-    """Per-chain Envio event cursor."""
+    """Per-chain Envio event cursor.
+
+    ``block_timestamp`` is not part of the ordering; it lets queries filter on the
+    ``blockTimestamp`` index, which is comparable across chains. Block numbers are not,
+    so a ``blockNumber`` range alone scans other chains' rows and Envio times out.
+    """
 
     block_number: int
     log_index: int
+    block_timestamp: int | None = field(default=None, compare=False)
 
 
 def http_json(url: str, body: dict) -> dict:
@@ -338,8 +344,9 @@ def load_events(
         where: {
           chainId: { _eq: $chainId }
           vaultAddress: { _in: $addresses }
+          blockTimestamp: { _gte: $sinceTs }
           _or: [
-            { blockNumber: { _gt: $lastBlock }, blockTimestamp: { _gte: $sinceTs } }
+            { blockNumber: { _gt: $lastBlock } }
             { blockNumber: { _eq: $lastBlock }, logIndex: { _gt: $lastLogIndex } }
           ]
         }
@@ -378,6 +385,35 @@ def load_events(
     return [{**event, "flow_type": flow_type} for event in events]
 
 
+def load_block_timestamp(flow_type: str, chain_id: int, block_number: int) -> int | None:
+    """Return the timestamp of ``block_number`` from any flow event in it, or None if none is indexed.
+
+    Used once for cursors persisted before ``block_timestamp`` was stored. Deliberately not
+    filtered by vault: the cursor may belong to a vault that has since left the active set,
+    and every event in a block shares its timestamp. An equality match on ``blockNumber``
+    is selective, unlike the range the main query uses.
+    """
+    entity = FLOW_ENTITY[flow_type]
+    query = """
+    query SmallParentFlowBlockTimestamp($chainId: Int!, $blockNumber: Int!) {
+      events: __ENTITY__(
+        where: {
+          chainId: { _eq: $chainId }
+          blockNumber: { _eq: $blockNumber }
+        }
+        limit: 1
+      ) {
+        blockTimestamp
+      }
+    }
+    """.replace("__ENTITY__", entity)
+    response = gql_request(query, {"chainId": chain_id, "blockNumber": block_number})
+    events = (response.get("data") or {}).get("events")
+    if not events:
+        return None
+    return int(events[0]["blockTimestamp"])
+
+
 def format_units(raw_assets: str | int, decimals: int) -> Decimal:
     """Convert an integer asset amount into normalized token units."""
     return Decimal(str(raw_assets)) / (Decimal(10) ** decimals)
@@ -404,7 +440,7 @@ def address_link(address: str, explorer: str | None) -> str:
 
 def cursor_from_event(event: dict) -> EventCursor:
     """Return the sortable cursor represented by an Envio event."""
-    return EventCursor(int(event["blockNumber"]), int(event["logIndex"]))
+    return EventCursor(int(event["blockNumber"]), int(event["logIndex"]), int(event["blockTimestamp"]))
 
 
 def state_key(chain_id: int, flow_type: str) -> str:
@@ -422,7 +458,12 @@ def load_cursor(chain_id: int, flow_type: str) -> EventCursor | None:
         return None
     try:
         payload = json.loads(raw)
-        return EventCursor(int(payload["block_number"]), int(payload["log_index"]))
+        block_timestamp = payload.get("block_timestamp")
+        return EventCursor(
+            int(payload["block_number"]),
+            int(payload["log_index"]),
+            None if block_timestamp is None else int(block_timestamp),
+        )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"Invalid small-flow cursor for {key}: {raw}") from exc
 
@@ -450,7 +491,13 @@ def save_cursor(chain_id: int, flow_type: str, cursor: EventCursor) -> None:
     store.state_set(
         STATE_NAMESPACE,
         state_key(chain_id, flow_type),
-        json.dumps({"block_number": cursor.block_number, "log_index": cursor.log_index}),
+        json.dumps(
+            {
+                "block_number": cursor.block_number,
+                "log_index": cursor.log_index,
+                "block_timestamp": cursor.block_timestamp,
+            }
+        ),
     )
 
 
@@ -520,7 +567,17 @@ def monitor_flow_type(
     persisted_cursor = load_cursor(chain_id, flow_type)
     if persisted_cursor is not None:
         cursor = persisted_cursor
-        since_ts = 0
+        since_ts = cursor.block_timestamp
+        if since_ts is None:
+            since_ts = load_block_timestamp(flow_type, chain_id, cursor.block_number)
+        if since_ts is None:
+            logger.warning(
+                "No indexed %s event at cursor block %s on chain %s; querying without a timestamp floor",
+                flow_type,
+                cursor.block_number,
+                chain_id,
+            )
+            since_ts = 0
     else:
         cursor = EventCursor(0, -1)
         since_ts = load_or_init_start_ts(chain_id, flow_type, (now or int(time.time())) - lookback_seconds)
@@ -540,6 +597,7 @@ def monitor_flow_type(
                 alerted += 1
             pending_cursors[(chain_id, flow_type)] = event_cursor
             cursor = event_cursor
+            since_ts = event_cursor.block_timestamp or since_ts
             processed += 1
 
         if len(events) < page_size:
