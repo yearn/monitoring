@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 import argparse
-import json
 import logging
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
 from decimal import Decimal, getcontext
 
+import requests
 from dotenv import load_dotenv
 
 from utils.abi import load_abi
@@ -16,6 +14,7 @@ from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import EXPLORER_URLS, Chain
 from utils.defillama import fetch_prices
+from utils.http_client import request_with_retry
 from utils.telegram import send_envio_error_message
 from utils.web3_wrapper import ChainManager
 
@@ -24,6 +23,8 @@ load_dotenv()
 getcontext().prec = 40
 
 ENVIO_GRAPHQL_URL = os.getenv("ENVIO_GRAPHQL_URL")
+# Per-attempt timeout; request_with_retry retries 5xx/timeouts so a brief Envio stall does not skip the run.
+ENVIO_REQUEST_TIMEOUT_SECONDS = 10
 DEFAULT_LOG_LEVEL = os.getenv("ALERT_LARGE_FLOWS_LOG_LEVEL", "WARNING")
 IGNORED_FROM_ADDRESS = "0x283132390ea87d6ecc20255b59ba94329ee17961"
 PROTOCOL = "yearn"
@@ -180,20 +181,19 @@ _price_cache: dict[tuple[int, str], tuple[float, Decimal]] = {}
 _logger = logging.getLogger("alert_large_flows")
 
 
-def http_json(url: str, method: str = "GET", body: dict | None = None, headers: dict | None = None):
-    _logger.info("http_json %s %s", method, url)
-    data = None
-    req_headers = {"Accept": "application/json"}
-    if headers:
-        req_headers.update(headers)
-    if body is not None:
-        data = json.dumps(body).encode("utf-8")
-        req_headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
-        _logger.info("http_json status=%s", resp.status)
-        return payload
+def http_json(url: str, body: dict) -> dict:
+    """POST a JSON body with retries on transient errors and return the decoded response."""
+    _logger.info("http_json POST %s", url)
+    response = request_with_retry(
+        "post",
+        url,
+        timeout=ENVIO_REQUEST_TIMEOUT_SECONDS,
+        json=body,
+        headers={"Accept": "application/json"},
+    )
+    _logger.info("http_json status=%s", response.status_code)
+    payload: dict = response.json()
+    return payload
 
 
 def gql_request(query: str, variables: dict) -> dict | None:
@@ -206,13 +206,21 @@ def gql_request(query: str, variables: dict) -> dict | None:
     payload = {"query": query, "variables": variables}
 
     try:
-        return http_json(ENVIO_GRAPHQL_URL, method="POST", body=payload)
-    except urllib.error.HTTPError as exc:
+        return http_json(ENVIO_GRAPHQL_URL, body=payload)
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
         send_envio_error_message(
-            f"⚠️ Large Flow Alert: Envio GraphQL error (HTTP {exc.code}). Skipping this run.",
+            f"⚠️ Large Flow Alert: Envio GraphQL error (HTTP {status}). Skipping this run.",
             PROTOCOL,
         )
-        _logger.error("Envio request failed with HTTP %d", exc.code)
+        _logger.error("Envio request failed with HTTP %s", status)
+        return None
+    except (requests.Timeout, requests.ConnectionError) as exc:
+        send_envio_error_message(
+            f"⚠️ Large Flow Alert: Envio GraphQL request failed ({type(exc).__name__}). Skipping this run.",
+            PROTOCOL,
+        )
+        _logger.error("Envio request failed: %s", exc)
         return None
 
 

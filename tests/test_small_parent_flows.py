@@ -1,7 +1,9 @@
+import json
 import sys
 from decimal import Decimal
 
 import pytest
+import requests
 
 from protocols.yearn import alert_small_parent_flows as monitor
 from utils.alert import Alert, AlertSeverity
@@ -225,6 +227,46 @@ def test_gql_request_reports_once_and_raises(monkeypatch) -> None:
     args, kwargs = reported[0]
     assert args[1] == monitor.PROTOCOL
     assert kwargs["alert_protocol"] == "yearn-internal"
+
+
+def _response(status: int, payload: dict | None = None) -> requests.Response:
+    response = requests.Response()
+    response.status_code = status
+    response.reason = "Gateway Timeout" if status == 504 else "OK"
+    response._content = b"" if payload is None else json.dumps(payload).encode()
+    response.url = "https://envio.example/graphql"
+    return response
+
+
+def test_http_json_retries_gateway_timeout_with_short_timeout(monkeypatch) -> None:
+    calls = []
+    responses = [_response(504), _response(200, {"data": {"events": []}})]
+
+    def fake_request(method, url, timeout=None, **kwargs):
+        calls.append((method, timeout, kwargs["json"]))
+        return responses.pop(0)
+
+    monkeypatch.setattr("utils.http_client.requests.request", fake_request)
+    monkeypatch.setattr("utils.http_client.time.sleep", lambda _seconds: None)
+
+    assert monitor.http_json("https://envio.example/graphql", {"query": "q"}) == {"data": {"events": []}}
+    assert [call[1] for call in calls] == [10, 10]
+    assert calls[0][0] == "post"
+
+
+def test_gql_request_reports_status_without_url_after_retries(monkeypatch) -> None:
+    reported = []
+
+    monkeypatch.setattr("utils.http_client.requests.request", lambda *args, **kwargs: _response(504))
+    monkeypatch.setattr("utils.http_client.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(monitor, "ENVIO_GRAPHQL_URL", "https://envio.example/graphql")
+    monkeypatch.setattr(monitor, "send_envio_error_message", lambda *args, **kwargs: reported.append(args[0]))
+
+    with pytest.raises(monitor.EnvioUnavailableError, match="HTTP 504 Gateway Timeout"):
+        monitor.gql_request("query {}", {})
+    assert len(reported) == 1
+    assert "HTTP 504 Gateway Timeout" in reported[0]
+    assert "envio.example" not in reported[0]
 
 
 def test_first_run_lookback_floor_persists_without_events(monkeypatch) -> None:
