@@ -152,7 +152,13 @@ Critical rules for parameter interpretation:
   didn't list it under. "Target-defined function changes" is where behavior lives: a changed
   body means the same signature now runs different code, and an added or removed
   internal/private member means logic moved or was deleted — say what the shown code does
-  rather than just naming it. "Storage compatibility" is the combined verdict: INCOMPATIBLE
+  rather than just naming it. "Source file changes" diffs every file the implementation was
+  compiled from — inherited bases, libraries and interfaces too — so a change in a base
+  contract appears there even when the target-defined section says none: describe what the
+  shown diff does and which contract/file it is in. "Compiler settings and linked libraries"
+  lists bytecode-affecting settings (EVM version, optimizer, compiler) and relinked external
+  libraries, each followed by that library's own source diff; a relinked library with
+  identical source is a redeployment, not a behavior change. "Storage compatibility" is the combined verdict: INCOMPATIBLE
   means a conflict is proven — say which; UNKNOWN means some storage could not be checked
   (listed under "Coverage gaps") — do not call the upgrade storage-safe, and do not call it
   unsafe either. A "Positional layout: COMPATIBLE" line under an UNKNOWN verdict means the

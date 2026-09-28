@@ -2,7 +2,7 @@
 
 When a governance tx upgrades a proxy, the LLM otherwise sees just the new impl
 address and a diff URL it can't follow. This module produces the deterministic
-evidence that grounds the alert, in four separated categories:
+evidence that grounds the alert, in these separated categories:
 
 - **External ABI changes** — added/removed entry points and ``stateMutability``
   changes, taken from each implementation's own verified ABI.
@@ -11,6 +11,14 @@ evidence that grounds the alert, in four separated categories:
   internal/private members added or removed. Comparing only the functions both
   sides share would miss behavior *moved* into a new helper, or a deleted hook —
   neither of which has an ABI footprint.
+- **Source file changes** — every file of the verified bundle diffed by path:
+  inherited bases, internal libraries and interfaces included. An upgrade whose
+  change sits in a base contract leaves the target's own file untouched, so the
+  target-scoped section alone would call it unchanged.
+- **Compiler settings and linked libraries** — EVM version, optimizer and
+  compiler changes alter bytecode without a source change; a relinked external
+  library runs different code at a different address, so each relinked
+  library's own verified source is diffed as well.
 - **Storage compatibility** — COMPATIBLE / INCOMPATIBLE / UNKNOWN, combining
   the compiler storage layouts Sourcify serves for both implementations with
   the storage those layouts can't describe (namespaces, custom-root accessors,
@@ -19,8 +27,8 @@ evidence that grounds the alert, in four separated categories:
 - **Unvalidated items** — everything the above cannot see, stated explicitly so
   silence is never read as safety.
 
-Every fact carries provenance (which contract, in which file). Nothing is
-derived from the concatenated source bundle, because the bundle contains bases,
+Every fact carries provenance (which contract, in which file). No semantic
+claim is derived from the concatenated source bundle, because the bundle contains bases,
 libraries and imported interfaces that are not part of the deployed contract —
 attributing those to the proxy produced both false positives (an imported
 interface's declaration reported as a new unpermissioned function) and false negatives (a
@@ -40,6 +48,15 @@ from utils.logger import get_logger
 from utils.namespaced_storage import NamespaceComparison, compare_non_positional
 from utils.solidity_text import FunctionDef, contract_functions, value_type_declarations
 from utils.source_context import fetch_verified_contract
+from utils.source_diff import (
+    NOT_LINKED,
+    SettingChange,
+    SourceFilesDiff,
+    diff_compiler_settings,
+    diff_source_files,
+    format_source_files,
+    relinked_libraries,
+)
 from utils.sourcify_layout import fetch_storage_layout
 from utils.storage_layout import LayoutComparison, StorageCompatibility, compare_storage_layouts
 from utils.verified_contract import VerifiedContract
@@ -57,10 +74,12 @@ MAX_LISTED_CONFLICTS = 10
 # behavior into one is exactly the case a signature alone fails to explain.
 MAX_ADDED_BODIES = 3
 
-_UNVALIDATED_INHERITED = "function and modifier bodies inherited from base contracts were not compared"
-_UNVALIDATED_INDIRECT = (
-    "linked or inlined libraries, imported constants and free functions can change behavior "
-    "even when the target's own function bodies are unchanged"
+_UNVALIDATED_EXTERNAL = (
+    "code at other addresses reached by external call or delegatecall (other than linked libraries) was not compared"
+)
+_UNVALIDATED_SETTINGS = (
+    "compiler settings (EVM version, optimizer, linked libraries) are not in the verified record; "
+    "a bytecode change without a source change cannot be seen"
 )
 _UNVALIDATED_MODIFIERS = "source-level modifiers are shown as written; they are not an authorization proof"
 
@@ -121,6 +140,17 @@ class ImplTarget:
 
 
 @dataclass(frozen=True)
+class LibraryChange:
+    """A linked library whose address differs between the implementations."""
+
+    name: str
+    old_address: str
+    new_address: str
+    files: SourceFilesDiff | None = None  # None when either side is unlinked or unverified
+    settings: list[SettingChange] | None = None
+
+
+@dataclass(frozen=True)
 class ImplDiff:
     """Deterministic evidence about one implementation swap."""
 
@@ -134,6 +164,9 @@ class ImplDiff:
     namespaces: NamespaceComparison = field(default_factory=NamespaceComparison)
     # Positional and non-positional storage combined; ``storage`` alone is positional.
     storage_verdict: StorageCompatibility = StorageCompatibility.UNKNOWN
+    files: SourceFilesDiff | None = None  # whole-bundle diff; None only if not run
+    settings: list[SettingChange] | None = None  # None when settings are unavailable
+    libraries: list[LibraryChange] = field(default_factory=list)
 
     @property
     def storage_status(self) -> StorageCompatibility:
@@ -155,11 +188,20 @@ def diff_implementations(old_addr: str, new_addr: str, chain_id: int) -> ImplDif
     bodies = _diff_bodies(old, new)
     if bodies.scope is None:
         unvalidated.append("function bodies: could not resolve the deployed contract's own source unambiguously")
-    else:
-        unvalidated.append(_UNVALIDATED_INHERITED)
-        unvalidated.append(_UNVALIDATED_INDIRECT)
     if not bodies.is_empty:
         unvalidated.append(_UNVALIDATED_MODIFIERS)
+
+    files = diff_source_files(old.sources, new.sources)
+    settings = diff_compiler_settings(old, new)
+    if settings is None:
+        unvalidated.append(_UNVALIDATED_SETTINGS)
+    libraries = _diff_linked_libraries(old, new, chain_id)
+    unvalidated.extend(
+        f"linked library {lib.name}: source of {lib.old_address} or {lib.new_address} is not verified"
+        for lib in libraries
+        if lib.files is None and NOT_LINKED not in (lib.old_address, lib.new_address)
+    )
+    unvalidated.append(_UNVALIDATED_EXTERNAL)
 
     # Storage coverage gaps go in the storage section, beside the verdict they
     # hold back — not in Unvalidated items, which never affect a verdict.
@@ -186,7 +228,39 @@ def diff_implementations(old_addr: str, new_addr: str, chain_id: int) -> ImplDif
         surface_note=surface_note,
         namespaces=namespaces,
         storage_verdict=storage_verdict,
+        files=files,
+        settings=settings,
+        libraries=libraries,
     )
+
+
+def _diff_linked_libraries(old: VerifiedContract, new: VerifiedContract, chain_id: int) -> list[LibraryChange]:
+    """Diff the verified source of every linked library whose address changed.
+
+    The bundle's copy of a library's source is only what the linker was told;
+    the code that runs is whatever is deployed at the linked address, so both
+    deployments are fetched and compared on their own.
+    """
+    changes: list[LibraryChange] = []
+    for name, old_addr, new_addr in relinked_libraries(old, new):
+        if NOT_LINKED in (old_addr, new_addr):
+            changes.append(LibraryChange(name=name, old_address=old_addr, new_address=new_addr))
+            continue
+        old_lib = fetch_verified_contract(chain_id, old_addr)
+        new_lib = fetch_verified_contract(chain_id, new_addr)
+        if not old_lib or not new_lib:
+            changes.append(LibraryChange(name=name, old_address=old_addr, new_address=new_addr))
+            continue
+        changes.append(
+            LibraryChange(
+                name=name,
+                old_address=old_addr,
+                new_address=new_addr,
+                files=diff_source_files(old_lib.sources, new_lib.sources),
+                settings=diff_compiler_settings(old_lib, new_lib),
+            )
+        )
+    return changes
 
 
 def reset_provenance_registry() -> None:
@@ -547,6 +621,41 @@ def _fmt_non_positional(namespaces: NamespaceComparison) -> list[str]:
     return lines
 
 
+def _fmt_files(diff: ImplDiff) -> list[str]:
+    """Render the whole-bundle file diff — where inherited and library changes show up."""
+    if diff.files is None:
+        return ["Source file changes (whole verified bundle): NOT COMPARED."]
+    label = f"Source file changes (whole verified bundle of {diff.new.contract_name or diff.new.address})"
+    return format_source_files(diff.files, label)
+
+
+def _fmt_settings(diff: ImplDiff) -> list[str]:
+    """Render compiler-setting changes, then each relinked library's own diff."""
+    if diff.settings is None:
+        lines = ["Compiler settings: NOT AVAILABLE — see Unvalidated items."]
+    elif not diff.settings:
+        lines = ["Compiler settings and linked libraries: unchanged."]
+    else:
+        lines = ["Compiler settings and linked libraries changed:"]
+        lines.extend(f"  ~ {change}" for change in diff.settings)
+
+    for lib in diff.libraries:
+        lines.append("")
+        lines.extend(_fmt_library(lib))
+    return lines
+
+
+def _fmt_library(lib: LibraryChange) -> list[str]:
+    head = f"Linked library {lib.name}: {lib.old_address} → {lib.new_address}"
+    if lib.files is None:
+        return [f"{head} — source NOT COMPARED (unlinked on one side or unverified)."]
+    lines = format_source_files(lib.files, f"{head} — source changes")
+    if lib.settings:
+        lines.append("  Compiler settings changed:")
+        lines.extend(f"    ~ {change}" for change in lib.settings)
+    return lines
+
+
 def format_impl_diff(diff: ImplDiff) -> str:
     """Render an :class:`ImplDiff` into a prompt-ready text block."""
     lines: list[str] = [
@@ -556,7 +665,7 @@ def format_impl_diff(diff: ImplDiff) -> str:
     if diff.old.contract_name and diff.new.contract_name and diff.old.contract_name != diff.new.contract_name:
         lines.append(f"Contract name changed: {diff.old.contract_name} → {diff.new.contract_name}")
 
-    for section in (_fmt_surface(diff), _fmt_bodies(diff), _fmt_storage(diff)):
+    for section in (_fmt_surface(diff), _fmt_bodies(diff), _fmt_files(diff), _fmt_settings(diff), _fmt_storage(diff)):
         lines.append("")
         lines.extend(section)
 
