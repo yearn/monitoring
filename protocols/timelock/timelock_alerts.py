@@ -19,7 +19,7 @@ from utils.chains import EXPLORER_URLS, Chain
 from utils.formatting import parse_wei
 from utils.llm.ai_explainer import Explanation, explain_batch_transaction, explain_transaction, format_explanation_line
 from utils.logger import get_logger
-from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
+from utils.proxy import find_proxy_upgrades, format_upgrade_lines
 from utils.safe_tx import unwrap_safe_exec_transaction
 from utils.telegram import MAX_MESSAGE_LENGTH, escape_markdown, send_envio_error_message, send_telegram_message
 from utils.web3_wrapper import ChainManager
@@ -256,23 +256,9 @@ def _build_call_info(event: dict, explorer: str | None, show_index: bool, chain_
         lines.extend(format_call_lines(data_hex))
 
     # Proxy upgrade detection: show diff link between old and new implementation
-    if len(data_hex) >= 10:
-        upgrade = detect_proxy_upgrade(data_hex, target)
-        if upgrade and chain_id:
-            # For ProxyAdmin-routed upgrades, `target` is the ProxyAdmin contract;
-            # the proxy being upgraded is inside the calldata. Surface it explicitly
-            # so recipients know which contract is changing.
-            if upgrade.proxy_address.lower() != target.lower():
-                lines.append(f"🅿️ Proxy: `{upgrade.proxy_address}`")
-            old_impl = get_current_implementation(upgrade.proxy_address, chain_id)
-            new_impl = upgrade.new_implementation
-            if old_impl:
-                lines.append(f"🔄 Upgrade: `{old_impl}` → `{new_impl}`")
-                diff_url = build_diff_url(old_impl, new_impl, chain_id)
-                if diff_url:
-                    lines.append(f"📊 [Diff]({diff_url})")
-            else:
-                lines.append(f"🔄 New impl: `{new_impl}`")
+    if len(data_hex) >= 10 and chain_id:
+        for upgrade in find_proxy_upgrades(data_hex, target):
+            lines.extend(format_upgrade_lines(upgrade, target, chain_id))
 
     value = event.get("value")
     if value and int(value) > 0:

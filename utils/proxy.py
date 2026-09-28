@@ -4,12 +4,13 @@ Detects proxy upgrade transactions (EIP-1967) and generates diff links
 to compare old vs new implementation source code on Etherscan.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from eth_utils import function_signature_to_4byte_selector, to_checksum_address
 
 from utils.calldata.decoder import decode_calldata
+from utils.calldata.wrappers import unwrap_calls
 from utils.chains import EXPLORER_URLS, Chain
 from utils.logger import get_logger
 
@@ -41,6 +42,11 @@ EIP1967_BEACON_SLOT = 0xA3F0AD74E5423AEBFD80D3EF4346578335A9A72AEAEE59FF6CB3582B
 _PROXY_DIRECT_SELECTORS = frozenset({"0x3659cfe6", "0x4f1ef286"})
 _PROXY_ADMIN_SELECTOR = "0x9623609d"
 
+# How many governance wrappers deep to look for an upgrade. One covers a Safe
+# calling a timelock; two covers a timelock operation that itself schedules on
+# another timelock. Bounded so adversarial nesting can't run away.
+MAX_WRAPPER_DEPTH = 2
+
 
 @dataclass(frozen=True)
 class ProxyUpgrade:
@@ -48,6 +54,7 @@ class ProxyUpgrade:
 
     proxy_address: str  # the proxy whose impl is being changed (may differ from tx target)
     new_implementation: str
+    via: str = ""  # wrapper path when nested, e.g. "executeBatch call 2"; "" when direct
 
 
 def detect_proxy_upgrade(data_hex: str, target: str = "") -> ProxyUpgrade | None:
@@ -100,6 +107,70 @@ def detect_proxy_upgrade(data_hex: str, target: str = "") -> ProxyUpgrade | None
         )
 
     return None
+
+
+def find_proxy_upgrades(data_hex: str, target: str = "") -> list[ProxyUpgrade]:
+    """Every proxy upgrade in a call, including ones inside governance wrappers.
+
+    A direct upgrade call yields itself. A wrapper — a timelock ``executeBatch``
+    sent by a Safe, a Compound ``queueTransaction`` — is unwrapped (see
+    :mod:`utils.calldata.wrappers`) and each inner call checked in turn, up to
+    :data:`MAX_WRAPPER_DEPTH` levels. Results keep call order and are
+    deduplicated by (proxy, new implementation).
+    """
+    return dedupe_upgrades(_find_upgrades(data_hex, target, via="", depth=0))
+
+
+def dedupe_upgrades(upgrades: list[ProxyUpgrade]) -> list[ProxyUpgrade]:
+    """Drop repeats of the same (proxy, new implementation), keeping the first.
+
+    A batch that both schedules and executes one timelock operation carries the
+    same upgrade twice; it should be reported — and diffed — once.
+    """
+    seen: set[tuple[str, str]] = set()
+    out: list[ProxyUpgrade] = []
+    for upgrade in upgrades:
+        key = (upgrade.proxy_address.lower(), upgrade.new_implementation.lower())
+        if key not in seen:
+            seen.add(key)
+            out.append(upgrade)
+    return out
+
+
+def _find_upgrades(data_hex: str, target: str, via: str, depth: int) -> list[ProxyUpgrade]:
+    direct = detect_proxy_upgrade(data_hex, target)
+    if direct:
+        return [replace(direct, via=via)]
+    if depth >= MAX_WRAPPER_DEPTH:
+        return []
+    found: list[ProxyUpgrade] = []
+    for inner in unwrap_calls(data_hex):
+        path = f"{via} → {inner.via}" if via else inner.via
+        found.extend(_find_upgrades(inner.data, inner.target, path, depth + 1))
+    return found
+
+
+def format_upgrade_lines(upgrade: ProxyUpgrade, target: str, chain_id: int) -> list[str]:
+    """Telegram alert lines for one upgrade: proxy, old → new implementation, diff link.
+
+    ``target`` is the call's own target. The proxy is named explicitly when it
+    differs — a ProxyAdmin-routed upgrade, or one nested inside a wrapper — so
+    recipients know which contract is changing.
+    """
+    lines: list[str] = []
+    if upgrade.proxy_address.lower() != target.lower():
+        suffix = f" (via {upgrade.via})" if upgrade.via else ""
+        lines.append(f"🅿️ Proxy: `{upgrade.proxy_address}`{suffix}")
+    old_impl = get_current_implementation(upgrade.proxy_address, chain_id)
+    new_impl = upgrade.new_implementation
+    if not old_impl:
+        lines.append(f"🔄 New impl: `{new_impl}`")
+        return lines
+    lines.append(f"🔄 Upgrade: `{old_impl}` → `{new_impl}`")
+    diff_url = build_diff_url(old_impl, new_impl, chain_id)
+    if diff_url:
+        lines.append(f"📊 [Diff]({diff_url})")
+    return lines
 
 
 # EIP-1167 minimal proxy (clone) runtime bytecode: a fixed 10-byte prefix, the
