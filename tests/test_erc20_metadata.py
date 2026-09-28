@@ -102,5 +102,65 @@ class TestFetchErc20Metadata(unittest.TestCase):
         self.assertEqual(client.eth.get_code.call_count, 1)
 
 
+# Runtime bytecode of a real Yearn V3 vault clone (yETH Recovery Vault).
+_VAULT_IMPL = "0xd8063123BBA3B480569244AE66BFE72B6c84b00d"
+_CLONE_CODE = bytes.fromhex("363d3d373d3d3d363d73" + _VAULT_IMPL[2:].lower() + "5af43d82803e903d91602b57fd5bf3")
+# Token bytecode that also dispatches name() (06fdde03).
+_NAMED_TOKEN_CODE = bytes.fromhex("608060405295d89b41313ce56706fdde03")
+
+
+class TestTokenName(unittest.TestCase):
+    """name() is read alongside symbol/decimals, and its failure is not fatal."""
+
+    def setUp(self) -> None:
+        reset_cache()
+
+    @patch("utils.erc20_metadata.ChainManager")
+    def test_reads_name_when_dispatched(self, mock_cm: MagicMock) -> None:
+        client = _client_with_code(_NAMED_TOKEN_CODE)
+        client.execute_batch.return_value = ("yvWETH-2", 18, "WETH-2 yVault")
+        mock_cm.get_client.return_value = client
+        meta = fetch_erc20_metadata(1, USDC)
+        self.assertEqual(meta, ERC20Metadata(symbol="yvWETH-2", decimals=18, name="WETH-2 yVault"))
+
+    @patch("utils.erc20_metadata.ChainManager")
+    def test_name_failure_falls_back_to_symbol_and_decimals(self, mock_cm: MagicMock) -> None:
+        """A bytes32 name (MKR) fails to decode; the token must keep its symbol/decimals."""
+        client = _client_with_code(_NAMED_TOKEN_CODE)
+        client.execute_batch.side_effect = [ValueError("could not decode name"), ("MKR", 18)]
+        mock_cm.get_client.return_value = client
+        self.assertEqual(fetch_erc20_metadata(1, USDC), ERC20Metadata(symbol="MKR", decimals=18))
+
+    @patch("utils.erc20_metadata.ChainManager")
+    def test_skips_name_when_not_dispatched(self, mock_cm: MagicMock) -> None:
+        client = _client_with_code(_TOKEN_CODE)
+        mock_cm.get_client.return_value = client
+        self.assertEqual(fetch_erc20_metadata(1, USDC), ERC20Metadata(symbol="USDC", decimals=6))
+        self.assertEqual(client.execute_batch.call_count, 1)
+
+
+class TestMinimalProxyClone(unittest.TestCase):
+    """EIP-1167 clones (every Yearn V3 vault) resolve through their embedded implementation."""
+
+    def setUp(self) -> None:
+        reset_cache()
+
+    @patch("utils.erc20_metadata.get_current_implementation")
+    @patch("utils.erc20_metadata.ChainManager")
+    def test_clone_resolves_to_embedded_implementation(self, mock_cm: MagicMock, mock_impl: MagicMock) -> None:
+        clone = "0xd7a540ba3626c0aa66e7DB4088971d0CD64695B6"
+
+        def code_for(addr: str) -> bytes:
+            return _TOKEN_CODE if addr.lower() == _VAULT_IMPL.lower() else _CLONE_CODE
+
+        client = _client_with_code(_CLONE_CODE)
+        client.eth.get_code.side_effect = code_for
+        mock_cm.get_client.return_value = client
+
+        self.assertEqual(fetch_erc20_metadata(1, clone), ERC20Metadata(symbol="USDC", decimals=6))
+        # The clone's bytecode names the implementation; no slot or getter probing.
+        mock_impl.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -278,6 +278,8 @@ def simulate_bundle(
         logger.exception("Failed to parse Tenderly bundle simulation response")
         return None
     if not results:
-        logger.error("Tenderly bundle simulation returned no results")
+        # Tenderly reports request-level problems (quota, bad network id) in an
+        # `error` object on a 200 response; log it so a fallback is diagnosable.
+        logger.error("Tenderly bundle simulation returned no results: %s", str(data.get("error") or data)[:300])
         return None
     return (results + [None] * len(calls))[: len(calls)]
