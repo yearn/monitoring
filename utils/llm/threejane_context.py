@@ -10,23 +10,34 @@ TimelockControllers, and both call shapes arrive at the LLM as opaque data:
   swap the Merkle root, but whether a claim mints new supply or transfers an
   existing balance lives in ``useMint`` — state the calldata never carries.
 
+Account-level actions (LCC bounces, USD3 supply-cap exemptions) live in
+``threejane_account_context``; this module dispatches to it.
+
 This adapter is deliberately narrow: it runs only for 3Jane on Ethereum,
 identifies contracts from their verified ABI, reverses known hashed labels from
 a checked-in name table, and reads the surrounding state on-chain.
 """
 
 from dataclasses import dataclass
-from functools import lru_cache
 
 from eth_utils import keccak, to_checksum_address
 
-from utils.abi import load_abi
 from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
 from utils.erc20_metadata import fetch_erc20_metadata
 from utils.llm.report import address_link
+from utils.llm.threejane_abi import exposes, threejane_abi
+from utils.llm.threejane_abi import reset_cache as reset_abi_cache
+from utils.llm.threejane_account_context import (
+    USD3_ADDRESS,
+    AccountContext,
+    TokenUnit,
+    fetch_token_unit,
+    format_account_prompt,
+    format_account_report,
+    resolve_account_contexts,
+)
 from utils.logger import get_logger
-from utils.source_context import fetch_abi_entries
 from utils.web3_wrapper import ChainManager
 
 logger = get_logger("utils.llm.threejane_context")
@@ -78,7 +89,7 @@ _HASHED_LABELS: dict[str, str] = {
     "SUSD3_COOLDOWN_PERIOD": "sUSD3 cooldown period in seconds",
     "SUSD3_WITHDRAWAL_WINDOW": "seconds after cooldown during which sUSD3 can be withdrawn",
     "USD3_COMMITMENT_TIME": "USD3 deposit commitment period in seconds",
-    "USD3_SUPPLY_CAP": "cap on USD3 supply in asset units",
+    "USD3_SUPPLY_CAP": "cap on USD3 totalAssets, in the vault's asset",
     "FULL_MARKDOWN_DURATION": "seconds over which a defaulted loan is marked down to zero",
     # --- Roles (Jane token, EmergencyController, MorphoCredit) ---
     "OWNER_ROLE": "owner role: manages all other roles and contract parameters",
@@ -92,30 +103,35 @@ _LABELS_BY_HASH: dict[str, tuple[str, str]] = {
     "0x" + keccak(text=name).hex(): (name, note) for name, note in _HASHED_LABELS.items()
 }
 
-ABI_DIR = "protocols/3jane/abi"
-
-
-@lru_cache(maxsize=None)
-def _abi(name: str) -> list[dict]:
-    """Load a checked-in 3Jane ABI once per process.
-
-    Lazily, not at import: this module sits in the explainer's import chain, and
-    a missing or unreadable file should degrade one protocol's context rather
-    than break every AI alert.
-    """
-    entries: list[dict] = load_abi(f"{ABI_DIR}/{name}.json")
-    return entries
-
-
 _MINTER_ROLE = keccak(text="MINTER_ROLE")
 
+
+@dataclass(frozen=True)
+class _UsageRead:
+    """An ERC4626 whose totalAssets a config key caps, and how the cap is enforced."""
+
+    vault_address: str
+    label: str
+    enforcement: str
+
+
 # A cap only reads as slack or binding next to what it is capping. USD3's cap
-# and its totalAssets are both denominated in the vault's 6-decimal asset, so
-# the two are directly comparable; DEBT_CAP is deliberately absent until its
-# denomination against the market's borrow accounting is confirmed.
-USD3_ADDRESS = "0x056B269Eb1f75477a8666ae8C7fE01b64dD55eCc"
-_USAGE_READS: dict[str, tuple[str, str, str]] = {
-    "0x" + keccak(text="USD3_SUPPLY_CAP").hex(): (USD3_ADDRESS, "ERC4626Vault", "USD3 totalAssets"),
+# and its totalAssets are both denominated in the vault's asset (USDC), so the
+# two are directly comparable and both render in that asset's units; DEBT_CAP is
+# deliberately absent until its denomination against the market's borrow
+# accounting is confirmed. The enforcement note is read from USD3's
+# availableDepositLimit — without it the model hedged that totalAssets might not
+# be the measure the cap checks.
+_USAGE_READS: dict[str, _UsageRead] = {
+    "0x" + keccak(text="USD3_SUPPLY_CAP").hex(): _UsageRead(
+        vault_address=USD3_ADDRESS,
+        label="USD3 totalAssets",
+        enforcement=(
+            "USD3.availableDepositLimit compares this cap directly against USD3 totalAssets and allows new deposits "
+            "only up to the difference. supplyCapExempt accounts skip that check. Exempt deposits and accrued "
+            "interest can both carry totalAssets above the cap; which one did so here is not known."
+        ),
+    ),
 }
 
 _DISTRIBUTOR_GETTERS = {"useMint", "merkleRoot", "jane", "maxClaimable", "totalClaimed", "epochEmissions"}
@@ -135,6 +151,30 @@ class HashedLabelContext:
     # What the key is capping, when the two are denominated the same way.
     usage_label: str = ""
     current_usage: int | None = None
+    # Token the key's value is denominated in, when verified; None leaves values raw.
+    unit: TokenUnit | None = None
+    # Values this transaction's setConfig calls write for the key, in call order.
+    proposed_values: tuple[int, ...] = ()
+    usage_enforcement: str = ""
+
+    def value_text(self, raw: int) -> str:
+        """A config value in its verified unit with the raw integer beside it, else raw alone."""
+        return f"{self.unit.amount(raw)} (raw {raw})" if self.unit else str(raw)
+
+    def usage_lines(self) -> list[str]:
+        """Where the capped quantity stands against the current cap and each proposed one."""
+        if self.current_usage is None or self.unit is None:
+            return []
+        usage = self.current_usage
+        lines = [f"{self.usage_label} right now: {self.value_text(usage)}"]
+        for label, cap in [("current", self.current_value), *(("proposed", value) for value in self.proposed_values)]:
+            if cap is None:
+                continue
+            if usage > cap:
+                lines.append(f"Against the {label} cap: above it by {self.unit.amount(usage - cap)}")
+            else:
+                lines.append(f"Against the {label} cap: {self.unit.amount(cap - usage)} of headroom")
+        return lines
 
     @property
     def addresses(self) -> list[str]:
@@ -226,49 +266,7 @@ class RewardsDistributorContext:
         return f"0.{tenths} {self.token_symbol}" if tenths else f"<0.1 {self.token_symbol}"
 
 
-ThreeJaneContext = HashedLabelContext | RewardsDistributorContext
-
-
-def _abi_function_names(entries: list[dict]) -> frozenset[str]:
-    """Function names present in a verified ABI."""
-    return frozenset(
-        str(entry.get("name")) for entry in entries if entry.get("type") == "function" and entry.get("name")
-    )
-
-
-@lru_cache(maxsize=64)
-def _own_function_names(chain_id: int, address: str) -> frozenset[str]:
-    """Function names on the address's own verified ABI. No RPC — Etherscan is cached."""
-    return _abi_function_names(fetch_abi_entries(chain_id, address) or [])
-
-
-@lru_cache(maxsize=64)
-def _implementation_function_names(chain_id: int, address: str) -> frozenset[str]:
-    """Function names behind an EIP-1967 proxy, or empty when there is no proxy.
-
-    Cached because one alert probes the same target for several shapes — the
-    slot read is identical every time, and one governance transaction cannot
-    change the implementation it is still only scheduled against.
-    """
-    from utils.proxy import get_current_implementation
-
-    implementation = get_current_implementation(address, chain_id)
-    if not implementation or implementation.lower() == address.lower():
-        return frozenset()
-    return _abi_function_names(fetch_abi_entries(chain_id, implementation) or [])
-
-
-def _exposes(chain_id: int, address: str, wanted: set[str]) -> bool:
-    """Whether a contract exposes every wanted getter, following EIP-1967.
-
-    3Jane's ProtocolConfig and MorphoCredit sit behind transparent proxies, so
-    the address's own verified ABI lists the proxy's functions, not `config` or
-    the distributor getters. The implementation is only read when the proxy ABI
-    comes up short, and then only once per address.
-    """
-    if wanted.issubset(_own_function_names(chain_id, address)):
-        return True
-    return wanted.issubset(_implementation_function_names(chain_id, address))
+ThreeJaneContext = HashedLabelContext | RewardsDistributorContext | AccountContext
 
 
 def _as_hex32(value: object) -> str | None:
@@ -292,6 +290,19 @@ def _bytes32_arguments(call: DecodedCall) -> list[str]:
     return hexes
 
 
+def _proposed_config_values(calls: list[DecodedCall]) -> dict[str, tuple[int, ...]]:
+    """Values each setConfig(bytes32,uint256) call writes, keyed by the normalized key hash."""
+    proposed: dict[str, list[int]] = {}
+    for call in calls:
+        if call.function_name != "setConfig" or len(call.params) != 2:
+            continue
+        (key_type, key), (value_type, value) = call.params
+        as_hex = _as_hex32(key) if key_type == "bytes32" else None
+        if as_hex and value_type.startswith("uint") and isinstance(value, int):
+            proposed.setdefault(as_hex, []).append(int(value))
+    return {key: tuple(values) for key, values in proposed.items()}
+
+
 def _proposed_emissions(calls: list[DecodedCall]) -> list[tuple[int, int]]:
     """(epoch, emissions) pairs each setEpochEmissions call proposes."""
     proposed = []
@@ -311,27 +322,48 @@ def _requested_epochs(calls: list[DecodedCall], current_epoch: int) -> list[int]
     return [epoch for epoch, _ in _proposed_emissions(calls)] or [current_epoch]
 
 
-def _read_config_state(chain_id: int, target: str, keys: list[str]) -> tuple[dict[str, int], dict[str, int]]:
+@dataclass(frozen=True)
+class _ConfigState:
+    """Config values plus, for capping keys, the capped quantity and its unit."""
+
+    values: dict[str, int]
+    usage: dict[str, int]
+    units: dict[str, TokenUnit]
+
+
+def _read_config_state(chain_id: int, target: str, keys: list[str]) -> _ConfigState:
     """Read config values, plus what any capped quantity currently stands at.
 
     Both come back in one batched request: a cap read without its usage costs
     the same round trip and leaves the reader unable to tell a routine ceiling
-    raise from one that unblocks a queue.
+    raise from one that unblocks a queue. The capped vault's asset() comes back
+    in the same batch, so both numbers render in that asset's units rather than
+    as 14-digit integers.
     """
     client = ChainManager.get_client(Chain.from_chain_id(chain_id))
-    contract = client.get_contract(to_checksum_address(target), _abi("ProtocolConfig"))
+    contract = client.get_contract(to_checksum_address(target), threejane_abi("ProtocolConfig"))
     usage_keys = [key for key in keys if key in _USAGE_READS]
     with client.batch_requests() as batch:
         for key in keys:
             batch.add(contract.functions.config(bytes.fromhex(key[2:])))
         for key in usage_keys:
-            address, abi_name, _ = _USAGE_READS[key]
-            batch.add(client.get_contract(to_checksum_address(address), _abi(abi_name)).functions.totalAssets())
+            vault = client.get_contract(
+                to_checksum_address(_USAGE_READS[key].vault_address), threejane_abi("ERC4626Vault")
+            )
+            batch.add(vault.functions.totalAssets())
+            batch.add(vault.functions.asset())
         results = client.execute_batch(batch)
 
     values = {key: int(value) for key, value in zip(keys, results[: len(keys)])}
-    usage = {key: int(value) for key, value in zip(usage_keys, results[len(keys) :])}
-    return values, usage
+    usage_results = results[len(keys) :]
+    usage: dict[str, int] = {}
+    units: dict[str, TokenUnit] = {}
+    for index, key in enumerate(usage_keys):
+        usage[key] = int(usage_results[2 * index])
+        unit = fetch_token_unit(chain_id, str(usage_results[2 * index + 1]))
+        if unit is not None:
+            units[key] = unit
+    return _ConfigState(values=values, usage=usage, units=units)
 
 
 def _resolve_hashed_labels(chain_id: int, target: str, calls: list[DecodedCall]) -> list[HashedLabelContext]:
@@ -341,18 +373,19 @@ def _resolve_hashed_labels(chain_id: int, target: str, calls: list[DecodedCall])
     if not known:
         return []
 
-    is_config_key = _exposes(chain_id, target, {"config"})
-    values: dict[str, int] = {}
-    usage: dict[str, int] = {}
+    is_config_key = exposes(chain_id, target, {"config"})
+    state = _ConfigState(values={}, usage={}, units={})
     if is_config_key:
         try:
-            values, usage = _read_config_state(chain_id, target, known)
+            state = _read_config_state(chain_id, target, known)
         except Exception as error:  # noqa: BLE001 - the name alone is still useful
             logger.info("3Jane config read failed for %s: %s", target, error)
 
+    proposed = _proposed_config_values(calls) if is_config_key else {}
     contexts = []
     for as_hex in known:
         name, note = _LABELS_BY_HASH[as_hex]
+        usage_read = _USAGE_READS.get(as_hex)
         contexts.append(
             HashedLabelContext(
                 target=to_checksum_address(target),
@@ -360,9 +393,12 @@ def _resolve_hashed_labels(chain_id: int, target: str, calls: list[DecodedCall])
                 name=name,
                 note=note,
                 is_config_key=is_config_key,
-                current_value=values.get(as_hex),
-                usage_label=_USAGE_READS[as_hex][2] if as_hex in _USAGE_READS else "",
-                current_usage=usage.get(as_hex),
+                current_value=state.values.get(as_hex),
+                usage_label=usage_read.label if usage_read else "",
+                current_usage=state.usage.get(as_hex),
+                unit=state.units.get(as_hex),
+                proposed_values=proposed.get(as_hex, ()),
+                usage_enforcement=usage_read.enforcement if usage_read else "",
             )
         )
     return contexts
@@ -370,12 +406,12 @@ def _resolve_hashed_labels(chain_id: int, target: str, calls: list[DecodedCall])
 
 def _read_distributor_context(chain_id: int, target: str, calls: list[DecodedCall]) -> RewardsDistributorContext | None:
     """Read distribution mode, claim accounting, and emission history for a distributor."""
-    if not _exposes(chain_id, target, _DISTRIBUTOR_GETTERS):
+    if not exposes(chain_id, target, _DISTRIBUTOR_GETTERS):
         return None
 
     client = ChainManager.get_client(Chain.from_chain_id(chain_id))
     address = to_checksum_address(target)
-    distributor = client.get_contract(address, _abi("RewardsDistributor"))
+    distributor = client.get_contract(address, threejane_abi("RewardsDistributor"))
     with client.batch_requests() as batch:
         batch.add(distributor.functions.useMint())
         batch.add(distributor.functions.merkleRoot())
@@ -408,7 +444,7 @@ def _read_distributor_context(chain_id: int, target: str, calls: list[DecodedCal
             if epoch - offset >= 0
         }
     )
-    token = client.get_contract(token_address, _abi("Jane"))
+    token = client.get_contract(token_address, threejane_abi("Jane"))
     with client.batch_requests() as batch:
         batch.add(token.functions.totalSupply())
         batch.add(token.functions.balanceOf(address))
@@ -462,6 +498,7 @@ def resolve_threejane_context(
             if distributor is not None:
                 contexts.append(distributor)
             contexts.extend(_resolve_hashed_labels(chain_id, target, calls))
+            contexts.extend(resolve_account_contexts(chain_id, target, calls))
         except Exception as error:  # noqa: BLE001 - enrichment must never block an alert
             logger.info("3Jane context resolution failed for %s: %s", target, error)
     return contexts
@@ -527,18 +564,32 @@ def format_threejane_prompt(contexts: list[ThreeJaneContext]) -> str:
                     ]
                 )
             )
+        elif isinstance(context, HashedLabelContext):
+            sections.append(_hashed_label_prompt(context))
         else:
-            line = f'bytes32 {context.argument_hex} on {context.target} = keccak256("{context.name}") — {context.note}'
-            if context.is_config_key:
-                value = "not readable" if context.current_value is None else str(context.current_value)
-                line += f"; value stored on-chain right now: {value}"
-            if context.current_usage is not None:
-                line += (
-                    f"; {context.usage_label} right now: {context.current_usage} "
-                    "(same units as the key, so the two are directly comparable)"
-                )
-            sections.append(line)
+            sections.append(format_account_prompt(context))
     return "\n\n".join(sections)
+
+
+def _hashed_label_prompt(context: HashedLabelContext) -> str:
+    """One hashed label: its name, and for a config key its value before and after."""
+    line = f'bytes32 {context.argument_hex} on {context.target} = keccak256("{context.name}") — {context.note}'
+    if context.unit is not None:
+        line += f" (denominated in {context.unit.symbol}, {context.unit.decimals} decimals, {context.unit.address})"
+    if context.is_config_key:
+        value = "not readable" if context.current_value is None else context.value_text(context.current_value)
+        line += f"; value stored on-chain right now: {value}"
+        for proposed in context.proposed_values:
+            line += f"; this transaction sets it to: {context.value_text(proposed)}"
+    if context.current_usage is not None and context.unit is None:
+        line += (
+            f"; {context.usage_label} right now: {context.current_usage} "
+            "(same units as the key, so the two are directly comparable)"
+        )
+    lines = [line, *context.usage_lines()]
+    if context.usage_enforcement:
+        lines.append(context.usage_enforcement)
+    return "\n".join(lines)
 
 
 def format_threejane_report(
@@ -579,24 +630,39 @@ def format_threejane_report(
             lines.extend(f"  - Epoch `{epoch}`: `{context.amount(value)}`" for epoch, value in context.epoch_emissions)
             lines.extend(f"- **Proposed:** {line}" for line in context.cadence_lines())
             sections.append("\n".join(lines))
+        elif isinstance(context, HashedLabelContext):
+            sections.append(_hashed_label_report(context, chain_id, labels))
         else:
-            lines = [
-                f'- **`{context.argument_hex}`** = `keccak256("{context.name}")` — {context.note}',
-                f"  - Target: {address_link(context.target, chain_id, labels)}",
-            ]
-            if context.is_config_key:
-                value = "not readable" if context.current_value is None else f"`{context.current_value:,}`"
-                lines.append(f"  - Value stored on-chain right now: {value}")
-            if context.current_usage is not None:
-                lines.append(
-                    f"  - {context.usage_label} right now: `{context.current_usage:,}` (same units as the key)"
-                )
-            sections.append("\n".join(lines))
+            sections.append(format_account_report(context, chain_id, labels))
     return "\n\n".join(sections)
+
+
+def _report_value(context: HashedLabelContext, raw: int) -> str:
+    """A config value for the gist: in its unit when verified, else the grouped raw integer."""
+    return f"`{context.unit.amount(raw)}`" if context.unit else f"`{raw:,}`"
+
+
+def _hashed_label_report(context: HashedLabelContext, chain_id: int, labels: dict[str, str]) -> str:
+    """The gist bullet for one hashed label."""
+    lines = [
+        f'- **`{context.argument_hex}`** = `keccak256("{context.name}")` — {context.note}',
+        f"  - Target: {address_link(context.target, chain_id, labels)}",
+    ]
+    if context.is_config_key:
+        value = "not readable" if context.current_value is None else _report_value(context, context.current_value)
+        lines.append(f"  - Value stored on-chain right now: {value}")
+        lines.extend(
+            f"  - Set by this transaction to: {_report_value(context, raw)}" for raw in context.proposed_values
+        )
+    if context.current_usage is not None:
+        suffix = "" if context.unit else " (same units as the key)"
+        lines.append(f"  - {context.usage_label} right now: {_report_value(context, context.current_usage)}{suffix}")
+        lines.extend(f"  - {line}" for line in context.usage_lines()[1:])
+    if context.usage_enforcement:
+        lines.append(f"  - {context.usage_enforcement}")
+    return "\n".join(lines)
 
 
 def reset_cache() -> None:
     """Reset process caches for tests or long-running workers."""
-    _abi.cache_clear()
-    _own_function_names.cache_clear()
-    _implementation_function_names.cache_clear()
+    reset_abi_cache()

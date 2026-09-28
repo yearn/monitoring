@@ -7,6 +7,7 @@ from eth_utils import function_signature_to_4byte_selector
 from eth_utils import to_checksum_address as _cs
 
 from utils.proxy import (
+    EIP1967_BEACON_SLOT,
     EIP1967_IMPL_SLOT,
     ZEPPELINOS_IMPL_SLOT,
     ProxyUpgrade,
@@ -128,13 +129,22 @@ class TestGetCurrentImplementation(unittest.TestCase):
             return bytes(32)
         return bytes(12) + bytes.fromhex(addr[2:])
 
-    def _run(self, slot_values: dict[int, str | None], getter_addr: str | None = None) -> str | None:
+    def _run(
+        self,
+        slot_values: dict[int, str | None],
+        getter_addr: str | None = None,
+        getters_by_address: dict[str, str] | None = None,
+    ) -> str | None:
         from unittest.mock import MagicMock, patch
 
         client = MagicMock()
         client.eth.get_storage_at.side_effect = lambda _addr, slot: self._slot_word(slot_values.get(slot))
-        # eth.call backs the impl-getter fallback (implementation() etc.).
-        client.eth.call.return_value = self._slot_word(getter_addr)
+        # eth.call backs the impl-getter fallback (implementation() etc.); keyed by
+        # callee when a test needs to tell the proxy's getter from the beacon's.
+        if getters_by_address is None:
+            client.eth.call.return_value = self._slot_word(getter_addr)
+        else:
+            client.eth.call.side_effect = lambda tx: self._slot_word(getters_by_address.get(tx["to"]))
         with patch("utils.web3_wrapper.ChainManager.get_client", return_value=client):
             return get_current_implementation("0x" + "ab" * 20, chain_id=1)
 
@@ -155,6 +165,29 @@ class TestGetCurrentImplementation(unittest.TestCase):
         eip = _cs("0x" + "11" * 20)
         result = self._run({EIP1967_IMPL_SLOT: eip, ZEPPELINOS_IMPL_SLOT: _cs("0x" + "22" * 20)})
         self.assertEqual(result, eip)
+
+    def test_follows_beacon_to_its_implementation(self) -> None:
+        beacon = _cs("0x" + "44" * 20)
+        impl = _cs("0x" + "55" * 20)
+        # The proxy itself answers implementation() with nothing; only the beacon knows.
+        result = self._run({EIP1967_BEACON_SLOT: beacon}, getters_by_address={beacon: impl})
+        self.assertEqual(result, impl)
+
+    def test_beacon_without_getter_returns_none(self) -> None:
+        # A beacon that answers no getter must not fall back to reading the proxy's own.
+        proxy_getter = _cs("0x" + "66" * 20)
+        beacon = _cs("0x" + "44" * 20)
+        result = self._run({EIP1967_BEACON_SLOT: beacon}, getters_by_address={_cs("0x" + "ab" * 20): proxy_getter})
+        self.assertIsNone(result)
+
+    def test_impl_slot_takes_precedence_over_beacon(self) -> None:
+        impl = _cs("0x" + "11" * 20)
+        beacon = _cs("0x" + "44" * 20)
+        result = self._run(
+            {EIP1967_IMPL_SLOT: impl, EIP1967_BEACON_SLOT: beacon},
+            getters_by_address={beacon: _cs("0x" + "55" * 20)},
+        )
+        self.assertEqual(result, impl)
 
     def test_returns_none_when_nothing_resolves(self) -> None:
         self.assertIsNone(self._run({}, getter_addr=None))

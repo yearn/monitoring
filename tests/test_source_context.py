@@ -59,6 +59,49 @@ class TestExtractFunctionSnippet(unittest.TestCase):
         self.assertIn("function bareFunction()", snippet)
 
 
+# Implementation listed before its interface, as Etherscan bundles often are, with a
+# decoy interface declaring the same name so the lookup must honor the tag's type.
+_INHERITDOC_SOURCE = """
+contract Vault is IVault {
+    /// @inheritdoc IVault
+    function bounce(address user, uint256 commitment) external returns (uint256) {
+        return commitment;
+    }
+}
+
+interface IOther {
+    /// @notice Wrong interface — must not be picked.
+    function bounce(address user, uint256 commitment) external returns (uint256);
+}
+
+interface IVault {
+    /// @notice Removes a user's commitment.
+    /// @param commitment Nominal active commitment to remove (fundingAsset).
+    function bounce(address user, uint256 commitment) external returns (uint256);
+}
+"""
+
+
+class TestInheritdocResolution(unittest.TestCase):
+    def test_replaces_inheritdoc_with_interface_natspec(self) -> None:
+        snippet = _extract_function_snippet(_INHERITDOC_SOURCE, "bounce")
+        self.assertIn("@param commitment Nominal active commitment to remove (fundingAsset).", snippet)
+        self.assertNotIn("@inheritdoc", snippet)
+        self.assertNotIn("Wrong interface", snippet)
+        # The signature still comes from the implementation.
+        self.assertIn("function bounce(address user, uint256 commitment) external returns (uint256) {", snippet)
+
+    def test_keeps_inheritdoc_when_interface_is_missing(self) -> None:
+        source = _INHERITDOC_SOURCE.replace("interface IVault", "interface IElsewhere")
+        snippet = _extract_function_snippet(source, "bounce")
+        self.assertIn("/// @inheritdoc IVault", snippet)
+
+    def test_does_not_follow_a_second_inheritdoc(self) -> None:
+        source = _INHERITDOC_SOURCE.replace("/// @notice Removes a user's commitment.", "/// @inheritdoc IBase")
+        snippet = _extract_function_snippet(source, "bounce")
+        self.assertIn("/// @inheritdoc IVault", snippet)
+
+
 class TestExtractFunctionBody(unittest.TestCase):
     def test_extracts_body(self) -> None:
         body = _extract_function_body(INFINIFI_FARM_SOURCE, "setMaxSlippage")

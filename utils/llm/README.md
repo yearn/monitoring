@@ -63,10 +63,10 @@ Result: `DecodedCall(function_name="upgradeTo", signature="upgradeTo(address)", 
 
 For each `(target, function)` pair, fetches the verified Solidity source via the Etherscan v2 multichain API and extracts:
 
-- The function's preceding natspec block + signature line
+- The function's preceding natspec block + signature line. A bare `/// @inheritdoc IFoo` is replaced by the natspec on `IFoo`'s declaration of the same function, found in the same verified bundle — implementations routinely keep every parameter's units in the interface
 - Declarations + natspec for state variables the function writes
 
-If the function isn't found in the target's source (e.g., the target is an `ERC1967Proxy` / `TransparentUpgradeableProxy`), follows the EIP-1967 implementation slot and retries against the impl source. Caches per `(chain_id, address)` for the workflow run.
+If the function isn't found in the target's source (e.g., the target is an `ERC1967Proxy` / `TransparentUpgradeableProxy` / `BeaconProxy`), resolves the implementation (`utils/proxy.get_current_implementation`) and retries against the impl source. Caches per `(chain_id, address)` for the workflow run.
 
 Requires `ETHERSCAN_TOKEN`. Failures degrade gracefully — no `--- Contract Source Context ---` section is added.
 
@@ -107,7 +107,7 @@ Distinct mapping keys are kept: two `setCap(address,uint256)` calls for differen
 Simulates the transaction against current on-chain state to get:
 
 - **Success/failure** status and gas used
-- **Token transfers** (ERC-20 balance changes)
+- **Token transfers** (ERC-20 balance changes). The explainer swaps each transfer's symbol for the token's own on-chain `symbol()` (`_with_onchain_symbols`): Tenderly lowercases symbols it has no curated entry for (`waethusdc` for waEthUSDC), and the model copied them into alerts verbatim
 - **State changes** (storage slot diffs)
 - **Emitted events** (decoded log entries)
 
@@ -133,7 +133,7 @@ For the ProxyAdmin pattern, the tx target is the ProxyAdmin and the actual proxy
 
 When an upgrade is detected the pipeline:
 
-1. Reads the **current implementation** from the EIP-1967 storage slot (`0x360894a...`) of the proxy, falling back to the legacy zeppelinos slot (`0x7050c9e...`) for pre-EIP-1967 proxies like USDC's `FiatTokenProxy`.
+1. Reads the **current implementation** from the EIP-1967 storage slot (`0x360894a...`) of the proxy, falling back to the legacy zeppelinos slot (`0x7050c9e...`) for pre-EIP-1967 proxies like USDC's `FiatTokenProxy`, then to the EIP-1967 beacon slot (`0xa3f0ad7...`) followed by the beacon's `implementation()`, then to `implementation()` / `comptrollerImplementation()` on the proxy itself. Every proxy-follow path (source context, parameter names, labels, state reads, ABI probes) goes through this one resolver — before beacon support, a `BeaconProxy` target (3Jane's per-facility `LCCVault`s) left the model with no source, no parameter names and the label "BeaconProxy".
 2. Builds an Etherscan diff URL: `etherscan.io/contractdiffchecker?a1=old&a2=new`.
 3. Fetches the verified record of **both** implementations (`utils/verified_contract.py`) and diffs them (`utils/impl_diff.py`) in four separated categories, each line carrying the contract and file it came from:
    - **External ABI changes** (`utils/abi_surface.py`) — additions, removals and `stateMutability` changes keyed by canonical signature (`setCaps((bytes32,uint128)[])`), derived from each implementation's own ABI. Generated public getters are included naturally; interfaces, comments, and internal/private functions never are.
@@ -210,19 +210,21 @@ Onboarding a chain to Infinifi's cross-chain Outland spans several contracts who
 
 Contracts are identified by the functions their verified ABI exposes (`utils/llm/abi_exposure.py`, following EIP-1967), not by hard-coded addresses. Failures are best-effort and never block the governance alert.
 
-### 5f. 3Jane Governance Context (`utils/llm/threejane_context.py`)
+### 5f. 3Jane Governance Context (`utils/llm/threejane_context.py`, `threejane_account_context.py`)
 
-Both 3Jane timelocks schedule calls that arrive as opaque data. `ProtocolConfig.setConfig(bytes32,uint256)` names the parameter it changes only by `keccak256("<NAME>")`, and `RewardsDistributor.setEpochEmissions` / `updateRoot` allocate JANE without revealing whether a claim mints new supply or moves an existing balance.
+Both 3Jane timelocks schedule calls that arrive as opaque data. `ProtocolConfig.setConfig(bytes32,uint256)` names the parameter it changes only by `keccak256("<NAME>")`, `RewardsDistributor.setEpochEmissions` / `updateRoot` allocate JANE without revealing whether a claim mints new supply or moves an existing balance, and `LCCVault.bounceCommitment(user, commitment)` passes a bare integer whose unit lives in the vault's config.
 
 For 3Jane mainnet alerts, the adapter:
 
 1. Reverses every `bytes32` argument against a checked-in name table (`ProtocolConfig` keys plus the Jane / EmergencyController roles), so the prompt carries `keccak256("MAX_LTV")` and what that key controls instead of a bare hash. Hashes outside the table stay unresolved rather than being guessed at.
-2. Reads the current stored value for resolved `ProtocolConfig` keys, following EIP-1967 to the implementation ABI since the config sits behind a transparent proxy. Role hashes get no value line — there is nothing to read.
+2. Reads the current stored value for resolved `ProtocolConfig` keys, following the proxy to the implementation ABI since the config sits behind a transparent proxy, and pairs it with the value each `setConfig` in the transaction writes. Role hashes get no value line — there is nothing to read.
 3. Identifies a `RewardsDistributor` by its verified getters and reads `useMint`, the reward token's metadata and `totalSupply`, whether the distributor holds `MINTER_ROLE`, whether token transfers are globally enabled, `maxClaimable` / `totalClaimed`, the current `merkleRoot`, and the current epoch.
 4. Reads emissions already stored for the epoch being set and the three before it, and derives how the proposed allocation compares to the epoch before it, so a new allocation is judged against recent ones rather than called "substantial in absolute terms". Three consecutive weeks of this same operation had previously scored LOW, MEDIUM, MEDIUM.
-5. Renders a capping key beside the quantity it caps (`USD3_SUPPLY_CAP` next to USD3 `totalAssets`), batched into the config read, so a ceiling raise reads as slack or as unblocking deposits. `_USAGE_READS` holds only pairs whose denominations are known to match.
+5. Renders a capping key beside the quantity it caps (`USD3_SUPPLY_CAP` next to USD3 `totalAssets`), batched into the config read together with the vault's `asset()`, so cap, proposed cap and `totalAssets` all render in USDC ("80,000,000 → 100,000,000 USDC") with the headroom against both caps derived in code. It also states how the cap is enforced — `USD3.availableDepositLimit` compares it directly to `totalAssets`, and `supplyCapExempt` accounts skip the check — after the model hedged that `totalAssets` might not be the measure the cap checks. `_USAGE_READS` holds only pairs whose denominations are known to match.
+6. For `LCCVault.bounceCommitment(user, commitment)` (identified by its verified getters behind the beacon proxy), reads the vault's `assetConfig()` for the funding and margin assets, the user's `getAccount()`, `riskConfig().minDepositAssets` and vault `totals()`. It states the commitment in the funding asset, whether the bounce is full or partial, the pro-rata margin returned (`activeMargin × commitment / activeCommitment`, rounded down), the share of the vault's active commitment withdrawn, and — mirroring the function's own checks — whether it would revert against current state (exit in progress, pending deposit, amount above the active commitment, partial bounce below the minimum margin). A full ~$500k bounce had been summarized as "0.0000005 at 1e18".
+7. For `USD3.setSupplyCapExempt(account, bool)`, reads the account's current `supplyCapExempt` and `ringFenceConduit` flags, whether it has contract code, `minDeposit`, and USD3's cap and `totalAssets`. It states everything the flag bypasses (cap headroom, the first-deposit minimum, the waUSDC-paused block; self-deposit only) and what still applies (borrower block, zero cap), and notes when an exemption is granted without the ring-fence flag USD3's natspec pairs it with.
 
-Token amounts are truncated to whole tokens, matching the call flow's amount hints. Failures are best-effort and never block the governance alert.
+Distributor token amounts are truncated to whole tokens, matching the call flow's amount hints; USDC-denominated amounts render exactly. Shared ABI loading and verified-ABI probes live in `threejane_abi.py`. Failures are best-effort and never block the governance alert.
 
 ### 5g. Adapter Registry (`utils/llm/protocol_context.py`)
 
@@ -235,7 +237,8 @@ The prompt is split into a **system** prompt (static instructions) and a **user*
 - Starts with a verb, no "This transaction…" preamble
 - Trailing risk tag in caps (LOW / MEDIUM / HIGH / CRITICAL)
 - Summary is plain text (it goes to Telegram); the detail is markdown and must render **every address as a block-explorer hyperlink**, copied verbatim from the prompt's `--- Address Links ---` section so the model never assembles an explorer URL or picks the wrong chain's explorer
-- Refuses to assume parameter units from function name alone; uses the Related Tokens section's decimals when exactly one token resolves, and hedges only when zero or several do
+- Refuses to assume parameter units from function name alone; uses the Related Tokens section's decimals when exactly one token resolves, and hedges only when zero or several do. An ambiguous value is quoted raw — no assumed-scale figure such as "at 1e18" in the summary, where it read a ~500k USDC commitment as dust — with candidate decimals discussed only in the detail
+- Treats token-denominated amounts in the Protocol Context as authoritative, and the self-critique pass accepts them as supported units
 - Trusts source-context natspec over prior assumptions
 - Quotes concrete before→after deltas when state reads are available
 - Flags any divergence between a proposal's **stated intent** and the decoded actions
@@ -477,6 +480,8 @@ utils/llm/
 ├── openai_compat.py         # OpenAI-compatible provider (Venice, OpenAI, etc.)
 ├── protocol_context.py      # Registry fanning one call out to every protocol adapter
 ├── report.py                # Gist report: metadata header + deterministic call flow + analysis
+├── threejane_abi.py         # 3Jane checked-in ABIs + verified-ABI probes (proxy-aware)
+├── threejane_account_context.py # 3Jane LCC bounces and USD3 supply-cap exemptions
 ├── threejane_context.py     # 3Jane adapter: hashed config keys/roles, rewards distribution mode
 └── README.md                # This file
 
@@ -484,7 +489,7 @@ utils/related_tokens.py      # Token discovery from a contract's own zero-arg ad
 utils/source_context.py      # Etherscan v2 source fetch + natspec extractor + proxy follow
 utils/verified_contract.py   # Structured verified record: per-file sources, settings, ABI, target
 utils/on_chain_state.py      # Before-state reader (auto-generated getters, mappings, diamond storage)
-utils/proxy.py               # EIP-1967 impl slot read + proxy-upgrade detection (3 selectors)
+utils/proxy.py               # Impl resolution (EIP-1967, zeppelinos, beacon, getters) + proxy-upgrade detection
 utils/impl_diff.py           # Old-vs-new impl diff: ABI surface, bodies, storage, unvalidated items
 utils/abi_surface.py         # Canonical-signature external surface diff from two ABIs
 utils/solidity_text.py       # Brace-aware, contract-scoped scanning of one Solidity file

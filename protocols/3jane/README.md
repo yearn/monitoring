@@ -130,11 +130,14 @@ Only HIGH and CRITICAL alerts dispatch. LOW and MEDIUM alerts—including insura
 [Internal timelock monitoring](../timelock/README.md) covers CallScheduled events from the [3Jane 24-hour timelock](https://etherscan.io/address/0x1dccd4628d48a50c1a7adea3848bcc869f08f8c2) and [7-day upgrade timelock](https://etherscan.io/address/0x3d3c41419ab401cd25055e8f9421d7d96d887885) on Mainnet.
 
 Those alerts carry a 3Jane `Protocol Context` section built by
-[`utils/llm/threejane_context.py`](../../utils/llm/threejane_context.py):
+[`utils/llm/threejane_context.py`](../../utils/llm/threejane_context.py) and
+[`utils/llm/threejane_account_context.py`](../../utils/llm/threejane_account_context.py):
 
 - `bytes32` arguments are reversed to their `keccak256` pre-image, so a `setConfig` call names the parameter (`MAX_LTV`, `IS_PAUSED`, `DEBT_CAP`, …) and a `grantRole` names the role, each with what it controls. `ProtocolConfig` keys also carry the value stored on-chain right now.
 - `RewardsDistributor` calls carry the distribution mode (`useMint`), whether the distributor holds `MINTER_ROLE` on JANE, JANE supply and whether transfers are globally enabled, `maxClaimable` / `totalClaimed` / outstanding, the current `merkleRoot` and epoch, the emissions stored for the three preceding epochs, and how the proposed allocation compares to the epoch before it.
-- A key that caps a quantity is rendered next to that quantity — `USD3_SUPPLY_CAP` alongside USD3 `totalAssets`, batched into the same request — so a ceiling raise reads as slack or as unblocking deposits. Register more in `_USAGE_READS`, but only where both sides are denominated the same way.
+- A key that caps a quantity is rendered next to that quantity — `USD3_SUPPLY_CAP` alongside USD3 `totalAssets`, batched into the same request — so a ceiling raise reads as slack or as unblocking deposits. Cap, proposed cap and `totalAssets` render in USDC with the headroom against each, plus how `USD3.availableDepositLimit` enforces the cap and that exempt accounts skip it. Register more in `_USAGE_READS`, but only where both sides are denominated the same way.
+- `LCCVault.bounceCommitment` (per-facility vaults behind a beacon proxy) carries the commitment in the vault's funding asset, the user's active commitment and margin, whether the bounce is full or partial, the margin returned, the share of the vault's active commitment it withdraws, and whether it would revert against current state.
+- `USD3.setSupplyCapExempt` carries the account's current flags, whether it is an EOA, everything the exemption bypasses (cap headroom, first-deposit minimum, the waUSDC-paused block) and what still applies, and USD3 supply against the cap.
 
 Add a key or role to `_HASHED_LABELS` in that module when 3Jane introduces one; the hash is derived from the name, so the table cannot drift.
 
