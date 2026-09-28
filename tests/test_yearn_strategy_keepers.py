@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 from web3 import Web3
 
-from protocols.yearn import check_looper_keepers as mod
+from protocols.yearn import check_strategy_keepers as mod
 from utils.chains import Chain
 
 ETH_KEY = "coingecko:ethereum"
@@ -35,21 +35,23 @@ def _allowed_log(keeper: str, caller: str, allowed: bool, block: int, index: int
     }
 
 
-def test_select_loopers_filters_name_shutdown_and_unsupported_chains() -> None:
-    loopers = mod.select_loopers(
+def test_select_keeper_strategies_filters_name_shutdown_and_unsupported_chains() -> None:
+    selected = mod.select_keeper_strategies(
         [
             _strategy(LOOPER_A, "wstETH/WETH Spark Looper"),
             _strategy(LOOPER_A, "wstETH/WETH Spark Looper"),
             _strategy(LOOPER_B, "Katana vbUSDC Morpho LooperStrategy", chain_id=Chain.POLYGON.chain_id),
+            _strategy(LOOPER_C, "Morpho vbWBTC/yvUSDC Lender Borrower", chain_id=Chain.KATANA.chain_id),
             _strategy(LOOPER_C, "PT siUSD Morpho Looper", is_shutdown=True),
             _strategy(LOOPER_C, "USDC Lender"),
             _strategy(LOOPER_C, "spUSDG/USDG Morpho Looper", chain_id=4663),
         ]
     )
 
-    assert {chain: [looper.address for looper in items] for chain, items in loopers.items()} == {
+    assert {chain: [strategy.address for strategy in items] for chain, items in selected.items()} == {
         Chain.MAINNET: [Web3.to_checksum_address(LOOPER_A)],
         Chain.POLYGON: [Web3.to_checksum_address(LOOPER_B)],
+        Chain.KATANA: [Web3.to_checksum_address(LOOPER_C)],
     }
 
 
@@ -65,32 +67,51 @@ def test_latest_allowed_callers_replays_events_in_order() -> None:
 
 
 class FakeBatch:
-    def __init__(self) -> None:
+    def __init__(self, client: "FakeClient") -> None:
         self.calls: list = []
+        self._client = client
 
     def __enter__(self) -> "FakeBatch":
+        self._client.in_batch = True
         return self
 
     def __exit__(self, *args: object) -> None:
-        pass
+        self._client.in_batch = False
 
     def add(self, call: object) -> None:
         self.calls.append(call)
 
 
 class FakeClient:
-    """Web3Client stand-in whose calls resolve eagerly; batches just collect the results."""
+    """Web3Client stand-in whose calls resolve eagerly; batches just collect the results.
 
-    def __init__(self, keepers: dict[str, str], contracts: set[str], balances: dict[str, int], logs: list) -> None:
+    Like web3, a call is only batched when it is built inside ``batch_requests()``, so
+    every batchable call asserts it runs inside one.
+    """
+
+    def __init__(
+        self,
+        keepers: dict[str, str],
+        contracts: set[str],
+        balances: dict[str, int],
+        logs: list,
+        empty: frozenset[str] = frozenset(),
+    ) -> None:
         self.batches: list[list] = []
+        self.in_batch = False
         self.logs_requests: list[dict] = []
         self._keepers = {Web3.to_checksum_address(k): v for k, v in keepers.items()}
+        self._empty = {Web3.to_checksum_address(address) for address in empty}
         self.eth = SimpleNamespace(
-            get_code=lambda address: b"\x01" if address in contracts else b"",
-            get_balance=lambda address: balances[address],
+            get_code=lambda address: self._batched(b"\x01" if address in contracts else b""),
+            get_balance=lambda address: self._batched(balances[address]),
             get_logs=self._get_logs,
         )
         self._logs = logs
+
+    def _batched(self, value: object) -> object:
+        assert self.in_batch, "call built outside batch_requests() would run unbatched"
+        return value
 
     def _get_logs(self, params: dict) -> list:
         self.logs_requests.append(params)
@@ -98,10 +119,16 @@ class FakeClient:
 
     def get_contract(self, address: str, abi: list) -> SimpleNamespace:
         keeper = self._keepers[address]
-        return SimpleNamespace(functions=SimpleNamespace(keeper=lambda: SimpleNamespace(call=lambda: keeper)))
+        total_assets = 0 if address in self._empty else 10**18
+        return SimpleNamespace(
+            functions=SimpleNamespace(
+                keeper=lambda: SimpleNamespace(call=lambda: self._batched(keeper)),
+                totalAssets=lambda: SimpleNamespace(call=lambda: self._batched(total_assets)),
+            )
+        )
 
     def batch_requests(self) -> FakeBatch:
-        return FakeBatch()
+        return FakeBatch(self)
 
     def execute_batch(self, batch: FakeBatch) -> list:
         self.batches.append(batch.calls)
@@ -124,9 +151,9 @@ def test_collect_keeper_wallets_dedupes_and_batches(monkeypatch) -> None:
     monkeypatch.setattr(mod.ChainManager, "get_client", lambda chain: client)
     monkeypatch.setattr(mod, "EXTRA_KEEPER_CALLERS", {Chain.MAINNET: {KEEPER_CONTRACT: (KEEPER_EOA, BOT)}})
     loopers = [
-        mod.Looper(Chain.MAINNET, Web3.to_checksum_address(LOOPER_A), "A"),
-        mod.Looper(Chain.MAINNET, Web3.to_checksum_address(LOOPER_B), "B"),
-        mod.Looper(Chain.MAINNET, Web3.to_checksum_address(LOOPER_C), "C"),
+        mod.KeeperStrategy(Chain.MAINNET, Web3.to_checksum_address(LOOPER_A), "A"),
+        mod.KeeperStrategy(Chain.MAINNET, Web3.to_checksum_address(LOOPER_B), "B"),
+        mod.KeeperStrategy(Chain.MAINNET, Web3.to_checksum_address(LOOPER_C), "C"),
     ]
 
     result = mod.collect_keeper_wallets(Chain.MAINNET, loopers)
@@ -140,8 +167,8 @@ def test_collect_keeper_wallets_dedupes_and_batches(monkeypatch) -> None:
         BOT: 2 * 10**18,
     }
     assert result.keepers_without_callers == {}
-    # keeper(), keeper code, caller code, balances: one batch each, no repeated addresses.
-    assert [len(calls) for calls in client.batches] == [3, 2, 3, 2]
+    # keeper()+totalAssets(), keeper code, caller code, balances: one batch each, no repeated addresses.
+    assert [len(calls) for calls in client.batches] == [6, 2, 3, 2]
     assert client.logs_requests[0]["address"] == [KEEPER_CONTRACT]
 
 
@@ -156,11 +183,33 @@ def test_collect_keeper_wallets_flags_contract_keeper_with_only_multisig_callers
     monkeypatch.setattr(mod, "EXTRA_KEEPER_CALLERS", {})
 
     result = mod.collect_keeper_wallets(
-        Chain.MAINNET, [mod.Looper(Chain.MAINNET, Web3.to_checksum_address(LOOPER_A), "A")]
+        Chain.MAINNET, [mod.KeeperStrategy(Chain.MAINNET, Web3.to_checksum_address(LOOPER_A), "A")]
     )
 
     assert result.wallets == {}
     assert result.keepers_without_callers == {KEEPER_CONTRACT: {"A"}}
+
+
+def test_collect_keeper_wallets_skips_strategies_without_assets(monkeypatch) -> None:
+    client = FakeClient(
+        keepers={LOOPER_A: KEEPER_EOA, LOOPER_B: BOT},
+        contracts=set(),
+        balances={KEEPER_EOA: 10**18},
+        logs=[],
+        empty=frozenset({LOOPER_B}),
+    )
+    monkeypatch.setattr(mod.ChainManager, "get_client", lambda chain: client)
+
+    result = mod.collect_keeper_wallets(
+        Chain.KATANA,
+        [
+            mod.KeeperStrategy(Chain.KATANA, Web3.to_checksum_address(LOOPER_A), "A"),
+            mod.KeeperStrategy(Chain.KATANA, Web3.to_checksum_address(LOOPER_B), "B"),
+        ],
+    )
+
+    assert {address: wallet.strategies for address, wallet in result.wallets.items()} == {KEEPER_EOA: {"A"}}
+    assert client.logs_requests == []
 
 
 def _result(chain: Chain, balance_wei: int, without_callers: dict | None = None) -> mod.ChainResult:

@@ -62,7 +62,7 @@ profiles:
       - { name: "cap-status",              script: protocols/cap/status.py }
       - { name: "yearn-alert-large-flows", script: protocols/yearn/alert_large_flows.py }
       - { name: "yearn-alert-small-parent-flows", script: protocols/yearn/alert_small_parent_flows.py }
-      - { name: "yearn-check-looper-keepers", script: protocols/yearn/check_looper_keepers.py }
+      - { name: "yearn-check-strategy-keepers", script: protocols/yearn/check_strategy_keepers.py }
       # Cache: tks-trigger-cache.json under $CACHE_DIR (check_stuck_triggers.DEFAULT_CACHE_FILE).
       - { name: "yearn-check-stuck-triggers", script: protocols/yearn/check_stuck_triggers.py, enabled: false }
       - { name: "maple",                  script: protocols/maple/main.py, enabled: false }
