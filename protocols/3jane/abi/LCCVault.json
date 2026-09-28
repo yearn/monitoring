@@ -1,0 +1,218 @@
+[
+  {
+    "inputs": [],
+    "name": "assetConfig",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "address",
+            "name": "marginAsset",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "fundingAsset",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "usd3",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "notificationVault",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "marginOracle",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "treasury",
+            "type": "address"
+          }
+        ],
+        "internalType": "struct ILCCVault.AssetConfig",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      }
+    ],
+    "name": "getAccount",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint256",
+            "name": "activeMargin",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "activeCommitment",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "pendingMargin",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "pendingCommitment",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "pendingActivationEpoch",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "calledEpochCursor",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "claimableExitMargin",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "exitBucketMargin",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "exitBucketCommitment",
+            "type": "uint256"
+          },
+          {
+            "internalType": "bool",
+            "name": "exitRequested",
+            "type": "bool"
+          },
+          {
+            "internalType": "uint256",
+            "name": "exitMaturityEpoch",
+            "type": "uint256"
+          },
+          {
+            "internalType": "bool",
+            "name": "exitClaimed",
+            "type": "bool"
+          },
+          {
+            "internalType": "bool",
+            "name": "exitMatured",
+            "type": "bool"
+          },
+          {
+            "internalType": "uint256",
+            "name": "commitmentStartEpoch",
+            "type": "uint256"
+          }
+        ],
+        "internalType": "struct ILCCVault.Account",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "riskConfig",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint256",
+            "name": "protocolCommitmentCap",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "userCommitmentCap",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "exitCapBps",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "minDepositAssets",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "maxAuctionAwardBps",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "slashFeeBps",
+            "type": "uint256"
+          }
+        ],
+        "internalType": "struct ILCCVault.RiskConfig",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "totals",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint128",
+            "name": "activeMargin",
+            "type": "uint128"
+          },
+          {
+            "internalType": "uint128",
+            "name": "activeCommitment",
+            "type": "uint128"
+          },
+          {
+            "internalType": "uint128",
+            "name": "pendingMargin",
+            "type": "uint128"
+          },
+          {
+            "internalType": "uint128",
+            "name": "pendingCommitment",
+            "type": "uint128"
+          }
+        ],
+        "internalType": "struct ILCCVault.Totals",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]

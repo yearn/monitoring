@@ -7,11 +7,13 @@ from unittest.mock import patch
 from eth_utils import keccak
 
 from utils.calldata.decoder import DecodedCall
-from utils.llm import threejane_context
+from utils.llm import threejane_abi, threejane_context
+from utils.llm.threejane_account_context import TokenUnit
 from utils.llm.threejane_context import (
     HashedLabelContext,
     RewardsDistributorContext,
     _bytes32_arguments,
+    _proposed_config_values,
     _requested_epochs,
     format_threejane_prompt,
     format_threejane_report,
@@ -25,6 +27,8 @@ SAFE = "0x33333333Bd7045F1A601A1E289D7AB21036fB5EF"
 TIMELOCK = "0x1dCcD4628d48a50C1A7adEA3848bcC869f08f8C2"
 
 WAD = 10**18
+USDC_UNIT = 10**6
+USDC = TokenUnit("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "USDC", 6)
 
 
 def _set_emissions_call(epoch: int = 45, emissions: int = 5_564_323 * WAD) -> DecodedCall:
@@ -77,6 +81,7 @@ class TestGuards(unittest.TestCase):
         with (
             patch.object(threejane_context, "_read_distributor_context", return_value=None) as distributor,
             patch.object(threejane_context, "_resolve_hashed_labels", return_value=[]),
+            patch.object(threejane_context, "resolve_account_contexts", return_value=[]),
         ):
             resolve_threejane_context("3jane", 1, [(PROTOCOL_CONFIG, _set_config_call())])
         distributor.assert_called_once()
@@ -127,21 +132,21 @@ class TestAbiProbeCaching(unittest.TestCase):
             return impl_abi if address == "0ximpl" else proxy_abi
 
         with (
-            patch.object(threejane_context, "fetch_abi_entries", side_effect=abi_for),
+            patch.object(threejane_abi, "fetch_abi_entries", side_effect=abi_for),
             patch("utils.proxy.get_current_implementation", return_value="0ximpl") as lookup,
         ):
-            self.assertFalse(threejane_context._exposes(1, PROTOCOL_CONFIG, {"useMint", "merkleRoot"}))
-            self.assertTrue(threejane_context._exposes(1, PROTOCOL_CONFIG, {"config"}))
+            self.assertFalse(threejane_abi.exposes(1, PROTOCOL_CONFIG, {"useMint", "merkleRoot"}))
+            self.assertTrue(threejane_abi.exposes(1, PROTOCOL_CONFIG, {"config"}))
 
         lookup.assert_called_once()
 
     def test_non_proxy_never_reads_the_slot(self) -> None:
         own_abi = [{"type": "function", "name": "useMint"}]
         with (
-            patch.object(threejane_context, "fetch_abi_entries", return_value=own_abi),
+            patch.object(threejane_abi, "fetch_abi_entries", return_value=own_abi),
             patch("utils.proxy.get_current_implementation") as lookup,
         ):
-            self.assertTrue(threejane_context._exposes(1, DISTRIBUTOR, {"useMint"}))
+            self.assertTrue(threejane_abi.exposes(1, DISTRIBUTOR, {"useMint"}))
 
         lookup.assert_not_called()
 
@@ -150,18 +155,22 @@ class TestCheckedInAbis(unittest.TestCase):
     """The JSON ABIs cover exactly the getters the adapter reads."""
 
     def test_distributor_abi_covers_the_detection_getters(self) -> None:
-        names = {entry["name"] for entry in threejane_context._abi("RewardsDistributor")}
+        names = {entry["name"] for entry in threejane_abi.threejane_abi("RewardsDistributor")}
         self.assertTrue(threejane_context._DISTRIBUTOR_GETTERS.issubset(names))
         self.assertIn("epoch", names)
         self.assertIn("owner", names)
 
     def test_jane_abi_covers_the_token_reads(self) -> None:
-        names = {entry["name"] for entry in threejane_context._abi("Jane")}
+        names = {entry["name"] for entry in threejane_abi.threejane_abi("Jane")}
         self.assertEqual(names, {"totalSupply", "transferable", "balanceOf", "hasRole"})
 
     def test_protocol_config_abi_exposes_config(self) -> None:
-        names = {entry["name"] for entry in threejane_context._abi("ProtocolConfig")}
+        names = {entry["name"] for entry in threejane_abi.threejane_abi("ProtocolConfig")}
         self.assertIn("config", names)
+
+    def test_capped_vault_abi_exposes_total_assets_and_asset(self) -> None:
+        names = {entry["name"] for entry in threejane_abi.threejane_abi("ERC4626Vault")}
+        self.assertTrue({"totalAssets", "asset"}.issubset(names))
 
 
 class TestHashedLabelRendering(unittest.TestCase):
@@ -200,12 +209,12 @@ class TestHashedLabelRendering(unittest.TestCase):
         self.assertIn("3Jane ProtocolConfig", report)
         self.assertIn("`63,366,281,225,814`", report)
 
-    def test_capped_quantity_is_rendered_beside_the_cap(self) -> None:
+    def test_capped_quantity_without_a_unit_stays_raw(self) -> None:
         context = HashedLabelContext(
             target=PROTOCOL_CONFIG,
             argument_hex="0x" + keccak(text="USD3_SUPPLY_CAP").hex(),
             name="USD3_SUPPLY_CAP",
-            note="cap on USD3 supply in asset units",
+            note="cap on USD3 totalAssets",
             is_config_key=True,
             current_value=75_000_000_000_000,
             usage_label="USD3 totalAssets",
@@ -216,6 +225,40 @@ class TestHashedLabelRendering(unittest.TestCase):
         self.assertIn("USD3 totalAssets right now: 75045566960234", prompt)
         self.assertIn("directly comparable", prompt)
         self.assertIn("`75,045,566,960,234`", report)
+
+    def test_supply_cap_raise_renders_in_the_asset_with_headroom(self) -> None:
+        """The alert that read "80,000,000,000,000 asset units" now reads in USDC."""
+        usage_read = threejane_context._USAGE_READS["0x" + keccak(text="USD3_SUPPLY_CAP").hex()]
+        context = HashedLabelContext(
+            target=PROTOCOL_CONFIG,
+            argument_hex="0x" + keccak(text="USD3_SUPPLY_CAP").hex(),
+            name="USD3_SUPPLY_CAP",
+            note="cap on USD3 totalAssets",
+            is_config_key=True,
+            current_value=80_000_000 * USDC_UNIT,
+            usage_label="USD3 totalAssets",
+            current_usage=80_354_041_482_181,
+            unit=USDC,
+            proposed_values=(100_000_000 * USDC_UNIT,),
+            usage_enforcement=usage_read.enforcement,
+        )
+        prompt = format_threejane_prompt([context])
+        report = format_threejane_report([context], 1, {})
+        self.assertIn("value stored on-chain right now: 80,000,000 USDC (raw 80000000000000)", prompt)
+        self.assertIn("this transaction sets it to: 100,000,000 USDC (raw 100000000000000)", prompt)
+        self.assertIn("USD3 totalAssets right now: 80,354,041.482181 USDC", prompt)
+        self.assertIn("Against the current cap: above it by 354,041.482181 USDC", prompt)
+        self.assertIn("Against the proposed cap: 19,645,958.517819 USDC of headroom", prompt)
+        self.assertIn("compares this cap directly against USD3 totalAssets", prompt)
+        self.assertNotIn("directly comparable", prompt)
+        self.assertIn("Set by this transaction to: `100,000,000 USDC`", report)
+        self.assertIn("Against the proposed cap: 19,645,958.517819 USDC of headroom", report)
+
+    def test_proposed_config_values_are_keyed_by_hash(self) -> None:
+        calls = [_set_config_call("USD3_SUPPLY_CAP", 5), _set_config_call("MAX_LTV", 7)]
+        proposed = _proposed_config_values(calls)
+        self.assertEqual(proposed["0x" + keccak(text="USD3_SUPPLY_CAP").hex()], (5,))
+        self.assertEqual(proposed["0x" + keccak(text="MAX_LTV").hex()], (7,))
 
     def test_usage_line_absent_for_keys_without_one(self) -> None:
         context = HashedLabelContext(PROTOCOL_CONFIG, "0xabc", "MAX_LTV", "ltv", True, 350000000000000000)

@@ -23,6 +23,7 @@ from utils.llm.ai_explainer import (
     _sole_token_by_target,
     _split_risk_tag,
     _token_label,
+    _with_onchain_symbols,
     collect_unique_addresses,
     explain_batch_transaction,
     explain_transaction,
@@ -31,7 +32,7 @@ from utils.llm.ai_explainer import (
 from utils.llm.base import LLMError
 from utils.related_tokens import RelatedToken
 from utils.source_context import SourceContext
-from utils.tenderly.simulation import SimulationResult
+from utils.tenderly.simulation import AssetChange, SimulationResult
 
 
 class TestBuildPrompt(unittest.TestCase):
@@ -1237,6 +1238,42 @@ class TestAddressLabels(unittest.TestCase):
         # Resolver called exactly once — for the target, not for the zero arg.
         addresses_queried = {call.args[1].lower() for call in mock_label.call_args_list}
         self.assertNotIn(zero, addresses_queried)
+
+
+class TestOnchainSymbols(unittest.TestCase):
+    """Tenderly's lowercased symbols are replaced by the token's own symbol()."""
+
+    TOKEN = "0xd4fa2d31b7968e448877f69a96de69f5de8cd23e"
+
+    def _sim(self, token_address: str) -> SimulationResult:
+        change = AssetChange(
+            token_address=token_address,
+            token_name="Wrapped Aave Ethereum USDC",
+            token_symbol="waethusdc",
+            from_address="0x1",
+            to_address="0x2",
+            amount="31685.345344",
+            raw_amount="31685345344",
+            decimals=6,
+        )
+        return SimulationResult(success=True, gas_used=1, asset_changes=[change])
+
+    def test_symbol_comes_from_the_token(self) -> None:
+        with patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=ERC20Metadata("waEthUSDC", 6)):
+            sim = _with_onchain_symbols(self._sim(self.TOKEN), 1)
+        self.assertEqual(sim.asset_changes[0].token_symbol, "waEthUSDC")
+
+    def test_tenderly_symbol_kept_when_metadata_unavailable(self) -> None:
+        with patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None):
+            sim = _with_onchain_symbols(self._sim(self.TOKEN), 1)
+        self.assertEqual(sim.asset_changes[0].token_symbol, "waethusdc")
+
+    def test_no_lookup_without_asset_changes_or_address(self) -> None:
+        with patch("utils.llm.ai_explainer.fetch_erc20_metadata") as fetch:
+            self.assertIsNone(_with_onchain_symbols(None, 1))
+            _with_onchain_symbols(SimulationResult(success=True), 1)
+            _with_onchain_symbols(self._sim(""), 1)
+        fetch.assert_not_called()
 
 
 class TestTokenFlows(unittest.TestCase):

@@ -5,12 +5,16 @@ to compare old vs new implementation source code on Etherscan.
 """
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from eth_utils import function_signature_to_4byte_selector, to_checksum_address
 
 from utils.calldata.decoder import decode_calldata
 from utils.chains import EXPLORER_URLS, Chain
 from utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from utils.web3_wrapper import Web3Client
 
 logger = get_logger("utils.proxy")
 
@@ -23,6 +27,12 @@ EIP1967_IMPL_SLOT = 0x360894A13BA1A3210667C828492DB98DCA3E2076CC3735A920A3CA505D
 # like USDC's FiatTokenProxy. Tried as a fallback when the EIP-1967 slot is empty.
 # bytes32(keccak256("org.zeppelinos.proxy.implementation"))
 ZEPPELINOS_IMPL_SLOT = 0x7050C9E0F4CA769C69BD3A8EF740BC37934F8E2C036E5A723FD8EE048ED3F8C3
+
+# EIP-1967 beacon storage slot. A BeaconProxy stores no implementation of its
+# own — it points at an UpgradeableBeacon whose implementation() is shared by
+# every proxy of that beacon (e.g. 3Jane's per-facility LCCVaults).
+# bytes32(uint256(keccak256("eip1967.proxy.beacon")) - 1)
+EIP1967_BEACON_SLOT = 0xA3F0AD74E5423AEBFD80D3EF4346578335A9A72AEAEE59FF6CB3582B35133D50
 
 # Selectors that indicate a proxy upgrade.
 # - upgradeTo(address)                       — called on the proxy itself
@@ -135,12 +145,27 @@ def _addr_from_word(raw: object) -> str | None:
     return to_checksum_address(addr) if int(addr, 16) != 0 else None
 
 
+def _call_impl_getters(client: "Web3Client", address: str) -> str | None:
+    """Return the first non-zero address a known implementation getter reports."""
+    for sig in _IMPL_GETTER_SIGS:
+        try:
+            selector = function_signature_to_4byte_selector(sig)
+            raw = client.eth.call({"to": address, "data": "0x" + selector.hex()})
+        except Exception:  # noqa: BLE001 - missing getter / revert is expected
+            continue
+        addr = _addr_from_word(raw) if raw else None
+        if addr:
+            return addr
+    return None
+
+
 def get_current_implementation(proxy_address: str, chain_id: int) -> str | None:
     """Read the current implementation address of a proxy.
 
     Resolution order: EIP-1967 slot → legacy zeppelinos slot (e.g. USDC's
-    FiatTokenProxy) → common getter functions (e.g. Compound's Unitroller, which
-    exposes ``comptrollerImplementation()`` instead of a known slot).
+    FiatTokenProxy) → EIP-1967 beacon slot, then the beacon's ``implementation()``
+    → common getter functions (e.g. Compound's Unitroller, which exposes
+    ``comptrollerImplementation()`` instead of a known slot).
 
     Args:
         proxy_address: The proxy contract address.
@@ -162,18 +187,13 @@ def get_current_implementation(proxy_address: str, chain_id: int) -> str | None:
             if addr:
                 return addr
 
-        # Non-standard proxies expose the impl via a getter rather than a slot.
-        for sig in _IMPL_GETTER_SIGS:
-            try:
-                selector = function_signature_to_4byte_selector(sig)
-                raw = client.eth.call({"to": checksum_proxy, "data": "0x" + selector.hex()})
-            except Exception:  # noqa: BLE001 - missing getter / revert is expected
-                continue
-            addr = _addr_from_word(raw) if raw else None
-            if addr:
-                return addr
+        # A beacon proxy's logic lives one hop away, behind the beacon's getter.
+        beacon = _addr_from_word(client.eth.get_storage_at(checksum_proxy, EIP1967_BEACON_SLOT))
+        if beacon:
+            return _call_impl_getters(client, beacon)
 
-        return None
+        # Non-standard proxies expose the impl via a getter rather than a slot.
+        return _call_impl_getters(client, checksum_proxy)
     except Exception:
         logger.debug("Failed to read implementation for %s on chain %s", proxy_address, chain_id, exc_info=True)
         return None

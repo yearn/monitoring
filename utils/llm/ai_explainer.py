@@ -7,7 +7,7 @@ transactions (timelocks and Safe multisigs).
 
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from functools import lru_cache
@@ -113,12 +113,16 @@ Critical rules for parameter interpretation:
 - If a unit is ambiguous and nothing above resolves it — no Token Flows row, no known
   movement-signature amount, no Related Tokens entry for the target, or several candidate
   tokens with different decimals — say so explicitly rather than guessing. Quote the raw
-  value plus its 1e18-normalized form, and name the candidates when there are several.
+  value only; never put an assumed-scale figure in the TLDR (a raw 499999999986 shown
+  "at 1e18" reads as dust when it is ~500k of a 6-decimal token). In DETAIL, name the
+  candidate tokens and what the value would be at each one's decimals.
 - When a Protocol Context section is provided, treat its farm identity, accounting asset,
   normalized totalAssets, and configured token targets as verified deterministic facts. When it
   states the unit a parameter is denominated in (e.g. a Yearn V3 max_debt in the vault asset),
   use that unit and its normalized amounts without hedging, even if Related Tokens lists several
-  candidate tokens. Prefer its contract names over raw labels. Distinguish
+  candidate tokens. Amounts it renders in a named token ("100,000,000 USDC") are AUTHORITATIVE —
+  report those, not the raw integers, and take full/partial, before→after and headroom figures
+  from it as stated. Prefer its contract names over raw labels. Distinguish
   the accounting asset from non-accounting ERC20 targets configured in an escrow whitelist;
   whitelisting proves permission to interact, but not how a token is valued or used downstream.
 - A bytes32 argument the Protocol Context or a Role Names section resolves to a keccak256
@@ -257,7 +261,8 @@ Check the TLDR above against this checklist. Each item is a yes/no question:
    revision. TLDRs longer than 10 sentences should be tightened.)
 3. Does it end with a risk tag in CAPS (LOW / MEDIUM / HIGH / CRITICAL)?
 4. Are all numeric magnitudes/units supported by the Token Flows section, the
-   Contract Source Context section, or the Current State section above? If a Token
+   Protocol Context section, the Contract Source Context section, or the Current
+   State section above? If a Token
    Flows section is present, do the amounts match its normalized values and "Total
    moved" exactly (no mis-scaling)? Or does it explicitly say the unit cannot be
    confirmed?
@@ -267,7 +272,8 @@ Check the TLDR above against this checklist. Each item is a yes/no question:
 Hard rules for the revision (if you choose to revise):
 - Do NOT introduce a unit/scale assumption that wasn't supported by the context.
   If the context shows "raw values 1e15–8e15", do NOT rewrite as "<0.008 ETH".
-  You don't know the decimals unless the source context or state reads tell you.
+  You don't know the decimals unless the source context, Protocol Context, or state
+  reads tell you.
 - Do NOT escalate a justifiable LOW out of caution.
 - Do NOT remove an explicit hedge ("unit cannot be confirmed", "without source
   context", etc.).
@@ -1234,6 +1240,22 @@ def _format_batch_simulation_section(items: list[_PreparedCall]) -> str:
     return "\n\n".join(blocks)
 
 
+def _with_onchain_symbols(sim: SimulationResult | None, chain_id: int) -> SimulationResult | None:
+    """Replace Tenderly's token symbols with each token's own ``symbol()``.
+
+    Tenderly lowercases symbols it has no curated entry for (waEthUSDC arrives
+    as "waethusdc"), and the model copies them verbatim into the alert. Metadata
+    is cached per token, so this costs one batched read per new token.
+    """
+    if sim is None or not sim.asset_changes:
+        return sim
+    changes = []
+    for change in sim.asset_changes:
+        meta = fetch_erc20_metadata(chain_id, change.token_address) if change.token_address else None
+        changes.append(replace(change, token_symbol=meta.symbol) if meta else change)
+    return replace(sim, asset_changes=changes)
+
+
 def _format_simulation_context(sim: SimulationResult) -> str:
     """Format simulation results into a readable string for the LLM prompt."""
     parts: list[str] = []
@@ -1828,12 +1850,15 @@ def explain_transaction(
     simulation: SimulationResult | None = None
     simulation_for_report: SimulationResult | None = None
     if not skip_simulation:
-        simulation = simulate_transaction(
-            target=target,
-            calldata=calldata,
-            chain_id=chain_id,
-            value=value,
-            from_address=from_address,
+        simulation = _with_onchain_symbols(
+            simulate_transaction(
+                target=target,
+                calldata=calldata,
+                chain_id=chain_id,
+                value=value,
+                from_address=from_address,
+            ),
+            chain_id,
         )
         simulation_for_report = simulation
         if simulation:
@@ -1964,7 +1989,7 @@ def _prepare_batch_items(
             if bundle is None:
                 unsimulated_reason = "bundle_unavailable"
             else:
-                simulation = bundle[position]
+                simulation = _with_onchain_symbols(bundle[position], chain_id)
                 if simulation is None:
                     unsimulated_reason = "not_reached"
                 elif not simulation.success:

@@ -83,6 +83,7 @@ def _record_cache_event(source: str, hit: bool, cache_key: tuple[int, str]) -> N
 
 _NATSPEC_LINE = r"(?:[ \t]*///.*\n|[ \t]*\*[^/].*\n|[ \t]*/\*\*[\s\S]*?\*/[ \t]*\n)"
 _NATSPEC_BLOCK = rf"(?:(?:{_NATSPEC_LINE})+)?"
+_INHERITDOC_RE = re.compile(r"@inheritdoc\s+(\w+)")
 
 # Statement-leading LHS of an assignment. Captures the var name from:
 #   `x = v` / `x[k] = v` / `obj.x = v` / `getStorage().x[k] = v` (diamond pattern).
@@ -450,20 +451,72 @@ def _function_input_names_from_abi(
     return names
 
 
-def _extract_function_snippet(source: str, function_name: str) -> str:
-    """Find a function definition and any preceding natspec comment block.
-
-    Falls back to Vyper syntax when no Solidity ``function`` matches, so Vyper
-    contracts (every Yearn V3 vault) get their signature and docstring too.
-    """
+def _function_with_natspec(source: str, function_name: str) -> "re.Match[str] | None":
+    """First `function <name>` declaration with its preceding natspec (group 1) and signature (group 2)."""
     pattern = re.compile(
         rf"({_NATSPEC_BLOCK})([ \t]*function\s+{re.escape(function_name)}\b[^{{;]*[{{;])",
         re.MULTILINE,
     )
-    match = pattern.search(source)
+    return pattern.search(source)
+
+
+def _block_end(source: str, open_brace: int) -> int:
+    """Index just past the `}` matching the `{` at ``open_brace``, or -1 if unbalanced."""
+    depth = 0
+    for i in range(open_brace, len(source)):
+        if source[i] == "{":
+            depth += 1
+        elif source[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
+def _type_body(source: str, type_name: str) -> str:
+    """Body of `interface|contract|library <type_name> ... { ... }` in the bundle, or ""."""
+    declaration = re.compile(
+        rf"^[ \t]*(?:abstract\s+)?(?:interface|contract|library)\s+{re.escape(type_name)}\b[^{{]*\{{",
+        re.MULTILINE,
+    )
+    match = declaration.search(source)
+    if not match:
+        return ""
+    end = _block_end(source, match.end() - 1)
+    return source[match.end() : end - 1] if end != -1 else ""
+
+
+def _inherited_natspec(source: str, natspec: str, function_name: str) -> str:
+    """Natspec a `@inheritdoc <Type>` tag points at, or "" when it cannot be found.
+
+    Implementations routinely carry only `/// @inheritdoc IFoo`, leaving the units
+    and semantics of every parameter in the interface. The verified bundle includes
+    that interface, so the documentation is one lookup away.
+    """
+    tag = _INHERITDOC_RE.search(natspec)
+    if not tag:
+        return ""
+    match = _function_with_natspec(_type_body(source, tag.group(1)), function_name)
+    inherited = (match.group(1) or "") if match else ""
+    # One hop only: an interface that itself defers again documents nothing here.
+    if not inherited.strip() or _INHERITDOC_RE.search(inherited):
+        return ""
+    # Re-indent flush left: the interface's nesting depth differs from the implementation's.
+    return "".join(line.strip() + "\n" for line in inherited.splitlines())
+
+
+def _extract_function_snippet(source: str, function_name: str) -> str:
+    """Find a function definition and any preceding natspec comment block.
+
+    A bare `@inheritdoc` block is replaced by the natspec it refers to. Falls
+    back to Vyper syntax when no Solidity ``function`` matches, so Vyper
+    contracts (every Yearn V3 vault) get their signature and docstring too.
+    """
+    match = _function_with_natspec(source, function_name)
     if not match:
         return _extract_vyper_function_snippet(source, function_name)
     natspec = match.group(1) or ""
+    natspec = _inherited_natspec(source, natspec, function_name) or natspec
     return f"{natspec.rstrip()}\n{match.group(2).strip()}".strip()
 
 
@@ -522,18 +575,8 @@ def _extract_function_body(source: str, function_name: str) -> str:
     if not match:
         return ""
 
-    start = match.end()
-    depth = 1
-    i = start
-    while i < len(source) and depth > 0:
-        if source[i] == "{":
-            depth += 1
-        elif source[i] == "}":
-            depth -= 1
-        i += 1
-    if depth != 0:
-        return ""
-    return source[start : i - 1]
+    end = _block_end(source, match.end() - 1)
+    return source[match.end() : end - 1] if end != -1 else ""
 
 
 def extract_state_var_snippet(source: str, var_name: str) -> str:
