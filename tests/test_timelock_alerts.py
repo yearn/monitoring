@@ -88,6 +88,15 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         self.assertIn("Test Timelock", msg)
 
     @patch("protocols.timelock.timelock_alerts._get_ai_explanation", return_value=None)
+    def test_batch_calls_are_numbered_from_one(self, _mock_ai: object) -> None:
+        """Telegram numbering must match the AI report's 1-based call flow."""
+        events = [_make_event(index=i, target=f"0x{i + 1:040x}", data="0x8456cb59") for i in range(2)]
+        msg = build_alert_message(events, TIMELOCK_INFO)
+        self.assertIn("--- Call 1 ---", msg)
+        self.assertIn("--- Call 2 ---", msg)
+        self.assertNotIn("--- Call 0 ---", msg)
+
+    @patch("protocols.timelock.timelock_alerts._get_ai_explanation", return_value=None)
     def test_long_call_details_truncated(self, _mock_ai: object) -> None:
         """When call details are very long, they should be truncated to fit."""
         events = [

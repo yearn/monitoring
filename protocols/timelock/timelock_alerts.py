@@ -241,7 +241,9 @@ def _build_call_info(event: dict, explorer: str | None, show_index: bool, chain_
         return lines
 
     if show_index and event.get("index") is not None:
-        lines.append(f"--- Call {int(event['index'])} ---")
+        # The on-chain batch index is 0-based; number from 1 so the Telegram
+        # message and the AI report's call flow name the same call identically.
+        lines.append(f"--- Call {int(event['index']) + 1} ---")
 
     lines.append(_format_address(target, explorer, "🎯 Target: "))
 
