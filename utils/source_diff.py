@@ -74,6 +74,19 @@ class SettingChange:
 
 
 @dataclass(frozen=True)
+class SettingsDiff:
+    """Compiler-setting changes, and whether every setting could be compared.
+
+    ``complete`` is False when either side has no standard-json settings: only
+    the compiler version was compared, so an empty ``changes`` then means
+    "same compiler", not "same settings".
+    """
+
+    changes: list[SettingChange] = field(default_factory=list)
+    complete: bool = True
+
+
+@dataclass(frozen=True)
 class LinkedLibrary:
     """An externally deployed library the contract was linked against."""
 
@@ -120,27 +133,29 @@ def diff_source_files(old_sources: dict[str, str], new_sources: dict[str, str]) 
     return SourceFilesDiff(changed=file_changes, added=added, removed=sorted(only_old), moved=sorted(moved))
 
 
-def diff_compiler_settings(old: VerifiedContract, new: VerifiedContract) -> list[SettingChange] | None:
-    """Compiler settings that differ, or None when either side has no settings.
+def diff_compiler_settings(old: VerifiedContract, new: VerifiedContract) -> SettingsDiff:
+    """Compiler settings that differ between two verified contracts.
 
-    Etherscan keeps standard-json settings only for contracts verified that way;
-    a single-file verification carries none, and "no difference" can't be
-    claimed from nothing.
+    The compiler version is a top-level Etherscan field present for every
+    verification, so it is always compared. Everything else (EVM version,
+    optimizer, ``viaIR``, linked libraries) lives in standard-json settings,
+    which a single-file verification doesn't carry; when either side lacks
+    them the result is marked incomplete rather than claiming "no difference"
+    from nothing.
     """
-    if not old.settings or not new.settings:
-        return None
-
     changes: list[SettingChange] = []
     if old.compiler_version != new.compiler_version:
         changes.append(SettingChange("compiler", old.compiler_version or "(unset)", new.compiler_version or "(unset)"))
+    if not old.settings or not new.settings:
+        return SettingsDiff(changes=changes, complete=False)
+
     for key in ("evmVersion", "viaIR", "optimizer"):
         before, after = _setting(old.settings, key), _setting(new.settings, key)
         if before != after:
             changes.append(SettingChange(key, before, after))
-
     for name, old_addr, new_addr in relinked_libraries(old, new):
         changes.append(SettingChange(f"linked library {name}", old_addr, new_addr))
-    return changes
+    return SettingsDiff(changes=changes, complete=True)
 
 
 def relinked_libraries(old: VerifiedContract, new: VerifiedContract) -> list[tuple[str, str, str]]:
@@ -192,12 +207,20 @@ def _pair_unmatched(only_old: dict[str, str], only_new: dict[str, str]) -> list[
     """Pair files present on one side only: identical content first, then a unique basename."""
     pairs: list[tuple[str, str]] = []
     taken_new: set[str] = set()
-    by_content = {text: path for path, text in only_new.items()}
+    # Several files can share content (identical interfaces, empty markers), so
+    # each content maps to every new path holding it; each is used at most once.
+    by_content: dict[str, list[str]] = {}
+    for path in sorted(only_new):
+        by_content.setdefault(only_new[path], []).append(path)
     for old_path, text in sorted(only_old.items()):
-        new_path = by_content.get(text)
-        if new_path and new_path not in taken_new:
-            pairs.append((old_path, new_path))
-            taken_new.add(new_path)
+        candidates = [p for p in by_content.get(text, []) if p not in taken_new]
+        if not candidates:
+            continue
+        # Among identical files, keep a file's own name when one is available.
+        same_name = [p for p in candidates if posixpath.basename(p) == posixpath.basename(old_path)]
+        new_path = (same_name or candidates)[0]
+        pairs.append((old_path, new_path))
+        taken_new.add(new_path)
 
     paired_old = {old for old, _ in pairs}
     old_by_name = _unique_by_basename([p for p in only_old if p not in paired_old])

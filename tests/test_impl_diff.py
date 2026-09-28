@@ -639,9 +639,19 @@ class TestWholeBundle(ImplDiffTestCase):
     def test_missing_settings_are_unvalidated(self) -> None:
         self.old_entry = _bundle(TARGET_OLD, OLD_ABI)
         diff = self.run_diff()
-        assert diff is not None
-        self.assertIsNone(diff.settings)
-        self.assertIn("compiler settings (EVM version, optimizer, linked libraries) are not", format_impl_diff(diff))
+        assert diff is not None and diff.settings is not None
+        self.assertFalse(diff.settings.complete)
+        rendered = format_impl_diff(diff)
+        self.assertIn("only the compiler version was comparable", rendered)
+        self.assertIn("  compiler: unchanged", rendered)
+        self.assertIn("compiler settings other than the compiler version", rendered)
+
+    def test_compiler_change_is_shown_without_standard_json_settings(self) -> None:
+        self.old_entry = {**_bundle(TARGET_OLD, OLD_ABI), "CompilerVersion": "v0.8.20+commit.a1b79de6"}
+        self.new_entry = _bundle(TARGET_OLD, OLD_ABI)
+        rendered = format_impl_diff(self.run_diff())
+        self.assertIn("~ compiler: v0.8.20+commit.a1b79de6 → v0.8.22+commit.4fc1097e", rendered)
+        self.assertNotIn("compiler: unchanged", rendered)
 
 
 if __name__ == "__main__":

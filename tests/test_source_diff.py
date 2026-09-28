@@ -3,7 +3,13 @@
 import unittest
 
 from utils import source_diff
-from utils.source_diff import diff_compiler_settings, diff_source_files, format_source_files, linked_libraries
+from utils.source_diff import (
+    SettingsDiff,
+    diff_compiler_settings,
+    diff_source_files,
+    format_source_files,
+    linked_libraries,
+)
 from utils.verified_contract import VerifiedContract
 
 RATE_ORACLE_OLD = """contract RateOracle {
@@ -66,6 +72,29 @@ class TestDiffSourceFiles(unittest.TestCase):
         self.assertEqual(diff.changed[0].added_lines, 1)
         self.assertEqual((diff.added, diff.removed), ([], []))
 
+    def test_identical_content_moves_are_all_paired_by_name(self) -> None:
+        """Several relocated files with the same content: every one is a move, each to its own name."""
+        old = {"lib/a/IMarker.sol": "// marker", "lib/b/IOther.sol": "// marker"}
+        new = {"node_modules/a/IMarker.sol": "// marker", "node_modules/b/IOther.sol": "// marker"}
+        diff = diff_source_files(old, new)
+        self.assertEqual(
+            diff.moved,
+            [("lib/a/IMarker.sol", "node_modules/a/IMarker.sol"), ("lib/b/IOther.sol", "node_modules/b/IOther.sol")],
+        )
+        self.assertEqual((diff.changed, diff.added, diff.removed), ([], [], []))
+
+    def test_identical_content_moves_pair_even_when_names_differ(self) -> None:
+        old = {"lib/One.sol": "", "lib/Two.sol": ""}
+        new = {"src/Three.sol": "", "src/Four.sol": ""}
+        diff = diff_source_files(old, new)
+        self.assertEqual(len(diff.moved), 2)
+        self.assertEqual((diff.added, diff.removed), ([], []))
+
+    def test_extra_identical_copy_is_an_addition(self) -> None:
+        diff = diff_source_files({"lib/I.sol": "x"}, {"src/I.sol": "x", "src/copy/J.sol": "x"})
+        self.assertEqual(diff.moved, [("lib/I.sol", "src/I.sol")])
+        self.assertEqual([c.path for c in diff.added], ["src/copy/J.sol"])
+
     def test_budget_prefers_project_files_over_dependencies(self) -> None:
         old = {f"node_modules/dep{i}.sol": "a" for i in range(source_diff.MAX_DIFFED_FILES)}
         old["contracts/Vault.sol"] = "a"
@@ -101,36 +130,44 @@ class TestDiffCompilerSettings(unittest.TestCase):
     def test_relinked_libraries_are_reported(self) -> None:
         old = _contract({"libraries": {"contracts/token/CapToken.sol": {"VaultLogic": "0xc7ea"}}})
         new = _contract({"libraries": {"contracts/token/CapToken.sol": {"VaultLogic": "0x651e"}}})
-        changes = diff_compiler_settings(old, new)
-        assert changes is not None
-        self.assertEqual([str(c) for c in changes], ["linked library VaultLogic: 0xc7ea → 0x651e"])
+        diff = diff_compiler_settings(old, new)
+        self.assertTrue(diff.complete)
+        self.assertEqual([str(c) for c in diff.changes], ["linked library VaultLogic: 0xc7ea → 0x651e"])
 
     def test_address_case_is_not_a_relink(self) -> None:
         old = _contract({"libraries": {"f.sol": {"L": "0xABCD"}}})
         new = _contract({"libraries": {"f.sol": {"L": "0xabcd"}}})
-        self.assertEqual(diff_compiler_settings(old, new), [])
+        self.assertEqual(diff_compiler_settings(old, new), SettingsDiff(changes=[], complete=True))
 
     def test_evm_version_change_is_reported(self) -> None:
-        changes = diff_compiler_settings(
+        diff = diff_compiler_settings(
             _contract({"evmVersion": "cancun", "libraries": {}}), _contract({"evmVersion": "prague"})
         )
-        assert changes is not None
-        self.assertEqual([str(c) for c in changes], ["evmVersion: cancun → prague"])
+        self.assertEqual([str(c) for c in diff.changes], ["evmVersion: cancun → prague"])
 
     def test_remappings_are_ignored(self) -> None:
         old = _contract({"remappings": ["a/=lib/a/"], "evmVersion": "prague"})
         new = _contract({"remappings": ["a/=node_modules/a/"], "evmVersion": "prague"})
-        self.assertEqual(diff_compiler_settings(old, new), [])
+        self.assertEqual(diff_compiler_settings(old, new).changes, [])
 
     def test_optimizer_and_compiler_changes(self) -> None:
         old = _contract({"optimizer": {"enabled": True, "runs": 200}})
         new = _contract({"optimizer": {"enabled": True, "runs": 1000}}, compiler="v0.8.30+commit.73712a01")
-        changes = diff_compiler_settings(old, new)
-        assert changes is not None
-        self.assertEqual([c.name for c in changes], ["compiler", "optimizer"])
+        self.assertEqual([c.name for c in diff_compiler_settings(old, new).changes], ["compiler", "optimizer"])
 
-    def test_missing_settings_is_unknown_not_unchanged(self) -> None:
-        self.assertIsNone(diff_compiler_settings(_contract({}), _contract({"evmVersion": "prague"})))
+    def test_missing_settings_is_incomplete_not_unchanged(self) -> None:
+        diff = diff_compiler_settings(_contract({}), _contract({"evmVersion": "prague"}))
+        self.assertEqual(diff, SettingsDiff(changes=[], complete=False))
+
+    def test_compiler_change_is_reported_without_standard_json_settings(self) -> None:
+        """Single-file verifications carry no settings, but the compiler version is still known."""
+        old = _contract({}, compiler="v0.8.20+commit.a1b79de6")
+        new = _contract({}, compiler="v0.8.28+commit.7893614a")
+        diff = diff_compiler_settings(old, new)
+        self.assertFalse(diff.complete)
+        self.assertEqual(
+            [str(c) for c in diff.changes], ["compiler: v0.8.20+commit.a1b79de6 → v0.8.28+commit.7893614a"]
+        )
 
     def test_linked_libraries_skips_malformed_entries(self) -> None:
         contract = _contract({"libraries": {"f.sol": {"L": "0x1", "Empty": ""}, "bad.sol": "0x2"}})

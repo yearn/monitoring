@@ -50,7 +50,7 @@ from utils.solidity_text import FunctionDef, contract_functions, value_type_decl
 from utils.source_context import fetch_verified_contract
 from utils.source_diff import (
     NOT_LINKED,
-    SettingChange,
+    SettingsDiff,
     SourceFilesDiff,
     diff_compiler_settings,
     diff_source_files,
@@ -78,8 +78,8 @@ _UNVALIDATED_EXTERNAL = (
     "code at other addresses reached by external call or delegatecall (other than linked libraries) was not compared"
 )
 _UNVALIDATED_SETTINGS = (
-    "compiler settings (EVM version, optimizer, linked libraries) are not in the verified record; "
-    "a bytecode change without a source change cannot be seen"
+    "compiler settings other than the compiler version (EVM version, optimizer, linked libraries) are not in "
+    "the verified record; a bytecode change from those without a source change cannot be seen"
 )
 _UNVALIDATED_MODIFIERS = "source-level modifiers are shown as written; they are not an authorization proof"
 
@@ -147,7 +147,7 @@ class LibraryChange:
     old_address: str
     new_address: str
     files: SourceFilesDiff | None = None  # None when either side is unlinked or unverified
-    settings: list[SettingChange] | None = None
+    settings: SettingsDiff | None = None  # None when either side is unlinked or unverified
 
 
 @dataclass(frozen=True)
@@ -165,7 +165,7 @@ class ImplDiff:
     # Positional and non-positional storage combined; ``storage`` alone is positional.
     storage_verdict: StorageCompatibility = StorageCompatibility.UNKNOWN
     files: SourceFilesDiff | None = None  # whole-bundle diff; None only if not run
-    settings: list[SettingChange] | None = None  # None when settings are unavailable
+    settings: SettingsDiff | None = None  # None only if not run
     libraries: list[LibraryChange] = field(default_factory=list)
 
     @property
@@ -193,7 +193,7 @@ def diff_implementations(old_addr: str, new_addr: str, chain_id: int) -> ImplDif
 
     files = diff_source_files(old.sources, new.sources)
     settings = diff_compiler_settings(old, new)
-    if settings is None:
+    if not settings.complete:
         unvalidated.append(_UNVALIDATED_SETTINGS)
     libraries = _diff_linked_libraries(old, new, chain_id)
     unvalidated.extend(
@@ -631,13 +631,23 @@ def _fmt_files(diff: ImplDiff) -> list[str]:
 
 def _fmt_settings(diff: ImplDiff) -> list[str]:
     """Render compiler-setting changes, then each relinked library's own diff."""
-    if diff.settings is None:
-        lines = ["Compiler settings: NOT AVAILABLE — see Unvalidated items."]
-    elif not diff.settings:
+    settings = diff.settings
+    if settings is None:
+        lines = ["Compiler settings: NOT COMPARED."]
+    elif settings.complete and not settings.changes:
         lines = ["Compiler settings and linked libraries: unchanged."]
-    else:
+    elif settings.complete:
         lines = ["Compiler settings and linked libraries changed:"]
-        lines.extend(f"  ~ {change}" for change in diff.settings)
+        lines.extend(f"  ~ {change}" for change in settings.changes)
+    else:
+        # Only the compiler version could be compared; say so either way.
+        lines = [
+            "Compiler settings: only the compiler version was comparable "
+            "(other settings NOT AVAILABLE — see Unvalidated items):"
+        ]
+        lines.extend(f"  ~ {change}" for change in settings.changes)
+        if not settings.changes:
+            lines.append("  compiler: unchanged")
 
     for lib in diff.libraries:
         lines.append("")
@@ -650,9 +660,11 @@ def _fmt_library(lib: LibraryChange) -> list[str]:
     if lib.files is None:
         return [f"{head} — source NOT COMPARED (unlinked on one side or unverified)."]
     lines = format_source_files(lib.files, f"{head} — source changes")
-    if lib.settings:
+    if lib.settings and lib.settings.changes:
         lines.append("  Compiler settings changed:")
-        lines.extend(f"    ~ {change}" for change in lib.settings)
+        lines.extend(f"    ~ {change}" for change in lib.settings.changes)
+    if lib.settings and not lib.settings.complete:
+        lines.append("  Compiler settings other than the compiler version: NOT AVAILABLE.")
     return lines
 
 
