@@ -45,6 +45,17 @@ query YearnParentVaults($chainId: Int) {
 }
 """
 
+KONG_STRATEGIES_QUERY = """
+query YearnStrategies {
+  strategies {
+    chainId
+    address
+    name
+    isShutdown
+  }
+}
+"""
+
 STRATEGY_SOURCE_ALL = "strategies"
 STRATEGY_SOURCE_DEFAULT_QUEUE = "default_queue"
 STRATEGY_SOURCES = {STRATEGY_SOURCE_ALL, STRATEGY_SOURCE_DEFAULT_QUEUE}
@@ -219,6 +230,43 @@ def fetch_kong_parent_vaults(chain: Chain) -> List[Dict[str, object]]:
                 "asset_address": asset_address,
                 "asset_symbol": asset.get("symbol") or "UNKNOWN",
                 "asset_decimals": asset_decimals,
+            }
+        )
+
+    return result
+
+
+def fetch_kong_strategies() -> List[Dict[str, object]]:
+    """Fetch strategy metadata for every chain Kong indexes in one request.
+
+    Rows missing a chain id, address or name are skipped.
+
+    Returns:
+        Strategy dicts with ``chain_id``, ``address``, ``name`` and ``is_shutdown`` keys.
+
+    Raises:
+        KongRequestError: If the Kong request fails or omits the strategies list.
+    """
+    data = _post_graphql(KONG_STRATEGIES_QUERY, {})
+    strategies = data.get("strategies")
+    if not isinstance(strategies, list):
+        raise KongRequestError("Kong response missing strategies list")
+
+    result: List[Dict[str, object]] = []
+    for strategy in strategies:
+        if not isinstance(strategy, dict):
+            continue
+        chain_id = strategy.get("chainId")
+        address = strategy.get("address")
+        name = strategy.get("name")
+        if not isinstance(chain_id, int) or not isinstance(address, str) or not isinstance(name, str):
+            continue
+        result.append(
+            {
+                "chain_id": chain_id,
+                "address": address,
+                "name": name,
+                "is_shutdown": bool(strategy.get("isShutdown")),
             }
         )
 

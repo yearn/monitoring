@@ -9,6 +9,7 @@ Where each script in this folder sends its alerts. "Yearn" is the public channel
 | Script | Alerts | Telegram destination | Fallback when unset | DB tag |
 |---|---|---|---|---|
 | `lender_borrower.py` | LTV, spread, coverage warnings and monitor errors | Yearn maintenance (`TELEGRAM_CHAT_ID_YEARN_MAINTENANCE`) | Yearn | `yearn-internal` |
+| `check_strategy_keepers.py` | Looper and lender-borrower keeper wallets low on gas, keeper contracts with no known wallet caller | Yearn maintenance (`TELEGRAM_CHAT_ID_YEARN_MAINTENANCE`) | Yearn | `yearn-internal` |
 | `alert_small_parent_flows.py` | Aggregated small parent-vault flows | Yearn maintenance (`TELEGRAM_CHAT_ID_YEARN_MAINTENANCE`) | Yearn | `yearn-internal` |
 | `alert_large_flows.py` | Large deposits/withdrawals | Yearn | — | `yearn` |
 | `check_shadow_debt.py` | Shadow debt | Yearn | — | `yearn` |
@@ -38,6 +39,22 @@ uv run protocols/yearn/lender_borrower.py --checks=rates-and-coverage --dry-run
 ```
 
 Omit `--dry-run` to persist rate samples and send configured alerts.
+
+## Strategy Keeper Gas
+
+The script `yearn/check_strategy_keepers.py` makes sure every funded looper and lender-borrower strategy has a funded wallet to keep it running. It runs hourly.
+
+1. **Discovery**: one Kong request lists every strategy on every chain. A strategy is checked when its name contains "Looper" or "Lender Borrower" and it is not shut down. Only mainnet, Base and Katana are monitored; strategies on other chains are logged and skipped.
+2. **Keepers**: `keeper()` and `totalAssets()` are read on-chain for every strategy; strategies with zero assets are skipped, since they need no keeper. A keeper with no code is a wallet and is checked directly. A keeper contract (`LooperKeeper`, `PublicAllocatorTendExecutor`, `yHaaSRelayer`, `TKSRelayer`) never holds ETH: its allow-listed wallets pass `msg.value` and pay gas. The wallets come from one `eth_getLogs` over all keeper contracts for `AllowedSet(address,bool)` (replayed in order, so revoked callers drop out), plus `EXTRA_KEEPER_CALLERS` for callers that emit no event (yHaaSRelayer and TKSRelayer keepers, governance allow-listed in the constructor). Callers with code (multisigs) are dropped.
+3. **Balances**: every address is collected into one deduplicated map before any RPC call, so a wallet shared by many strategies is read once. `keeper()` with `totalAssets()`, `eth_getCode` and `eth_getBalance` each run as a single JSON-RPC batch per chain. Native token prices come from DeFiLlama in one request.
+
+An alert fires when a wallet holds less than **$10** of the native gas token on mainnet or **$2** on Base/Katana, or when a keeper contract has no known wallet caller (add its bots to `EXTRA_KEEPER_CALLERS`); the no-caller check does not depend on prices, so it still fires during a DeFiLlama outage. All issues from a run go into one `MEDIUM` message to the internal Yearn maintenance chat, stored as `yearn-internal`; crashes go through `run_with_alert` with the same internal key. The same set of issues is re-sent only once every 24 hours; any change in the set alerts right away.
+
+### Usage
+
+```bash
+uv run protocols/yearn/check_strategy_keepers.py --dry-run
+```
 
 ## Large Flows
 
