@@ -10,10 +10,9 @@ Tenderly alerts will send telegram message when there are transactions made by:
   - [Staking router proxy](https://etherscan.io/address/0xFdDf38947aFB03C621C71b06C9C70bce73f12999#readContract#F1) - is a top-level controller contract for staking modules. Used to maintain a registry of staking modules, allocating stake to modules, and distribute protocol fees. [Docs](https://docs.lido.fi/contracts/staking-router)
   - [Withdrawal queue ERC721 proxy](https://etherscan.io/address/0x889edC2eDab5f40e902b864aD4d7AdE8E412F9B1#readContract#F1) - A FIFO queue for stETH withdrawal requests and an unstETH NFT implementation representing the position in the queue. [Docs](https://docs.lido.fi/contracts/withdrawal-queue-erc721/).
 
-Monitor Safe multisig for [Emergency Brakes functions](https://docs.lido.fi/multisigs/emergency-brakes/):
+Monitor the Safe multisig for [Emergency Brakes functions](https://docs.lido.fi/multisigs/emergency-brakes/):
 
 - Emergency Brakes: Ethereum used to disable deposits & withdrawals for wstETH bridging to other chains (Arbitrum, Optimism, Base, Scroll, Mantle, ZKSync, Binance Smart Chain, Mode) in case of an emergency on Ethereum mainnet or the counterpart chain, and can pause Easy Track pipeline.
-- GateSeal Committee - can trigger GateSeal to pause WithdrawalQueueERC721. Expires on 1 April 2025.
 
 [Internal timelock monitoring](../timelock/README.md) for StartVote events on the [Lido Timelock](https://etherscan.io/address/0x2e59a20f205bb85a89c53f1936454680651e618e) on Mainnet.
 

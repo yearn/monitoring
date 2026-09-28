@@ -204,7 +204,7 @@ protocols:
       - name: "Timelock"
         description: "Lido Timelock StartVote events via Envio"
       - name: "Safe Multisigs"
-        description: "Emergency Brakes and GateSeal Committee Safe queues"
+        description: "Emergency Brakes Safe queue"
 
   lrt-pegs:
     display_name: "LRT Pegs"
