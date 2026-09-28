@@ -1,3 +1,4 @@
+import hashlib
 import itertools
 import os
 import time
@@ -80,6 +81,10 @@ _api_key_cycle = itertools.cycle(_api_keys)
 _exhausted_api_keys: dict[str, int] = {}  # key -> seconds until its quota resets
 
 CACHE_KEY_QUOTA_ALERTED_UNTIL = "SAFE_API_QUOTA_ALERTED_UNTIL"
+# Per-key "exhausted until" unix time, so later runs skip a dead key instead of spending a
+# request on it (and logging) every run until its window resets. Keyed by a hash so the
+# cache never holds the key itself.
+CACHE_KEY_EXHAUSTED_UNTIL_PREFIX = "SAFE_API_KEY_EXHAUSTED_UNTIL_"
 # Crash and quota alerts are operational: they go to the internal errors channel with a
 # ``[yearn]`` label and are stored as ``yearn-internal`` so they stay off the public
 # Yearn monitoring page. Never send them to a protocol's public channel or topic.
@@ -106,6 +111,41 @@ def _next_api_key() -> str | None:
         if key not in _exhausted_api_keys:
             return key
     return None
+
+
+def _exhausted_cache_key(api_key: str) -> str:
+    """Return the cache key holding when ``api_key``'s quota resets."""
+    return CACHE_KEY_EXHAUSTED_UNTIL_PREFIX + hashlib.sha256(api_key.encode()).hexdigest()[:16]
+
+
+def _mark_key_exhausted(api_key: str, reset_seconds: int, now: float | None = None) -> None:
+    """Skip ``api_key`` for the rest of this run and persist its reset time for later runs."""
+    now = time.time() if now is None else now
+    _exhausted_api_keys[api_key] = reset_seconds
+    write_last_value_to_file(cache_filename, _exhausted_cache_key(api_key), int(now + reset_seconds))
+    key_number = _api_keys.index(api_key) + 1 if api_key in _api_keys else "?"
+    logger.warning(
+        "Safe API key #%s quota exhausted; skipping it until %s",
+        key_number,
+        time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(now + reset_seconds)),
+    )
+
+
+def load_known_exhausted_keys(now: float | None = None) -> None:
+    """Pre-mark keys whose quota a previous run found exhausted and has not reset yet."""
+    now = time.time() if now is None else now
+    for number, api_key in enumerate(_api_keys, start=1):
+        try:
+            exhausted_until = float(get_last_value_for_key_from_file(cache_filename, _exhausted_cache_key(api_key)))
+        except (TypeError, ValueError):
+            continue
+        if exhausted_until > now:
+            _exhausted_api_keys[api_key] = int(exhausted_until - now)
+            logger.info(
+                "Skipping Safe API key #%s until %s (quota exhausted)",
+                number,
+                time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(exhausted_until)),
+            )
 
 
 def _quota_reset_seconds(response: requests.Response) -> int | None:
@@ -168,9 +208,8 @@ def get_safe_transactions(
         elif response.status_code == 429:
             reset_seconds = _quota_reset_seconds(response)
             if reset_seconds is not None:
-                # Quota used up: drop the key for this run and try the next one at once.
-                _exhausted_api_keys[api_key] = reset_seconds
-                logger.error("Safe API key quota exhausted; resets in %ss", reset_seconds)
+                # Quota used up: drop the key until it resets and try the next one at once.
+                _mark_key_exhausted(api_key, reset_seconds)
                 continue
             # Short-term rate limit - wait and retry
             wait_time = 2**attempt
@@ -516,7 +555,7 @@ def report_quota_exhausted(exc: SafeApiQuotaExhausted, now: float | None = None)
         f"All {len(_api_keys)} Safe API keys have used up their quota; pending Safe transactions "
         "are NOT being monitored until the earliest reset "
         f"({time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(reset_at))}).\n"
-        "Add a fresh key to SAFE_API_KEY or SAFE_API_KEY_2 in /etc/monitoring/.env.",
+        "Add a key from another Safe developer account as the next SAFE_API_KEY_N in /etc/monitoring/.env.",
         ERROR_LABEL,
         disable_notification=False,
         source="safe_api_quota",
@@ -528,6 +567,7 @@ def report_quota_exhausted(exc: SafeApiQuotaExhausted, now: float | None = None)
 def main():
     last_api_call_time = 0
     request_counter = 0
+    load_known_exhausted_keys()
     # loop all
     for safe in ALL_SAFE_ADDRESSES:
         logger.info("Running for %s on %s", safe[0], safe[1])

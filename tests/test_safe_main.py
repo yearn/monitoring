@@ -449,6 +449,55 @@ class TestSafeApiQuota(unittest.TestCase):
             safe_main.get_safe_transactions("0xSafe", "mainnet")
         self.assertEqual({c.kwargs["headers"]["Authorization"] for c in mock_get.call_args_list}, {"Bearer k2"})
 
+    def test_exhausted_key_is_skipped_by_later_runs_until_reset(self):
+        safe_main = self._import_safe_main({"SAFE_API_KEY": "k1", "SAFE_API_KEY_2": "k2"})
+        ok = self._response(200, results=[{"nonce": 7}])
+
+        with patch.object(safe_main.requests, "get", side_effect=[self._response(429, "0", "3600"), ok]):
+            safe_main.get_safe_transactions("0xSafe", "mainnet")
+        stored = safe_main.get_last_value_for_key_from_file(
+            safe_main.cache_filename, safe_main._exhausted_cache_key("k1")
+        )
+        self.assertNotIn("k1", safe_main._exhausted_cache_key("k1"))  # never persist the key itself
+
+        # Next run: a fresh process that has not seen the 429 yet.
+        safe_main = self._import_safe_main({"SAFE_API_KEY": "k1", "SAFE_API_KEY_2": "k2"})
+        safe_main.load_known_exhausted_keys(now=float(stored) - 60)
+        with patch.object(safe_main.requests, "get", return_value=ok) as mock_get:
+            safe_main.get_safe_transactions("0xSafe", "mainnet")
+            safe_main.get_safe_transactions("0xSafe", "mainnet")
+        self.assertEqual({c.kwargs["headers"]["Authorization"] for c in mock_get.call_args_list}, {"Bearer k2"})
+
+        # Once the window has reset, the key is used again.
+        safe_main = self._import_safe_main({"SAFE_API_KEY": "k1", "SAFE_API_KEY_2": "k2"})
+        safe_main.load_known_exhausted_keys(now=float(stored) + 1)
+        with patch.object(safe_main.requests, "get", return_value=ok) as mock_get:
+            safe_main.get_safe_transactions("0xSafe", "mainnet")
+            safe_main.get_safe_transactions("0xSafe", "mainnet")
+        self.assertEqual(
+            [c.kwargs["headers"]["Authorization"] for c in mock_get.call_args_list], ["Bearer k1", "Bearer k2"]
+        )
+
+    def test_all_keys_known_exhausted_alerts_without_api_requests(self):
+        safe_main = self._import_safe_main({"SAFE_API_KEY": "k1", "SAFE_API_KEY_2": "k2"})
+        now = safe_main.time.time()
+        for key in ("k1", "k2"):
+            safe_main.write_last_value_to_file(
+                safe_main.cache_filename, safe_main._exhausted_cache_key(key), int(now + 7200)
+            )
+
+        with (
+            patch.object(safe_main, "ALL_SAFE_ADDRESSES", [["LIDO", "mainnet", "0x1"]]),
+            patch.object(safe_main, "get_last_executed_nonce_from_file", return_value=0),
+            patch.object(safe_main, "get_safe_current_nonce", return_value=1),
+            patch.object(safe_main.requests, "get") as mock_get,
+            patch.object(safe_main, "send_error_message") as mock_error,
+        ):
+            safe_main.main()
+
+        mock_get.assert_not_called()
+        mock_error.assert_called_once()
+
     def test_all_keys_exhausted_raises_with_earliest_reset(self):
         safe_main = self._import_safe_main({"SAFE_API_KEY": "k1", "SAFE_API_KEY_2": "k2"})
 
