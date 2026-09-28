@@ -2315,3 +2315,44 @@ class TestTokenLabel(unittest.TestCase):
             _token_label("Circle: USDC Token", ERC20Metadata("USDC", 6)), "Circle: USDC Token (USDC, 6 dec)"
         )
         self.assertEqual(_token_label("", ERC20Metadata("USDC", 6)), "USDC, 6 dec")
+
+
+class TestNestedProxyUpgradeInfo(unittest.TestCase):
+    """A Safe tx calling a timelock's executeBatch still gets each upgrade's impl diff."""
+
+    @patch("utils.llm.ai_explainer.get_verification_status", return_value=True)
+    @patch("utils.llm.ai_explainer.format_impl_diff", side_effect=lambda diff: f"IMPL DIFF {diff}")
+    @patch("utils.llm.ai_explainer.diff_implementations", side_effect=lambda old, new, chain_id: f"{old}->{new}")
+    @patch("utils.llm.ai_explainer.get_current_implementation")
+    def test_each_nested_upgrade_is_diffed(self, current_impl, _diff, _fmt, _verified) -> None:
+        from tests.test_calldata_wrappers import (
+            CUSD,
+            NEW_CUSD_IMPL,
+            NEW_ORACLE_IMPL,
+            ORACLE,
+            execute_batch,
+            upgrade_to_and_call,
+        )
+        from utils.llm.ai_explainer import _get_proxy_upgrade_info
+
+        old_impls = {ORACLE: "0xOldOracle", CUSD: "0xOldCusd"}
+        current_impl.side_effect = lambda proxy, chain_id: old_impls[proxy]
+        data = execute_batch([ORACLE, CUSD], [upgrade_to_and_call(NEW_ORACLE_IMPL), upgrade_to_and_call(NEW_CUSD_IMPL)])
+
+        info = _get_proxy_upgrade_info(data, "0xD8236031d8279d82E615aF2BFab5FC0127A329ab", 1)
+
+        self.assertEqual(info.count("This is a PROXY UPGRADE on"), 2)
+        self.assertIn(f"PROXY UPGRADE on {ORACLE}. It is nested inside", info)
+        self.assertIn("(executeBatch call 1)", info)
+        self.assertIn("(executeBatch call 2)", info)
+        self.assertIn(f"IMPL DIFF 0xOldOracle->{NEW_ORACLE_IMPL}", info)
+        self.assertIn(f"IMPL DIFF 0xOldCusd->{NEW_CUSD_IMPL}", info)
+        # Call order is kept even though diffs are fetched in parallel.
+        self.assertLess(info.index(ORACLE), info.index(CUSD))
+
+    def test_non_upgrade_wrapper_adds_nothing(self) -> None:
+        from tests.test_calldata_wrappers import CUSD, execute_batch
+        from utils.llm.ai_explainer import _get_proxy_upgrade_info
+
+        transfer = "0xa9059cbb" + "00" * 64
+        self.assertEqual(_get_proxy_upgrade_info(execute_batch([CUSD], [transfer]), CUSD, 1), "")

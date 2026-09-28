@@ -309,6 +309,77 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         mock_explain.assert_called_once()
         self.assertEqual(mock_explain.call_args.kwargs["hex_data"], "0x12")
 
+    def test_upgrade_nested_in_timelock_call_is_in_the_alert(self):
+        from tests.test_calldata_wrappers import (
+            CUSD,
+            NEW_CUSD_IMPL,
+            NEW_ORACLE_IMPL,
+            ORACLE,
+            execute_batch,
+            upgrade_to_and_call,
+        )
+
+        safe_main = self._import_safe_main()
+        safe_address = "0xb8FC49402dF3ee4f8587268FB89fda4d621a8793"
+        timelock = "0xD8236031d8279d82E615aF2BFab5FC0127A329ab"
+        data = execute_batch([ORACLE, CUSD], [upgrade_to_and_call(NEW_ORACLE_IMPL), upgrade_to_and_call(NEW_CUSD_IMPL)])
+        tx = {**self._tx(249), "to": timelock, "data": data, "operation": 0}
+
+        with (
+            patch.object(safe_main, "get_pending_transactions", return_value=[tx]),
+            patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
+            patch.object(safe_main, "_pending_filter_diag", return_value=self._DIAG),
+            patch.object(safe_main, "_explain_safe_tx", return_value=None),
+            patch.object(safe_main, "send_telegram_message") as mock_send,
+            patch.object(safe_main, "write_last_executed_nonce_to_file"),
+            patch("utils.proxy.get_current_implementation", return_value="0xOldImpl"),
+        ):
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "CAP")
+
+        message = mock_send.call_args.args[0]
+        self.assertIn(f"🅿️ Proxy: `{ORACLE}` (via executeBatch call 1)", message)
+        self.assertIn(f"🅿️ Proxy: `{CUSD}` (via executeBatch call 2)", message)
+        self.assertIn(f"🔄 Upgrade: `0xOldImpl` → `{NEW_CUSD_IMPL}`", message)
+        self.assertIn("📊 [Diff](https://etherscan.io/contractdiffchecker?a1=0xOldImpl", message)
+
+    def test_multisend_upgrade_path_names_the_inner_call(self):
+        from tests.test_calldata_wrappers import NEW_ORACLE_IMPL, ORACLE, upgrade_to_and_call
+
+        safe_main = self._import_safe_main()
+        transfer = "0xa9059cbb" + "00" * 64
+        tx = {
+            **self._tx(10),
+            "to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
+            "operation": 1,
+            "dataDecoded": {
+                "method": "multiSend",
+                "parameters": [
+                    {
+                        "valueDecoded": [
+                            {"to": ORACLE, "data": transfer, "value": "0"},
+                            {"to": ORACLE, "data": upgrade_to_and_call(NEW_ORACLE_IMPL), "value": "0"},
+                        ]
+                    }
+                ],
+            },
+        }
+        upgrades = safe_main._find_safe_tx_upgrades(tx, tx["to"], "0x8d80ff0a")
+        self.assertEqual([(u.proxy_address, u.via) for u in upgrades], [(ORACLE, "multiSend call 2")])
+
+    def test_upgrade_detection_failure_does_not_block_the_alert(self):
+        safe_main = self._import_safe_main()
+        with (
+            patch.object(safe_main, "get_pending_transactions", return_value=[self._tx(5)]),
+            patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
+            patch.object(safe_main, "_pending_filter_diag", return_value=self._DIAG),
+            patch.object(safe_main, "_upgrade_alert_lines", side_effect=RuntimeError("rpc down")),
+            patch.object(safe_main, "_explain_safe_tx", return_value=None),
+            patch.object(safe_main, "send_telegram_message") as mock_send,
+            patch.object(safe_main, "write_last_executed_nonce_to_file"),
+        ):
+            safe_main.check_for_pending_transactions("0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52", "mainnet", "CAP")
+        mock_send.assert_called_once()
+
     def test_explain_safe_tx_forwards_empty_calldata(self):
         safe_main = self._import_safe_main()
         tx = {**self._tx(2281), "data": "0x", "value": "1", "operation": 0}

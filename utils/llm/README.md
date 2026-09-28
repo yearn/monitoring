@@ -135,6 +135,16 @@ Timelock batches are simulated as one **sequential bundle** (`simulate_bundle`, 
 
 For the ProxyAdmin pattern, the tx target is the ProxyAdmin and the actual proxy is inside the calldata — the Telegram alert surfaces both. Detection short-circuits on the selector check *before* calldata decoding, so non-upgrade calls don't trigger the Sourcify 4byte lookup.
 
+`find_proxy_upgrades(data_hex, target)` is what callers use: it returns every upgrade in a call, including ones **nested inside governance wrappers**, unwrapped by `utils/calldata/wrappers.py` (up to two levels, deduplicated by proxy + new implementation, each tagged with its path such as `executeBatch call 2`):
+
+| Wrapper | Functions |
+|---|---|
+| OpenZeppelin `TimelockController` | `schedule`, `scheduleBatch`, `execute`, `executeBatch` |
+| Compound-style `Timelock` | `queueTransaction`, `executeTransaction` (inner calldata = `selector(signature) ++ data` when `signature` is set) |
+| Maple `GovernorTimelock` | `scheduleProposals` |
+
+Without this, a Safe tx that schedules or executes a timelock batch of upgrades (the CAP multisig calling `executeBatch` on its `TimelockController`) was explained with no implementation diff at all, since only the outer `executeBatch` was checked. Safe alerts (`protocols/safe/main.py`) also print the same `🅿️ Proxy` / `🔄 Upgrade` / `📊 Diff` lines as timelock alerts, for direct, multisend and wrapped upgrades, all rendered by `format_upgrade_lines`.
+
 When an upgrade is detected the pipeline:
 
 1. Reads the **current implementation** from the EIP-1967 storage slot (`0x360894a...`) of the proxy, falling back to the legacy zeppelinos slot (`0x7050c9e...`) for pre-EIP-1967 proxies like USDC's `FiatTokenProxy`, then to the EIP-1967 beacon slot (`0xa3f0ad7...`) followed by the beacon's `implementation()`, then to `implementation()` / `comptrollerImplementation()` on the proxy itself. Every proxy-follow path (source context, parameter names, labels, state reads, ABI probes) goes through this one resolver — before beacon support, a `BeaconProxy` target (3Jane's per-facility `LCCVault`s) left the model with no source, no parameter names and the label "BeaconProxy".
@@ -512,7 +522,7 @@ utils/related_tokens.py      # Token discovery from a contract's own zero-arg ad
 utils/source_context.py      # Etherscan v2 source fetch + natspec extractor + proxy follow
 utils/verified_contract.py   # Structured verified record: per-file sources, settings, ABI, target
 utils/on_chain_state.py      # Before-state reader (auto-generated getters, mappings, diamond storage)
-utils/proxy.py               # Impl resolution (EIP-1967, zeppelinos, beacon, getters), EIP-1167 clone decode, upgrade detection
+utils/proxy.py               # Impl resolution (EIP-1967, zeppelinos, beacon, getters), EIP-1167 clone decode, upgrade detection (direct + nested), alert lines
 utils/impl_diff.py           # Old-vs-new impl diff: ABI surface, bodies, files, settings, storage, unvalidated items
 utils/source_diff.py         # Whole-bundle file diff, compiler-settings diff, linked-library helpers
 utils/abi_surface.py         # Canonical-signature external surface diff from two ABIs
@@ -523,7 +533,7 @@ utils/storage_scope.py       # Code that can touch proxy storage: inheritance ch
 utils/storage_access.py      # Slot accessors (with bounded root resolution), raw sload/sstore, delegatecall
 utils/namespaced_storage.py  # Non-positional storage: namespaces, roots, gaps and conflicts
 utils/tenderly/simulation.py # Tenderly Simulation API client
-utils/calldata/              # Selector resolver + ABI decoder
+utils/calldata/              # Selector resolver + ABI decoder + governance wrapper unwrapping (wrappers.py)
 safe/multisend.py            # Safe MultiSendCallOnly inner-call extractor + DELEGATECALL context note
 ```
 
