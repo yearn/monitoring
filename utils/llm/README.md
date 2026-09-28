@@ -135,19 +135,31 @@ Timelock batches are simulated as one **sequential bundle** (`simulate_bundle`, 
 
 For the ProxyAdmin pattern, the tx target is the ProxyAdmin and the actual proxy is inside the calldata — the Telegram alert surfaces both. Detection short-circuits on the selector check *before* calldata decoding, so non-upgrade calls don't trigger the Sourcify 4byte lookup.
 
+`find_proxy_upgrades(data_hex, target)` is what callers use: it returns every upgrade in a call, including ones **nested inside governance wrappers**, unwrapped by `utils/calldata/wrappers.py` (up to two levels, deduplicated by proxy + new implementation, each tagged with its path such as `executeBatch call 2`):
+
+| Wrapper | Functions |
+|---|---|
+| OpenZeppelin `TimelockController` | `schedule`, `scheduleBatch`, `execute`, `executeBatch` |
+| Compound-style `Timelock` | `queueTransaction`, `executeTransaction` (inner calldata = `selector(signature) ++ data` when `signature` is set) |
+| Maple `GovernorTimelock` | `scheduleProposals` |
+
+Without this, a Safe tx that schedules or executes a timelock batch of upgrades (the CAP multisig calling `executeBatch` on its `TimelockController`) was explained with no implementation diff at all, since only the outer `executeBatch` was checked. Safe alerts (`protocols/safe/main.py`) also print the same `🅿️ Proxy` / `🔄 Upgrade` / `📊 Diff` lines as timelock alerts, for direct, multisend and wrapped upgrades, all rendered by `format_upgrade_lines`.
+
 When an upgrade is detected the pipeline:
 
 1. Reads the **current implementation** from the EIP-1967 storage slot (`0x360894a...`) of the proxy, falling back to the legacy zeppelinos slot (`0x7050c9e...`) for pre-EIP-1967 proxies like USDC's `FiatTokenProxy`, then to the EIP-1967 beacon slot (`0xa3f0ad7...`) followed by the beacon's `implementation()`, then to `implementation()` / `comptrollerImplementation()` on the proxy itself. Every proxy-follow path (source context, parameter names, labels, state reads, ABI probes) goes through this one resolver — before beacon support, a `BeaconProxy` target (3Jane's per-facility `LCCVault`s) left the model with no source, no parameter names and the label "BeaconProxy".
 2. Builds an Etherscan diff URL: `etherscan.io/contractdiffchecker?a1=old&a2=new`.
-3. Fetches the verified record of **both** implementations (`utils/verified_contract.py`) and diffs them (`utils/impl_diff.py`) in four separated categories, each line carrying the contract and file it came from:
+3. Fetches the verified record of **both** implementations (`utils/verified_contract.py`) and diffs them (`utils/impl_diff.py`) in separated categories, each line carrying the contract and file it came from:
    - **External ABI changes** (`utils/abi_surface.py`) — additions, removals and `stateMutability` changes keyed by canonical signature (`setCaps((bytes32,uint128)[])`), derived from each implementation's own ABI. Generated public getters are included naturally; interfaces, comments, and internal/private functions never are.
    - **Target-defined function changes** (`utils/solidity_text.py`) — scoped to the deployed contract's own definition in its own file: bodies that changed under an unchanged signature (with a short unified diff), plus internal/private members added or removed (added ones carry their source). ABI equality is not behavioral equality, and neither is an unchanged function list — comparing only the functions both sides share would miss behavior *moved* into a new internal helper, or a deleted transfer hook. External additions stay in the ABI section, so nothing is reported twice.
+   - **Source file changes** (`utils/source_diff.py`) — every file in the implementation's verified bundle diffed by path, including inherited bases, internal libraries and interfaces. An upgrade whose change sits in a base contract (e.g. `nonReentrant` added to an inherited `mint`) leaves the target's own file untouched, so the target-scoped section alone reports "none". Moved files are paired by content or unique basename; project files get the diff budget before `node_modules/`/`lib/` dependencies, and long diffs are cut at hunk boundaries.
+   - **Compiler settings and linked libraries** — compiler version, `evmVersion`, optimizer and `viaIR` changes (they change bytecode without a source change), plus relinked external libraries. Each relinked library's own verified source is fetched at both addresses and diffed, since the code that runs is whatever is deployed there. Import remappings are ignored — they only matter through the files they resolve to, which are already diffed. The compiler version is a top-level Etherscan field and is always compared; the other settings exist only for standard-json verifications, so for single-file verifications the section says only the compiler version was comparable and lists the rest under Unvalidated items.
    - **Storage compatibility** — one verdict from two parts. Precedence: any *proven* conflict is `INCOMPATIBLE`; otherwise anything the check could not see is `UNKNOWN`; only full coverage is `COMPATIBLE`. The positional result is always shown on its own line too.
      - *Positional layout* (`utils/sourcify_layout.py`, `utils/storage_layout.py`): the compiler `storageLayout` Sourcify publishes for both implementations. Slot, byte offset and recursive type shape are compared, including a normalized type *kind* at every level — `uint256` and `bytes32` fill the same 32 bytes, but retyping one as the other changes what stored data means ("reinterpreted as"). Contract types and `address` count as one kind. Custom value types are compared by what they wrap, resolved from each side's source (`type Id is bytes32`): unwrapping `Id` to `bytes32` is compatible and reported as a retype, `Id` redeclared over `uint256` is not, and an unresolved or ambiguous declaration is a gap rather than a name match. Compiler ids and variable names are ignored, so renames are context. Reserved `__gap` space may be consumed freely.
      - *Non-positional storage* (`utils/storage_scope.py`, `utils/storage_access.py`, `utils/namespaced_storage.py`): everything a layout can't describe, found in the code that can run against the proxy's storage — the deployed contract, its whole inheritance chain, and library and free (file-level) functions actually reachable from them, read through each file's import aliases (`import {Lib as State}`) — a merely imported library contributes nothing. ERC-7201 namespaces count as unchanged only with the same id, identical elementary struct text, and every accessor resolving to the root the annotation defines (ERC-7201 leaves enforcing that to the developer). Structs are identified by their declaration (`Vault.Main` ≠ `Lib.Main`), never by bare name. A root that provably moved is a conflict; differently shaped structs sharing a root are an unresolved overlap, not a conflict. Unannotated `s.slot := ROOT` accessors, raw `sload`/`sstore` and `delegatecall` are coverage gaps. Roots resolve only from bounded forms — literals, unique constants, one never-reassigned local or getter hop, and the `keccak256`, EIP-1967 and ERC-7201 expressions — never guessed.
-   - **Unvalidated items** — inherited bodies, libraries/free functions, ERC-7201 namespaces, and anything else not checked, stated explicitly so silence is never read as safety.
+   - **Unvalidated items** — code reached at other addresses, missing compiler settings, unverified relinked libraries, and anything else not checked, stated explicitly so silence is never read as safety.
 
-Everything is target-scoped: the compilation target is resolved from `settings.compilationTarget` or the unique file declaring the contract, and if it can't be resolved unambiguously the body analysis reports itself unavailable instead of falling back to the bundle. The concatenated source survives only as an explicitly named search helper for natspec lookups (`fetch_source`), never as evidence.
+Function-level claims are target-scoped (the whole-bundle file diff is attributed per file path instead, and never names a function as the target's): the compilation target is resolved from `settings.compilationTarget` or the unique file declaring the contract, and if it can't be resolved unambiguously the body analysis reports itself unavailable instead of falling back to the bundle. The concatenated source survives only as an explicitly named search helper for natspec lookups (`fetch_source`), never as evidence.
 
 Storage coverage is partial by design: Sourcify verifies a subset of what Etherscan does, and one-sided coverage, a `match: null` response, a malformed payload or a network error all produce `UNKNOWN`. `UNKNOWN` is never a soft `COMPATIBLE` — it means a reviewer still has to look. No compiler is downloaded or executed in the monitoring path.
 
@@ -510,8 +522,9 @@ utils/related_tokens.py      # Token discovery from a contract's own zero-arg ad
 utils/source_context.py      # Etherscan v2 source fetch + natspec extractor + proxy follow
 utils/verified_contract.py   # Structured verified record: per-file sources, settings, ABI, target
 utils/on_chain_state.py      # Before-state reader (auto-generated getters, mappings, diamond storage)
-utils/proxy.py               # Impl resolution (EIP-1967, zeppelinos, beacon, getters), EIP-1167 clone decode, upgrade detection
-utils/impl_diff.py           # Old-vs-new impl diff: ABI surface, bodies, storage, unvalidated items
+utils/proxy.py               # Impl resolution (EIP-1967, zeppelinos, beacon, getters), EIP-1167 clone decode, upgrade detection (direct + nested), alert lines
+utils/impl_diff.py           # Old-vs-new impl diff: ABI surface, bodies, files, settings, storage, unvalidated items
+utils/source_diff.py         # Whole-bundle file diff, compiler-settings diff, linked-library helpers
 utils/abi_surface.py         # Canonical-signature external surface diff from two ABIs
 utils/solidity_text.py       # Brace-aware, contract-scoped scanning of one Solidity file
 utils/sourcify_layout.py     # Sourcify compiler storageLayout fetch + cache
@@ -520,7 +533,7 @@ utils/storage_scope.py       # Code that can touch proxy storage: inheritance ch
 utils/storage_access.py      # Slot accessors (with bounded root resolution), raw sload/sstore, delegatecall
 utils/namespaced_storage.py  # Non-positional storage: namespaces, roots, gaps and conflicts
 utils/tenderly/simulation.py # Tenderly Simulation API client
-utils/calldata/              # Selector resolver + ABI decoder
+utils/calldata/              # Selector resolver + ABI decoder + governance wrapper unwrapping (wrappers.py)
 safe/multisend.py            # Safe MultiSendCallOnly inner-call extractor + DELEGATECALL context note
 ```
 

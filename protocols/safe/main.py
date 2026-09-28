@@ -2,6 +2,7 @@ import hashlib
 import itertools
 import os
 import time
+from dataclasses import replace
 
 import requests
 from dotenv import load_dotenv
@@ -27,6 +28,7 @@ from utils.chains import Chain, safe_network_to_chain_id
 from utils.formatting import parse_wei
 from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
 from utils.logger import get_logger
+from utils.proxy import ProxyUpgrade, dedupe_upgrades, find_proxy_upgrades, format_upgrade_lines
 from utils.telegram import escape_markdown, send_error_message, send_telegram_message
 from utils.web3_wrapper import ChainManager
 
@@ -384,6 +386,33 @@ def _explain_safe_tx(
     )
 
 
+def _find_safe_tx_upgrades(tx: dict, target: str, hex_data: str) -> list[ProxyUpgrade]:
+    """Proxy upgrades a Safe tx performs: direct, per multisend call, or inside a timelock call.
+
+    Multisend upgrades carry ``multiSend call N`` in their path, because the
+    alert's target is the multisend utility, not the call that upgrades.
+    """
+    operation = int(tx.get("operation", 0) or 0)
+    inner_calls = extract_inner_calls(tx) if operation == 1 else []
+    if not inner_calls:
+        return find_proxy_upgrades(hex_data, target)
+
+    upgrades: list[ProxyUpgrade] = []
+    for i, call in enumerate(inner_calls, start=1):
+        for upgrade in find_proxy_upgrades(call["data"], call["target"]):
+            via = f"multiSend call {i}" + (f" → {upgrade.via}" if upgrade.via else "")
+            upgrades.append(replace(upgrade, via=via))
+    return dedupe_upgrades(upgrades)
+
+
+def _upgrade_alert_lines(tx: dict, target: str, hex_data: str, chain_id: int) -> str:
+    """Upgrade lines for the Telegram alert (old → new impl, diff link), or ""."""
+    lines: list[str] = []
+    for upgrade in _find_safe_tx_upgrades(tx, target, hex_data):
+        lines.extend(format_upgrade_lines(upgrade, target, chain_id))
+    return "".join(f"\n{line}" for line in lines)
+
+
 def check_for_pending_transactions(safe_address: str, network_name: str, protocol: str) -> None:
     pending_transactions = get_pending_transactions(safe_address, network_name)
     expected_proposers = YEARN_EXPECTED_PROPOSERS.get((network_name, safe_address.lower()), set())
@@ -482,11 +511,18 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
                 except Exception as e:
                     logger.error("Cannot decode Pendle aggregate calls: %s", e)
 
+            hex_data = tx.get("data") or "0x"
+            chain_id = safe_network_to_chain_id(network_name)
+            # Proxy upgrades, including ones nested in a timelock call or a
+            # multisend (best-effort: an RPC failure must not block the alert).
+            try:
+                message += _upgrade_alert_lines(tx, target_contract, hex_data, chain_id)
+            except Exception:
+                logger.warning("Upgrade detection failed for Safe tx nonce=%s", nonce, exc_info=True)
+
             # AI explanation (best-effort, non-blocking). Empty and short
             # payloads still reach the explainer — they are native transfers
             # or unknown selectors, not "nothing to explain".
-            hex_data = tx.get("data") or "0x"
-            chain_id = safe_network_to_chain_id(network_name)
             try:
                 explanation = _explain_safe_tx(
                     tx=tx,

@@ -80,7 +80,12 @@ NEW_ABI = _abi(
 
 
 def _bundle(
-    target_source: str, abi: str, name: str = "Vault", base: str = BASE_CONTRACT, extra: dict[str, str] | None = None
+    target_source: str,
+    abi: str,
+    name: str = "Vault",
+    base: str = BASE_CONTRACT,
+    extra: dict[str, str] | None = None,
+    settings: dict | None = None,
 ) -> dict:
     """An Etherscan entry whose bundle mixes the target with an interface and a base."""
     sources = {
@@ -91,7 +96,7 @@ def _bundle(
     for path, content in (extra or {}).items():
         sources[path] = {"content": content}
     return {
-        "SourceCode": "{" + json.dumps({"language": "Solidity", "sources": sources, "settings": {}}) + "}",
+        "SourceCode": "{" + json.dumps({"language": "Solidity", "sources": sources, "settings": settings or {}}) + "}",
         "ABI": abi,
         "ContractName": name,
         "CompilerVersion": "v0.8.22+commit.4fc1097e",
@@ -147,9 +152,12 @@ class ImplDiffTestCase(unittest.TestCase):
         self.new_entry = _bundle(TARGET_NEW, NEW_ABI)
         self.old_layout: StorageLayout | None = OLD_LAYOUT
         self.new_layout: StorageLayout | None = NEW_LAYOUT
+        # Linked-library records, returned in order after the two implementations.
+        self.library_entries: list[dict | None] = []
 
     def run_diff(self):
         contracts = [_contract(self.old_entry), _contract(self.new_entry)]
+        contracts += [_contract(entry) if entry else None for entry in self.library_entries]
         layouts = [self.old_layout, self.new_layout]
         with (
             patch("utils.impl_diff.fetch_verified_contract", side_effect=contracts),
@@ -171,9 +179,13 @@ class TestSurfaceIsAbiDerived(ImplDiffTestCase):
         self.assertNotIn("externalOnly", format_impl_diff(diff))
 
     def test_commented_out_function_is_not_a_removal(self) -> None:
+        # The deleted comment still shows as raw text in the whole-bundle file
+        # diff; what must not appear is a structured removal claim.
         diff = self.run_diff()
-        assert diff is not None
-        self.assertNotIn("restartStrategy", format_impl_diff(diff))
+        assert diff is not None and diff.surface is not None
+        self.assertNotIn("restartStrategy()", [fn.signature for fn in diff.surface.removed])
+        self.assertNotIn("restartStrategy()", [change.signature for change in diff.bodies.removed])
+        self.assertNotIn("- restartStrategy(", format_impl_diff(diff))
 
     def test_duplicate_signature_in_interface_does_not_mask_the_target(self) -> None:
         """`setCap` is declared by both the target and the imported interface."""
@@ -541,6 +553,105 @@ class TestUnavailableInputs(ImplDiffTestCase):
         assert diff is not None
         self.assertIsNone(diff.surface)
         self.assertIn("no ABI available", format_impl_diff(diff))
+
+
+# A base-contract change that leaves the target file untouched: the CAP cUSD
+# upgrade added `nonReentrant` to inherited Vault functions and relinked every
+# external library, with no change in CapToken.sol itself.
+BASE_OLD = "abstract contract Base { function mint() external { _mint(); } }"
+BASE_NEW = "abstract contract Base { function mint() external nonReentrant { _mint(); } }"
+LIBRARY_SOURCE = "library VaultLogic { function repay() external {} }"
+
+
+def _library(source: str = LIBRARY_SOURCE) -> dict:
+    return {
+        "SourceCode": "{" + json.dumps({"sources": {"src/VaultLogic.sol": {"content": source}}, "settings": {}}) + "}",
+        "ABI": "[]",
+        "ContractName": "VaultLogic",
+        "CompilerVersion": "v0.8.28+commit.7893614a",
+    }
+
+
+def _linked(address: str) -> dict:
+    return {"evmVersion": "prague", "libraries": {"src/Vault.sol": {"VaultLogic": address}}}
+
+
+class TestWholeBundle(ImplDiffTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.old_entry = _bundle(TARGET_OLD, OLD_ABI, base=BASE_OLD, settings={"evmVersion": "prague"})
+        self.new_entry = _bundle(TARGET_OLD, OLD_ABI, base=BASE_NEW, settings={"evmVersion": "prague"})
+
+    def test_inherited_change_is_reported_when_target_file_is_unchanged(self) -> None:
+        diff = self.run_diff()
+        assert diff is not None and diff.files is not None
+        self.assertTrue(diff.bodies.is_empty)
+        self.assertEqual([c.path for c in diff.files.changed], ["src/Base.sol"])
+        rendered = format_impl_diff(diff)
+        self.assertIn("Target-defined function changes (Vault @ src/Vault.sol): none.", rendered)
+        self.assertIn("+abstract contract Base { function mint() external nonReentrant { _mint(); } }", rendered)
+        self.assertNotIn("inherited from base contracts were not compared", rendered)
+
+    def test_identical_bundle_and_settings_render_as_unchanged(self) -> None:
+        self.new_entry = self.old_entry
+        rendered = format_impl_diff(self.run_diff())
+        self.assertIn("every file in the verified bundle is identical", rendered)
+        self.assertIn("Compiler settings and linked libraries: unchanged.", rendered)
+
+    def test_evm_version_change_is_reported(self) -> None:
+        self.new_entry = _bundle(TARGET_OLD, OLD_ABI, base=BASE_OLD, settings={"evmVersion": "cancun"})
+        self.assertIn("~ evmVersion: prague → cancun", format_impl_diff(self.run_diff()))
+
+    def test_relinked_library_with_identical_source(self) -> None:
+        self.old_entry = _bundle(TARGET_OLD, OLD_ABI, settings=_linked("0xaaaa"))
+        self.new_entry = _bundle(TARGET_OLD, OLD_ABI, settings=_linked("0xbbbb"))
+        self.library_entries = [_library(), _library()]
+        diff = self.run_diff()
+        assert diff is not None
+        self.assertEqual(len(diff.libraries), 1)
+        lib = diff.libraries[0]
+        assert lib.files is not None
+        self.assertTrue(lib.files.is_empty)
+        rendered = format_impl_diff(diff)
+        self.assertIn("~ linked library VaultLogic: 0xaaaa → 0xbbbb", rendered)
+        self.assertIn("Linked library VaultLogic: 0xaaaa → 0xbbbb — source changes: none", rendered)
+
+    def test_relinked_library_with_changed_source_is_diffed(self) -> None:
+        self.old_entry = _bundle(TARGET_OLD, OLD_ABI, settings=_linked("0xaaaa"))
+        self.new_entry = _bundle(TARGET_OLD, OLD_ABI, settings=_linked("0xbbbb"))
+        changed = "library VaultLogic { function repay() external { revert(); } }"
+        self.library_entries = [_library(), _library(changed)]
+        rendered = format_impl_diff(self.run_diff())
+        self.assertIn("~ src/VaultLogic.sol (+1/-1)", rendered)
+        self.assertIn("+" + changed, rendered)
+
+    def test_unverified_relinked_library_is_unvalidated(self) -> None:
+        self.old_entry = _bundle(TARGET_OLD, OLD_ABI, settings=_linked("0xaaaa"))
+        self.new_entry = _bundle(TARGET_OLD, OLD_ABI, settings=_linked("0xbbbb"))
+        self.library_entries = [_library(), None]
+        diff = self.run_diff()
+        assert diff is not None
+        self.assertIsNone(diff.libraries[0].files)
+        rendered = format_impl_diff(diff)
+        self.assertIn("source NOT COMPARED", rendered)
+        self.assertIn("linked library VaultLogic: source of 0xaaaa or 0xbbbb is not verified", rendered)
+
+    def test_missing_settings_are_unvalidated(self) -> None:
+        self.old_entry = _bundle(TARGET_OLD, OLD_ABI)
+        diff = self.run_diff()
+        assert diff is not None and diff.settings is not None
+        self.assertFalse(diff.settings.complete)
+        rendered = format_impl_diff(diff)
+        self.assertIn("only the compiler version was comparable", rendered)
+        self.assertIn("  compiler: unchanged", rendered)
+        self.assertIn("compiler settings other than the compiler version", rendered)
+
+    def test_compiler_change_is_shown_without_standard_json_settings(self) -> None:
+        self.old_entry = {**_bundle(TARGET_OLD, OLD_ABI), "CompilerVersion": "v0.8.20+commit.a1b79de6"}
+        self.new_entry = _bundle(TARGET_OLD, OLD_ABI)
+        rendered = format_impl_diff(self.run_diff())
+        self.assertIn("~ compiler: v0.8.20+commit.a1b79de6 → v0.8.22+commit.4fc1097e", rendered)
+        self.assertNotIn("compiler: unchanged", rendered)
 
 
 if __name__ == "__main__":

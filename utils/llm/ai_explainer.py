@@ -36,7 +36,13 @@ from utils.llm.report import (
 )
 from utils.logger import get_logger
 from utils.on_chain_state import StateRead, format_state_reads, read_before_state
-from utils.proxy import build_diff_url, detect_proxy_upgrade, get_current_implementation
+from utils.proxy import (
+    ProxyUpgrade,
+    build_diff_url,
+    dedupe_upgrades,
+    find_proxy_upgrades,
+    get_current_implementation,
+)
 from utils.related_tokens import RelatedToken, format_related_tokens_block, resolve_related_tokens
 from utils.risk_anchors import RiskAnchor, format_anchors_block
 from utils.risk_anchors import lookup as lookup_risk_anchor
@@ -152,7 +158,13 @@ Critical rules for parameter interpretation:
   didn't list it under. "Target-defined function changes" is where behavior lives: a changed
   body means the same signature now runs different code, and an added or removed
   internal/private member means logic moved or was deleted — say what the shown code does
-  rather than just naming it. "Storage compatibility" is the combined verdict: INCOMPATIBLE
+  rather than just naming it. "Source file changes" diffs every file the implementation was
+  compiled from — inherited bases, libraries and interfaces too — so a change in a base
+  contract appears there even when the target-defined section says none: describe what the
+  shown diff does and which contract/file it is in. "Compiler settings and linked libraries"
+  lists bytecode-affecting settings (EVM version, optimizer, compiler) and relinked external
+  libraries, each followed by that library's own source diff; a relinked library with
+  identical source is a redeployment, not a behavior change. "Storage compatibility" is the combined verdict: INCOMPATIBLE
   means a conflict is proven — say which; UNKNOWN means some storage could not be checked
   (listed under "Coverage gaps") — do not call the upgrade storage-safe, and do not call it
   unsafe either. A "Positional layout: COMPATIBLE" line under an UNKNOWN verdict means the
@@ -846,19 +858,34 @@ def _new_impl_verification_note(new_impl: str, chain_id: int) -> str:
 
 
 def _get_proxy_upgrade_info(calldata: str, target: str, chain_id: int) -> str:
-    """Detect proxy upgrade, fetch impl diff, and return context string for the prompt."""
-    upgrade = detect_proxy_upgrade(calldata, target)
-    if not upgrade:
-        return ""
+    """Detect proxy upgrades, fetch impl diffs, and return context for the prompt.
 
+    Upgrades nested inside governance wrappers count too: a Safe tx executing a
+    timelock ``executeBatch`` of two ``upgradeToAndCall`` calls gets both diffs,
+    not just the wrapper.
+    """
+    return _format_proxy_upgrades(find_proxy_upgrades(calldata, target), chain_id)
+
+
+def _format_proxy_upgrades(upgrades: list[ProxyUpgrade], chain_id: int) -> str:
+    """One prompt block per upgrade, diffs fetched in parallel, call order kept."""
+    blocks = _parallel_map(lambda upgrade: _proxy_upgrade_block(upgrade, chain_id), upgrades)
+    return "\n\n".join(block for block in blocks if block)
+
+
+def _proxy_upgrade_block(upgrade: ProxyUpgrade, chain_id: int) -> str:
+    """Prompt context for one upgrade: old/new implementation and the impl diff."""
     proxy = upgrade.proxy_address
     new_impl = upgrade.new_implementation
+    header = f"This is a PROXY UPGRADE on {proxy}."
+    if upgrade.via:
+        header += f" It is nested inside the transaction's governance wrapper call ({upgrade.via})."
     verification_note = _new_impl_verification_note(new_impl, chain_id)
     old_impl = get_current_implementation(proxy, chain_id)
     if not old_impl:
-        return f"This is a PROXY UPGRADE on {proxy}.\nNew implementation: {new_impl}{verification_note}"
+        return f"{header}\nNew implementation: {new_impl}{verification_note}"
 
-    info = f"This is a PROXY UPGRADE on {proxy}.\nCurrent implementation: {old_impl}\nNew implementation: {new_impl}"
+    info = f"{header}\nCurrent implementation: {old_impl}\nNew implementation: {new_impl}"
     info += verification_note
     diff_url = build_diff_url(old_impl, new_impl, chain_id)
     if diff_url:
@@ -2205,12 +2232,12 @@ def explain_batch_transaction(
     decoded_calls = [item.decoded for item in decoded_items if item.decoded is not None]
     all_targets_for_labels = [(item.target, item.decoded) for item in items]
 
-    upgrade_parts: list[str] = []
-    for item in items:
-        info = _get_proxy_upgrade_info(item.data, item.target, chain_id)
-        if info:
-            upgrade_parts.append(info)
-    proxy_upgrade_info = "\n".join(upgrade_parts)
+    # Deduplicated across items too: a multisend that schedules and then
+    # executes the same timelock operation must not diff each upgrade twice.
+    batch_upgrades = dedupe_upgrades(
+        [upgrade for item in items for upgrade in find_proxy_upgrades(item.data, item.target)]
+    )
+    proxy_upgrade_info = _format_proxy_upgrades(batch_upgrades, chain_id)
 
     address_labels = _collect_address_labels(all_targets_for_labels, chain_id)
     decode_statuses = [_decode_status(item.data, item.decoded) for item in items]

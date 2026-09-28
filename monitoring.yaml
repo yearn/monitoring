@@ -336,6 +336,8 @@ protocols:
     monitors:
       - name: "Queued Transactions"
         description: "Pending transactions across all monitored protocol Safe multisigs"
+      - name: "Proxy Upgrades"
+        description: "Proxy upgrades in queued txs, including ones inside a multisend or a timelock schedule/execute call, with old → new implementation diff"
       - name: "Unexpected Proposers"
         description: "Yearn multisig txs proposed by addresses outside known bot/EOA set"
 
