@@ -174,3 +174,28 @@ def test_fetch_kong_parent_vaults_filters_retired_and_malformed_vaults(monkeypat
             "asset_decimals": 18,
         },
     ]
+
+
+def test_fetch_kong_strategies_parses_rows_and_skips_malformed(monkeypatch) -> None:
+    payload = {
+        "data": {
+            "strategies": [
+                {"chainId": 1, "address": "0xAAA", "name": "wstETH/WETH Spark Looper", "isShutdown": False},
+                {"chainId": 137, "address": "0xBBB", "name": "Old Looper", "isShutdown": True},
+                {"chainId": 1, "address": "0xCCC", "name": None, "isShutdown": False},
+            ]
+        }
+    }
+    monkeypatch.setattr(kong, "request_with_retry", lambda *args, **kwargs: FakeResponse(payload))
+
+    assert kong.fetch_kong_strategies() == [
+        {"chain_id": 1, "address": "0xAAA", "name": "wstETH/WETH Spark Looper", "is_shutdown": False},
+        {"chain_id": 137, "address": "0xBBB", "name": "Old Looper", "is_shutdown": True},
+    ]
+
+
+def test_fetch_kong_strategies_raises_without_list(monkeypatch) -> None:
+    monkeypatch.setattr(kong, "request_with_retry", lambda *args, **kwargs: FakeResponse({"data": {}}))
+
+    with pytest.raises(kong.KongRequestError):
+        kong.fetch_kong_strategies()

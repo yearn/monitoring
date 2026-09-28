@@ -489,11 +489,15 @@ protocols:
       - protocols/yearn/alert_small_parent_flows.py
       - protocols/yearn/check_timelock_delay.py
       - protocols/yearn/check_indexer_freshness.py
+      - protocols/yearn/check_looper_keepers.py
     monitors:
       - name: "Indexer Freshness"
         description: "Envio indexer lag per chain; alerts the Envio channel when a chain's newest indexed block is older than 60 minutes or the GraphQL endpoint is down"
       - name: "Lender-Borrower Risk"
         description: "All configured lender-borrower strategies: collateral and borrow-token prices plus LTV/liquidation risk every 30m; lender and borrow APR availability, 24h net spread, and debt coverage every 6h; alerts go to the internal Yearn maintenance chat"
+        severity: "MEDIUM"
+      - name: "Looper Keeper Gas"
+        description: "Native gas balance of every wallet that keeps a live Yearn looper strategy running (resolved from keeper() through LooperKeeper/yHaaS relayer contracts); alerts the internal Yearn maintenance chat below $5 on mainnet or $1 on other chains"
         severity: "MEDIUM"
       - name: "Large Flows"
         description: "Deposit/withdrawal flows >=$500k USD (Katana withdrawals >=$50k; or 10% of vault totalSupply fallback for unpriced tokens)"

@@ -9,6 +9,7 @@ Where each script in this folder sends its alerts. "Yearn" is the public channel
 | Script | Alerts | Telegram destination | Fallback when unset | DB tag |
 |---|---|---|---|---|
 | `lender_borrower.py` | LTV, spread, coverage warnings and monitor errors | Yearn maintenance (`TELEGRAM_CHAT_ID_YEARN_MAINTENANCE`) | Yearn | `yearn-internal` |
+| `check_looper_keepers.py` | Looper keeper wallets low on gas, keeper contracts with no known wallet caller | Yearn maintenance (`TELEGRAM_CHAT_ID_YEARN_MAINTENANCE`) | Yearn | `yearn-internal` |
 | `alert_small_parent_flows.py` | Aggregated small parent-vault flows | Yearn maintenance (`TELEGRAM_CHAT_ID_YEARN_MAINTENANCE`) | Yearn | `yearn-internal` |
 | `alert_large_flows.py` | Large deposits/withdrawals | Yearn | — | `yearn` |
 | `check_shadow_debt.py` | Shadow debt | Yearn | — | `yearn` |
@@ -38,6 +39,22 @@ uv run protocols/yearn/lender_borrower.py --checks=rates-and-coverage --dry-run
 ```
 
 Omit `--dry-run` to persist rate samples and send configured alerts.
+
+## Looper Keeper Gas
+
+The script `yearn/check_looper_keepers.py` makes sure every live looper strategy has a funded wallet to keep it running. It runs hourly.
+
+1. **Discovery**: one Kong request lists every strategy on every chain. A looper is any strategy whose name contains "Looper" and that is not shut down. Chains the monitor has no RPC or price config for (e.g. 4663) are logged and skipped.
+2. **Keepers**: `keeper()` is read on-chain for every looper. A keeper with no code is a wallet and is checked directly. A keeper contract (`LooperKeeper`, `PublicAllocatorTendExecutor`, `yHaaSRelayer`) never holds ETH: its allow-listed wallets pass `msg.value` and pay gas. The wallets come from one `eth_getLogs` over all keeper contracts for `AllowedSet(address,bool)` (replayed in order, so revoked callers drop out), plus `EXTRA_KEEPER_CALLERS` for callers that emit no event (yHaaSRelayer keepers, governance allow-listed in the constructor). Callers with code (multisigs) are dropped.
+3. **Balances**: every address is collected into one deduplicated map before any RPC call, so a wallet shared by many loopers is read once. `keeper()`, `eth_getCode` and `eth_getBalance` each run as a single JSON-RPC batch per chain. Native token prices come from DeFiLlama in one request.
+
+An alert fires when a wallet holds less than **$5** of the native gas token on mainnet or **$1** on other chains, or when a keeper contract has no known wallet caller (add its bots to `EXTRA_KEEPER_CALLERS`). All issues from a run go into one `MEDIUM` message to the internal Yearn maintenance chat, stored as `yearn-internal`. The same set of issues is re-sent only once every 24 hours; any change in the set alerts right away.
+
+### Usage
+
+```bash
+uv run protocols/yearn/check_looper_keepers.py --dry-run
+```
 
 ## Large Flows
 
