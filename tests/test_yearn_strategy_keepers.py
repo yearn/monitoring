@@ -7,7 +7,6 @@ from protocols.yearn import check_strategy_keepers as mod
 from utils.chains import Chain
 
 ETH_KEY = "coingecko:ethereum"
-POL_KEY = "coingecko:polygon-ecosystem-token"
 
 LOOPER_A = "0x00000000000000000000000000000000000000a1"
 LOOPER_B = "0x00000000000000000000000000000000000000a2"
@@ -40,17 +39,19 @@ def test_select_keeper_strategies_filters_name_shutdown_and_unsupported_chains()
         [
             _strategy(LOOPER_A, "wstETH/WETH Spark Looper"),
             _strategy(LOOPER_A, "wstETH/WETH Spark Looper"),
-            _strategy(LOOPER_B, "Katana vbUSDC Morpho LooperStrategy", chain_id=Chain.POLYGON.chain_id),
+            _strategy(LOOPER_B, "Base syrupUSDC Morpho LooperStrategy", chain_id=Chain.BASE.chain_id),
             _strategy(LOOPER_C, "Morpho vbWBTC/yvUSDC Lender Borrower", chain_id=Chain.KATANA.chain_id),
             _strategy(LOOPER_C, "PT siUSD Morpho Looper", is_shutdown=True),
             _strategy(LOOPER_C, "USDC Lender"),
             _strategy(LOOPER_C, "spUSDG/USDG Morpho Looper", chain_id=4663),
+            _strategy(LOOPER_C, "CompV3 WMATIC Lender Borrower", chain_id=Chain.POLYGON.chain_id),
+            _strategy(LOOPER_C, "Arbitrum syrupUSDC/USDC Morpho Looper", chain_id=Chain.ARBITRUM.chain_id),
         ]
     )
 
     assert {chain: [strategy.address for strategy in items] for chain, items in selected.items()} == {
         Chain.MAINNET: [Web3.to_checksum_address(LOOPER_A)],
-        Chain.POLYGON: [Web3.to_checksum_address(LOOPER_B)],
+        Chain.BASE: [Web3.to_checksum_address(LOOPER_B)],
         Chain.KATANA: [Web3.to_checksum_address(LOOPER_C)],
     }
 
@@ -217,30 +218,28 @@ def _result(chain: Chain, balance_wei: int, without_callers: dict | None = None)
     return mod.ChainResult(chain, {KEEPER_EOA: wallet}, without_callers or {})
 
 
-def test_evaluate_uses_five_dollars_on_mainnet_and_one_dollar_elsewhere() -> None:
-    prices = {ETH_KEY: Decimal("2000"), POL_KEY: Decimal("0.5")}
-    # 0.002 ETH = $4 on mainnet (below $5); 2.5 POL = $1.25 on Polygon (above $1).
+def test_evaluate_uses_ten_dollars_on_mainnet_and_two_dollars_on_l2s() -> None:
+    prices = {ETH_KEY: Decimal("2000")}
+    # 0.0045 ETH = $9 on mainnet (below $10); 0.00125 ETH = $2.50 on Katana (above $2).
     issues = mod.evaluate(
-        [_result(Chain.MAINNET, 2 * 10**15), _result(Chain.POLYGON, 25 * 10**17)],
+        [_result(Chain.MAINNET, 45 * 10**14), _result(Chain.KATANA, 125 * 10**13)],
         prices,
     )
 
     assert [issue.code for issue in issues] == [f"low:1:{KEEPER_EOA.lower()}"]
     assert f"https://etherscan.io/address/{KEEPER_EOA}" in issues[0].message
-    assert "($4.00 < $5)" in issues[0].message
+    assert "($9.00 < $10)" in issues[0].message
 
-    # 0.0004 ETH = $0.80 on Base (below $1); 0.003 ETH = $6 on mainnet (above $5).
-    issues = mod.evaluate([_result(Chain.BASE, 4 * 10**14), _result(Chain.MAINNET, 3 * 10**15)], prices)
+    # 0.0009 ETH = $1.80 on Base (below $2); 0.0055 ETH = $11 on mainnet (above $10).
+    issues = mod.evaluate([_result(Chain.BASE, 9 * 10**14), _result(Chain.MAINNET, 55 * 10**14)], prices)
     assert [issue.code for issue in issues] == [f"low:8453:{KEEPER_EOA.lower()}"]
 
 
-def test_evaluate_reports_missing_price_and_keepers_without_callers() -> None:
-    issues = mod.evaluate(
-        [_result(Chain.MAINNET, 10**18, {KEEPER_CONTRACT: {"Looper"}}), _result(Chain.POLYGON, 10**18)],
-        {ETH_KEY: Decimal("2000")},
-    )
+def test_evaluate_reports_keepers_without_callers_even_without_price() -> None:
+    issues = mod.evaluate([_result(Chain.MAINNET, 0, {KEEPER_CONTRACT: {"Looper"}})], {ETH_KEY: Decimal("0")})
 
-    assert [issue.code for issue in issues] == [f"nocaller:1:{KEEPER_CONTRACT.lower()}", "price:137"]
+    # No price: balances cannot be judged, but the no-caller finding needs no price and still fires.
+    assert [issue.code for issue in issues] == ["price:1", f"nocaller:1:{KEEPER_CONTRACT.lower()}"]
 
 
 def test_should_send_alert_dedupes_and_reminds_daily() -> None:

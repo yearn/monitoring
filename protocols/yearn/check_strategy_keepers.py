@@ -11,8 +11,9 @@ allow-listed wallets send ``msg.value`` and pay gas, so those wallets are resolv
 Every address is collected into a deduplicated map first, then each RPC step
 (``keeper()`` with ``totalAssets()``, ``eth_getCode``, ``eth_getBalance``) runs as a
 single batch per chain.
-An alert fires when a wallet holds less than ``$5`` of the native token on mainnet or
-``$1`` on other chains, or when a keeper contract has no known wallet caller.
+Only mainnet, Base and Katana are monitored. An alert fires when a wallet holds less
+than ``$10`` of the native token on mainnet or ``$2`` on Base/Katana, or when a keeper
+contract has no known wallet caller.
 """
 
 from __future__ import annotations
@@ -46,19 +47,15 @@ ALERT_PROTOCOL = "yearn-internal"
 
 # Lower-cased Kong strategy-name fragments of strategies that depend on a keeper.
 KEEPER_STRATEGY_MARKERS = ("looper", "lender borrower")
-MIN_BALANCE_USD_MAINNET = Decimal("5")
-MIN_BALANCE_USD_OTHER = Decimal("1")
+MIN_BALANCE_USD_MAINNET = Decimal("10")
+MIN_BALANCE_USD_L2 = Decimal("2")
 WEI_PER_NATIVE = Decimal(10) ** 18
 
 # Native gas token symbol and DeFiLlama price key per chain.
 NATIVE_TOKENS: dict[Chain, tuple[str, str]] = {
     Chain.MAINNET: ("ETH", "coingecko:ethereum"),
-    Chain.OPTIMISM: ("ETH", "coingecko:ethereum"),
     Chain.BASE: ("ETH", "coingecko:ethereum"),
-    Chain.ARBITRUM: ("ETH", "coingecko:ethereum"),
     Chain.KATANA: ("ETH", "coingecko:ethereum"),
-    Chain.POLYGON: ("POL", "coingecko:polygon-ecosystem-token"),
-    Chain.HYPEREVM: ("HYPE", "coingecko:hyperliquid"),
 }
 
 # AllowedSet(address indexed, bool indexed), emitted by LooperKeeper and PublicAllocatorTendExecutor.
@@ -160,8 +157,8 @@ def select_keeper_strategies(strategies: Iterable[dict[str, Any]]) -> dict[Chain
             continue
         chain = chains_by_id.get(int(strategy["chain_id"]))
         if chain is None:
-            logger.warning(
-                "Skipping strategy %s (%s) on unsupported chain %s",
+            logger.info(
+                "Skipping strategy %s (%s) on unmonitored chain %s",
                 strategy["name"],
                 strategy["address"],
                 strategy["chain_id"],
@@ -191,7 +188,7 @@ def latest_allowed_callers(logs: Iterable[Any]) -> dict[str, set[str]]:
 
 def min_balance_usd(chain: Chain) -> Decimal:
     """Return the minimum USD value of native gas token a keeper wallet must hold on ``chain``."""
-    return MIN_BALANCE_USD_MAINNET if chain == Chain.MAINNET else MIN_BALANCE_USD_OTHER
+    return MIN_BALANCE_USD_MAINNET if chain == Chain.MAINNET else MIN_BALANCE_USD_L2
 
 
 def _batch(client: Web3Client, calls: Iterable[Any]) -> list[Any]:
@@ -288,6 +285,27 @@ def _strategy_list(strategies: set[str]) -> str:
     return ", ".join(sorted(strategies))
 
 
+def _low_balance_issues(result: ChainResult, symbol: str, price: Decimal) -> list[Issue]:
+    """Return an issue for every wallet on the chain holding less than its USD minimum."""
+    chain = result.chain
+    minimum = min_balance_usd(chain)
+    issues: list[Issue] = []
+    for wallet in sorted(result.wallets.values(), key=lambda w: w.address):
+        balance = Decimal(wallet.balance_wei) / WEI_PER_NATIVE
+        balance_usd = balance * price
+        if balance_usd >= minimum:
+            logger.info("%s keeper %s holds %.6f %s ($%.2f)", chain.name, wallet.address, balance, symbol, balance_usd)
+            continue
+        issues.append(
+            Issue(
+                f"low:{chain.chain_id}:{wallet.address.lower()}",
+                f"{chain.name}: {_address_url(chain, wallet.address)} holds {balance:.6f} {symbol} "
+                f"(${balance_usd:.2f} < ${minimum})\n  keeps: {_strategy_list(wallet.strategies)}",
+            )
+        )
+    return issues
+
+
 def evaluate(results: list[ChainResult], prices: dict[str, Decimal]) -> list[Issue]:
     """Return low-balance and missing-caller issues across all chains.
 
@@ -305,23 +323,9 @@ def evaluate(results: list[ChainResult], prices: dict[str, Decimal]) -> list[Iss
         price = prices.get(price_key)
         if price is None or price <= 0:
             issues.append(Issue(f"price:{chain.chain_id}", f"{chain.name}: no {symbol} USD price from DeFiLlama"))
-            continue
-        minimum = min_balance_usd(chain)
-        for wallet in sorted(result.wallets.values(), key=lambda w: w.address):
-            balance = Decimal(wallet.balance_wei) / WEI_PER_NATIVE
-            balance_usd = balance * price
-            if balance_usd >= minimum:
-                logger.info(
-                    "%s keeper %s holds %.6f %s ($%.2f)", chain.name, wallet.address, balance, symbol, balance_usd
-                )
-                continue
-            issues.append(
-                Issue(
-                    f"low:{chain.chain_id}:{wallet.address.lower()}",
-                    f"{chain.name}: {_address_url(chain, wallet.address)} holds {balance:.6f} {symbol} "
-                    f"(${balance_usd:.2f} < ${minimum})\n  keeps: {_strategy_list(wallet.strategies)}",
-                )
-            )
+        else:
+            issues.extend(_low_balance_issues(result, symbol, price))
+        # No-caller issues need no price, so a price outage must not hide them.
         for keeper, strategies in sorted(result.keepers_without_callers.items()):
             issues.append(
                 Issue(
@@ -406,4 +410,4 @@ def main() -> None:
 if __name__ == "__main__":
     from utils.runner import run_with_alert
 
-    run_with_alert(main, PROTOCOL)
+    run_with_alert(main, PROTOCOL, alert_protocol=ALERT_PROTOCOL)
