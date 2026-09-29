@@ -55,6 +55,31 @@ class TestExtractFunctionSnippet(unittest.TestCase):
         self.assertIn("@external", snippet)
         self.assertIn("@notice Add a new strategy.", snippet)
 
+    def test_state_var_writes_go_through_self(self) -> None:
+        source = (
+            VYPER_VAULT_SOURCE
+            + """
+unclaimed: public(uint256)
+claimable: public(HashMap[address, uint256])
+
+@external
+def set_claimable(_accounts: DynArray[address, 64], _amounts: DynArray[uint256, 64]):
+    unclaimed: uint256 = self.unclaimed
+    for i: uint256 in range(len(_accounts), bound=64):
+        unclaimed = unclaimed - self.claimable[_accounts[i]] + _amounts[i]
+        self.claimable[_accounts[i]] = _amounts[i]
+    self.unclaimed = unclaimed
+
+@external
+def other():
+    self.untouched = 1
+"""
+        )
+        self.assertEqual(find_state_var_writes(source, "set_claimable"), ["claimable", "unclaimed"])
+        self.assertEqual(extract_state_var_snippet(source, "claimable"), "claimable: public(HashMap[address, uint256])")
+        # A function-local declaration is indented, so it never matches a storage lookup.
+        self.assertEqual(extract_state_var_snippet(source, "untouched"), "")
+
     def test_missing_function_returns_empty(self) -> None:
         snippet = _extract_function_snippet(INFINIFI_FARM_SOURCE, "doesNotExist")
         self.assertEqual(snippet, "")

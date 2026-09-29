@@ -100,6 +100,8 @@ Handles:
 
 - **Simple public state vars** (uint*/int*/address/bool/bytes*/string) via the auto-generated no-arg getter.
 - **Single-key mappings** where setter args include the mapping key type (e.g., `mapping(address => uint256) public coverageCap` paired with `setCoverageCap(address, uint256)`).
+- **Batch setters with an array of keys**: `set_claimable(address[] accounts, uint256[] amounts)` reads `claimable(account)` for each element. Reads stop at `MAX_ARRAY_KEY_READS` (12) elements per call; any elements past that are listed as unavailable rather than dropped.
+- **Vyper storage**: writes are found through `self.<name>` (`self.claimable[a] = x`, `self.unclaimed -= x`), so a local that shares a storage name is not mistaken for storage. Declarations are read from `name: public(T)` / `public(HashMap[K, V])` (`String[N]` / `Bytes[N]` decode as `string` / `bytes`), and non-`public` storage is skipped because it has no getter. Before this, a Vyper setter produced no before-state at all: a report said "prior claimable amounts were not provided" for values that were public on-chain.
 - **Diamond-storage / non-public-var setters** via a speculative getter-guess from the setter signature (last arg = value type, leading args = key types). If wrong, the eth_call reverts and is skipped gracefully.
 
 Follows EIP-1967 proxies to locate the function source, but issues `eth_call`s against the original storage-holder address.
@@ -119,7 +121,7 @@ Requires `TENDERLY_API_KEY`. Simulation failure is non-blocking — the pipeline
 
 **State overrides** (`state_objects`) reduce false reverts. When a call forwards ETH (`value > 0`), the executor (timelock/Safe) often doesn't hold that balance, so a faithful sim would revert with "insufficient funds" — a false negative. `_merge_balance_override` grants the sender exactly the forwarded `value`. Callers can pass additional overrides (e.g. a role/owner storage slot) to unblock access-gated setters; caller-supplied values win on conflict.
 
-Callers can pass `skip_simulation=True` to bypass Tenderly entirely. Used for Safe transactions with `operation=DELEGATECALL` (typically multiSend batches), where our plain-CALL simulator can't model the real execution and would produce a spurious "revert" verdict.
+Callers can pass `skip_simulation=True` to bypass Tenderly entirely. Safe multisend batches are simulated whenever that models the real execution. The Safe DELEGATECALLs into a canonical MultiSend/MultiSendCallOnly utility, and the utility sends each inner transaction with `operation == 0` as a plain CALL from the Safe. A batch made only of those is therefore exactly an ordered sequence of calls from the Safe, and it is simulated as one bundle from the Safe address (`is_simulatable_multisend`). Only batches with an inner DELEGATECALL, or with an unknown delegate target, skip simulation, because our plain-CALL simulator would produce a spurious revert for them.
 
 Timelock batches are simulated as one **sequential bundle** (`simulate_bundle`, Tenderly `simulate-bundle`): every call is sent from the executor in batch order, and each sees the state the earlier calls left — the way `executeBatch` runs them. Calls are **never simulated one by one**: out of batch order, a call that depends on an earlier one reverts falsely (`update_max_debt_for_strategy` before its `add_strategy`, or `OutlandFarm.setVault(vault)` before the `Accounting.setOracle` it needs), and an alert once reported exactly those false reverts after the bundle request failed and the code fell back to single-call simulations. Tenderly stops at the first revert; calls after it are marked `not reached`. When the bundle request itself fails, no call is simulated: the call flow says `Batch simulation: unavailable` and the prompt tells the model not to infer success or failure. Failed simulations are omitted from the risk prompt (Tenderly often false-reverts governance calls) but kept as call-flow diagnostics so a reviewer can see them without treating them as a predicted on-chain failure.
 
@@ -180,7 +182,7 @@ The system prompt instructs the LLM to treat each item as verified and reflect i
 
 `_collect_token_flows()` normalizes ERC20 movement amounts in Python so the LLM never has to do decimal arithmetic — the source of a real bug where a Safe-batch summary reported `~50.8k` for a `~50.78`-token transfer while the detail was correct. For each call whose signature is a known movement (`transfer`, `transferFrom`, `mint`, `burn`, `approve`) on a token with discoverable decimals, it divides the raw amount by `10**decimals` using `Decimal` (exact, no float error) and emits a `--- Token Flows (computed — authoritative amounts) ---` section with per-recipient amounts and a per-token **Total moved** (`approve` is listed but not summed — it's an allowance). The system prompt marks these amounts authoritative: the model must quote them verbatim rather than re-derive from raw units.
 
-This matters most on Safe multisig alerts, which run with `skip_simulation=True` (DELEGATECALL batches our plain-CALL simulator can't model) and so have no Tenderly asset-change rows with pre-normalized amounts.
+This matters most on Safe alerts that cannot be simulated (a multisend batch with an inner DELEGATECALL), which have no Tenderly asset-change rows with pre-normalized amounts.
 
 Normalization goes through `normalize_token_amount()` (`utils/formatting.py`), which builds the `Decimal` by shifting the exponent instead of dividing. Division is evaluated at `decimal.getcontext().prec`, and several modules set that **globally** at import time (`utils/defillama.py` uses 18) — enough to silently truncate a 25-digit 18-decimal amount depending on which modules the process happened to import.
 
@@ -256,9 +258,22 @@ The adapter runs for any protocol and chain: the same vault code is governed by 
 
 It then states each proposed value in the vault asset against that state, in batch order: the cap as a share or multiple of `totalAssets`, whether it matches the other queue strategies' caps and the deposit limit, and whether a strategy left out of the default queue can still be withdrawn from (it cannot while `use_default_queue` is true). It also states that funds move only through `update_debt`. The system prompt treats a unit the Protocol Context states as verified, so the model normalizes `max_debt` without hedging. Failures are best-effort and never block the governance alert.
 
+### 5f-3. Control Transfer Context (`utils/llm/control_transfer_context.py`)
+
+A call such as `set_management(0xac7D…)` names the new controller by address only. Whether that address is a 6-of-9 multisig, a contract run by a 2-of-4 multisig, or a single key decides how serious the change is. A report once called moving a Funding Distributor from Yearn's 6-of-9 Safe to an Executor contract (managed by a 2-of-4 Safe, with an operator whitelist) just a "pending management handover".
+
+For any protocol, calls that hand over control (`set_management`, `transferOwnership`, `setPendingOwner`, `setGovernance`, `setAdmin`, `set_role_manager`, and similar) and `grantRole(bytes32,address)` get these on-chain facts:
+
+1. **The current holder**, from the target's own `management()` / `owner()` / `governance()` / `admin()` / `role_manager()`.
+2. **What each side is**: an EOA, an EOA with EIP-7702 delegated code, a Safe (with its threshold and owner count), or a contract. A contract is followed one hop through its own controller getter (Executor → its `management()` Safe). A contract that exposes `operators` is flagged as acting for whitelisted addresses.
+3. **Whether the transfer is two-step**: a pending slot such as `pending_management` or `pendingOwner` means the call only nominates.
+4. **The change in signing threshold** behind control when both sides resolve to a Safe (for example 6-of-9 → 2-of-4, a LOWER threshold).
+
+Involved Safes get `Safe m-of-n` labels. These are applied with `setdefault`, so curated names win. Failures are best-effort and never block the alert.
+
 ### 5g. Adapter Registry (`utils/llm/protocol_context.py`)
 
-Adapters register in `_ADAPTERS`; `resolve_protocol_context()` fans one call out to all of them and merges the rendered prompt text, report text, introduced addresses, and address labels. Each adapter guards itself, so registration order carries no meaning and one adapter raising is logged and skipped rather than dropping the alert. Most guard on protocol and chain; the Yearn V3 adapter guards on call shape and `apiVersion()`.
+Adapters register in `_ADAPTERS`; `resolve_protocol_context()` fans one call out to all of them and merges the rendered prompt text, report text, introduced addresses, and address labels. Each adapter guards itself, so registration order carries no meaning and one adapter raising is logged and skipped rather than dropping the alert. Most guard on protocol and chain. The Yearn V3 adapter guards on call shape and `apiVersion()`, and the control-transfer adapter on call shape alone.
 
 ### 6. LLM Prompt & Completion (`utils/llm/ai_explainer.py`)
 
@@ -516,6 +531,7 @@ utils/llm/
 ├── threejane_account_context.py # 3Jane LCC bounces and USD3 supply-cap exemptions
 ├── threejane_context.py     # 3Jane adapter: hashed config keys/roles, rewards distribution mode
 ├── yearn_v3_context.py      # Yearn V3 adapter: vault state, queue, strategy caps in asset units
+├── control_transfer_context.py # Who gains control: current vs new holder, Safe thresholds, two-step
 └── README.md                # This file
 
 utils/related_tokens.py      # Token discovery from a contract's own zero-arg address getters
@@ -534,13 +550,13 @@ utils/storage_access.py      # Slot accessors (with bounded root resolution), ra
 utils/namespaced_storage.py  # Non-positional storage: namespaces, roots, gaps and conflicts
 utils/tenderly/simulation.py # Tenderly Simulation API client
 utils/calldata/              # Selector resolver + ABI decoder + governance wrapper unwrapping (wrappers.py)
-safe/multisend.py            # Safe MultiSendCallOnly inner-call extractor + DELEGATECALL context note
+safe/multisend.py            # Safe multisend inner-call extractor, simulatable check, DELEGATECALL context note
 ```
 
 ## Integration Points
 
 - **Timelock alerts** (`timelock/timelock_alerts.py`): Calls `explain_transaction()` or `explain_batch_transaction()` for each scheduled operation. Empty and short payloads still reach the explainer; callers no longer drop them on `len(data) >= 10`.
-- **Safe alerts** (`safe/main.py`): Routes through `_explain_safe_tx()`, which detects `operation=DELEGATECALL` multisend batches and dispatches to `explain_batch_transaction()` with `skip_simulation=True` and a DELEGATECALL context note. Plain CALL Safe txs use `explain_transaction()`. Empty and short targeted payloads are explained the same way as decoded calls.
+- **Safe alerts** (`safe/main.py`): Routes through `_explain_safe_tx()`, which detects `operation=DELEGATECALL` multisend batches and dispatches to `explain_batch_transaction()` with a DELEGATECALL context note. The batch is bundle-simulated from the Safe unless an inner transaction is itself a DELEGATECALL. Plain CALL Safe txs use `explain_transaction()`. Empty and short targeted payloads are explained the same way as decoded calls.
 - Both call sites use `format_explanation_line()` to append the AI summary to Telegram messages.
 - Both call sites can opt into the refine pass per-protocol by passing `refine=True` to the explainer.
 

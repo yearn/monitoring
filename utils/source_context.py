@@ -94,6 +94,12 @@ _ASSIGNMENT_RE = re.compile(
     re.MULTILINE,
 )
 
+# `self.<name>` followed by any index/member chain — one level of nested index
+# (`self.claimable[_accounts[i]]`) included — then `=` or an augmented assignment.
+_VYPER_ASSIGNMENT_RE = re.compile(
+    r"\bself\.([a-zA-Z_]\w*)(?:\[(?:[^\[\]\n]|\[[^\[\]\n]*\])*\]|\.\w+)*\s*(?:[-+*/%|&^]|//|<<|>>)?=(?!=)"
+)
+
 _CONTROL_KEYWORDS = frozenset({"if", "for", "while", "require", "revert", "return", "emit", "assembly", "unchecked"})
 
 # Proxy contract names that are not informative on their own — when the target is
@@ -520,6 +526,41 @@ def _extract_function_snippet(source: str, function_name: str) -> str:
     return f"{natspec.rstrip()}\n{match.group(2).strip()}".strip()
 
 
+def _find_vyper_def(source: str, function_name: str) -> tuple[str, "re.Match[str]"] | None:
+    """Locate a Vyper ``def`` header; returns (LF-normalized source, match) or None.
+
+    Groups: 1 = decorators, 2 = signature through the closing ``:``, 3 = docstring.
+    """
+    pattern = re.compile(
+        rf"^((?:[ \t]*@\w+(?:\([^)\n]*\))?[ \t]*\n)*)"
+        rf"([ \t]*def[ \t]+{re.escape(function_name)}[ \t]*\([\s\S]*?\)[ \t]*(?:->[ \t]*[^:\n]+)?:)"
+        rf"(?:[ \t]*\n[ \t]*(\"\"\"[\s\S]*?\"\"\"))?",
+        re.MULTILINE,
+    )
+    # Etherscan serves some Vyper sources with CRLF line endings.
+    normalized = source.replace("\r\n", "\n")
+    matches = list(pattern.finditer(normalized))
+    if not matches:
+        return None
+    # Interface stubs (``def totalAssets() -> uint256: view``) carry no
+    # decorators; the contract's own definition always does.
+    return normalized, next((m for m in matches if (m.group(1) or "").strip()), matches[0])
+
+
+def _extract_vyper_function_body(source: str, function_name: str) -> str:
+    """Return a Vyper function's indented body (docstring included), or ""."""
+    found = _find_vyper_def(source, function_name)
+    if found is None:
+        return ""
+    normalized, match = found
+    lines: list[str] = []
+    for line in normalized[match.end(2) :].split("\n")[1:]:
+        if line.strip() and not line[0].isspace():
+            break  # back at module level: next decorator, def, or declaration
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _extract_vyper_function_snippet(source: str, function_name: str) -> str:
     """Find a Vyper ``def`` with its decorators and docstring, or "".
 
@@ -531,19 +572,10 @@ def _extract_vyper_function_snippet(source: str, function_name: str) -> str:
     Default values are kept: ``add_to_queue: bool=True`` is exactly the detail
     a reviewer needs when calldata passes the flag explicitly.
     """
-    pattern = re.compile(
-        rf"^((?:[ \t]*@\w+(?:\([^)\n]*\))?[ \t]*\n)*)"
-        rf"([ \t]*def[ \t]+{re.escape(function_name)}[ \t]*\([\s\S]*?\)[ \t]*(?:->[ \t]*[^:\n]+)?:)"
-        rf"(?:[ \t]*\n[ \t]*(\"\"\"[\s\S]*?\"\"\"))?",
-        re.MULTILINE,
-    )
-    # Etherscan serves some Vyper sources with CRLF line endings.
-    matches = list(pattern.finditer(source.replace("\r\n", "\n")))
-    if not matches:
+    found = _find_vyper_def(source, function_name)
+    if found is None:
         return ""
-    # Interface stubs (``def totalAssets() -> uint256: view``) carry no
-    # decorators; the contract's own definition always does.
-    match = next((m for m in matches if (m.group(1) or "").strip()), matches[0])
+    _, match = found
     decorators = "\n".join(line.strip() for line in (match.group(1) or "").splitlines() if line.strip())
     parts = [decorators, match.group(2).strip()]
     if match.group(3):
@@ -552,14 +584,22 @@ def _extract_vyper_function_snippet(source: str, function_name: str) -> str:
 
 
 def find_state_var_writes(source: str, function_name: str) -> list[str]:
-    """State variable names assigned inside the function body, deduped, in order."""
+    """State variable names assigned inside the function body, deduped, in order.
+
+    Vyper storage is always written through ``self.`` (``self.claimable[a] = x``,
+    ``self.unclaimed -= x``), which keeps locals that share a storage name out.
+    """
     body = _extract_function_body(source, function_name)
+    pattern = _ASSIGNMENT_RE
+    if not body:
+        body = _extract_vyper_function_body(source, function_name)
+        pattern = _VYPER_ASSIGNMENT_RE
     if not body:
         return []
 
     seen: set[str] = set()
     ordered: list[str] = []
-    for m in _ASSIGNMENT_RE.finditer(body):
+    for m in pattern.finditer(body):
         name = m.group(1)
         if name in _CONTROL_KEYWORDS or name.startswith("_") or name in seen:
             continue
@@ -597,9 +637,26 @@ def extract_state_var_snippet(source: str, var_name: str) -> str:
     )
     match = pattern.search(source)
     if not match:
-        return ""
+        return _extract_vyper_state_var_snippet(source, var_name)
     natspec = match.group(1) or ""
     return f"{natspec.rstrip()}\n{match.group(2).strip()}".strip()
+
+
+def _extract_vyper_state_var_snippet(source: str, var_name: str) -> str:
+    """Find a module-level Vyper storage declaration (``name: public(T)``) with its comments.
+
+    Only column-0 declarations count, so function locals (``amount: uint256 = ...``)
+    never match; constants and immutables are skipped, since a setter cannot write them.
+    """
+    pattern = re.compile(
+        rf"^((?:#.*\n)*)({re.escape(var_name)}[ \t]*:[ \t]*(?!constant\(|immutable\()[^\n=]+?)[ \t]*$",
+        re.MULTILINE,
+    )
+    match = pattern.search(source.replace("\r\n", "\n"))
+    if not match:
+        return ""
+    comments = match.group(1) or ""
+    return f"{comments.rstrip()}\n{match.group(2).strip()}".strip()
 
 
 def _build_context(contract_name: str, source: str, function_name: str) -> SourceContext | None:
@@ -673,7 +730,10 @@ def format_source_context(ctx: SourceContext) -> str:
     lines.append(ctx.function_snippet)
     if ctx.state_var_snippets:
         lines.append("")
-        lines.append("Relevant state variables:")
+        # These are the variables the function body assigns. Saying so stops the
+        # model from calling a written variable untouched: a report claimed
+        # `set_claimable` leaves `unclaimed` stale when the body updates it.
+        lines.append("State variables this function writes (assigned in its body):")
         for snippet in ctx.state_var_snippets:
             lines.append("")
             lines.append(snippet)
