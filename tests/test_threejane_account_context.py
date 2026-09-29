@@ -203,10 +203,24 @@ class TestSupplyCapExempt(unittest.TestCase):
 
     def test_overview_counts_directions_and_kinds(self) -> None:
         line = self._revocation().overview_line()
-        self.assertIn("4 setSupplyCapExempt call(s) on USD3: 0 grant (false → true), 4 revoke (true → false)", line)
+        self.assertIn(
+            "4 setSupplyCapExempt call(s) on USD3 across 4 account(s): 0 grant (false → true), 4 revoke (true → false)",
+            line,
+        )
         self.assertIn("2 EOA, 1 EOA with an EIP-7702 delegation", line)
         self.assertIn("not a deployed contract), 1 contract", line)
         self.assertIn("2 hold USD3, 1,356,502.239231 USD3 in total", line)
+
+    def test_overview_counts_a_repeated_account_once(self) -> None:
+        """Calls count per call; type, holders and the USD3 total count each account once."""
+        grant = _account(usd3_balance_raw=1_271_316_913_410)
+        revoke = replace(grant, proposed_exempt=False, current_exempt=True)
+        line = _exemption(grant, revoke, _account(address=SAFE, is_contract=True)).overview_line()
+        self.assertIn("3 setSupplyCapExempt call(s) on USD3 across 2 account(s)", line)
+        self.assertIn("2 grant (false → true), 1 revoke (true → false), 0 no-op", line)
+        self.assertIn("Accounts: 1 EOA, 0 EOA with an EIP-7702 delegation", line)
+        self.assertIn("not a deployed contract), 1 contract", line)
+        self.assertIn("1 hold USD3, 1,271,316.91341 USD3 in total", line)
 
     def test_semantics_name_every_bypass_and_what_still_applies(self) -> None:
         line = _exemption().semantics_line()
@@ -337,6 +351,23 @@ class TestReaders(unittest.TestCase):
         )
         # Code is read through the batch, never with a direct per-account RPC.
         self.assertEqual(client.execute_batch.call_count, 1)
+
+    def test_repeated_account_sees_the_previous_call_as_its_before_state(self) -> None:
+        """Grant then revoke the same account: the revoke is a real true → false, not a no-op."""
+        shared = [USDC.address, 83_483_415_520_897, 1_000_000_000, 80_000_000_000_000, "USD3", 6]
+        # Both reads return the pre-batch state: not exempt.
+        per_account = [*(False, False, 0, b""), *(False, False, 0, b"")]
+        client = _client([*shared, *per_account])
+        with (
+            patch.object(account_context.ChainManager, "get_client", return_value=client),
+            patch.object(account_context, "fetch_token_unit", return_value=USDC),
+        ):
+            (context,) = resolve_account_contexts(1, USD3_ADDRESS, [_exempt_call(OTHER), _exempt_call(OTHER, False)])
+
+        grant, revoke = context.accounts
+        self.assertEqual(grant.change(), "false → true")
+        self.assertEqual(revoke.change(), "true → false")
+        self.assertIn("1 grant (false → true), 1 revoke (true → false), 0 no-op", context.overview_line())
 
     def test_exemption_on_another_target_is_ignored(self) -> None:
         with patch.object(account_context.ChainManager, "get_client") as get_client:

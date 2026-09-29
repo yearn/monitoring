@@ -221,18 +221,25 @@ class SupplyCapExemptContext:
         return {self.usd3_address: "USD3"}
 
     def overview_line(self) -> str:
-        """Counts by direction and account type, so the model does not tally 44 lines itself."""
+        """Counts by direction and account type, so the model does not tally 44 lines itself.
+
+        Directions count calls; types, holders and the USD3 total count distinct
+        accounts, so an account named in two calls is not counted — or its
+        balance summed — twice.
+        """
         grants = sum(1 for a in self.accounts if a.proposed_exempt and not a.current_exempt)
         revokes = sum(1 for a in self.accounts if not a.proposed_exempt and a.current_exempt)
         noops = len(self.accounts) - grants - revokes
-        delegated = sum(1 for a in self.accounts if a.delegate)
-        contracts = sum(1 for a in self.accounts if a.is_contract)
-        plain = len(self.accounts) - delegated - contracts
-        holders = [a for a in self.accounts if a.usd3_balance_raw]
+        distinct = list({a.address: a for a in self.accounts}.values())
+        delegated = sum(1 for a in distinct if a.delegate)
+        contracts = sum(1 for a in distinct if a.is_contract)
+        plain = len(distinct) - delegated - contracts
+        holders = [a for a in distinct if a.usd3_balance_raw]
         held = sum(a.usd3_balance_raw for a in holders)
         return (
-            f"{len(self.accounts)} setSupplyCapExempt call(s) on USD3: {grants} grant (false → true), "
-            f"{revokes} revoke (true → false), {noops} no-op. Accounts: {plain} EOA, "
+            f"{len(self.accounts)} setSupplyCapExempt call(s) on USD3 across {len(distinct)} account(s): "
+            f"{grants} grant (false → true), {revokes} revoke (true → false), {noops} no-op. "
+            f"Accounts: {plain} EOA, "
             f"{delegated} EOA with an EIP-7702 delegation (a key-controlled wallet running delegated code, not a "
             f"deployed contract), {contracts} contract. {len(holders)} hold USD3, "
             f"{self.share.amount(held)} in total."
@@ -411,14 +418,18 @@ def _read_supply_cap_exemptions(chain_id: int, target: str, calls: list[DecodedC
     share = TokenUnit(address=usd3_address, symbol=str(share_symbol), decimals=int(share_decimals))
 
     accounts = []
+    # Calls execute in order, so a repeated account's "before" is what the previous call set.
+    flag_before: dict[str, bool] = {}
     for index, (account, proposed) in enumerate(changes):
         exempt, ring_fence, balance, code = per_account[4 * index : 4 * index + 4]
         delegate = eip7702_delegate(code)
+        current = flag_before.get(account, bool(exempt))
+        flag_before[account] = proposed
         accounts.append(
             ExemptAccount(
                 address=account,
                 proposed_exempt=proposed,
-                current_exempt=bool(exempt),
+                current_exempt=current,
                 ring_fence_conduit=bool(ring_fence),
                 is_contract=bool(code) and delegate is None,
                 delegate=delegate,
