@@ -13,8 +13,10 @@ For every call whose shape transfers control, this adapter reads, on-chain:
 - the proposed controller, classified as EOA, EIP-7702 delegated EOA, Safe
   (threshold and owner count), or contract — following a contract one hop to
   its own controller, and noting an operator whitelist,
-- whether the transfer is two-step (a pending slot the new controller must
-  accept), and
+- whether the transfer is two-step: decided from the call itself (a
+  nominate-only setter, BoringOwnable's ``direct`` flag, or which slot the
+  setter's source writes), never from the mere existence of a pending slot,
+  since some setters bypass it; and
 - how the signing threshold behind control changes.
 
 It keys on call shape, not protocol, so every governance alert benefits.
@@ -30,7 +32,8 @@ from utils.chains import Chain
 from utils.llm.abi_exposure import exposes
 from utils.llm.report import address_link
 from utils.logger import get_logger
-from utils.source_context import get_contract_label
+from utils.on_chain_state import resolve_function_source
+from utils.source_context import find_state_var_writes, get_contract_label
 from utils.web3_wrapper import ChainManager
 
 logger = get_logger("utils.llm.control_transfer_context")
@@ -73,6 +76,12 @@ _CONTROL_SETTERS: dict[str, _Role] = {
     "setrolemanager": _ROLE_MANAGER,
     "transferrolemanager": _ROLE_MANAGER,
 }
+
+# Setters that can only nominate: the role moves when the nominee accepts.
+_NOMINATE_SETTERS = frozenset({"setpendingmanagement", "setpendingowner", "setpendinggovernance", "setpendingadmin"})
+
+# BoringOwnable: `direct = true` sets the owner immediately and clears the pending slot.
+_BORING_TRANSFER_OWNERSHIP = "transferOwnership(address,bool,bool)"
 
 # Getters that name a contract's own controller, tried in order for the one-hop follow.
 _CONTROLLER_GETTERS = ("management", "owner", "governance", "admin")
@@ -132,8 +141,11 @@ class ControlTransferContext:
     role: str
     proposed: ControllerInfo
     current: ControllerInfo | None = None
-    # True: the target has a pending slot, so the call only nominates.
-    two_step: bool = False
+    # True: this call only nominates. False: it transfers immediately.
+    # None: the target has a pending slot, but this call's effect is unknown.
+    two_step: bool | None = False
+    # The target exposes a pending slot for the role.
+    pending_slot: bool = False
     # For grantRole: the role hash being granted.
     role_hash: str = ""
 
@@ -186,15 +198,26 @@ class ControlTransferContext:
         if self.current is not None:
             lines.append(f"Current {self.role}: {self.current.describe()}.")
         lines.append(f"{'Grantee' if self.role_hash else f'Proposed {self.role}'}: {self.proposed.describe()}.")
-        if self.two_step:
-            lines.append(
-                f"Two-step: {self.target_label or 'the target'} keeps a pending {self.role} slot, so this call only "
-                f"nominates; control moves when the nominee accepts."
-            )
+        timing = self.timing_note()
+        if timing:
+            lines.append(timing)
         change = self.threshold_change()
         if change:
             lines.append(change + (" Effective once accepted." if self.two_step else ""))
         return lines
+
+    def timing_note(self) -> str:
+        """When control moves: after acceptance, immediately, or undetermined."""
+        if self.two_step:
+            return "Two-step: this call only nominates; control moves when the nominee accepts."
+        if self.two_step is None:
+            return (
+                f"The target keeps a pending {self.role} slot, but whether this call nominates or transfers "
+                "immediately could not be determined."
+            )
+        if self.pending_slot:
+            return "Immediate: this call transfers control directly, bypassing the target's pending slot."
+        return ""
 
 
 def _selector(signature: str) -> str:
@@ -268,9 +291,40 @@ def _current_holder(client: object, target: str, role: _Role) -> str | None:
     return None
 
 
-def _is_two_step(client: object, target: str, role: _Role) -> bool:
-    """Whether ``target`` keeps a pending slot for ``role`` (nominate, then accept)."""
+def _has_pending_slot(client: object, target: str, role: _Role) -> bool:
+    """Whether ``target`` exposes a pending slot for ``role``."""
     return any(_call(client, target, f"{getter}()", "address") is not None for getter in role.pending_getters)
+
+
+def _slot_key(name: str) -> str:
+    """Compare storage names across conventions: ``_pendingOwner`` ~ ``pending_owner`` ~ ``pendingOwner``."""
+    return name.replace("_", "").lower()
+
+
+def _two_step(chain_id: int, target: str, call: DecodedCall, role: _Role, pending_slot: bool) -> bool | None:
+    """Whether this call only nominates (True), transfers immediately (False), or is undetermined (None).
+
+    A pending slot on the target is not enough: BoringOwnable's
+    ``transferOwnership(owner, direct, renounce)`` has one yet transfers
+    immediately when ``direct`` is true. The call itself decides.
+    """
+    normalized = _slot_key(call.function_name or "")
+    if normalized in _NOMINATE_SETTERS:
+        return True
+    if call.signature == _BORING_TRANSFER_OWNERSHIP and len(call.params) >= 2:
+        return not bool(call.params[1][1])
+    if not pending_slot:
+        return False
+
+    source = resolve_function_source(chain_id, target, call.function_name)
+    writes = {_slot_key(name) for name in find_state_var_writes(source, call.function_name, True)} if source else set()
+    writes_pending = bool(writes & {_slot_key(g) for g in role.pending_getters})
+    writes_role = bool(writes & {_slot_key(g) for g in role.getters})
+    if writes_pending and not writes_role:
+        return True
+    if writes_role and not writes_pending:
+        return False
+    return None
 
 
 def _first_address(call: DecodedCall) -> str | None:
@@ -305,6 +359,7 @@ def _resolve_one(chain_id: int, client: object, target: str, call: DecodedCall) 
     if role is None or new_holder is None:
         return None
     current = _current_holder(client, target, role)
+    pending_slot = _has_pending_slot(client, target, role)
     return ControlTransferContext(
         target=target,
         target_label=get_contract_label(chain_id, target),
@@ -312,7 +367,8 @@ def _resolve_one(chain_id: int, client: object, target: str, call: DecodedCall) 
         role=role.name,
         proposed=_describe_controller(chain_id, client, new_holder),
         current=_describe_controller(chain_id, client, current) if current else None,
-        two_step=_is_two_step(client, target, role),
+        two_step=_two_step(chain_id, target, call, role, pending_slot),
+        pending_slot=pending_slot,
     )
 
 
@@ -393,8 +449,10 @@ def format_control_transfer_report(
             lines.append(f"- **Current {context.role}:** {_describe_markdown(context.current, chain_id, labels)}")
         who = "Grantee" if context.role_hash else f"Proposed {context.role}"
         lines.append(f"- **{who}:** {_describe_markdown(context.proposed, chain_id, labels)}")
-        if context.two_step:
-            lines.append("- **Two-step:** this call only nominates; control moves when the nominee accepts.")
+        timing = context.timing_note()
+        if timing:
+            heading, _, detail = timing.partition(": ")
+            lines.append(f"- **{heading}:** {detail}" if detail else f"- **Timing:** {timing}")
         change = context.threshold_change()
         if change:
             lines.append(f"- **Threshold:** {change}")

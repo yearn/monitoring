@@ -583,11 +583,14 @@ def _extract_vyper_function_snippet(source: str, function_name: str) -> str:
     return "\n".join(part for part in parts if part)
 
 
-def find_state_var_writes(source: str, function_name: str) -> list[str]:
+def find_state_var_writes(source: str, function_name: str, include_private: bool = False) -> list[str]:
     """State variable names assigned inside the function body, deduped, in order.
 
     Vyper storage is always written through ``self.`` (``self.claimable[a] = x``,
     ``self.unclaimed -= x``), which keeps locals that share a storage name out.
+    Underscore-prefixed names are skipped unless ``include_private``: they have no
+    getter to read, but they still say what a function changes (OpenZeppelin's
+    ``Ownable2Step.transferOwnership`` writes only ``_pendingOwner``).
     """
     body = _extract_function_body(source, function_name)
     pattern = _ASSIGNMENT_RE
@@ -601,7 +604,7 @@ def find_state_var_writes(source: str, function_name: str) -> list[str]:
     ordered: list[str] = []
     for m in pattern.finditer(body):
         name = m.group(1)
-        if name in _CONTROL_KEYWORDS or name.startswith("_") or name in seen:
+        if name in _CONTROL_KEYWORDS or (name.startswith("_") and not include_private) or name in seen:
             continue
         seen.add(name)
         ordered.append(name)

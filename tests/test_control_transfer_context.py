@@ -65,12 +65,25 @@ def _funding_distributor_chain() -> MagicMock:
 SET_MANAGEMENT = DecodedCall("set_management", "set_management(address)", [("address", EXECUTOR)])
 
 
+# Vyper setter that only writes the pending slot (Funding Distributor, yETH claim).
+NOMINATING_VYPER = """
+pending_management: public(address)
+management: public(address)
+
+@external
+def set_management(_management: address):
+    assert msg.sender == self.management
+    self.pending_management = _management
+"""
+
+
 @patch.object(control_transfer_context, "get_contract_label", return_value="")
 class TestResolve(unittest.TestCase):
+    @patch.object(control_transfer_context, "resolve_function_source", return_value=NOMINATING_VYPER)
     @patch.object(control_transfer_context, "exposes", side_effect=lambda _c, address, _w: address == EXECUTOR)
     @patch.object(control_transfer_context, "ChainManager")
     def test_management_to_contract_behind_smaller_safe(
-        self, mock_cm: MagicMock, _exposes: MagicMock, _label: MagicMock
+        self, mock_cm: MagicMock, _exposes: MagicMock, _source: MagicMock, _label: MagicMock
     ) -> None:
         mock_cm.get_client.return_value = _funding_distributor_chain()
 
@@ -129,6 +142,107 @@ class TestResolve(unittest.TestCase):
         self.assertIn("control is renounced", context.proposed.describe())
 
 
+# BoringOwnable: `direct` decides between an immediate transfer and a nomination.
+BORING_OWNABLE = """
+contract BoringOwnable {
+    address public owner;
+    address public pendingOwner;
+    function transferOwnership(address newOwner, bool direct, bool renounce) public onlyOwner {
+        if (direct) {
+            owner = newOwner;
+            pendingOwner = address(0);
+        } else {
+            pendingOwner = newOwner;
+        }
+    }
+}
+"""
+
+OZ_OWNABLE_2STEP = """
+abstract contract Ownable2Step is Ownable {
+    address private _pendingOwner;
+    function pendingOwner() public view virtual returns (address) { return _pendingOwner; }
+    function transferOwnership(address newOwner) public virtual override onlyOwner {
+        _pendingOwner = newOwner;
+        emit OwnershipTransferStarted(owner(), newOwner);
+    }
+}
+"""
+
+
+def _owned_chain(pending: bool = True) -> MagicMock:
+    """A target whose owner is yChad, optionally exposing ``pendingOwner()``."""
+    responses = {(TARGET, "owner()"): abi_encode(["address"], [YCHAD]), **_safe(YCHAD, 6, 9)}
+    if pending:
+        responses[(TARGET, "pendingOwner()")] = abi_encode(["address"], ["0x" + "00" * 20])
+    return _chain(responses, {TARGET.lower(): b"\x60", YCHAD.lower(): b"\x60"})
+
+
+@patch.object(control_transfer_context, "exposes", return_value=False)
+@patch.object(control_transfer_context, "get_contract_label", return_value="")
+@patch.object(control_transfer_context, "ChainManager")
+class TestTwoStepFromTheCall(unittest.TestCase):
+    """A pending slot on the target does not make every transfer two-step."""
+
+    def _resolve(self, call: DecodedCall) -> ControlTransferContext:
+        (context,) = resolve_control_transfer_context("x", 1, [(TARGET, call)])
+        return context
+
+    def _boring(self, direct: bool) -> DecodedCall:
+        return DecodedCall(
+            "transferOwnership",
+            "transferOwnership(address,bool,bool)",
+            [("address", EOA), ("bool", direct), ("bool", False)],
+        )
+
+    def test_boring_ownable_direct_transfer_is_immediate(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        mock_cm.get_client.return_value = _owned_chain()
+        with patch.object(control_transfer_context, "resolve_function_source", return_value=BORING_OWNABLE):
+            context = self._resolve(self._boring(direct=True))
+        self.assertIs(context.two_step, False)
+        self.assertTrue(context.pending_slot)
+        prompt = format_control_transfer_prompt([context])
+        self.assertIn("Immediate: this call transfers control directly", prompt)
+        self.assertNotIn("only nominates", prompt)
+
+    def test_boring_ownable_claimable_transfer_nominates(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        mock_cm.get_client.return_value = _owned_chain()
+        context = self._resolve(self._boring(direct=False))
+        self.assertIs(context.two_step, True)
+
+    def test_nominate_only_setter(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        mock_cm.get_client.return_value = _owned_chain()
+        context = self._resolve(DecodedCall("setPendingOwner", "setPendingOwner(address)", [("address", EOA)]))
+        self.assertIs(context.two_step, True)
+
+    def test_oz_ownable2step_private_pending_slot(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        mock_cm.get_client.return_value = _owned_chain()
+        call = DecodedCall("transferOwnership", "transferOwnership(address)", [("address", EOA)])
+        with patch.object(control_transfer_context, "resolve_function_source", return_value=OZ_OWNABLE_2STEP):
+            context = self._resolve(call)
+        self.assertIs(context.two_step, True)
+
+    def test_unreadable_source_is_undetermined(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        mock_cm.get_client.return_value = _owned_chain()
+        call = DecodedCall("transferOwnership", "transferOwnership(address)", [("address", EOA)])
+        with patch.object(control_transfer_context, "resolve_function_source", return_value=None):
+            context = self._resolve(call)
+        self.assertIsNone(context.two_step)
+        prompt = format_control_transfer_prompt([context])
+        self.assertIn("could not be determined", prompt)
+        self.assertNotIn("only nominates", prompt)
+        self.assertNotIn("Effective once accepted", prompt)
+
+    def test_no_pending_slot_is_direct_without_source(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        mock_cm.get_client.return_value = _owned_chain(pending=False)
+        call = DecodedCall("transferOwnership", "transferOwnership(address)", [("address", EOA)])
+        with patch.object(control_transfer_context, "resolve_function_source") as mock_source:
+            context = self._resolve(call)
+        self.assertIs(context.two_step, False)
+        self.assertEqual(context.timing_note(), "")
+        mock_source.assert_not_called()
+
+
 class TestRendering(unittest.TestCase):
     CONTEXT = ControlTransferContext(
         target=TARGET,
@@ -145,6 +259,7 @@ class TestRendering(unittest.TestCase):
             has_operators=True,
         ),
         two_step=True,
+        pending_slot=True,
     )
 
     def test_prompt(self) -> None:
@@ -160,6 +275,7 @@ class TestRendering(unittest.TestCase):
         for address in (TARGET, YCHAD, EXECUTOR, EXEC_SAFE):
             self.assertIn(f"https://etherscan.io/address/{address}", report)
         self.assertIn("**2-of-4**", report)
+        self.assertIn("- **Two-step:** this call only nominates", report)
 
     def test_labels_and_addresses_include_the_hop(self) -> None:
         self.assertEqual(self.CONTEXT.labels, {YCHAD: "Safe 6-of-9", EXEC_SAFE: "Safe 2-of-4"})

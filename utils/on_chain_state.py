@@ -257,7 +257,7 @@ def _guess_getter_from_setter(decoded_call: DecodedCall) -> tuple[str, list[str]
     return value_type, [t for t, _ in key_params], [v for _, v in key_params]
 
 
-def _resolve_source_for_function(chain_id: int, target: str, function_name: str) -> str | None:
+def resolve_function_source(chain_id: int, target: str, function_name: str) -> str | None:
     """Return the source where `function_name` is defined, following the proxy if needed."""
     fetched = fetch_source(chain_id, target)
     if fetched and find_state_var_writes(fetched[1], function_name):
@@ -288,7 +288,7 @@ def read_before_state(
     if not target or not decoded_call.function_name:
         return []
 
-    source = _resolve_source_for_function(chain_id, target, decoded_call.function_name)
+    source = resolve_function_source(chain_id, target, decoded_call.function_name)
     if not source:
         return []
 

@@ -266,7 +266,11 @@ For any protocol, calls that hand over control (`set_management`, `transferOwner
 
 1. **The current holder**, from the target's own `management()` / `owner()` / `governance()` / `admin()` / `role_manager()`.
 2. **What each side is**: an EOA, an EOA with EIP-7702 delegated code, a Safe (with its threshold and owner count), or a contract. A contract is followed one hop through its own controller getter (Executor → its `management()` Safe). A contract that exposes `operators` is flagged as acting for whitelisted addresses.
-3. **Whether the transfer is two-step**: a pending slot such as `pending_management` or `pendingOwner` means the call only nominates.
+3. **Whether the transfer is two-step**, decided from the call itself, because a pending slot on the target is not enough. BoringOwnable's `transferOwnership(owner, direct, renounce)` has `pendingOwner()` but transfers immediately when `direct` is true. The rules, in order:
+   - Nominate-only setters (`setPendingOwner`, …) are two-step.
+   - BoringOwnable's call follows its `direct` flag.
+   - Otherwise the setter's source decides. Writing only the pending slot (private names like `_pendingOwner` included) means two-step; writing only the role slot means immediate.
+   - When a pending slot exists but the source doesn't settle it, the report says "could not be determined" instead of asserting either way. Without a pending slot, the transfer is immediate.
 4. **The change in signing threshold** behind control when both sides resolve to a Safe (for example 6-of-9 → 2-of-4, a LOWER threshold).
 
 Involved Safes get `Safe m-of-n` labels. These are applied with `setdefault`, so curated names win. Failures are best-effort and never block the alert.
