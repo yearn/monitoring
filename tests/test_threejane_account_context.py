@@ -9,6 +9,7 @@ from utils.llm import threejane_account_context as account_context
 from utils.llm.threejane_account_context import (
     UNLIMITED,
     USD3_ADDRESS,
+    ExemptAccount,
     LCCBounceContext,
     SupplyCapExemptContext,
     TokenUnit,
@@ -22,6 +23,11 @@ USER = "0x66C0d9152209B51977047b9DC3b0B5bf2339b67C"
 OTHER = "0x445d1098c0ABC313dAcc04558855c86A9e492210"
 USDC = TokenUnit("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "USDC", 6)
 WAEUSDC = TokenUnit("0xD4fa2D31b7968E448877f69A96DE69f5de8cD23E", "waEthUSDC", 6)
+USD3 = TokenUnit(USD3_ADDRESS, "USD3", 6)
+# Accounts from the 44-call revocation that called three delegated EOAs "contracts".
+DELEGATED = "0x48cadD085e157A3F1C1C4BD6F9Bc0D6EF6215ADB"
+DELEGATE = "0x63c0c19a282a1B52b07dD5a65b58948A07DAE32B"
+SAFE = "0xcaB6b18D178502D6e18609a5f7228011CbF34F56"
 
 # The live account behind the alert that summarized this bounce as dust at 1e18.
 COMMITMENT = 499_999_999_986
@@ -46,18 +52,28 @@ def _bounce(**overrides: object) -> LCCBounceContext:
     return replace(context, **overrides)
 
 
-def _exemption(**overrides: object) -> SupplyCapExemptContext:
-    context = SupplyCapExemptContext(
-        usd3_address=USD3_ADDRESS,
-        account_address=OTHER,
+def _account(**overrides: object) -> ExemptAccount:
+    account = ExemptAccount(
+        address=OTHER,
         proposed_exempt=True,
         current_exempt=False,
         ring_fence_conduit=False,
-        account_is_contract=False,
+        is_contract=False,
+        delegate=None,
+        usd3_balance_raw=0,
+    )
+    return replace(account, **overrides)
+
+
+def _exemption(*accounts: ExemptAccount, **overrides: object) -> SupplyCapExemptContext:
+    context = SupplyCapExemptContext(
+        usd3_address=USD3_ADDRESS,
         asset=USDC,
+        share=USD3,
         min_deposit_raw=1_000_000_000,
         supply_cap_raw=80_000_000_000_000,
         total_assets_raw=83_483_415_520_897,
+        accounts=accounts or (_account(),),
     )
     return replace(context, **overrides)
 
@@ -149,10 +165,48 @@ class TestLCCBounce(unittest.TestCase):
         self.assertEqual(labels[WAEUSDC.address], "waEthUSDC (LCC margin asset)")
 
 
+class TestExemptAccount(unittest.TestCase):
+    def test_kind_separates_delegated_eoas_from_contracts(self) -> None:
+        self.assertEqual(_account().kind(), "EOA")
+        self.assertEqual(_account(delegate=DELEGATE).kind(), f"EOA with EIP-7702 delegation to {DELEGATE}")
+        self.assertEqual(_account(is_contract=True).kind(), "contract")
+
+    def test_change_and_noop(self) -> None:
+        self.assertEqual(_account().change(), "false → true")
+        self.assertEqual(_account(proposed_exempt=False, current_exempt=True).change(), "true → false")
+        self.assertEqual(_account(current_exempt=True).change(), "already true (no change)")
+
+    def test_grant_without_ring_fence_is_an_issue(self) -> None:
+        self.assertIn("no ring-fence credit", _account().pairing_issue())
+        self.assertEqual(_account(ring_fence_conduit=True).pairing_issue(), "")
+
+    def test_revoke_leaving_ring_fence_set_is_an_issue(self) -> None:
+        issue = _account(proposed_exempt=False, current_exempt=True, ring_fence_conduit=True).pairing_issue()
+        self.assertIn("ringFenceConduit stays true", issue)
+        self.assertIn("revoke both flags together", issue)
+
+    def test_revoke_without_ring_fence_is_clean(self) -> None:
+        self.assertEqual(_account(proposed_exempt=False, current_exempt=True).pairing_issue(), "")
+
+
 class TestSupplyCapExempt(unittest.TestCase):
-    def test_flag_change_and_noop(self) -> None:
-        self.assertEqual(_exemption().flag_line(), "supplyCapExempt: false → true.")
-        self.assertIn("already true", _exemption(current_exempt=True).flag_line())
+    def _revocation(self) -> SupplyCapExemptContext:
+        revoke = {"proposed_exempt": False, "current_exempt": True}
+        return _exemption(
+            _account(address=OTHER, usd3_balance_raw=1_271_316_913_410, **revoke),
+            _account(address=DELEGATED, delegate=DELEGATE, **revoke),
+            _account(address=SAFE, is_contract=True, usd3_balance_raw=85_185_325_821, **revoke),
+            _account(address=USER, **revoke),
+            total_assets_raw=100_497_447_211_275,
+            supply_cap_raw=100_000_000_000_000,
+        )
+
+    def test_overview_counts_directions_and_kinds(self) -> None:
+        line = self._revocation().overview_line()
+        self.assertIn("4 setSupplyCapExempt call(s) on USD3: 0 grant (false → true), 4 revoke (true → false)", line)
+        self.assertIn("2 EOA, 1 EOA with an EIP-7702 delegation", line)
+        self.assertIn("not a deployed contract), 1 contract", line)
+        self.assertIn("2 hold USD3, 1,356,502.239231 USD3 in total", line)
 
     def test_semantics_name_every_bypass_and_what_still_applies(self) -> None:
         line = _exemption().semantics_line()
@@ -162,19 +216,21 @@ class TestSupplyCapExempt(unittest.TestCase):
         self.assertIn("msg.sender == receiver", line)
         self.assertIn("outstanding borrow shares", line)
         self.assertIn("supply cap of 0", line)
+        self.assertIn("does not touch existing balances or withdrawals", line)
 
-    def test_eoa_without_ring_fence_is_called_out(self) -> None:
-        line = _exemption().pairing_line()
-        self.assertIn("an EOA (no contract code)", line)
-        self.assertIn("receive no ring-fence credit", line)
+    def test_pairing_line_counts_out_of_step_accounts(self) -> None:
+        self.assertIn("1 account(s) end up out of step", _exemption().pairing_line())
+        self.assertIn("No call in this batch", self._revocation().pairing_line())
 
-    def test_paired_conduit_is_not_flagged(self) -> None:
-        line = _exemption(ring_fence_conduit=True, account_is_contract=True).pairing_line()
-        self.assertIn("a contract", line)
-        self.assertNotIn("no ring-fence credit", line)
+    def test_supply_line_above_cap_blocks_non_exempt(self) -> None:
+        line = _exemption().supply_line()
+        self.assertIn("above the cap by 3,483,415.520897 USDC", line)
+        self.assertIn("availableDepositLimit is 0 for every non-exempt receiver", line)
 
-    def test_supply_line_above_cap(self) -> None:
-        self.assertIn("above the cap by 3,483,415.520897 USDC", _exemption().supply_line())
+    def test_supply_line_exactly_at_cap(self) -> None:
+        line = _exemption(total_assets_raw=80_000_000_000_000).supply_line()
+        self.assertIn("exactly at the cap", line)
+        self.assertNotIn("above the cap by 0", line)
 
     def test_supply_line_with_headroom(self) -> None:
         line = _exemption(total_assets_raw=70_000_000_000_000).supply_line()
@@ -183,12 +239,30 @@ class TestSupplyCapExempt(unittest.TestCase):
     def test_supply_line_unlimited_cap(self) -> None:
         self.assertIn("unlimited", _exemption(supply_cap_raw=UNLIMITED).supply_line())
 
-    def test_prompt_and_report(self) -> None:
-        prompt = format_account_prompt(_exemption())
-        report = format_account_report(_exemption(), 1, {USD3_ADDRESS: "USD3"})
-        self.assertIn(f"USD3.setSupplyCapExempt on {USD3_ADDRESS} for account {OTHER}", prompt)
-        self.assertIn("waUSDC is paused", report)
-        self.assertIn(f"https://etherscan.io/address/{OTHER}", report)
+    def test_prompt_states_shared_facts_once_and_lists_every_account(self) -> None:
+        context = self._revocation()
+        prompt = format_account_prompt(context)
+        self.assertEqual(prompt.count("What the flag does"), 1)
+        self.assertEqual(prompt.count("USD3 now:"), 1)
+        self.assertIn(f"- {DELEGATED} (EOA with EIP-7702 delegation to {DELEGATE}): true → false", prompt)
+        self.assertIn(f"- {SAFE} (contract): true → false; ringFenceConduit false; holds 85,185.325821 USD3", prompt)
+        self.assertEqual(sum(1 for line in prompt.splitlines() if line.startswith("- 0x")), 4)
+
+    def test_report_tabulates_accounts_with_links(self) -> None:
+        report = format_account_report(self._revocation(), 1, {USD3_ADDRESS: "USD3"})
+        self.assertEqual(report.count("What the flag does"), 1)
+        self.assertIn("| # | Account | Type | supplyCapExempt | ringFenceConduit | USD3 balance |", report)
+        self.assertIn(f"EOA, EIP-7702 → [`{DELEGATE}`](https://etherscan.io/address/{DELEGATE})", report)
+        for address in (OTHER, DELEGATED, SAFE, USER):
+            self.assertIn(f"https://etherscan.io/address/{address}", report)
+        self.assertIn("`1,271,316.91341 USD3`", report)
+
+    def test_report_flags_out_of_step_accounts(self) -> None:
+        report = format_account_report(_exemption(), 1, {})
+        self.assertIn("⚠️ exempt without ringFenceConduit", report)
+
+    def test_addresses_include_every_account(self) -> None:
+        self.assertEqual(self._revocation().addresses, [USD3_ADDRESS, OTHER, DELEGATED, SAFE, USER])
 
 
 class TestReaders(unittest.TestCase):
@@ -229,20 +303,40 @@ class TestReaders(unittest.TestCase):
             self.assertEqual(resolve_account_contexts(1, VAULT, [_bounce_call()]), [])
         get_client.assert_not_called()
 
-    def test_supply_cap_exemptions_read_flags_per_account(self) -> None:
-        client = _client(
-            [USDC.address, 83_483_415_520_897, 1_000_000_000, 80_000_000_000_000, False, False, True, True],
-            code=b"",
-        )
-        calls = [_exempt_call(OTHER), _exempt_call(USER)]
+    def test_supply_cap_exemptions_read_flags_code_and_balance_in_one_batch(self) -> None:
+        delegation = bytes.fromhex("ef0100" + DELEGATE[2:].lower())
+        safe_code = bytes.fromhex("6080604052" + "00" * 166)
+        shared = [USDC.address, 83_483_415_520_897, 1_000_000_000, 80_000_000_000_000, "USD3", 6]
+        per_account = [
+            *(False, False, 0, b""),
+            *(True, True, 5, delegation),
+            *(False, False, 7, safe_code),
+        ]
+        client = _client([*shared, *per_account])
+        calls = [_exempt_call(OTHER), _exempt_call(DELEGATED, exempt=False), _exempt_call(SAFE)]
         with (
             patch.object(account_context.ChainManager, "get_client", return_value=client),
             patch.object(account_context, "fetch_token_unit", return_value=USDC),
         ):
-            contexts = resolve_account_contexts(1, USD3_ADDRESS, calls)
+            (context,) = resolve_account_contexts(1, USD3_ADDRESS, calls)
 
-        self.assertEqual(contexts[0], _exemption())
-        self.assertEqual(contexts[1], _exemption(account_address=USER, current_exempt=True, ring_fence_conduit=True))
+        self.assertEqual(
+            context,
+            _exemption(
+                _account(),
+                _account(
+                    address=DELEGATED,
+                    proposed_exempt=False,
+                    current_exempt=True,
+                    ring_fence_conduit=True,
+                    delegate=DELEGATE,
+                    usd3_balance_raw=5,
+                ),
+                _account(address=SAFE, is_contract=True, usd3_balance_raw=7),
+            ),
+        )
+        # Code is read through the batch, never with a direct per-account RPC.
+        self.assertEqual(client.execute_batch.call_count, 1)
 
     def test_exemption_on_another_target_is_ignored(self) -> None:
         with patch.object(account_context.ChainManager, "get_client") as get_client:

@@ -202,6 +202,30 @@ def minimal_proxy_implementation(code: bytes | str) -> str | None:
     return to_checksum_address("0x" + hex_code[len(_EIP1167_PREFIX) : len(_EIP1167_PREFIX) + 40])
 
 
+# EIP-7702 delegation designator: an EOA that authorized a delegate carries
+# exactly `0xef0100 ++ delegate` (23 bytes) as its code. It is still a
+# key-controlled account — code-length checks misread it as a contract.
+_EIP7702_PREFIX = "ef0100"
+_EIP7702_CODE_LEN = len(_EIP7702_PREFIX) + 40
+
+
+def eip7702_delegate(code: bytes | str) -> str | None:
+    """Return the address an EIP-7702 EOA delegates to, or None for any other code.
+
+    Args:
+        code: Deployed code, as bytes or hex (with or without ``0x``).
+
+    Returns:
+        The checksummed delegate when ``code`` is exactly a delegation
+        designator, else None.
+    """
+    hex_code = code.hex() if isinstance(code, (bytes, bytearray)) else str(code)
+    hex_code = hex_code.lower().removeprefix("0x")
+    if len(hex_code) != _EIP7702_CODE_LEN or not hex_code.startswith(_EIP7702_PREFIX):
+        return None
+    return to_checksum_address("0x" + hex_code[len(_EIP7702_PREFIX) :])
+
+
 # Getters non-standard proxies expose instead of using a known storage slot.
 # Compound's Unitroller, for example, points at its logic via
 # comptrollerImplementation() rather than the EIP-1967 slot.

@@ -22,6 +22,7 @@ from utils.proxy import (
     ZEPPELINOS_IMPL_SLOT,
     ProxyUpgrade,
     detect_proxy_upgrade,
+    eip7702_delegate,
     find_proxy_upgrades,
     format_upgrade_lines,
     get_current_implementation,
@@ -303,6 +304,24 @@ class TestFormatUpgradeLines(unittest.TestCase):
     def test_unknown_current_implementation(self, _impl) -> None:
         lines = format_upgrade_lines(ProxyUpgrade(ORACLE, NEW_ORACLE_IMPL), ORACLE, 1)
         self.assertEqual(lines, [f"🔄 New impl: `{NEW_ORACLE_IMPL}`"])
+
+
+class TestEip7702Delegate(unittest.TestCase):
+    """An EIP-7702 EOA's code is `0xef0100 ++ delegate`; nothing else is."""
+
+    DELEGATE = _cs("0x63c0c19a282a1b52b07dd5a65b58948a07dae32b")
+    CODE = "ef0100" + DELEGATE[2:].lower()
+
+    def test_extracts_delegate_from_hex_and_bytes(self) -> None:
+        self.assertEqual(eip7702_delegate("0x" + self.CODE), self.DELEGATE)
+        self.assertEqual(eip7702_delegate(bytes.fromhex(self.CODE)), self.DELEGATE)
+
+    def test_rejects_other_code(self) -> None:
+        self.assertIsNone(eip7702_delegate(""))
+        self.assertIsNone(eip7702_delegate(b""))
+        self.assertIsNone(eip7702_delegate("0x6080604052"))
+        self.assertIsNone(eip7702_delegate(self.CODE + "00"))
+        self.assertIsNone(eip7702_delegate("ef0200" + self.CODE[6:]))
 
 
 if __name__ == "__main__":
