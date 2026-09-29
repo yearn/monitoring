@@ -10,7 +10,8 @@ fact that matters missing:
   dust; it is a ~$500k commitment.
 - ``USD3.setSupplyCapExempt(account, bool)`` flips a flag whose reach — cap
   headroom, first-deposit minimum, the waUSDC-paused block — is only visible in
-  USD3's deposit-limit code, not in the setter's natspec.
+  USD3's deposit-limit code, not in the setter's natspec. Batches of these are
+  rendered as one context: shared semantics once, then one line per account.
 
 Each context reads the account's state on-chain and states the effect in the
 right units, so the model reports it rather than guessing.
@@ -27,6 +28,7 @@ from utils.formatting import format_decimal_amount, normalize_token_amount
 from utils.llm.report import address_link
 from utils.llm.threejane_abi import exposes, threejane_abi
 from utils.logger import get_logger
+from utils.proxy import eip7702_delegate
 from utils.web3_wrapper import ChainManager
 
 logger = get_logger("utils.llm.threejane_account_context")
@@ -155,34 +157,93 @@ class LCCBounceContext:
 
 
 @dataclass(frozen=True)
-class SupplyCapExemptContext:
-    """An account's USD3 deposit flags around a ``setSupplyCapExempt`` call."""
+class ExemptAccount:
+    """One ``setSupplyCapExempt`` call's account, with its flags and type before the call."""
 
-    usd3_address: str
-    account_address: str
+    address: str
     proposed_exempt: bool
     current_exempt: bool
     ring_fence_conduit: bool
-    account_is_contract: bool
+    # Set only for a contract: False for an EOA, including one with an EIP-7702 delegation.
+    is_contract: bool
+    # The delegate an EIP-7702 EOA runs, or None.
+    delegate: str | None
+    usd3_balance_raw: int
+
+    def kind(self) -> str:
+        """EOA, delegated EOA, or contract — a delegation designator is not a deployed contract."""
+        if self.delegate:
+            return f"EOA with EIP-7702 delegation to {self.delegate}"
+        return "contract" if self.is_contract else "EOA"
+
+    def change(self) -> str:
+        """Before → after for the flag, flagging a no-op."""
+        after = str(self.proposed_exempt).lower()
+        if self.current_exempt == self.proposed_exempt:
+            return f"already {after} (no change)"
+        return f"{str(self.current_exempt).lower()} → {after}"
+
+    def pairing_issue(self) -> str:
+        """How this change leaves the flag out of step with ringFenceConduit, or ""."""
+        if self.proposed_exempt and not self.ring_fence_conduit:
+            return "exempt without ringFenceConduit: its exempt deposits receive no ring-fence credit"
+        if not self.proposed_exempt and self.current_exempt and self.ring_fence_conduit:
+            return (
+                "exemption revoked while ringFenceConduit stays true: third-party deposits become possible and "
+                "receive no ring-fence credit (USD3 natspec says to revoke both flags together)"
+            )
+        return ""
+
+
+@dataclass(frozen=True)
+class SupplyCapExemptContext:
+    """Every ``setSupplyCapExempt`` call on USD3 in one alert, with the state they share.
+
+    One context per batch rather than per account: the flag's semantics and the
+    cap position are the same for every account, and a 44-call revocation
+    otherwise repeated them 44 times in both the prompt and the report.
+    """
+
+    usd3_address: str
     asset: TokenUnit
+    share: TokenUnit
     min_deposit_raw: int
     supply_cap_raw: int
     total_assets_raw: int
+    accounts: tuple[ExemptAccount, ...]
 
     @property
     def addresses(self) -> list[str]:
-        return [self.usd3_address, self.account_address]
+        return [self.usd3_address, *(account.address for account in self.accounts)]
 
     @property
     def labels(self) -> dict[str, str]:
         return {self.usd3_address: "USD3"}
 
-    def flag_line(self) -> str:
-        """Before → after for the flag, flagging a no-op."""
-        before, after = str(self.current_exempt).lower(), str(self.proposed_exempt).lower()
-        if self.current_exempt == self.proposed_exempt:
-            return f"supplyCapExempt is already {after}; the call changes nothing."
-        return f"supplyCapExempt: {before} → {after}."
+    def overview_line(self) -> str:
+        """Counts by direction and account type, so the model does not tally 44 lines itself.
+
+        Directions count calls; types, holders and the USD3 total count distinct
+        accounts, so an account named in two calls is not counted — or its
+        balance summed — twice.
+        """
+        grants = sum(1 for a in self.accounts if a.proposed_exempt and not a.current_exempt)
+        revokes = sum(1 for a in self.accounts if not a.proposed_exempt and a.current_exempt)
+        noops = len(self.accounts) - grants - revokes
+        distinct = list({a.address: a for a in self.accounts}.values())
+        delegated = sum(1 for a in distinct if a.delegate)
+        contracts = sum(1 for a in distinct if a.is_contract)
+        plain = len(distinct) - delegated - contracts
+        holders = [a for a in distinct if a.usd3_balance_raw]
+        held = sum(a.usd3_balance_raw for a in holders)
+        return (
+            f"{len(self.accounts)} setSupplyCapExempt call(s) on USD3 across {len(distinct)} account(s): "
+            f"{grants} grant (false → true), {revokes} revoke (true → false), {noops} no-op. "
+            f"Accounts: {plain} EOA, "
+            f"{delegated} EOA with an EIP-7702 delegation (a key-controlled wallet running delegated code, not a "
+            f"deployed contract), {contracts} contract. {len(holders)} hold USD3, "
+            f"{self.share.amount(held)} in total."
+        )
 
     def semantics_line(self) -> str:
         """What the exemption bypasses and what still applies.
@@ -196,34 +257,44 @@ class SupplyCapExemptContext:
             f"supply-cap headroom check, the first-deposit minimum of {self.asset.amount(self.min_deposit_raw)}, "
             "and the deposit block that applies while waUSDC is paused, and may only deposit for itself "
             "(msg.sender == receiver). Still enforced for exempt accounts: accounts with outstanding borrow shares "
-            "cannot deposit, and a supply cap of 0 blocks every deposit."
+            "cannot deposit, and a supply cap of 0 blocks every deposit. The flag does not touch existing balances "
+            "or withdrawals."
         )
 
     def pairing_line(self) -> str:
-        """The natspec pairs the flag with ringFenceConduit; say when that pairing is absent."""
-        kind = "a contract" if self.account_is_contract else "an EOA (no contract code)"
-        pairing = (
-            f"USD3 natspec pairs this flag with ringFenceConduit, and LCC deployment grants both atomically. "
-            f"The account is {kind}; ringFenceConduit = {str(self.ring_fence_conduit).lower()}"
-        )
-        if self.proposed_exempt and not self.ring_fence_conduit:
-            return pairing + ", so its exempt deposits receive no ring-fence credit."
-        return pairing + "."
+        """The natspec pairs the flag with ringFenceConduit; say where this batch breaks the pairing."""
+        issues = [a for a in self.accounts if a.pairing_issue()]
+        pairing = "USD3 natspec pairs this flag with ringFenceConduit; LCC deployment grants both atomically."
+        if not issues:
+            return pairing + " No call in this batch leaves the two flags out of step."
+        return pairing + f" {len(issues)} account(s) end up out of step (see the per-account list)."
 
     def supply_line(self) -> str:
         """Where USD3 supply stands against the cap the exemption bypasses."""
         cap, assets = self.supply_cap_raw, self.total_assets_raw
         if cap == UNLIMITED:
             return f"USD3 now: totalAssets {self.asset.amount(assets)}; USD3_SUPPLY_CAP is unlimited (max uint256)."
-        standing = (
-            f"above the cap by {self.asset.amount(assets - cap)}"
-            if assets > cap
-            else f"{self.asset.amount(cap - assets)} of headroom"
-        )
+        if assets >= cap:
+            standing = "exactly at the cap" if assets == cap else f"above the cap by {self.asset.amount(assets - cap)}"
+            return (
+                f"USD3 now: totalAssets {self.asset.amount(assets)} against USD3_SUPPLY_CAP "
+                f"{self.asset.amount(cap)} ({standing}), so "
+                "availableDepositLimit is 0 for every non-exempt receiver until totalAssets falls below the cap or "
+                "the cap rises."
+            )
         return (
             f"USD3 now: totalAssets {self.asset.amount(assets)} against USD3_SUPPLY_CAP "
-            f"{self.asset.amount(cap)} ({standing})."
+            f"{self.asset.amount(cap)} ({self.asset.amount(cap - assets)} of headroom)."
         )
+
+    def account_line(self, account: ExemptAccount) -> str:
+        """One account's change, type, ring-fence flag and USD3 balance."""
+        line = (
+            f"{account.address} ({account.kind()}): {account.change()}; ringFenceConduit "
+            f"{str(account.ring_fence_conduit).lower()}; holds {self.share.amount(account.usd3_balance_raw)}"
+        )
+        issue = account.pairing_issue()
+        return f"{line}; {issue}" if issue else line
 
 
 AccountContext = LCCBounceContext | SupplyCapExemptContext
@@ -301,7 +372,7 @@ def _read_lcc_bounces(chain_id: int, target: str, calls: list[DecodedCall]) -> l
 
 
 def _read_supply_cap_exemptions(chain_id: int, target: str, calls: list[DecodedCall]) -> list[SupplyCapExemptContext]:
-    """Read each account's USD3 flags and code, plus USD3's cap and supply, in one batch."""
+    """Read every account's USD3 flags, code and balance, plus USD3's cap and supply, in one batch."""
     if target.lower() != USD3_ADDRESS.lower():
         return []
     changes = [
@@ -320,33 +391,62 @@ def _read_supply_cap_exemptions(chain_id: int, target: str, calls: list[DecodedC
         batch.add(vault.functions.totalAssets())
         batch.add(usd3.functions.minDeposit())
         batch.add(config.functions.config(USD3_SUPPLY_CAP_KEY))
+        # USD3's own metadata comes from the batch: it serves symbol()/decimals() through the
+        # TokenizedStrategy fallback, which fetch_erc20_metadata's bytecode gate cannot see.
+        batch.add(vault.functions.symbol())
+        batch.add(vault.functions.decimals())
+        # Each request is built inside the batch context; one built outside it runs unbatched.
         for account, _ in changes:
             batch.add(usd3.functions.supplyCapExempt(account))
             batch.add(usd3.functions.ringFenceConduit(account))
-        asset_address, total_assets, min_deposit, supply_cap, *flags = client.execute_batch(batch)
+            batch.add(vault.functions.balanceOf(account))
+            batch.add(client.eth.get_code(account))
+        (
+            asset_address,
+            total_assets,
+            min_deposit,
+            supply_cap,
+            share_symbol,
+            share_decimals,
+            *per_account,
+        ) = client.execute_batch(batch)
 
     asset = fetch_token_unit(chain_id, str(asset_address))
     if asset is None:
         logger.info("3Jane USD3 %s: asset metadata unavailable", usd3_address)
         return []
+    share = TokenUnit(address=usd3_address, symbol=str(share_symbol), decimals=int(share_decimals))
 
-    contexts = []
+    accounts = []
+    # Calls execute in order, so a repeated account's "before" is what the previous call set.
+    flag_before: dict[str, bool] = {}
     for index, (account, proposed) in enumerate(changes):
-        contexts.append(
-            SupplyCapExemptContext(
-                usd3_address=usd3_address,
-                account_address=account,
+        exempt, ring_fence, balance, code = per_account[4 * index : 4 * index + 4]
+        delegate = eip7702_delegate(code)
+        current = flag_before.get(account, bool(exempt))
+        flag_before[account] = proposed
+        accounts.append(
+            ExemptAccount(
+                address=account,
                 proposed_exempt=proposed,
-                current_exempt=bool(flags[2 * index]),
-                ring_fence_conduit=bool(flags[2 * index + 1]),
-                account_is_contract=len(client.eth.get_code(account)) > 0,
-                asset=asset,
-                min_deposit_raw=int(min_deposit),
-                supply_cap_raw=int(supply_cap),
-                total_assets_raw=int(total_assets),
+                current_exempt=current,
+                ring_fence_conduit=bool(ring_fence),
+                is_contract=bool(code) and delegate is None,
+                delegate=delegate,
+                usd3_balance_raw=int(balance),
             )
         )
-    return contexts
+    return [
+        SupplyCapExemptContext(
+            usd3_address=usd3_address,
+            asset=asset,
+            share=share,
+            min_deposit_raw=int(min_deposit),
+            supply_cap_raw=int(supply_cap),
+            total_assets_raw=int(total_assets),
+            accounts=tuple(accounts),
+        )
+    ]
 
 
 def resolve_account_contexts(chain_id: int, target: str, calls: list[DecodedCall]) -> list[AccountContext]:
@@ -379,11 +479,12 @@ def format_account_prompt(context: AccountContext) -> str:
 
     return "\n".join(
         [
-            f"USD3.setSupplyCapExempt on {context.usd3_address} for account {context.account_address}: "
-            f"{context.flag_line()}",
+            f"USD3.setSupplyCapExempt on {context.usd3_address}: {context.overview_line()}",
             context.semantics_line(),
             context.pairing_line(),
             context.supply_line(),
+            "Per account, in call order:",
+            *(f"- {context.account_line(account)}" for account in context.accounts),
         ]
     )
 
@@ -405,13 +506,25 @@ def format_account_report(context: AccountContext, chain_id: int, labels: dict[s
             lines.append(f"  - {share}")
         return "\n".join(lines)
 
-    return "\n".join(
-        [
-            f"- **USD3 supply-cap exemption:** {address_link(context.account_address, chain_id, labels)} "
-            f"on {address_link(context.usd3_address, chain_id, labels)}",
-            f"  - {context.flag_line()}",
-            f"  - {context.semantics_line()}",
-            f"  - {context.pairing_line()}",
-            f"  - {context.supply_line()}",
-        ]
-    )
+    lines = [
+        f"- **USD3 supply-cap exemptions** on {address_link(context.usd3_address, chain_id, labels)}: "
+        f"{context.overview_line()}",
+        f"  - {context.semantics_line()}",
+        f"  - {context.pairing_line()}",
+        f"  - {context.supply_line()}",
+        "",
+        "| # | Account | Type | supplyCapExempt | ringFenceConduit | USD3 balance |",
+        "|---|---|---|---|---|---|",
+    ]
+    for number, account in enumerate(context.accounts, start=1):
+        kind = (
+            f"EOA, EIP-7702 → {address_link(account.delegate, chain_id, labels)}"
+            if account.delegate
+            else account.kind()
+        )
+        issue = f" ⚠️ {account.pairing_issue()}" if account.pairing_issue() else ""
+        lines.append(
+            f"| {number} | {address_link(account.address, chain_id, labels)} | {kind} | {account.change()} | "
+            f"{str(account.ring_fence_conduit).lower()}{issue} | `{context.share.amount(account.usd3_balance_raw)}` |"
+        )
+    return "\n".join(lines)
