@@ -26,6 +26,7 @@ from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
 from utils.erc20_metadata import fetch_erc20_metadata
 from utils.llm.report import address_link
+from utils.llm.yearn_v3_batch import DebtMove, VaultBatchState
 from utils.logger import get_logger
 from utils.web3_wrapper import ChainManager
 
@@ -80,6 +81,11 @@ _VAULT_ABI = [
     _fn("minimum_total_idle", ["uint256"]),
     _fn("use_default_queue", ["bool"]),
     _fn("strategies", ["uint256", "uint256", "uint256", "uint256"], ["address"]),
+    # ERC-4626 limits, read on a strategy with the vault as owner: what
+    # update_debt can actually deposit into / redeem from it.
+    _fn("maxDeposit", ["uint256"], ["address"]),
+    _fn("maxRedeem", ["uint256"], ["address"]),
+    _fn("convertToAssets", ["uint256"], ["uint256"]),
 ]
 
 
@@ -100,6 +106,10 @@ class StrategyState:
     # of the strategies it allocates to.
     is_vault: bool = False
     sub_strategies: tuple[str, ...] = ()
+    # ERC-4626 limits with the vault as owner, read only for named strategies;
+    # None when unreadable. They bound what update_debt can move.
+    max_deposit: int | None = None
+    max_withdraw: int | None = None
 
     @property
     def active(self) -> bool:
@@ -192,21 +202,42 @@ class YearnV3VaultContext:
             "add_strategy(strategy, add_to_queue) registers the strategy with max_debt 0; add_to_queue=True "
             "appends it to the default queue (used for withdrawals), False leaves it out. "
             "update_max_debt_for_strategy only sets a ceiling: funds move only when a DEBT_MANAGER "
-            "(typically a debt allocator) calls update_debt."
+            "(typically a debt allocator) calls update_debt. update_debt(strategy, target_debt) is a TARGET, not an "
+            "amount: a deposit is capped by the strategy's max_debt, its maxDeposit and the vault's idle above "
+            "minimum_total_idle, so a target above what the vault holds simply allocates everything available — "
+            "it is not a funding gap; the per-call lines below give the expected amounts, running through the "
+            "batch. Withdrawals (withdraw/redeem) pull from strategies in default_queue order unless the withdrawer "
+            "passes a custom queue; use_default_queue=True forces the default queue even then, and False only "
+            "permits custom queues — the default queue still applies to ordinary withdrawals."
         )
 
     def proposal_lines(self) -> list[str]:
-        """One line per call, in batch order, comparing proposed values with current state."""
+        """One line per call, in batch order, each against the state the earlier calls leave."""
         lines: list[str] = []
         added: set[str] = set()
+        state = self.batch_state()
         for call in self.calls:
-            line = self._proposal_line(call, added)
+            line = self._proposal_line(call, added, state)
             if line:
                 lines.append(line)
         return lines
 
-    def _proposal_line(self, call: DecodedCall, added: set[str]) -> str:
-        """Describe one call against the vault's state before the transaction."""
+    def batch_state(self) -> VaultBatchState:
+        """A running copy of the vault's debt accounting, before the first call."""
+        state = VaultBatchState(
+            idle=self.total_idle,
+            minimum_total_idle=self.minimum_total_idle or 0,
+            shutdown=self.is_shutdown,
+        )
+        for strategy in (*self.default_queue, *self.other_strategies):
+            if strategy.active:
+                state.add_strategy(strategy.address, strategy.max_deposit, strategy.max_withdraw)
+                state.set_max_debt(strategy.address, strategy.max_debt)
+                state.strategies[strategy.address.lower()].current_debt = strategy.current_debt
+        return state
+
+    def _proposal_line(self, call: DecodedCall, added: set[str], state: VaultBatchState) -> str:
+        """Describe one call against the vault state the earlier calls in the batch leave."""
         params = call.params
         name = call.function_name
         first = params[0][1] if params else None
@@ -216,6 +247,8 @@ class YearnV3VaultContext:
         if name == "add_strategy" and strategy:
             add_to_queue = bool(params[1][1]) if len(params) > 1 else True
             added.add(strategy.address.lower())
+            if not strategy.active:
+                state.add_strategy(strategy.address, strategy.max_deposit, strategy.max_withdraw)
             status = "ALREADY ACTIVE — the call reverts" if strategy.active else "not yet active"
             parts = [f"add_strategy({label}): {status}"]
             if strategy.asset is not None:
@@ -253,14 +286,18 @@ class YearnV3VaultContext:
 
         if name == "update_max_debt_for_strategy" and strategy and len(params) > 1:
             new_max = int(params[1][1])
+            running = state.get(strategy.address)
             before = "added earlier in this batch" if strategy.address.lower() in added else None
             current = before or (
-                f"current max_debt {self.amount(strategy.max_debt)}, current_debt {self.amount(strategy.current_debt)}"
-                if strategy.active
+                f"current max_debt {self.amount(running.max_debt)}, current_debt {self.amount(running.current_debt)}"
+                if running is not None and running.active
                 else "strategy not active"
             )
+            state.set_max_debt(strategy.address, new_max)
             parts = [f"update_max_debt_for_strategy({label}): {self.amount(new_max)} ({current})"]
             parts.append(f"= {self.share_of_vault(new_max)} ({self.amount(self.total_assets)})")
+            if new_max != MAX_UINT256 and new_max > self.total_assets:
+                parts.append("a ceiling above the vault's size — update_debt can only allocate what the vault holds")
             peers = {s.max_debt for s in self.default_queue if s.address.lower() != strategy.address.lower()}
             if peers == {new_max}:
                 parts.append("same max_debt as every other default-queue strategy")
@@ -269,27 +306,19 @@ class YearnV3VaultContext:
             return "; ".join(parts) + "."
 
         if name == "update_debt" and strategy and len(params) > 1:
-            target = int(params[1][1])
-            if target == MAX_UINT256:
-                return f"update_debt({label}): MOVES FUNDS NOW — allocates all available idle ({self.amount(self.total_idle)})."
-            delta = target - strategy.current_debt
-            direction = "deposits" if delta > 0 else "withdraws"
-            return (
-                f"update_debt({label}): MOVES FUNDS NOW — current_debt {self.amount(strategy.current_debt)} → "
-                f"{self.amount(target)} ({direction} {self.amount(abs(delta))}; idle now {self.amount(self.total_idle)})."
-            )
+            return self._update_debt_line(label, state.update_debt(strategy.address, int(params[1][1])))
 
-        if name == "revoke_strategy" and strategy:
-            return (
-                f"revoke_strategy({label}): removes it; reverts unless current_debt is 0 "
-                f"(now {self.amount(strategy.current_debt)})."
-            )
-
-        if name == "force_revoke_strategy" and strategy:
+        if name in ("revoke_strategy", "force_revoke_strategy") and strategy:
+            running = state.get(strategy.address)
+            debt = running.current_debt if running is not None else strategy.current_debt
+            state.revoke(strategy.address)
+            if name == "revoke_strategy":
+                return (
+                    f"revoke_strategy({label}): removes it; reverts unless current_debt is 0 (now {self.amount(debt)})."
+                )
             return (
                 f"force_revoke_strategy({label}): removes it and WRITES OFF its current_debt "
-                f"{self.amount(strategy.current_debt)} as a loss to depositors "
-                f"({self.share_of_vault(strategy.current_debt)})."
+                f"{self.amount(debt)} as a loss to depositors ({self.share_of_vault(debt)})."
             )
 
         if name == "set_deposit_limit" and params:
@@ -297,7 +326,8 @@ class YearnV3VaultContext:
             return f"set_deposit_limit: {current} → {self.amount(int(params[0][1]))}."
 
         if name == "set_minimum_total_idle" and params:
-            current = self.optional_amount(self.minimum_total_idle)
+            current = self.amount(state.minimum_total_idle)
+            state.minimum_total_idle = int(params[0][1])
             return f"set_minimum_total_idle: {current} → {self.amount(int(params[0][1]))}."
 
         if name == "set_use_default_queue" and params:
@@ -311,6 +341,24 @@ class YearnV3VaultContext:
             return line + (f"; removed from the queue: {', '.join(removed)}." if removed else ".")
 
         return ""
+
+    def _update_debt_line(self, label: str, move: DebtMove) -> str:
+        """Expected effect of one update_debt, from the running batch state."""
+        target = "max (allocate all available)" if move.target == MAX_UINT256 else self.amount(move.target)
+        head = f"update_debt({label}) target_debt {target}"
+        if move.reverts:
+            return f"{head}: REVERTS — {move.reverts}."
+        if move.moved == 0:
+            reason = f" — limited by {move.limited_by}" if move.limited_by else ""
+            return f"{head}: moves nothing{reason}; current_debt stays {self.amount(move.debt_before)}."
+
+        direction = "deposits" if move.moved > 0 else "withdraws"
+        limit = f", limited by {move.limited_by}" if move.limited_by else ""
+        return (
+            f"{head}: MOVES FUNDS NOW — {direction} {self.amount(abs(move.moved))}{limit}; "
+            f"current_debt {self.amount(move.debt_before)} → {self.amount(move.debt_after)}; "
+            f"vault idle {self.amount(move.idle_before)} → {self.amount(move.idle_after)} (expected)."
+        )
 
     def optional_amount(self, raw: int | None) -> str:
         """Render an amount that may not have been readable on this vault version."""
@@ -348,19 +396,26 @@ def _token_name(chain_id: int, address: str) -> str | None:
     return meta.name if meta else None
 
 
-def _read_strategy_details(client: Any, chain_id: int, address: str) -> dict[str, Any]:
-    """Asset, size, and — for an allocator vault — its own queue, for a named strategy."""
+def _read_strategy_details(client: Any, chain_id: int, address: str, vault: str) -> dict[str, Any]:
+    """Asset, size, deposit/redeem limits for the vault, and — for an allocator vault — its own queue."""
     contract = client.get_contract(address, _VAULT_ABI)
     asset = _optional_call(contract.functions.asset())
     total_assets = _optional_call(contract.functions.totalAssets())
     sub_queue = _optional_call(contract.functions.get_default_queue())
     is_vault = isinstance(sub_queue, (list, tuple))
     subs = tuple(_token_name(chain_id, str(a)) or str(a) for a in sub_queue) if is_vault else ()
+    max_deposit = _optional_call(contract.functions.maxDeposit(vault))
+    max_redeem = _optional_call(contract.functions.maxRedeem(vault))
+    max_withdraw = (
+        _optional_call(contract.functions.convertToAssets(max_redeem)) if isinstance(max_redeem, int) else None
+    )
     return {
         "asset": to_checksum_address(str(asset)) if isinstance(asset, str) else None,
         "total_assets": int(total_assets) if isinstance(total_assets, int) else None,
         "is_vault": is_vault,
         "sub_strategies": subs,
+        "max_deposit": int(max_deposit) if isinstance(max_deposit, int) else None,
+        "max_withdraw": int(max_withdraw) if isinstance(max_withdraw, int) else None,
     }
 
 
@@ -410,7 +465,7 @@ def _read_vault_context(chain_id: int, vault: str, calls: list[DecodedCall]) -> 
     named_set = set(named)
     states: dict[str, StrategyState] = {}
     for address, (activation, _last_report, current_debt, max_debt) in zip(everyone, params):
-        details = _read_strategy_details(client, chain_id, address) if address in named_set else {}
+        details = _read_strategy_details(client, chain_id, address, vault) if address in named_set else {}
         states[address] = StrategyState(
             address=address,
             name=_token_name(chain_id, address),

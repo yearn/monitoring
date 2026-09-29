@@ -254,9 +254,11 @@ The adapter runs for any protocol and chain: the same vault code is governed by 
 
 1. Name, symbol, API version, asset (symbol/decimals), `totalAssets` / `totalDebt` / `totalIdle`, `deposit_limit`, `use_default_queue` and shutdown state.
 2. The default queue, with each strategy's name, `current_debt` and `max_debt`.
-3. For each strategy the calls name: its registration (`strategies()`), `asset()` (a mismatch makes `add_strategy` revert), `totalAssets`, and whether it is itself a V3 vault (an allocator) together with the strategies it allocates to.
+3. For each strategy the calls name: its registration (`strategies()`), `asset()` (a mismatch makes `add_strategy` revert), `totalAssets`, its ERC-4626 limits with the vault as owner (`maxDeposit(vault)` and `convertToAssets(maxRedeem(vault))`), and whether it is itself a V3 vault (an allocator) together with the strategies it allocates to.
 
-It then states each proposed value in the vault asset against that state, in batch order: the cap as a share or multiple of `totalAssets`, whether it matches the other queue strategies' caps and the deposit limit, and whether a strategy left out of the default queue can still be withdrawn from (it cannot while `use_default_queue` is true). It also states that funds move only through `update_debt`. The system prompt treats a unit the Protocol Context states as verified, so the model normalizes `max_debt` without hedging. Failures are best-effort and never block the governance alert.
+It then states each proposed value in the vault asset against that state, in batch order: the cap as a share or multiple of `totalAssets`, whether it matches the other queue strategies' caps and the deposit limit, and whether a strategy left out of the default queue can still be withdrawn from (it cannot while `use_default_queue` is true). It also states that funds move only through `update_debt`.
+
+`update_debt(strategy, target_debt)` is a **target, not an amount**. `utils/llm/yearn_v3_batch.py` mirrors the vault's `_update_debt` over a running copy of the vault state, so each call's expected amount reflects what the earlier calls in the batch left. Withdrawals keep `minimum_total_idle` and are capped by what the strategy can redeem. On deposits, the target is capped by `max_debt` and the amount by the strategy's `maxDeposit` and by idle above `minimum_total_idle`. The model also covers shutdown, the "new debt equals current debt" revert and inactive strategies. Each line gives the amount moved, what limited it, and the vault's idle before → after. Previously the line printed `target − current_debt` and the pre-batch idle. A Cap batch that withdrew 26.9M USDC from two Morpho strategies and set Aave's target to 50M was then reported as "deposits 50,000,000 USDC; idle now 0 USDC", and the model flagged a funding gap that cannot exist; the vault deposits the 26.93M it holds. The semantics line also spells out `use_default_queue`: `False` only permits custom withdrawal queues, and ordinary withdrawals still use the default queue. A report had called a queue reorder inert because the flag was false. The system prompt treats a unit the Protocol Context states as verified, so the model normalizes `max_debt` without hedging. Failures are best-effort and never block the governance alert.
 
 ### 5f-3. Control Transfer Context (`utils/llm/control_transfer_context.py`)
 
@@ -535,6 +537,7 @@ utils/llm/
 ├── threejane_account_context.py # 3Jane LCC bounces and USD3 supply-cap exemptions
 ├── threejane_context.py     # 3Jane adapter: hashed config keys/roles, rewards distribution mode
 ├── yearn_v3_context.py      # Yearn V3 adapter: vault state, queue, strategy caps in asset units
+├── yearn_v3_batch.py        # Yearn V3 _update_debt model: expected amounts through a batch
 ├── control_transfer_context.py # Who gains control: current vs new holder, Safe thresholds, two-step
 └── README.md                # This file
 
