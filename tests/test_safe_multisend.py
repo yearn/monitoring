@@ -2,7 +2,12 @@
 
 import unittest
 
-from protocols.safe.multisend import build_context_note, extract_inner_calls, safe_utility_label
+from protocols.safe.multisend import (
+    build_context_note,
+    extract_inner_calls,
+    is_simulatable_multisend,
+    safe_utility_label,
+)
 
 
 class TestSafeUtilityLabel(unittest.TestCase):
@@ -57,6 +62,7 @@ class TestExtractInnerCalls(unittest.TestCase):
         self.assertEqual(calls[0]["target"], "0x8772E3a2D86B9347A2688f9bc1808A6d8917760C")
         self.assertTrue(calls[0]["data"].startswith("0xe318b52b"))
         self.assertEqual(calls[0]["value"], "0")
+        self.assertEqual(calls[0]["operation"], "0")
 
     def test_non_multisend_returns_empty(self) -> None:
         tx = {
@@ -97,7 +103,39 @@ class TestExtractInnerCalls(unittest.TestCase):
         self.assertEqual(calls[0]["target"], "0xABC")
 
 
+MULTISEND_CALL_ONLY = "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D"
+
+
+class TestIsSimulatableMultisend(unittest.TestCase):
+    """Only a delegatecall into a multisend utility whose inner txs are all CALLs is modeled."""
+
+    CALLS = [{"target": "0xA", "data": "0x", "value": "0", "operation": "0"}]
+
+    def test_all_calls_via_multisend(self) -> None:
+        self.assertTrue(is_simulatable_multisend({"to": MULTISEND_CALL_ONLY, "operation": 1}, self.CALLS))
+
+    def test_inner_delegatecall_is_not(self) -> None:
+        calls = [*self.CALLS, {"target": "0xB", "data": "0x", "value": "0", "operation": "1"}]
+        self.assertFalse(is_simulatable_multisend({"to": MULTISEND_CALL_ONLY, "operation": 1}, calls))
+
+    def test_unknown_delegate_target_is_not(self) -> None:
+        self.assertFalse(is_simulatable_multisend({"to": "0xCustomDelegated", "operation": 1}, self.CALLS))
+
+    def test_sign_message_lib_is_not(self) -> None:
+        tx = {"to": "0xd53cd0ab83d845ac265be939c57f53ad838012c9", "operation": 1}
+        self.assertFalse(is_simulatable_multisend(tx, self.CALLS))
+
+    def test_empty_batch_is_not(self) -> None:
+        self.assertFalse(is_simulatable_multisend({"to": MULTISEND_CALL_ONLY, "operation": 1}, []))
+
+
 class TestBuildContextNote(unittest.TestCase):
+    def test_simulated_multisend_says_so(self) -> None:
+        tx = {"to": MULTISEND_CALL_ONLY, "operation": 1}
+        note = build_context_note(tx, "0xSafe", simulated=True)
+        self.assertIn("simulated as one ordered bundle", note)
+        self.assertNotIn("skipped", note)
+
     def test_delegatecall_into_known_multisend(self) -> None:
         tx = {"to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D", "operation": 1}
         note = build_context_note(tx, "0xSafe123")

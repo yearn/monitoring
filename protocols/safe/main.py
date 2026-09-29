@@ -15,7 +15,12 @@ from protocols.safe.addresses import (
     safe_address_network_prefix,
     safe_apis,
 )
-from protocols.safe.multisend import build_context_note, extract_inner_calls, safe_utility_label
+from protocols.safe.multisend import (
+    build_context_note,
+    extract_inner_calls,
+    is_simulatable_multisend,
+    safe_utility_label,
+)
 from protocols.safe.specific import handle_pendle
 from utils.cache import (
     cache_filename,
@@ -342,16 +347,19 @@ def _explain_safe_tx(
 ):
     """Pick the right AI explainer path for a Safe transaction.
 
-    Safe txs with operation=DELEGATECALL into a multisend utility can't be
-    modeled by our plain-CALL Tenderly simulator. Route them to the batch
-    explainer (one call per inner tx) with simulation skipped, and feed the
-    LLM a context note describing the delegated-execution semantics.
+    Safe txs with operation=DELEGATECALL into a multisend utility go to the
+    batch explainer (one call per inner tx) with a context note describing the
+    delegated-execution semantics. When every inner tx is a plain CALL, the
+    batch is simulated as one ordered bundle from the Safe — exactly what the
+    multisend executes. An inner DELEGATECALL can't be modeled, so those
+    batches skip simulation.
     """
     operation = int(tx.get("operation", 0) or 0)
     inner_calls = extract_inner_calls(tx) if operation == 1 else []
 
     if inner_calls:
-        context_note = build_context_note(tx, safe_address)
+        simulate = is_simulatable_multisend(tx, inner_calls)
+        context_note = build_context_note(tx, safe_address, simulated=simulate)
         utility_label = safe_utility_label(target)
         label = utility_label or (additional_info or "")
         return explain_batch_transaction(
@@ -360,7 +368,7 @@ def _explain_safe_tx(
             protocol=protocol,
             label=label,
             from_address=safe_address,
-            skip_simulation=True,
+            skip_simulation=not simulate,
             context_note=context_note,
             refine=True,
             # A utility label names the multisend contract, not the Safe, so the

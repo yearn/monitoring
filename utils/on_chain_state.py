@@ -7,8 +7,11 @@ deltas instead of just seeing the new value.
 v1 scope:
 - Simple state vars (uint*, int*, address, bool, bytes*, string).
 - Single-key mappings where the setter's args include the mapping key type
-  (e.g., ``mapping(address => uint256) public coverageCap`` + ``setCoverageCap(address, uint256)``).
-- Skips: nested mappings, arrays, struct-valued mappings, anything else.
+  (e.g., ``mapping(address => uint256) public coverageCap`` + ``setCoverageCap(address, uint256)``),
+  or an array of it: ``set_claimable(address[] accounts, uint256[] amounts)``
+  reads ``claimable(account)`` for each element, up to ``MAX_ARRAY_KEY_READS``.
+- Solidity declarations and Vyper ``public(...)`` storage (``claimable: public(HashMap[address, uint256])``).
+- Skips: nested mappings, array values, struct-valued mappings, anything else.
 """
 
 import re
@@ -30,6 +33,11 @@ from utils.source_context import (
 from utils.web3_wrapper import ChainManager
 
 logger = get_logger("utils.on_chain_state")
+
+# Elements of an array-typed key argument read per setter call. A batch setter
+# can carry up to 64 entries; a dozen is enough to show the before-state of a
+# typical call without turning one alert into an RPC fan-out.
+MAX_ARRAY_KEY_READS = 12
 
 # Simple Solidity value types whose auto-generated getter takes no args.
 _SIMPLE_VALUE_TYPES = frozenset(
@@ -70,6 +78,35 @@ class StateRead:
     available: bool = True
 
 
+def _vyper_abi_type(type_str: str) -> str | None:
+    """ABI type a Vyper storage type is returned as, or None when unsupported.
+
+    Bounded ``String[N]`` / ``Bytes[N]`` come back as ABI ``string`` / ``bytes``.
+    """
+    type_str = type_str.strip()
+    if type_str.startswith("String["):
+        return "string"
+    if type_str.startswith("Bytes["):
+        return "bytes"
+    return type_str if _is_simple_type(type_str) else None
+
+
+def _parse_vyper_declaration(decl: str) -> tuple[str, list[str]] | None:
+    """Parse ``name: public(T)`` / ``name: public(HashMap[K, V])``; None if not public or unsupported."""
+    m = re.match(r"\w+\s*:\s*public\(\s*(.+)\s*\)\s*$", decl)
+    if not m:
+        return None
+    inner = m.group(1).strip()
+    hashmap = re.fullmatch(r"HashMap\[\s*(\w+)\s*,\s*(.+)\]", inner)
+    if hashmap:
+        key_type, value_type = _vyper_abi_type(hashmap.group(1)), _vyper_abi_type(hashmap.group(2))
+        if key_type is None or value_type is None:
+            return None  # nested HashMap, struct, or DynArray value — skip
+        return (value_type, [key_type])
+    value_type = _vyper_abi_type(inner)
+    return (value_type, []) if value_type else None
+
+
 def _parse_var_declaration(snippet: str, var_name: str) -> tuple[str, list[str]] | None:
     """From a state-var snippet, return (value_type, mapping_key_types).
 
@@ -78,9 +115,12 @@ def _parse_var_declaration(snippet: str, var_name: str) -> tuple[str, list[str]]
     Returns None for unsupported shapes (nested mapping, struct, array).
     """
     # Strip natspec lines to isolate the declaration line
-    decl_lines = [line for line in snippet.splitlines() if not line.strip().startswith(("///", "*", "/**"))]
+    decl_lines = [line for line in snippet.splitlines() if not line.strip().startswith(("///", "*", "/**", "#"))]
     decl = " ".join(line.strip() for line in decl_lines).strip()
     decl = decl.rstrip(";")
+
+    if re.match(rf"{re.escape(var_name)}\s*:", decl):
+        return _parse_vyper_declaration(decl)
 
     # Mapping case: mapping(K => V) public name. Solidity >=0.8.18 also allows
     # named parameters — mapping(uint256 chainId => bool configured) — whose
@@ -115,8 +155,9 @@ def _is_externally_readable(snippet: str) -> bool:
     so a read always reverts (e.g. Compound's Configurator declares
     ``mapping(address => Configuration) internal configuratorParams``).
     """
-    decl_lines = [line for line in snippet.splitlines() if not line.strip().startswith(("///", "*", "/**"))]
+    decl_lines = [line for line in snippet.splitlines() if not line.strip().startswith(("///", "*", "/**", "#"))]
     decl = " ".join(line.strip() for line in decl_lines)
+    # Vyper storage is readable only when wrapped in ``public(...)``.
     return bool(re.search(r"\b(?:public|external)\b", decl))
 
 
@@ -136,6 +177,14 @@ def _match_key_value_from_params(decoded_call: DecodedCall, key_type: str) -> An
         # Allow uint variants to match (uint256 keys are common)
         if key_type == "uint256" and _is_simple_uint(type_str):
             return value
+    return None
+
+
+def _match_key_array_from_params(decoded_call: DecodedCall, key_type: str) -> list[Any] | None:
+    """Elements of the first ``key_type[]`` param, for batch setters like ``set_claimable(address[], uint256[])``."""
+    for type_str, value in decoded_call.params:
+        if type_str == f"{key_type}[]" and isinstance(value, (list, tuple)):
+            return list(value)
     return None
 
 
@@ -208,7 +257,7 @@ def _guess_getter_from_setter(decoded_call: DecodedCall) -> tuple[str, list[str]
     return value_type, [t for t, _ in key_params], [v for _, v in key_params]
 
 
-def _resolve_source_for_function(chain_id: int, target: str, function_name: str) -> str | None:
+def resolve_function_source(chain_id: int, target: str, function_name: str) -> str | None:
     """Return the source where `function_name` is defined, following the proxy if needed."""
     fetched = fetch_source(chain_id, target)
     if fetched and find_state_var_writes(fetched[1], function_name):
@@ -239,7 +288,7 @@ def read_before_state(
     if not target or not decoded_call.function_name:
         return []
 
-    source = _resolve_source_for_function(chain_id, target, decoded_call.function_name)
+    source = resolve_function_source(chain_id, target, decoded_call.function_name)
     if not source:
         return []
 
@@ -269,6 +318,11 @@ def read_before_state(
                         break
                     key_values.append(matched)
                 if not key_values:
+                    array_keys = (
+                        _match_key_array_from_params(decoded_call, key_types[0]) if len(key_types) == 1 else None
+                    )
+                    if array_keys:
+                        reads.extend(_read_array_keys(chain_id, target, var_name, value_type, key_types[0], array_keys))
                     continue
         else:
             # Diamond-storage / non-public-var fallback: guess the getter from the
@@ -291,6 +345,39 @@ def read_before_state(
             )
         )
 
+    return reads
+
+
+def _read_array_keys(
+    chain_id: int,
+    target: str,
+    var_name: str,
+    value_type: str,
+    key_type: str,
+    keys: list[Any],
+) -> list[StateRead]:
+    """Read ``var_name(key)`` for each element of an array-typed key argument.
+
+    Keys beyond ``MAX_ARRAY_KEY_READS`` and failed reads are returned as
+    unavailable, so the prompt never implies a value it did not read.
+    """
+    type_str = f"mapping({key_type} => {value_type})"
+    reads: list[StateRead] = []
+    for index, key in enumerate(dict.fromkeys(keys)):
+        value = (
+            _call_getter(chain_id, target, var_name, value_type, [key_type], [key])
+            if index < MAX_ARRAY_KEY_READS
+            else None
+        )
+        reads.append(
+            StateRead(
+                var_name=var_name,
+                type_str=type_str,
+                value=value,
+                key_args=(key,),
+                available=value is not None,
+            )
+        )
     return reads
 
 

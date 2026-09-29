@@ -400,6 +400,51 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         self.assertEqual(mock_explain.call_args.kwargs["calldata"], "0x")
         self.assertEqual(mock_explain.call_args.kwargs["value"], 1)
 
+    def _multisend_tx(self, inner_operations: list[int]) -> dict:
+        return {
+            **self._tx(2296),
+            "to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
+            "operation": 1,
+            "dataDecoded": {
+                "method": "multiSend",
+                "parameters": [
+                    {
+                        "valueDecoded": [
+                            {"operation": op, "to": f"0x{i + 1:040x}", "value": "0", "data": "0x8456cb59"}
+                            for i, op in enumerate(inner_operations)
+                        ]
+                    }
+                ],
+            },
+        }
+
+    def _explain_multisend(self, tx: dict):
+        safe_main = self._import_safe_main()
+        with patch.object(safe_main, "explain_batch_transaction", return_value=None) as mock_batch:
+            safe_main._explain_safe_tx(
+                tx=tx,
+                target=tx["to"],
+                hex_data="0x8d80ff0a",
+                chain_id=1,
+                protocol="YEARN_MS",
+                safe_address="0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52",
+                additional_info=None,
+            )
+        mock_batch.assert_called_once()
+        return mock_batch.call_args.kwargs
+
+    def test_all_call_multisend_is_simulated_as_a_bundle(self):
+        """MultiSend inner CALLs run from the Safe, so a bundle from the Safe is the real execution."""
+        kwargs = self._explain_multisend(self._multisend_tx([0, 0, 0]))
+        self.assertFalse(kwargs["skip_simulation"])
+        self.assertEqual(kwargs["from_address"], "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52")
+        self.assertIn("simulated as one ordered bundle", kwargs["context_note"])
+
+    def test_multisend_with_inner_delegatecall_skips_simulation(self):
+        kwargs = self._explain_multisend(self._multisend_tx([0, 1]))
+        self.assertTrue(kwargs["skip_simulation"])
+        self.assertIn("simulation was skipped", kwargs["context_note"])
+
 
 class TestPendingFilterDiag(unittest.TestCase):
     """The diagnostic helper must mirror the same baseline math as get_pending_transactions."""

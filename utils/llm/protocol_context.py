@@ -12,7 +12,8 @@ protocols and chains it does not handle, so registration order carries no
 meaning and adding a protocol is one row in ``_ADAPTERS``. Most guard on the
 alert's protocol; the Yearn V3 adapter guards on call shape and an on-chain
 ``apiVersion()`` instead, because the same vault code is governed by Yearn and
-third-party curators alike.
+third-party curators alike, and the control-transfer adapter guards on call
+shape alone, since handing over management means the same thing everywhere.
 """
 
 from collections.abc import Callable
@@ -20,6 +21,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from utils.calldata.decoder import DecodedCall
+from utils.llm.control_transfer_context import (
+    format_control_transfer_prompt,
+    format_control_transfer_report,
+    resolve_control_transfer_context,
+)
 from utils.llm.infinifi_context import (
     format_infinifi_prompt,
     format_infinifi_report,
@@ -60,6 +66,12 @@ _ADAPTERS: tuple[_Adapter, ...] = (
     _Adapter("infinifi-outland", resolve_outland_context, format_outland_prompt, format_outland_report),
     _Adapter("3jane", resolve_threejane_context, format_threejane_prompt, format_threejane_report),
     _Adapter("yearn-v3", resolve_yearn_v3_context, format_yearn_v3_prompt, format_yearn_v3_report),
+    _Adapter(
+        "control-transfer",
+        resolve_control_transfer_context,
+        format_control_transfer_prompt,
+        format_control_transfer_report,
+    ),
 )
 
 
