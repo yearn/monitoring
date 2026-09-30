@@ -498,7 +498,7 @@ All configuration is via environment variables:
 | `LLM_MODEL` | `deepseek-v4-flash` | Model identifier |
 | `LLM_BASE_URL` | *(per provider)* | API base URL (not needed for anthropic) |
 | `LLM_STRUCTURED_OUTPUT` | *(per provider)* | `true`/`false` to force JSON-schema output. Default: on for anthropic/openai/venice (all verified live), off for groq/custom |
-| `LLM_CREDIT_ALERT_THRESHOLD_USD` | `1` | Venice only: alert when the key's USD + DIEM balance drops below this (see [Credit Alert](#credit-alert)) |
+| `LLM_CREDIT_ALERT_THRESHOLD_USD` | `1` | Venice only: alert when what the key can still spend (USD + DIEM) drops below this (see [Credit Alert](#credit-alert)) |
 | `WAVEY_GIST_API_KEY` | *(required for detail links)* | API key for publishing detailed AI reports to Wavey Gist |
 | `ETHERSCAN_TOKEN` | *(optional)* | Etherscan v2 multichain API key for source context |
 | `TENDERLY_API_KEY` | *(optional)* | Tenderly API key for simulation |
@@ -526,6 +526,7 @@ uv pip install 'monitoring-scripts-py[ai]'
 `utils/llm/credits.py` checks the Venice balance at the start of every Safe and timelock run. When credits run out, every completion fails and alerts go out with no AI summary, and nothing else reports it.
 
 - Reads `GET /api_keys/rate_limits`, which works with the inference key. `/billing/balance` needs an admin key.
+- Venice reports what the key can still spend: the lower of the account balance and what's left of the key's daily spend limit. A low reading can mean the account is nearly empty or the daily limit is nearly used up (it resets at 00:00 UTC). The alert names both causes and shows the reset time.
 - Alerts when USD + DIEM is below `LLM_CREDIT_ALERT_THRESHOLD_USD` (default $1), or when Venice reports `accessPermitted: false`.
 - Sends to the internal errors channel via `send_error_message`, labelled `yearn`, stored under `yearn-internal`.
 - Sends at most one alert every 24h while the balance stays low. A top-up clears the cooldown, so the next drop alerts right away.

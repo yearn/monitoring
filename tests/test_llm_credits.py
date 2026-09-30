@@ -14,6 +14,7 @@ def _response(usd: float, diem: float = 0, access_permitted: bool = True) -> Mag
     response.json.return_value = {
         "data": {
             "accessPermitted": access_permitted,
+            "nextEpochBegins": "2026-10-01T00:00:00.000Z",
             "balances": {"USD": usd, "DIEM": diem, "BUNDLED_CREDITS": 0},
         }
     }
@@ -58,6 +59,8 @@ class TestCheckLLMCredits(unittest.TestCase):
         self.mock_send.assert_called_once()
         message, label = self.mock_send.call_args.args
         self.assertIn("$0.42", message)
+        self.assertIn("daily spend limit", message)
+        self.assertIn("2026-10-01 00:00 UTC", message)
         self.assertEqual(label, "yearn")
         self.assertEqual(self.mock_send.call_args.kwargs["alert_protocol"], "yearn-internal")
         self.assertFalse(self.mock_send.call_args.kwargs["disable_notification"])
