@@ -534,7 +534,12 @@ class TestSafeApiQuota(unittest.TestCase):
         with patch.dict(os.environ, env):
             import protocols.safe.main as safe_main
 
-            return importlib.reload(safe_main)
+            safe_main = importlib.reload(safe_main)
+        # main() checks Venice credits first; keep these tests off the network.
+        credits_patch = patch.object(safe_main, "check_llm_credits")
+        credits_patch.start()
+        self.addCleanup(credits_patch.stop)
+        return safe_main
 
     @staticmethod
     def _response(status: int, remaining: str | None = None, reset: str = "3600", results=None) -> Mock:

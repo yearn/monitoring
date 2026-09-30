@@ -18,6 +18,7 @@ from utils.calldata.decoder import decode_calldata, format_call_lines
 from utils.chains import EXPLORER_URLS, Chain
 from utils.formatting import parse_wei
 from utils.llm.ai_explainer import Explanation, explain_batch_transaction, explain_transaction, format_explanation_line
+from utils.llm.credits import check_llm_credits
 from utils.logger import get_logger
 from utils.proxy import find_proxy_upgrades, format_upgrade_lines
 from utils.safe_tx import unwrap_safe_exec_transaction
@@ -644,6 +645,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     _logger.setLevel(args.log_level.upper())
+    check_llm_credits("yearn", alert_protocol="yearn-internal")
 
     # Filter timelocks by protocol if specified
     filtered_timelocks: list[TimelockConfig] | None = None

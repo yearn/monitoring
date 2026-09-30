@@ -498,6 +498,7 @@ All configuration is via environment variables:
 | `LLM_MODEL` | `deepseek-v4-flash` | Model identifier |
 | `LLM_BASE_URL` | *(per provider)* | API base URL (not needed for anthropic) |
 | `LLM_STRUCTURED_OUTPUT` | *(per provider)* | `true`/`false` to force JSON-schema output. Default: on for anthropic/openai/venice (all verified live), off for groq/custom |
+| `LLM_CREDIT_ALERT_THRESHOLD_USD` | `1` | Venice only: alert when the key's USD + DIEM balance drops below this (see [Credit Alert](#credit-alert)) |
 | `WAVEY_GIST_API_KEY` | *(required for detail links)* | API key for publishing detailed AI reports to Wavey Gist |
 | `ETHERSCAN_TOKEN` | *(optional)* | Etherscan v2 multichain API key for source context |
 | `TENDERLY_API_KEY` | *(optional)* | Tenderly API key for simulation |
@@ -520,6 +521,16 @@ The `openai` and `anthropic` packages are optional dependencies. Install with:
 uv pip install 'monitoring-scripts-py[ai]'
 ```
 
+### Credit Alert
+
+`utils/llm/credits.py` checks the Venice balance at the start of every Safe and timelock run. When credits run out, every completion fails and alerts go out with no AI summary, and nothing else reports it.
+
+- Reads `GET /api_keys/rate_limits`, which works with the inference key. `/billing/balance` needs an admin key.
+- Alerts when USD + DIEM is below `LLM_CREDIT_ALERT_THRESHOLD_USD` (default $1), or when Venice reports `accessPermitted: false`.
+- Sends to the internal errors channel via `send_error_message`, labelled `yearn`, stored under `yearn-internal`.
+- Sends at most one alert every 24h while the balance stays low. A top-up clears the cooldown, so the next drop alerts right away.
+- Does nothing for other providers or when no key is set. A failed balance read is logged and the monitor carries on.
+
 ## Module Structure
 
 ```
@@ -528,6 +539,7 @@ utils/llm/
 ├── ai_explainer.py          # Orchestrator: decode → fetch context → prompt → explain
 ├── anthropic_provider.py    # Anthropic (Claude) native API provider
 ├── base.py                  # Abstract LLMProvider base class + LLMError
+├── credits.py               # Venice low-balance alert, run at the start of Safe/timelock monitors
 ├── factory.py               # Provider factory with env-based config + singleton
 ├── infinifi_context.py      # Infinifi adapter: escrow → farm, accounting asset, whitelisted tokens
 ├── openai_compat.py         # OpenAI-compatible provider (Venice, OpenAI, etc.)

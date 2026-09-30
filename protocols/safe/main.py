@@ -32,6 +32,7 @@ from utils.cache import (
 from utils.chains import Chain, safe_network_to_chain_id
 from utils.formatting import parse_wei
 from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
+from utils.llm.credits import check_llm_credits
 from utils.logger import get_logger
 from utils.proxy import ProxyUpgrade, dedupe_upgrades, find_proxy_upgrades, format_upgrade_lines
 from utils.telegram import escape_markdown, send_error_message, send_telegram_message
@@ -612,6 +613,7 @@ def main():
     last_api_call_time = 0
     request_counter = 0
     load_known_exhausted_keys()
+    check_llm_credits(ERROR_LABEL, alert_protocol=ALERT_PROTOCOL)
     # loop all
     for safe in ALL_SAFE_ADDRESSES:
         logger.info("Running for %s on %s", safe[0], safe[1])
