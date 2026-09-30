@@ -41,13 +41,17 @@ class VeniceBalance:
 
     usd: float
     diem: float
+    bundled_credits: float
     access_permitted: bool
     next_epoch: str = ""
 
     @property
     def spendable(self) -> float:
-        """USD plus DIEM (1 DIEM buys $1 of compute per epoch)."""
-        return self.usd + self.diem
+        """DIEM plus bundled credits plus USD — keys spend all three, in that order.
+
+        DIEM buys $1 of compute per epoch; bundled credits are USD-denominated.
+        """
+        return self.diem + self.bundled_credits + self.usd
 
 
 def fetch_venice_balance(api_key: str, base_url: str) -> VeniceBalance:
@@ -77,6 +81,7 @@ def fetch_venice_balance(api_key: str, base_url: str) -> VeniceBalance:
     return VeniceBalance(
         usd=float(balances.get("USD", 0)),
         diem=float(balances.get("DIEM", 0)),
+        bundled_credits=float(balances.get("BUNDLED_CREDITS", 0)),
         access_permitted=bool(data.get("accessPermitted", True)),
         next_epoch=str(data.get("nextEpochBegins") or ""),
     )
@@ -85,14 +90,24 @@ def fetch_venice_balance(api_key: str, base_url: str) -> VeniceBalance:
 def check_llm_credits(label: str, alert_protocol: str | None = None, now: float | None = None) -> None:
     """Send an ops alert when the Venice balance is below the threshold.
 
-    No-op for other providers or when no API key is set. Never raises: a failed
-    balance read is logged and the calling monitor carries on.
+    No-op for other providers or when no API key is set. Never raises: runs before
+    the monitor's own checks, so any failure (balance read, cooldown state, alert
+    delivery) is logged and the calling monitor carries on. A failed send leaves the
+    cooldown untouched, so the next run retries.
 
     Args:
         label: Telegram protocol key used to label the alert (see ``send_error_message``).
         alert_protocol: Protocol key stored in alert history.
         now: Current unix time; defaults to ``time.time()``.
     """
+    try:
+        _check_llm_credits(label, alert_protocol, now)
+    except Exception:  # noqa: BLE001 - a diagnostic must never block the monitor's real alerts
+        logger.exception("Venice credit check failed")
+
+
+def _check_llm_credits(label: str, alert_protocol: str | None, now: float | None) -> None:
+    """Body of :func:`check_llm_credits`; may raise."""
     provider = (os.getenv("LLM_PROVIDER") or "venice").lower()
     api_key = os.getenv("LLM_API_KEY")
     if provider != "venice" or not api_key:
@@ -107,7 +122,7 @@ def check_llm_credits(label: str, alert_protocol: str | None = None, now: float 
         logger.warning("Could not read Venice balance: %s", e)
         return
 
-    logger.info("Venice balance: USD %.2f, DIEM %.2f", balance.usd, balance.diem)
+    logger.info("Venice balance: USD %.2f, DIEM %.2f, bundled %.2f", balance.usd, balance.diem, balance.bundled_credits)
     if balance.access_permitted and balance.spendable >= threshold:
         # Topped up: clear the cooldown so the next drop alerts right away.
         if _last_alerted_at() > 0:
@@ -119,7 +134,7 @@ def check_llm_credits(label: str, alert_protocol: str | None = None, now: float 
     status = "access blocked" if not balance.access_permitted else f"below ${threshold:.2f}"
     send_error_message(
         f"🚨 Venice LLM key running out of credits ({status})\n"
-        f"Spendable: ${balance.usd:.2f} USD, {balance.diem:.2f} DIEM.\n"
+        f"Spendable: ${balance.usd:.2f} USD, {balance.diem:.2f} DIEM, ${balance.bundled_credits:.2f} bundled credits.\n"
         "AI explanations on timelock and Safe alerts stop once it hits zero. "
         "This is the lower of the account balance and the key's daily spend limit: "
         f"if the account is funded, the limit resets at {_format_epoch(balance.next_epoch)}. "

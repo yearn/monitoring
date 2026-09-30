@@ -9,13 +9,13 @@ from utils.llm import credits
 DAY = credits.ALERT_COOLDOWN_SECONDS
 
 
-def _response(usd: float, diem: float = 0, access_permitted: bool = True) -> MagicMock:
+def _response(usd: float, diem: float = 0, access_permitted: bool = True, bundled: float = 0) -> MagicMock:
     response = MagicMock()
     response.json.return_value = {
         "data": {
             "accessPermitted": access_permitted,
             "nextEpochBegins": "2026-10-01T00:00:00.000Z",
-            "balances": {"USD": usd, "DIEM": diem, "BUNDLED_CREDITS": 0},
+            "balances": {"USD": usd, "DIEM": diem, "BUNDLED_CREDITS": bundled},
         }
     }
     return response
@@ -67,6 +67,23 @@ class TestCheckLLMCredits(unittest.TestCase):
 
     def test_diem_counts_towards_spendable_balance(self) -> None:
         self._check(_response(0.1, diem=10))
+        self.mock_send.assert_not_called()
+
+    def test_bundled_credits_count_towards_spendable_balance(self) -> None:
+        self._check(_response(0.1, bundled=10))
+        self.mock_send.assert_not_called()
+
+    def test_failed_send_does_not_raise_and_retries_next_run(self) -> None:
+        self.mock_send.side_effect = RuntimeError("telegram down")
+        self._check(_response(0.5), now=1_000_000)
+        self.assertEqual(self.cache.get(credits.CACHE_KEY_ALERTED_AT, 0), 0)  # cooldown not started
+        self.mock_send.side_effect = None
+        self._check(_response(0.5), now=1_000_000 + 60)
+        self.assertEqual(self.mock_send.call_count, 2)
+
+    def test_bad_threshold_env_does_not_raise(self) -> None:
+        with patch.dict(os.environ, {"LLM_CREDIT_ALERT_THRESHOLD_USD": "one"}):
+            self._check(_response(0.5))
         self.mock_send.assert_not_called()
 
     def test_access_blocked_alerts_even_with_balance(self) -> None:
