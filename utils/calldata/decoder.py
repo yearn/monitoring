@@ -129,7 +129,7 @@ def resolve_selector(selector_hex: str) -> str | None:
     if results:
         try:
             sig = results[0].get("name") if isinstance(results[0], dict) else None
-        except (IndexError, AttributeError):
+        except IndexError, AttributeError:
             sig = None
         if sig:
             _selector_cache[selector_hex] = sig
@@ -387,7 +387,7 @@ def try_decode_inner_calldata(value: object) -> DecodedCall | None:
 
     try:
         return decode_calldata(hex_str)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
 
 

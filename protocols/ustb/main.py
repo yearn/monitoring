@@ -183,7 +183,7 @@ def _check_chainlink_monotonicity(reading: FeedReading) -> None:
     previous_answer = get_last_value_for_key_from_file(CACHE_FILE, CACHE_KEY_CHAINLINK_NAV)
     try:
         previous_answer_int = int(previous_answer)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         previous_answer_int = 0
 
     chainlink_answer = reading.round_data.answer

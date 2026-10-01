@@ -419,7 +419,7 @@ def _abi_entry_signature(entry: dict) -> str | None:
     """Canonical ``name(type,...)`` signature of an ABI function entry, or None if malformed."""
     try:
         types = ",".join(collapse_if_tuple(inp) for inp in entry.get("inputs") or [])
-    except (KeyError, TypeError):
+    except KeyError, TypeError:
         return None
     return f"{entry.get('name')}({types})"
 

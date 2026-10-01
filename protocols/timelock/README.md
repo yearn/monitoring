@@ -107,7 +107,7 @@ For complete field mapping details, see [`detils.md`](./detils.md).
 2. **Add a `TimelockConfig` entry** in [`timelock_alerts.py`](./timelock_alerts.py) in the `TIMELOCK_LIST` list:
 
 ```python
-TimelockConfig("0xabcdef...lowercase_address", 1, "PROTOCOL_NAME", "Human Readable Label"),
+(TimelockConfig("0xabcdef...lowercase_address", 1, "PROTOCOL_NAME", "Human Readable Label"),)
 ```
 
 Parameters:

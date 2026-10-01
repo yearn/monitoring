@@ -187,7 +187,7 @@ def get_cache_value(key: str) -> float:
     val = get_last_value_for_key_from_file(CACHE_FILENAME, key)
     try:
         return float(val)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return 0.0
 
 
@@ -196,11 +196,11 @@ def get_cache_int(key: str) -> int:
     val = get_last_value_for_key_from_file(CACHE_FILENAME, key)
     try:
         return int(val)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         # Accept values written by the previous implementation as "123.0".
         try:
             return int(float(val))
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return 0
 
 
@@ -214,7 +214,7 @@ def get_fresh_cache_value(key: str) -> float:
     val = get_fresh_last_value_for_key_from_file(CACHE_FILENAME, key, HOURLY_CACHE_STALE_AFTER_SECONDS)
     try:
         return float(val)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return 0.0
 
 
@@ -296,7 +296,7 @@ def _normalize_borrower(value: Any) -> str | None:
 def _as_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default
 
 

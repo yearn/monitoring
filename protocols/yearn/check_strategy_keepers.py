@@ -343,7 +343,7 @@ def should_send_alert(fingerprint: str, previous_raw: str | None, now: int) -> b
     if previous_raw:
         try:
             previous = json.loads(previous_raw)
-        except (TypeError, json.JSONDecodeError):
+        except TypeError, json.JSONDecodeError:
             previous = {}
     if not fingerprint:
         return False

@@ -161,5 +161,5 @@ def _last_alerted_at() -> float:
     """Return when the low-credit alert last fired (0 if never or reset)."""
     try:
         return float(get_last_value_for_key_from_file(cache_filename, CACHE_KEY_ALERTED_AT))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0.0

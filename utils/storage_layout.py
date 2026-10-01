@@ -226,7 +226,7 @@ def _as_int(value: object) -> int | None:
     """Slots arrive as strings, offsets as ints."""
     try:
         return int(str(value))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 

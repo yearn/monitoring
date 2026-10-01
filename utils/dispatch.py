@@ -55,7 +55,7 @@ def _is_on_cooldown(protocol: str, cooldown_seconds: int = DEFAULT_COOLDOWN_SECO
         return False
     try:
         return (time.time() - float(last_ts)) < cooldown_seconds
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return False
 
 

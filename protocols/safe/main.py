@@ -145,7 +145,7 @@ def load_known_exhausted_keys(now: float | None = None) -> None:
     for number, api_key in enumerate(_api_keys, start=1):
         try:
             exhausted_until = float(get_last_value_for_key_from_file(cache_filename, _exhausted_cache_key(api_key)))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         if exhausted_until > now:
             _exhausted_api_keys[api_key] = int(exhausted_until - now)
@@ -590,7 +590,7 @@ def report_quota_exhausted(exc: SafeApiQuotaExhausted, now: float | None = None)
     logger.error("Safe monitoring skipped: %s", exc)
     try:
         alerted_until = float(get_last_value_for_key_from_file(cache_filename, CACHE_KEY_QUOTA_ALERTED_UNTIL))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         alerted_until = 0.0
     if now < alerted_until:
         return

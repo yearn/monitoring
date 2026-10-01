@@ -255,7 +255,7 @@ def _cache_int(key: str) -> int:
     """Read a cache value as int, defaulting to 0."""
     try:
         return int(_cache_raw(key))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0
 
 
@@ -368,14 +368,14 @@ def load_supply_snapshots() -> list[tuple[int, int]]:
         return []
     try:
         parsed = json.loads(str(raw))
-    except (TypeError, json.JSONDecodeError):
+    except TypeError, json.JSONDecodeError:
         logger.warning("Ignoring invalid uniBTC supply snapshot cache: %s", raw)
         return []
     snapshots: list[tuple[int, int]] = []
     for item in parsed:
         try:
             snapshots.append((int(item["ts"]), int(item["supply"])))
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             continue
     return snapshots
 
@@ -499,7 +499,7 @@ def _parse_chain_supplies(raw: Any) -> tuple[ChainSupply, ...] | None:
     for item in raw:
         try:
             supplies.append(ChainSupply(str(item["name"]), int(item["chain_id"]), Decimal(str(item["supply"]))))
-        except (KeyError, TypeError, ValueError, ArithmeticError):
+        except KeyError, TypeError, ValueError, ArithmeticError:
             logger.warning("Ignoring malformed Bedrock API supply entry: %s", item)
     return tuple(supplies)
 

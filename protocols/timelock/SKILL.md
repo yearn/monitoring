@@ -120,7 +120,7 @@ The indexer must be deployed and indexing events before the monitoring script ca
 ### 3.1 — Add `TimelockConfig` entry in `timelock/timelock_alerts.py`
 
 ```python
-TimelockConfig("0xlowercase_address", chain_id, "PROTOCOL", "Human Label"),
+(TimelockConfig("0xlowercase_address", chain_id, "PROTOCOL", "Human Label"),)
 ```
 
 - Address **must be lowercase**

@@ -96,7 +96,7 @@ def cache_key_is_stale(
     timestamp_raw = get_last_value_for_key_from_file(filename, cache_timestamp_key(value_key))
     try:
         timestamp = int(timestamp_raw)
-    except (TypeError, ValueError, OverflowError):
+    except TypeError, ValueError, OverflowError:
         return True
 
     return timestamp <= 0 or timestamp > current_timestamp or current_timestamp - timestamp > stale_after_seconds

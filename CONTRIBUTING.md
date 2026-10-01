@@ -81,11 +81,10 @@ logger = get_logger(PROTOCOL)
 Add type annotations to all function signatures:
 
 ```python
-def process_assets(chain: Chain, threshold: float = 0.99) -> None:
-    ...
+def process_assets(chain: Chain, threshold: float = 0.99) -> None: ...
 
-def get_price(token_address: str) -> float | None:
-    ...
+
+def get_price(token_address: str) -> float | None: ...
 ```
 
 ### Telegram Alerts

@@ -44,7 +44,7 @@ def run_with_alert(
     """
     try:
         entrypoint()
-    except (KeyboardInterrupt, SystemExit):
+    except KeyboardInterrupt, SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 - top-level safety net by design
         script = name or entrypoint.__module__
