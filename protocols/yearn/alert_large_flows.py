@@ -31,8 +31,9 @@ PROTOCOL = "yearn"
 CACHE_KEY_LAST_ALERT_TX = f"{PROTOCOL}_LARGE_FLOW_LAST_TX"
 
 FALLBACK_LARGE_FLOW_RATIO = Decimal("0.1")
-KATANA_CHAIN_ID = 747474
-KATANA_WITHDRAWAL_THRESHOLD_USD = Decimal("50000")
+# L2s (Base, Arbitrum, Katana) use a lower threshold than the mainnet default for both deposits and withdrawals.
+L2_CHAIN_IDS = frozenset({8453, 42161, 747474})
+L2_THRESHOLD_USD = Decimal("200000")
 
 ERC20_ABI = load_abi("common-abi/ERC20.json")
 _total_supply_cache: dict[tuple[int, str], Decimal] = {}
@@ -423,7 +424,7 @@ def send_large_flow_alert(
 def resolve_threshold_usd(event: dict, vault: dict, default_threshold_usd: Decimal) -> Decimal:
     """Return the USD alert threshold for a flow event.
 
-    Katana withdrawals use a lower fixed threshold; everything else uses the
+    L2 deposits and withdrawals use a lower fixed threshold; mainnet uses the
     caller-provided default (typically CLI ``--threshold-usd``).
 
     Args:
@@ -434,8 +435,8 @@ def resolve_threshold_usd(event: dict, vault: dict, default_threshold_usd: Decim
     Returns:
         USD threshold to apply for this event.
     """
-    if vault["chain_id"] == KATANA_CHAIN_ID and event.get("type") == "withdraw":
-        return KATANA_WITHDRAWAL_THRESHOLD_USD
+    if vault["chain_id"] in L2_CHAIN_IDS:
+        return L2_THRESHOLD_USD
     return default_threshold_usd
 
 
