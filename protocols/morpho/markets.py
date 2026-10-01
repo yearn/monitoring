@@ -275,7 +275,7 @@ def parse_lltv(lltv: str | int | None) -> float:
         return 0.0
     try:
         return int(lltv) / 1e18
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0.0
 
 

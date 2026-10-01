@@ -66,7 +66,7 @@ def fetch_api_data():
 def to_float(value, default=0.0):
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default
 
 

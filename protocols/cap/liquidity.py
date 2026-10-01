@@ -27,7 +27,7 @@ ALERT_THRESHOLD = 15_000_000
 def _to_int(value) -> int:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0
 
 

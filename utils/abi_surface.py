@@ -80,6 +80,6 @@ def _canonical_signature(entry: dict) -> str | None:
     inputs = entry.get("inputs") or []
     try:
         types = ",".join(collapse_if_tuple(inp) for inp in inputs)
-    except (KeyError, TypeError):  # malformed ABI entry — skip rather than guess
+    except KeyError, TypeError:  # malformed ABI entry — skip rather than guess
         return None
     return f"{name}({types})"

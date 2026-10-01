@@ -122,7 +122,7 @@ def get_cache_value(key: str) -> float:
     val = get_last_value_for_key_from_file(CACHE_FILENAME, key)
     try:
         return float(val)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return 0.0
 
 
@@ -136,7 +136,7 @@ def get_fresh_cache_value(key: str) -> float:
     val = get_fresh_last_value_for_key_from_file(CACHE_FILENAME, key, HOURLY_CACHE_STALE_AFTER_SECONDS)
     try:
         return float(val)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return 0.0
 
 

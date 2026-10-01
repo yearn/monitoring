@@ -220,7 +220,7 @@ def _read_int(key: str) -> int:
     raw = get_last_value_for_key_from_file(morpho_filename, key)
     try:
         return int(raw)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0
 
 

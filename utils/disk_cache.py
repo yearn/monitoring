@@ -102,7 +102,7 @@ class DiskCache:
         try:
             with open(path) as f:
                 entry = json.load(f)
-        except (OSError, json.JSONDecodeError):
+        except OSError, json.JSONDecodeError:
             return MISS
         if not isinstance(entry, dict) or "v" not in entry:
             return MISS

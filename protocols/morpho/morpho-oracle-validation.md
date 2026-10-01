@@ -152,6 +152,7 @@ If `cast` reverts on `BASE_FEED_1()(address)"`, the contract may be a different 
 ```python
 import json, urllib.request
 
+
 def market_by_unique_key(unique_key: str, chain_id: int) -> dict:
     body = {
         "query": (

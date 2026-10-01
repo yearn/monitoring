@@ -105,7 +105,7 @@ def get_reserve_fund() -> float | None:
     try:
         series = data["queryIndex"][0]["yields"]
         latest = series[-1]
-    except (KeyError, IndexError, TypeError):
+    except KeyError, IndexError, TypeError:
         logger.error("Unexpected reserve fund response shape: %s", data)
         return None
 

@@ -43,7 +43,7 @@ REPO_DIR="${REPO_DIR:-/srv/monitoring}"
 BRANCH="${BRANCH:-main}"
 ETC_DIR="${ETC_DIR:-/etc/monitoring}"
 CACHE_DIR="${CACHE_DIR:-/srv/cache}"
-PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.14}"
 # journald cap for the box. Default journald is Storage=auto (logs are RAM-only
 # and lost on reboot unless /var/log/journal exists) with SystemMaxUse=10% of
 # the disk up to 4G. We force persistence and a modest cap — log volume here is

@@ -120,5 +120,5 @@ def parse_wei(value: object) -> int:
         return 0
     try:
         return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0

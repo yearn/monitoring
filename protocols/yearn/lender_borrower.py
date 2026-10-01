@@ -594,7 +594,7 @@ def _load_rate_samples(config: StrategyConfig) -> list[RateSample]:
     try:
         decoded = json.loads(raw)
         return [RateSample(timestamp=int(row["timestamp"]), spread_wad=int(row["spread_wad"])) for row in decoded]
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    except KeyError, TypeError, ValueError, json.JSONDecodeError:
         logger.warning("Ignoring malformed rate history for %s", config.address)
         return []
 
@@ -624,7 +624,7 @@ def _should_send_alert(config: StrategyConfig, evaluation: Evaluation, now: int,
     if raw:
         try:
             previous = json.loads(raw)
-        except (TypeError, json.JSONDecodeError):
+        except TypeError, json.JSONDecodeError:
             previous = {}
 
     if not evaluation.issue_codes:
@@ -654,7 +654,7 @@ def _should_send_error(config: StrategyConfig, checks: str, error_type: str, now
     if raw:
         try:
             previous = json.loads(raw)
-        except (TypeError, json.JSONDecodeError):
+        except TypeError, json.JSONDecodeError:
             previous = {}
     last_alert = int(previous.get("last_alert", 0))
     return previous.get("fingerprint") != error_type or now - last_alert >= ALERT_REMINDER_SECONDS
