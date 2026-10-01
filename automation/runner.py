@@ -188,7 +188,7 @@ def run_profile(
 
 
 def sync_repo(repo_root: Path) -> None:
-    """Force the checkout to origin/main, then refresh the live crontab from it.
+    """Force the checkout to origin/main, then refresh the venv and live crontab from it.
 
     Best-effort: a failed sync is logged but never blocks the run — these are
     read-only checks, so running slightly older code is harmless, and we never
@@ -196,11 +196,19 @@ def sync_repo(repo_root: Path) -> None:
     and `automation.crontab.refresh_live_crontab`.
     """
     result = git_sync.sync_to_remote_main(repo_root)
-    if result.ok:
-        logger.info("pre-run git sync: %s", result.output or "already up to date")
-        crontab.refresh_live_crontab(repo_root / "automation" / "jobs.yaml")
-    else:
+    if not result.ok:
         logger.warning("pre-run git sync failed (running existing checkout): %s", result.output)
+        return
+    logger.info("pre-run git sync: %s", result.output or "already up to date")
+
+    deps = git_sync.sync_dependencies(repo_root)
+    if not deps.ok:
+        logger.warning("pre-run uv sync failed (running existing venv): %s", deps.output)
+    elif "Installed" in deps.output or "Uninstalled" in deps.output:
+        # A no-op sync only prints "Resolved/Checked N packages"; log the real changes.
+        logger.info("pre-run uv sync updated the venv: %s", deps.output)
+
+    crontab.refresh_live_crontab(repo_root / "automation" / "jobs.yaml")
 
 
 def _run_task(task: Task, *, profile: Profile, repo_root: Path, dry_run: bool) -> TaskResult:

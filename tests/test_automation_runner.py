@@ -81,6 +81,8 @@ class TestRunProfileSuccess(unittest.TestCase):
         with (
             patch.dict(os.environ, {CRONTAB_PATH_ENV: "/tmp/crontab"}),
             patch("automation.runner.git_sync.sync_to_remote_main") as mock_sync,
+            patch("automation.runner.git_sync.sync_dependencies", return_value=SyncResult(ok=True, output="")),
+            patch("automation.runner.crontab.refresh_live_crontab"),
             patch("automation.runner.subprocess.run", return_value=_Result()),
         ):
             run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
@@ -112,6 +114,7 @@ class TestRunProfileSuccess(unittest.TestCase):
         with (
             patch.dict(os.environ, {CRONTAB_PATH_ENV: "/tmp/crontab"}),
             patch("automation.runner.git_sync.sync_to_remote_main", return_value=SyncResult(ok=True, output="")),
+            patch("automation.runner.git_sync.sync_dependencies", return_value=SyncResult(ok=True, output="")),
             patch("automation.runner.crontab.refresh_live_crontab") as mock_refresh,
             patch("automation.runner.subprocess.run", return_value=_Result()),
         ):
@@ -134,6 +137,64 @@ class TestRunProfileSuccess(unittest.TestCase):
             run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
 
         mock_refresh.assert_not_called()
+
+    def test_successful_sync_refreshes_venv(self):
+        profile = _profile([Task(name="x", script="x.py")], sync_before_run=True)
+
+        class _Result:
+            returncode = 0
+
+        with (
+            patch.dict(os.environ, {CRONTAB_PATH_ENV: "/tmp/crontab"}),
+            patch("automation.runner.git_sync.sync_to_remote_main", return_value=SyncResult(ok=True, output="")),
+            patch(
+                "automation.runner.git_sync.sync_dependencies", return_value=SyncResult(ok=True, output="")
+            ) as mock_deps,
+            patch("automation.runner.crontab.refresh_live_crontab"),
+            patch("automation.runner.subprocess.run", return_value=_Result()),
+        ):
+            run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
+
+        mock_deps.assert_called_once_with(Path("/srv/repo"))
+
+    def test_failed_git_sync_skips_venv_refresh(self):
+        profile = _profile([Task(name="x", script="x.py")], sync_before_run=True)
+
+        class _Result:
+            returncode = 0
+
+        with (
+            patch.dict(os.environ, {CRONTAB_PATH_ENV: "/tmp/crontab"}),
+            patch("automation.runner.git_sync.sync_to_remote_main", return_value=SyncResult(ok=False, output="boom")),
+            patch("automation.runner.git_sync.sync_dependencies") as mock_deps,
+            patch("automation.runner.subprocess.run", return_value=_Result()),
+        ):
+            run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
+
+        mock_deps.assert_not_called()
+
+    def test_failed_venv_refresh_still_runs_tasks_and_refreshes_crontab(self):
+        profile = _profile([Task(name="x", script="x.py")], sync_before_run=True)
+
+        class _Result:
+            returncode = 0
+
+        with (
+            patch.dict(os.environ, {CRONTAB_PATH_ENV: "/tmp/crontab"}),
+            patch("automation.runner.git_sync.sync_to_remote_main", return_value=SyncResult(ok=True, output="")),
+            patch(
+                "automation.runner.git_sync.sync_dependencies",
+                return_value=SyncResult(ok=False, output="no interpreter found"),
+            ),
+            patch("automation.runner.crontab.refresh_live_crontab") as mock_refresh,
+            patch("automation.runner.subprocess.run", return_value=_Result()) as mock_run,
+            self.assertLogs("automation.runner", level="WARNING") as logs,
+        ):
+            run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
+
+        mock_refresh.assert_called_once()
+        mock_run.assert_called_once()
+        self.assertIn("pre-run uv sync failed", "\n".join(logs.output))
 
 
 class TestRunProfileContinuesOnFailure(unittest.TestCase):

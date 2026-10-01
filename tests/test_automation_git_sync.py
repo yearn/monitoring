@@ -1,11 +1,12 @@
 """Tests for automation/git_sync.py."""
 
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from automation.git_sync import sync_to_remote_main
+from automation.git_sync import UV_SYNC_ARGV, sync_dependencies, sync_to_remote_main
 
 
 class _Result:
@@ -67,6 +68,48 @@ class TestSyncToRemoteMain(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertIn("cannot lock ref", result.output)
+
+
+class TestSyncDependencies(unittest.TestCase):
+    def test_runs_frozen_uv_sync_in_repo(self):
+        with (
+            patch.dict(os.environ, {"CACHE_DIR": "/srv/cache", "VIRTUAL_ENV": "/elsewhere"}, clear=True),
+            patch("automation.git_sync.subprocess.run", return_value=_Result(stderr="Checked 64 packages")) as mock_run,
+        ):
+            result = sync_dependencies(Path("/srv/repo"))
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.output, "Checked 64 packages")
+        self.assertEqual(mock_run.call_args.args[0], UV_SYNC_ARGV)
+        self.assertIn("--frozen", UV_SYNC_ARGV)
+        self.assertEqual(mock_run.call_args.kwargs["cwd"], Path("/srv/repo"))
+        env = mock_run.call_args.kwargs["env"]
+        self.assertEqual(env["UV_CACHE_DIR"], "/srv/cache/uv/cache")
+        self.assertEqual(env["UV_PYTHON_INSTALL_DIR"], "/srv/cache/uv/python")
+        self.assertNotIn("VIRTUAL_ENV", env)
+
+    def test_respects_operator_uv_cache_dir(self):
+        with (
+            patch.dict(os.environ, {"CACHE_DIR": "/srv/cache", "UV_CACHE_DIR": "/custom"}, clear=True),
+            patch("automation.git_sync.subprocess.run", return_value=_Result()) as mock_run,
+        ):
+            sync_dependencies(Path("/srv/repo"))
+
+        self.assertEqual(mock_run.call_args.kwargs["env"]["UV_CACHE_DIR"], "/custom")
+
+    def test_failure_is_reported(self):
+        with patch("automation.git_sync.subprocess.run", return_value=_Result(2, stderr="lockfile out of date")):
+            result = sync_dependencies(Path("/srv/repo"))
+
+        self.assertFalse(result.ok)
+        self.assertIn("lockfile out of date", result.output)
+
+    def test_missing_uv_is_reported(self):
+        with patch("automation.git_sync.subprocess.run", side_effect=FileNotFoundError("uv")):
+            result = sync_dependencies(Path("/srv/repo"))
+
+        self.assertFalse(result.ok)
+        self.assertIn("failed to spawn", result.output)
 
 
 if __name__ == "__main__":

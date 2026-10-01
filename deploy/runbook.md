@@ -113,19 +113,21 @@ i.e. when `CRONTAB_PATH` is set, so a local typo never hard-resets a checkout), 
 `sync_before_run` profile cannot stop the box from pulling code (this happened
 on 2026-09-24 and stalled syncs for two days).
 
-**Manual restart (deps).** A `pyproject.toml` / `uv.lock` change lands on disk
-via the auto-sync but stays inert until the venv is rebuilt. After the PR merges:
+**Dependencies (no restart).** After each successful sync the runner also runs
+`uv sync --frozen --extra ai`, so a `pyproject.toml` / `uv.lock` change —
+including a `requires-python` bump, which makes uv recreate `.venv` — lands in
+the venv on the same tick as the code that needs it. It is a ~40ms no-op when
+the venv already matches the lockfile, and a failure is logged (`journalctl -u
+monitoring | grep 'pre-run uv sync'`) and retried on the next tick. Because the
+unit runs with `ProtectHome=read-only`, uv's cache and any managed-Python
+downloads go to `$CACHE_DIR/uv/` (`/srv/cache/uv/`) instead of `~`.
+`monitoring-api` is a long-running process, so it keeps its old imports until
+`sudo systemctl restart monitoring-api`. To rebuild by hand:
 
 ```sh
 cd /srv/monitoring
-git fetch origin main && git reset --hard origin/main  # or let the next ten_minute tick land it
 uv sync --frozen --extra ai   # --extra ai: openai client for the AI explainer
-sudo systemctl restart monitoring
 ```
-
-The restart re-renders the crontab and points supercronic at the freshly-pulled
-tree. Total downtime is a few seconds and only affects the scheduler, not an
-in-flight job.
 
 ---
 
@@ -275,7 +277,7 @@ Remove the variable and restart to return to SQLite-backed cache state.
 | `Active: failed` on start | `journalctl -u monitoring -n 50` | Malformed `automation/jobs.yaml` (render-crontab aborts the start), or `/etc/monitoring/.env` missing (the unit refuses to start without it). |
 | Telegram suddenly silent | Is `TELEGRAM_BOT_TOKEN_DEFAULT` valid? `LOG_LEVEL=DEBUG` skips sends. | Bot revoked, chat removed bot, or LOG_LEVEL left at DEBUG. |
 | One profile never runs | `uv run python -m automation render-crontab` — is its line present? | Profile/task `enabled: false` in jobs.yaml, or its `flock` lock is stuck held by a hung run (restart clears it). |
-| `ModuleNotFoundError` after a deploy | `journalctl -u monitoring -n 50` | Forgot `uv sync --frozen` after a `pyproject.toml`/`uv.lock` change. |
+| `ModuleNotFoundError` / `SyntaxError` after a deploy | `journalctl -u monitoring \| grep 'pre-run uv sync'` | Auto `uv sync` failed or hasn't ticked yet; run `uv sync --frozen --extra ai` by hand. |
 | Cache/dedupe acting up | `ls -l /srv/cache` | Wrong perms (must be writable by the runner user) or a corrupt cache file — safe to delete; it re-seeds. |
 
 ---
