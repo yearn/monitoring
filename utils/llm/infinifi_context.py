@@ -8,10 +8,27 @@ relationship.
 This adapter is deliberately narrow: it runs only for Infinifi on Ethereum,
 identifies RWAEscrow contracts from their verified ABI, reads their accounting
 asset and owner on-chain, matches and verifies the owning farm, and resolves
-configured non-accounting ERC20 targets from the escrow's whitelist events.
+the escrow's whitelist from its events.
+
+What the calls mean, from the verified sources (RWAEscrow, RWAEscrowRouter,
+RWAEscrowRateManager):
+
+- An escrow's value is a number its ``keeper`` reports (``totalAssets``), not a
+  token balance. Plain escrows forward deposits to an off-chain ``receiver``.
+- ``RWAEscrowRateManager.setRate(escrow, rate)`` sets an annual accrual rate in
+  WAD around 1e18 (1.0868e18 = +8.68% a year), bounded to ±20%; the manager's
+  permissionless ``harvest`` books it into ``totalAssets`` over time. Reports had
+  read these as relative changes of a raw number ("raises the rate by 1.09%").
+- ``governanceUpdateTotalAssets(escrow, assets)`` overwrites ``totalAssets`` with
+  no bound, booking the difference as profit or loss.
+- On an ``RWAEscrowRouter`` (the escrow holds the assets itself), ``whitelist``
+  is the set of contracts ``externalCall`` may call, with any calldata, by any
+  MANUAL_REBALANCER holder — the team multisig among them, with no timelock. A
+  whitelisted token's router balance can therefore be moved by that call.
 """
 
 from dataclasses import dataclass
+from decimal import Decimal
 from functools import lru_cache
 
 from eth_utils import to_checksum_address
@@ -23,7 +40,7 @@ from utils.formatting import format_decimal_amount, normalize_token_amount
 from utils.http_client import fetch_json
 from utils.llm.report import address_link, iter_address_values
 from utils.logger import get_logger
-from utils.source_context import fetch_abi_entries
+from utils.source_context import fetch_abi_entries, get_contract_label
 from utils.web3_wrapper import ChainManager
 
 logger = get_logger("utils.llm.infinifi_context")
@@ -54,6 +71,45 @@ _ESCROW_GETTERS_ABI = [
         "outputs": [{"name": "", "type": "uint256"}],
     },
 ]
+
+_ESCROW_DETAIL_ABI = [
+    {"name": name, "type": "function", "stateMutability": "view", "inputs": [], "outputs": [{"name": "", "type": kind}]}
+    for name, kind in (("receiver", "address"), ("keeper", "address"), ("lastUpdatedAt", "uint256"))
+]
+
+_RATE_MANAGER_ABI = [
+    {
+        "name": "rates",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [{"name": "escrow", "type": "address"}],
+        "outputs": [{"name": "", "type": "uint256"}],
+    }
+]
+
+_ROUTER_ABI = [
+    {
+        "name": "whitelist",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [{"name": "target", "type": "address"}],
+        "outputs": [{"name": "", "type": "bool"}],
+    }
+]
+
+_BALANCE_ABI = [
+    {
+        "name": "balanceOf",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [{"name": "account", "type": "address"}],
+        "outputs": [{"name": "", "type": "uint256"}],
+    }
+]
+
+# RWAEscrowRateManager bounds (BASE_RATE ± 20%); rates are annual, WAD-scaled around 1e18.
+_RATE_BASE = 10**18
+_RATE_BOUND = 2 * 10**17
 
 _TOKEN_NAME_ABI = [
     {
@@ -100,6 +156,27 @@ class TokenContext:
 
 
 @dataclass(frozen=True)
+class RateChange:
+    """A setRate call against the rate currently stored for the escrow."""
+
+    current_raw: int
+    proposed_raw: int
+
+
+@dataclass(frozen=True)
+class WhitelistChange:
+    """A setWhitelist call on a router escrow, with the flag before it."""
+
+    target: str
+    label: str
+    enabled_before: bool
+    enabled_after: bool
+    # Set when the target is an ERC20: the router's own balance of it.
+    token: TokenContext | None = None
+    escrow_balance_raw: int | None = None
+
+
+@dataclass(frozen=True)
 class InfinifiEscrowContext:
     """Resolved context for one Infinifi RWA escrow."""
 
@@ -109,17 +186,37 @@ class InfinifiEscrowContext:
     farm_slug: str
     accounting_asset: TokenContext
     total_assets_raw: int
+    # Whitelisted call targets that verify as ERC20 tokens (router escrows only).
     configured_tokens: tuple[TokenContext, ...]
+    receiver: str = ""
+    keeper: str = ""
+    keeper_label: str = ""
+    last_updated_at: int = 0
+    is_router: bool = False
+    # Whitelisted call targets that are not ERC20s, as (address, label).
+    whitelisted_contracts: tuple[tuple[str, str], ...] = ()
+    rate_change: RateChange | None = None
+    # governanceUpdateTotalAssets values this transaction writes, in call order.
+    assets_overrides: tuple[int, ...] = ()
+    whitelist_changes: tuple[WhitelistChange, ...] = ()
 
     @property
     def addresses(self) -> list[str]:
         """Addresses introduced by this context for explorer-link generation."""
-        return [
-            self.escrow_address,
-            self.farm_address,
-            self.accounting_asset.address,
-            *(token.address for token in self.configured_tokens),
-        ]
+        extra = [self.receiver, self.keeper] if self.receiver else []
+        return list(
+            dict.fromkeys(
+                [
+                    self.escrow_address,
+                    self.farm_address,
+                    self.accounting_asset.address,
+                    *(token.address for token in self.configured_tokens),
+                    *(address for address, _ in self.whitelisted_contracts),
+                    *(change.target for change in self.whitelist_changes),
+                    *extra,
+                ]
+            )
+        )
 
     @property
     def labels(self) -> dict[str, str]:
@@ -129,7 +226,73 @@ class InfinifiEscrowContext:
             self.accounting_asset.address: _token_label(self.accounting_asset),
         }
         labels.update({token.address: _token_label(token) for token in self.configured_tokens})
+        labels.update(dict(self.whitelisted_contracts))
+        if self.keeper and self.keeper_label:
+            labels[self.keeper] = self.keeper_label
         return {address: label for address, label in labels.items() if label}
+
+    def amount(self, raw: int) -> str:
+        """An amount in the escrow's accounting asset."""
+        asset = self.accounting_asset
+        return f"{format_decimal_amount(normalize_token_amount(raw, asset.decimals))} {asset.symbol}"
+
+    def custody_line(self) -> str:
+        """Where the escrow's value sits and who reports it."""
+        if self.is_router:
+            custody = (
+                "RWAEscrowRouter: the escrow holds the assets itself (receiver is the escrow), and any "
+                "MANUAL_REBALANCER holder can call its whitelisted targets with arbitrary calldata via externalCall — "
+                "no timelock"
+            )
+        elif self.receiver:
+            custody = f"RWAEscrow: deposits are forwarded to the off-chain receiver {self.receiver}"
+        else:
+            return ""
+        keeper = f"{self.keeper} ({self.keeper_label})" if self.keeper_label else self.keeper
+        return f"{custody}. totalAssets is a reported value, not a token balance; it is set by the keeper {keeper}."
+
+    def rate_lines(self) -> list[str]:
+        """setRate and governanceUpdateTotalAssets, in annual percentages and asset units."""
+        lines: list[str] = []
+        if self.rate_change is not None:
+            current, proposed = self.rate_change.current_raw, self.rate_change.proposed_raw
+            before = "unset (no accrual)" if current == 0 else f"{_rate_percent(current)} a year (raw {current})"
+            yearly = self.total_assets_raw * abs(proposed - _RATE_BASE) // _RATE_BASE
+            direction = "accrues" if proposed >= _RATE_BASE else "writes down"
+            lines.append(
+                f"setRate: annual accrual rate {before} → {_rate_percent(proposed)} a year (raw {proposed}); the rate "
+                f"is WAD-scaled around 1e18, bounded to ±20%. On the current totalAssets it {direction} about "
+                f"{self.amount(yearly)} a year, booked into totalAssets whenever harvest runs; setRate harvests at "
+                "the old rate first."
+            )
+        for assets in self.assets_overrides:
+            delta = assets - self.total_assets_raw
+            effect = "profit" if delta >= 0 else "loss"
+            lines.append(
+                f"governanceUpdateTotalAssets: overwrites totalAssets {self.amount(self.total_assets_raw)} → "
+                f"{self.amount(assets)} with no bound, booking a {effect} of {self.amount(abs(delta))}."
+            )
+        return lines
+
+    def whitelist_lines(self) -> list[str]:
+        """Each setWhitelist change, and what a whitelisted token means for the router's holdings."""
+        lines = []
+        for change in self.whitelist_changes:
+            state = f"{str(change.enabled_before).lower()} → {str(change.enabled_after).lower()}"
+            line = f"setWhitelist {change.target} ({change.label or 'unlabelled'}): {state}"
+            if change.token is not None and change.escrow_balance_raw is not None:
+                held = format_decimal_amount(normalize_token_amount(change.escrow_balance_raw, change.token.decimals))
+                line += f"; ERC20 {change.token.symbol}, router balance {held} {change.token.symbol}"
+                if change.enabled_after:
+                    line += " — once whitelisted, externalCall can transfer or approve that balance"
+            lines.append(line)
+        return lines
+
+
+def _rate_percent(raw: int) -> str:
+    """A WAD rate around 1e18 as a signed annual percentage, e.g. ``+8.683%``."""
+    percent = Decimal(raw - _RATE_BASE) * 100 / Decimal(_RATE_BASE)
+    return f"{percent:+.3f}".rstrip("0").rstrip(".") + "%"
 
 
 @dataclass(frozen=True)
@@ -138,6 +301,10 @@ class _EscrowState:
     farm_address: str
     asset_address: str
     total_assets_raw: int
+    receiver: str = ""
+    keeper: str = ""
+    last_updated_at: int = 0
+    is_router: bool = False
 
 
 @dataclass(frozen=True)
@@ -198,17 +365,24 @@ def _read_escrow_state(chain_id: int, address: str) -> _EscrowState | None:
         return None
 
     client = ChainManager.get_client(Chain.from_chain_id(chain_id))
-    contract = client.get_contract(to_checksum_address(address), _ESCROW_GETTERS_ABI)
+    contract = client.get_contract(to_checksum_address(address), _ESCROW_GETTERS_ABI + _ESCROW_DETAIL_ABI)
     with client.batch_requests() as batch:
         batch.add(contract.functions.assetToken())
         batch.add(contract.functions.owner())
         batch.add(contract.functions.totalAssets())
-        asset_address, farm_address, total_assets = client.execute_batch(batch)
+        batch.add(contract.functions.receiver())
+        batch.add(contract.functions.keeper())
+        batch.add(contract.functions.lastUpdatedAt())
+        asset_address, farm_address, total_assets, receiver, keeper, last_updated = client.execute_batch(batch)
     return _EscrowState(
         address=to_checksum_address(address),
         farm_address=to_checksum_address(str(farm_address)),
         asset_address=to_checksum_address(str(asset_address)),
         total_assets_raw=int(total_assets),
+        receiver=to_checksum_address(str(receiver)),
+        keeper=to_checksum_address(str(keeper)),
+        last_updated_at=int(last_updated),
+        is_router={"whitelist", "externalCall"}.issubset(_abi_function_names(entries)),
     )
 
 
@@ -302,7 +476,19 @@ def _read_token(chain_id: int, candidate: _TokenCandidate) -> TokenContext | Non
 
 def _resolve_configured_tokens(chain_id: int, escrow: _EscrowState) -> tuple[TokenContext, ...]:
     """Whitelisted non-accounting addresses that verify as ERC20 tokens."""
+    return _resolve_whitelist(chain_id, escrow)[0]
+
+
+def _resolve_whitelist(
+    chain_id: int, escrow: _EscrowState
+) -> tuple[tuple[TokenContext, ...], tuple[tuple[str, str], ...]]:
+    """Every enabled whitelist target: ERC20s as tokens, the rest as labelled contracts.
+
+    Non-token targets used to be dropped, yet they are what externalCall can call
+    (a redemption vault, a swapper), so they are listed with their explorer label.
+    """
     tokens: list[TokenContext] = []
+    contracts: list[tuple[str, str]] = []
     for address in _fetch_whitelist_targets(chain_id, escrow.address):
         if address.lower() == escrow.asset_address.lower():
             continue
@@ -310,8 +496,91 @@ def _resolve_configured_tokens(chain_id: int, escrow: _EscrowState) -> tuple[Tok
         if token is not None:
             tokens.append(token)
         else:
-            logger.debug("ERC20 metadata unavailable or incompatible for Infinifi whitelist target %s", address)
-    return tuple(tokens)
+            contracts.append((address, _contract_label(chain_id, address)))
+    return tuple(tokens), tuple(contracts)
+
+
+def _contract_label(chain_id: int, address: str) -> str:
+    """Best-effort verified contract name for a whitelisted target."""
+    try:
+        return get_contract_label(chain_id, address)
+    except Exception as error:  # noqa: BLE001 - a label is enrichment
+        logger.info("Infinifi whitelist label failed for %s: %s", address, error)
+        return ""
+
+
+def _escrow_address_arg(call: DecodedCall) -> str | None:
+    """The first argument of a rate-manager call, when it is an address."""
+    if not call.params or call.params[0][0] != "address":
+        return None
+    try:
+        return to_checksum_address(str(call.params[0][1]))
+    except ValueError:
+        return None
+
+
+def _uint_arg(call: DecodedCall, position: int) -> int | None:
+    """The call's ``position``-th argument when it is an unsigned integer."""
+    if len(call.params) <= position:
+        return None
+    type_str, value = call.params[position]
+    return int(value) if type_str.startswith("uint") and isinstance(value, int) else None
+
+
+def _rate_and_overrides(
+    chain_id: int, escrow: str, targets_and_calls: list[tuple[str, DecodedCall]]
+) -> tuple[RateChange | None, tuple[int, ...]]:
+    """setRate / governanceUpdateTotalAssets calls that name this escrow, with the stored rate."""
+    rate_call: tuple[str, int] | None = None
+    overrides: list[int] = []
+    for target, call in targets_and_calls:
+        if _escrow_address_arg(call) != escrow:
+            continue
+        value = _uint_arg(call, 1)
+        if value is None:
+            continue
+        if call.function_name == "setRate":
+            rate_call = (target, value)
+        elif call.function_name == "governanceUpdateTotalAssets":
+            overrides.append(value)
+    if rate_call is None:
+        return None, tuple(overrides)
+    manager, proposed = rate_call
+    client = ChainManager.get_client(Chain.from_chain_id(chain_id))
+    current = int(client.get_contract(to_checksum_address(manager), _RATE_MANAGER_ABI).functions.rates(escrow).call())
+    return RateChange(current_raw=current, proposed_raw=proposed), tuple(overrides)
+
+
+def _whitelist_changes(
+    chain_id: int, escrow: _EscrowState, targets_and_calls: list[tuple[str, DecodedCall]]
+) -> tuple[WhitelistChange, ...]:
+    """setWhitelist calls on this router escrow, with the flag before and any token balance it holds."""
+    calls = [
+        call
+        for target, call in targets_and_calls
+        if call.function_name == "setWhitelist" and target.lower() == escrow.address.lower() and len(call.params) == 2
+    ]
+    if not calls:
+        return ()
+    client = ChainManager.get_client(Chain.from_chain_id(chain_id))
+    router = client.get_contract(escrow.address, _ROUTER_ABI)
+    changes = []
+    for call in calls:
+        (_, raw_target), (_, enabled) = call.params
+        target = to_checksum_address(str(raw_target))
+        before = bool(router.functions.whitelist(target).call())
+        token = _read_token(chain_id, _TokenCandidate(target, ""))
+        balance = None
+        if token is not None:
+            balance = int(client.get_contract(target, _BALANCE_ABI).functions.balanceOf(escrow.address).call())
+        label = _token_label(token) if token else _contract_label(chain_id, target)
+        changes.append(WhitelistChange(target, label, before, bool(enabled), token, balance))
+    return tuple(changes)
+
+
+def _keeper_label(chain_id: int, keeper: str) -> str:
+    """Name the keeper, which is normally the RWAEscrowRateManager."""
+    return _contract_label(chain_id, keeper) if keeper else ""
 
 
 def resolve_infinifi_context(
@@ -353,10 +622,16 @@ def resolve_infinifi_context(
                 logger.info("Infinifi escrow %s: farm %s does not reference this escrow", escrow.address, farm.address)
                 continue
             try:
-                configured_tokens = _resolve_configured_tokens(chain_id, escrow)
+                configured_tokens, whitelisted_contracts = _resolve_whitelist(chain_id, escrow)
             except Exception as error:  # noqa: BLE001 - optional token context must not block farm context
                 logger.info("Infinifi token resolution failed for %s: %s", escrow.address, error)
-                configured_tokens = ()
+                configured_tokens, whitelisted_contracts = (), ()
+            try:
+                rate_change, overrides = _rate_and_overrides(chain_id, escrow.address, targets_and_calls)
+                whitelist_changes = _whitelist_changes(chain_id, escrow, targets_and_calls)
+            except Exception as error:  # noqa: BLE001 - call context is enrichment
+                logger.info("Infinifi escrow call context failed for %s: %s", escrow.address, error)
+                rate_change, overrides, whitelist_changes = None, (), ()
             contexts.append(
                 InfinifiEscrowContext(
                     escrow_address=escrow.address,
@@ -366,6 +641,15 @@ def resolve_infinifi_context(
                     accounting_asset=accounting_asset,
                     total_assets_raw=escrow.total_assets_raw,
                     configured_tokens=configured_tokens,
+                    receiver=escrow.receiver,
+                    keeper=escrow.keeper,
+                    keeper_label=_keeper_label(chain_id, escrow.keeper),
+                    last_updated_at=escrow.last_updated_at,
+                    is_router=escrow.is_router,
+                    whitelisted_contracts=whitelisted_contracts,
+                    rate_change=rate_change,
+                    assets_overrides=overrides,
+                    whitelist_changes=whitelist_changes,
                 )
             )
         except Exception as error:  # noqa: BLE001 - enrichment must never block an alert
@@ -385,11 +669,17 @@ def format_infinifi_prompt(contexts: list[InfinifiEscrowContext]) -> str:
             f"Accounting asset: {asset.address} ({asset.name}, {asset.symbol}, {asset.decimals} decimals)",
             f"Current escrow totalAssets: {context.total_assets_raw} raw units = {total_assets} {asset.symbol}",
         ]
+        if custody := context.custody_line():
+            lines.append(custody)
         for token in context.configured_tokens:
             lines.append(
-                f"Configured non-accounting ERC20 target: {token.address} "
+                f"Whitelisted ERC20 call target: {token.address} "
                 f"({token.name}, {token.symbol}, {token.decimals} decimals)"
             )
+        for address, label in context.whitelisted_contracts:
+            lines.append(f"Whitelisted contract call target: {address} ({label or 'unlabelled'})")
+        lines.extend(context.rate_lines())
+        lines.extend(context.whitelist_lines())
         sections.append("\n".join(lines))
     return "\n\n".join(sections)
 
@@ -412,13 +702,19 @@ def format_infinifi_report(
             f"{address_link(asset.address, chain_id)}",
             f"- **Current `totalAssets`:** `{total_assets} {asset.symbol}` (`{context.total_assets_raw:,}` raw units)",
         ]
-        if context.configured_tokens:
-            lines.append("- **Configured non-accounting ERC-20 targets:**")
+        if custody := context.custody_line():
+            lines.append(f"- **Custody:** {custody}")
+        if context.configured_tokens or context.whitelisted_contracts:
+            lines.append("- **Whitelisted call targets** (`externalCall`):")
             for token in context.configured_tokens:
                 lines.append(
                     f"  - {token.name} (`{token.symbol}`, {token.decimals} decimals) — "
                     f"{address_link(token.address, chain_id)}"
                 )
+            for address, label in context.whitelisted_contracts:
+                lines.append(f"  - {address_link(address, chain_id, {address: label} if label else labels)}")
+        lines.extend(f"- {line}" for line in context.rate_lines())
+        lines.extend(f"- {line}" for line in context.whitelist_lines())
         sections.append("\n".join(lines))
     return "\n\n".join(sections)
 

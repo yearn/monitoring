@@ -12,12 +12,17 @@ arrives at the LLM without the facts that make it reviewable:
   the connector can actually send to the chain: ``sendTokens`` also needs a
   peer, gas limit and selector from ``setConfiguration`` — and the peer is the
   destination-side address that receives the bridged funds.
+- ``Connector.govReceive(chainId, message)`` queues an arbitrary inbound message
+  on the PortalHub as if the bridge had delivered it, and
+  ``PortalHub.processMessage`` executes it. The message is opaque bytes; an
+  assets update in it mints or burns OutlandFarm shares on mainnet, i.e. books
+  profit or loss. Reports could not resolve its numbers.
 
 This adapter runs only for Infinifi on Ethereum, identifies contracts by the
 getters their verified ABI exposes, and reads the surrounding state on-chain.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 
 from eth_utils import to_checksum_address
@@ -40,8 +45,16 @@ ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 FARM_TYPES: dict[int, tuple[str, str]] = {
     0: ("PROTOCOL", "not generating yield but capable of storing funds"),
     1: ("LIQUID", "instant principal withdrawals (e.g. Aave)"),
-    2: ("MATURITY", "illiquid: principal is locked until the farm's maturity"),
+    2: (
+        "MATURITY",
+        "principal is available after the farm's maturity(): a fixed timestamp, or for a perpetual farm a rolling "
+        "now + duration notice period",
+    ),
 }
+
+# OutlandMsgCodec wire layout: type (32) | chainId (32) | nonce (32) | abi.encode(payload).
+_MESSAGE_TYPES = {0: "MESSAGE (assets update)", 1: "TRANSFER", 2: "KEY_VALUE", 3: "TOKEN_BRIDGE"}
+_HEADER_SIZE = 96
 
 # IOracle.price() scale: a whole token's value in the reference unit is
 # price * 10**decimals / 1e36 (USDC is quoted at ~1e30 for a 1:1 price).
@@ -51,6 +64,21 @@ _CONNECTOR_CHAIN_CALLS = {"enableChainAsset", "disableChainAsset", "setCctpDomai
 
 _ADDRESS_OUT = [{"name": "", "type": "address"}]
 _UINT_OUT = [{"name": "", "type": "uint256"}]
+
+_MATURITY_ABI = [
+    {"name": name, "type": "function", "stateMutability": "view", "inputs": [], "outputs": [{"name": "", "type": kind}]}
+    for name, kind in (("duration", "uint256"), ("perpetual", "bool"))
+]
+_PORTAL_ABI = [{"name": "portal", "type": "function", "stateMutability": "view", "inputs": [], "outputs": _ADDRESS_OUT}]
+_VAULT_REPORT_ABI = [
+    {
+        "name": "portalAssetsReport",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "uint256"} for _ in range(4)],
+    }
+]
 
 _ORACLE_ABI = [{"name": "price", "type": "function", "stateMutability": "view", "inputs": [], "outputs": _UINT_OUT}]
 _VAULT_ABI = [{"name": "chainId", "type": "function", "stateMutability": "view", "inputs": [], "outputs": _UINT_OUT}]
@@ -93,6 +121,20 @@ class FarmTypeContext:
     function_name: str
     farm_type: int
     farms: tuple[str, ...]
+    # (farm, duration seconds, perpetual) for MATURITY farms whose terms could be read.
+    maturity_terms: tuple[tuple[str, int, bool], ...] = ()
+
+    def terms_lines(self) -> list[str]:
+        """Each MATURITY farm's notice terms, since perpetual farms roll their maturity forward."""
+        lines = []
+        for farm, duration, perpetual in self.maturity_terms:
+            if perpetual:
+                lines.append(
+                    f"{farm}: perpetual, rolling {duration / 86400:g}-day notice period (maturity() = now + {duration:,}s)"
+                )
+            else:
+                lines.append(f"{farm}: fixed maturity at unix time {duration}")
+        return lines
 
     @property
     def addresses(self) -> list[str]:
@@ -198,7 +240,97 @@ class ConnectorRouteContext:
         return self.proposed or self.current
 
 
-OutlandContext = FarmTypeContext | OracleAssignmentContext | HubVaultContext | ConnectorRouteContext
+@dataclass(frozen=True)
+class OutlandMessageContext:
+    """A cross-chain message injected (govReceive) or executed (processMessage) by governance."""
+
+    target: str
+    function_name: str
+    source_chain_id: int
+    message_type: int
+    nonce: int
+    payload: tuple[object, ...]
+    # Vault for the source chain and its current portalAssetsReport (assets, iUSD, siUSD), when readable.
+    vault: str = ""
+    current_report: tuple[int, int, int] | None = None
+
+    @property
+    def addresses(self) -> list[str]:
+        return [self.target] + ([self.vault] if self.vault else [])
+
+    @property
+    def labels(self) -> dict[str, str]:
+        return {}
+
+    @property
+    def type_name(self) -> str:
+        return _MESSAGE_TYPES.get(self.message_type, f"unknown type {self.message_type}")
+
+    def describe(self) -> str:
+        """What the call does with the message, and what the message carries."""
+        if self.function_name == "govReceive":
+            action = (
+                f"govReceive on connector {self.target} queues this message on the PortalHub as if the bridge had "
+                f"delivered it from chain {self.source_chain_id} — no bridge involved. It runs once processMessage "
+                "executes it. govReceive needs PROTOCOL_PARAMETERS (the 1-hour Short Timelock), although its natspec "
+                "says it should sit behind a 1-day timelock"
+            )
+        else:
+            action = (
+                f"processMessage on PortalHub {self.target} executes the queued chain-{self.source_chain_id} "
+                "message with this nonce"
+            )
+        return f"{action}. Message: {self.type_name}, nonce {self.nonce}. {self._payload_text()}"
+
+    def _payload_text(self) -> str:
+        if self.message_type == 0 and len(self.payload) == 3:
+            assets, receipt, staked = (int(value) for value in self.payload)  # type: ignore[call-overload]
+            text = (
+                f"Reports totalAssetsValue {_e18(assets)}, L2 iUSD supply {_e18(receipt)}, L2 siUSD supply "
+                f"{_e18(staked)} (18 decimals). Executing it mints or burns OutlandFarm shares toward that value, "
+                "booking the difference as profit or loss on mainnet"
+            )
+            if self.current_report is not None:
+                current = self.current_report[0]
+                delta = assets - current
+                text += (
+                    f"; the vault {self.vault} reports {_e18(current)} now, so the change is {'+' if delta >= 0 else '-'}"
+                    f"{_e18(abs(delta))}"
+                )
+            return text + "."
+        if self.message_type == 1 and len(self.payload) == 2:
+            token, amount = self.payload
+            return (
+                f"Transfers {amount} raw units of {token} (the outpost-side token): the hub pulls the mapped token "
+                "from the connector and deposits it into the chain's OutlandVault."
+            )
+        return "Payload not decoded."
+
+
+def _e18(raw: int) -> str:
+    """An 18-decimal amount, grouped."""
+    return f"{Decimal(raw) / Decimal(10**18):,.6f}"
+
+
+def _decode_message(data: bytes) -> tuple[int, int, int, tuple[object, ...]] | None:
+    """(type, chainId, nonce, payload) from an OutlandMsgCodec message, or None when malformed."""
+    if len(data) < _HEADER_SIZE:
+        return None
+    message_type = data[0]
+    chain = int.from_bytes(data[32:64], "big")
+    nonce = int.from_bytes(data[64:96], "big")
+    body = data[_HEADER_SIZE:]
+    payload: tuple[object, ...] = ()
+    if message_type == 0 and len(body) >= 96:
+        payload = tuple(int.from_bytes(body[i : i + 32], "big") for i in (0, 32, 64))
+    elif message_type == 1 and len(body) >= 64:
+        payload = (to_checksum_address(body[12:32]), int.from_bytes(body[32:64], "big"))
+    return message_type, chain, nonce, payload
+
+
+OutlandContext = (
+    FarmTypeContext | OracleAssignmentContext | HubVaultContext | ConnectorRouteContext | OutlandMessageContext
+)
 
 
 def _uint_param(call: DecodedCall, position: int) -> int | None:
@@ -237,6 +369,61 @@ def _farm_type_context(target: str, call: DecodedCall) -> FarmTypeContext | None
         function_name=call.function_name,
         farm_type=farm_type,
         farms=tuple(to_checksum_address(str(farm)) for farm in farms),
+    )
+
+
+def _with_maturity_terms(chain_id: int, context: FarmTypeContext) -> FarmTypeContext:
+    """Read duration/perpetual for added MATURITY farms; farms without the getters are skipped."""
+    if context.farm_type != 2 or context.function_name != "addFarms":
+        return context
+    terms = []
+    try:
+        client = ChainManager.get_client(Chain.from_chain_id(chain_id))
+        for farm in context.farms:
+            contract = client.get_contract(farm, _MATURITY_ABI)
+            terms.append((farm, int(contract.functions.duration().call()), bool(contract.functions.perpetual().call())))
+    except Exception as error:  # noqa: BLE001 - terms are enrichment; the farm type still renders
+        logger.info("Outland maturity terms unavailable: %s", error)
+    return replace(context, maturity_terms=tuple(terms))
+
+
+def _message_context(chain_id: int, target: str, call: DecodedCall) -> OutlandMessageContext | None:
+    """Decode a govReceive / processMessage payload and read the source chain's vault report."""
+    if call.function_name not in {"govReceive", "processMessage"} or len(call.params) < 2:
+        return None
+    source_chain = _uint_param(call, 0)
+    type_str, data = call.params[1]
+    if source_chain is None or type_str != "bytes":
+        return None
+    raw = bytes.fromhex(data[2:]) if isinstance(data, str) else bytes(data)  # type: ignore[arg-type]
+    decoded = _decode_message(raw)
+    if decoded is None:
+        return None
+    message_type, _, nonce, payload = decoded
+    client = ChainManager.get_client(Chain.from_chain_id(chain_id))
+    hub = target
+    if call.function_name == "govReceive":
+        if not exposes(chain_id, target, {"govReceive", "portal"}):
+            return None
+        hub = to_checksum_address(client.get_contract(target, _PORTAL_ABI).functions.portal().call())
+    elif not exposes(chain_id, target, {"processMessage", "getVault"}):
+        return None
+    vault, report = "", None
+    try:
+        vault = to_checksum_address(client.get_contract(hub, _HUB_ABI).functions.getVault(source_chain).call())
+        values = client.get_contract(vault, _VAULT_REPORT_ABI).functions.portalAssetsReport().call()
+        report = (int(values[0]), int(values[1]), int(values[2]))
+    except Exception as error:  # noqa: BLE001 - the decoded message is still useful
+        logger.info("Outland vault report unavailable for chain %s: %s", source_chain, error)
+    return OutlandMessageContext(
+        target=target,
+        function_name=call.function_name,
+        source_chain_id=source_chain,
+        message_type=message_type,
+        nonce=nonce,
+        payload=payload,
+        vault=vault,
+        current_report=report,
     )
 
 
@@ -358,10 +545,12 @@ def resolve_outland_context(
     for target, calls in calls_by_target.items():
         for call in calls:
             try:
+                farm_type = _farm_type_context(target, call)
                 resolved = (
-                    _farm_type_context(target, call)
+                    (_with_maturity_terms(chain_id, farm_type) if farm_type else None)
                     or _oracle_context(chain_id, target, call)
                     or _hub_vault_context(chain_id, target, call)
+                    or _message_context(chain_id, target, call)
                 )
             except Exception as error:  # noqa: BLE001 - enrichment must never block an alert
                 logger.info("Outland context failed for %s.%s: %s", target, call.function_name, error)
@@ -425,6 +614,9 @@ def format_outland_prompt(contexts: list[OutlandContext]) -> str:
                 f"FarmRegistry {context.registry}.{context.function_name}: farm type {context.farm_type} = "
                 f"FarmTypes.{context.type_name} — {context.type_note}"
             )
+            lines.extend(f"  {line}" for line in context.terms_lines())
+        elif isinstance(context, OutlandMessageContext):
+            lines.append(context.describe())
         elif isinstance(context, OracleAssignmentContext):
             lines.append(
                 f"Oracle {context.oracle} assigned to {context.asset} ({context.asset_symbol}, "
@@ -448,6 +640,9 @@ def format_outland_report(contexts: list[OutlandContext], chain_id: int, labels:
                 f"- **Farm type {context.farm_type}:** `FarmTypes.{context.type_name}` — {context.type_note} "
                 f"({address_link(context.registry, chain_id, labels)} `{context.function_name}`)"
             )
+            lines.extend(f"  - {line}" for line in context.terms_lines())
+        elif isinstance(context, OutlandMessageContext):
+            lines.append(f"- **Cross-chain message (`{context.function_name}`):** {context.describe()}")
         elif isinstance(context, OracleAssignmentContext):
             lines.append(
                 f"- **Oracle price:** {address_link(context.oracle, chain_id, labels)} reports `{context.price_raw}` "

@@ -62,13 +62,28 @@ class TestGuards(unittest.TestCase):
 class TestFarmType(unittest.TestCase):
     def test_add_farms_type_is_named_without_rpc(self) -> None:
         call = _call("addFarms", ("uint256", 2), ("address[]", (FARM.lower(),)))
-        with patch.object(infinifi_outland_context, "exposes") as probe:
+        with (
+            patch.object(infinifi_outland_context, "exposes") as probe,
+            patch.object(infinifi_outland_context.ChainManager, "get_client", side_effect=RuntimeError("no rpc")),
+        ):
             contexts = resolve_outland_context("infinifi", 1, [(REGISTRY, call)])
         probe.assert_not_called()
         self.assertEqual(contexts, [FarmTypeContext(REGISTRY, "addFarms", 2, (FARM,))])
         prompt = format_outland_prompt(contexts)
         self.assertIn("farm type 2 = FarmTypes.MATURITY", prompt)
-        self.assertIn("principal is locked until the farm's maturity", prompt)
+        self.assertIn("rolling now + duration notice period", prompt)
+
+    def test_maturity_farm_terms_are_read(self) -> None:
+        """A perpetual farm's maturity() is now + duration; the old note called the principal locked."""
+        call = _call("addFarms", ("uint256", 2), ("address[]", (FARM,)))
+        client = MagicMock()
+        farm = client.get_contract.return_value.functions
+        farm.duration.return_value.call.return_value = 2_419_200
+        farm.perpetual.return_value.call.return_value = True
+        with patch.object(infinifi_outland_context.ChainManager, "get_client", return_value=client):
+            (context,) = resolve_outland_context("infinifi", 1, [(REGISTRY, call)])
+        self.assertEqual(context.maturity_terms, ((FARM, 2_419_200, True),))
+        self.assertIn("perpetual, rolling 28-day notice period", format_outland_prompt([context]))
 
     def test_unknown_farm_type_is_flagged(self) -> None:
         context = FarmTypeContext(REGISTRY, "addFarms", 7, (FARM,))
@@ -223,3 +238,39 @@ class TestAbiExposure(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOutlandMessage(unittest.TestCase):
+    """govReceive injects a message the reports could not read; an assets update books profit or loss."""
+
+    @staticmethod
+    def _message(message_type: int, chain: int, nonce: int, *words: int) -> bytes:
+        header = bytes([message_type]) + bytes(31) + chain.to_bytes(32, "big") + nonce.to_bytes(32, "big")
+        return header + b"".join(word.to_bytes(32, "big") for word in words)
+
+    def test_assets_update_is_decoded_against_the_vault_report(self) -> None:
+        data = self._message(0, 8453, 41, 81 * 10**18, 5 * 10**18, 2 * 10**18)
+        call = _call("govReceive", ("uint256", 8453), ("bytes", data))
+        client = MagicMock()
+        contract = client.get_contract.return_value.functions
+        contract.portal.return_value.call.return_value = HUB
+        contract.getVault.return_value.call.return_value = BASE_VAULT
+        contract.portalAssetsReport.return_value.call.return_value = (80 * 10**18, 0, 0, 0)
+        with (
+            patch.object(infinifi_outland_context, "exposes", return_value=True),
+            patch.object(infinifi_outland_context.ChainManager, "get_client", return_value=client),
+        ):
+            (context,) = resolve_outland_context("infinifi", 1, [(CONNECTOR, call)])
+        text = context.describe()
+        self.assertIn("no bridge involved", text)
+        self.assertIn("1-hour Short Timelock", text)
+        self.assertIn("MESSAGE (assets update), nonce 41", text)
+        self.assertIn("totalAssetsValue 81.000000", text)
+        self.assertIn("reports 80.000000 now, so the change is +1.000000", text)
+        self.assertIn("booking the difference as profit or loss on mainnet", text)
+
+    def test_short_message_is_ignored(self) -> None:
+        call = _call("govReceive", ("uint256", 8453), ("bytes", b"\x00" * 10))
+        with patch.object(infinifi_outland_context, "exposes", return_value=True) as probe:
+            self.assertEqual(resolve_outland_context("infinifi", 1, [(CONNECTOR, call)]), [])
+        probe.assert_not_called()

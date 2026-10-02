@@ -216,19 +216,21 @@ For Infinifi mainnet alerts, the adapter:
 
 1. Identifies candidate `RWAEscrow` contracts by their verified ABI (`assetToken()`, `owner()`, and `totalAssets()`).
 2. Matches the owner address to the public Infinifi farm API and verifies that the farm's on-chain `escrow()` getter returns the candidate.
-3. Reads the accounting asset and current total assets on-chain.
-4. Reconstructs the escrow's current whitelist from `WhitelistUpdated` events and identifies non-accounting targets that verify as ERC20 tokens. Token names, symbols, and decimals are read on-chain.
+3. Reads the accounting asset, current `totalAssets`, `receiver`, `keeper` and `lastUpdatedAt`, and states the custody model. A plain `RWAEscrow` forwards deposits to an off-chain `receiver`. An `RWAEscrowRouter` (identified by `whitelist` + `externalCall`) holds the assets itself, and any `MANUAL_REBALANCER` holder can call its whitelisted targets with arbitrary calldata, with no timelock; the team multisig is one such holder. Either way, `totalAssets` is a value the keeper reports, not a token balance.
+4. Reconstructs the escrow's current whitelist from `WhitelistUpdated` events. ERC20 targets are listed as tokens, and other targets (redemption vaults, swappers) are listed with their verified contract name; these used to be dropped. For `setWhitelist` calls, it reads each target's flag before the call and, for a token, the router's balance of it: once whitelisted, `externalCall` can transfer or approve that balance.
+5. Decodes `RWAEscrowRateManager` calls. `setRate(escrow, rate)` is an annual accrual rate in WAD around 1e18, bounded to ±20%. The context shows the stored rate before and the proposed rate after, as signed annual percentages, plus the yearly amount on current `totalAssets`. Reports had read these as relative changes of the raw number ("raises the rate by 1.09%" for 7.51% → 8.683% a year). `governanceUpdateTotalAssets(escrow, assets)` is shown as an unbounded overwrite of `totalAssets`, with the profit or loss it books.
 
-The result is added to the LLM prompt as verified protocol context and rendered independently in the Wavey Gist under `## Protocol Context`. The report distinguishes the escrow's accounting asset from non-accounting ERC20 targets it is allowed to interact with; whitelist membership does not establish how a token is valued downstream. Failures are best-effort and never block the governance alert.
+The result is added to the LLM prompt as verified protocol context and rendered independently in the Wavey Gist under `## Protocol Context`. Semantics are read from the verified `RWAEscrow`, `RWAEscrowRouter` and `RWAEscrowRateManager` sources. Failures are best-effort and never block the governance alert.
 
 ### 5e-2. Infinifi Outland Context (`utils/llm/infinifi_outland_context.py`)
 
 Onboarding a chain to Infinifi's cross-chain Outland spans several contracts whose calls carry no reviewable facts on their own. For Infinifi mainnet alerts, the adapter:
 
-1. Names the `FarmRegistry.addFarms` / `removeFarms` farm type from the `FarmTypes` library (`0 PROTOCOL`, `1 LIQUID`, `2 MATURITY`). No RPC.
+1. Names the `FarmRegistry.addFarms` / `removeFarms` farm type from the `FarmTypes` library (`0 PROTOCOL`, `1 LIQUID`, `2 MATURITY`). For added MATURITY farms it reads `duration()` and `perpetual()`. A perpetual farm's `maturity()` is `now + duration`, a rolling notice period rather than a lock-up date; the old note said principal was "locked until maturity".
 2. For `Accounting.setOracle(asset, oracle)`, reads the oracle's `price()` and the asset's decimals and states the whole-token value in the reference unit (`price * 10^decimals / 1e36`, the `IOracle` convention under which USDC is ~1e30).
 3. For `PortalHub.setVault(vault)`, reads the vault's `chainId()` and the hub's registered chains, and says whether the call adds a chain or replaces a live vault.
 4. For connector calls naming a destination chain (`enableChainAsset`, `setCctpDomain`, …), reads `chainConfig(chainId)` and states whether the route can send. An unset peer/gas limit means `sendTokens` reverts until a separate `setConfiguration` — the call that sets the destination-side recipient of bridged funds — executes.
+5. Decodes `Connector.govReceive(chainId, message)` and `PortalHub.processMessage(chainId, message, connector)`. The message layout is `type | chainId | nonce | payload` (`OutlandMsgCodec`). `govReceive` queues a message as if the bridge had delivered it; it is gated by `PROTOCOL_PARAMETERS` (the 1-hour Short Timelock), although its natspec asks for a 1-day timelock. An assets-update payload is shown against the source chain's `OutlandVault.portalAssetsReport()`, because executing it mints or burns OutlandFarm shares, booking profit or loss on mainnet. The 21/09 and 22/09 alerts injected all-zero assets updates for Base, and their reports could not read them.
 
 Contracts are identified by the functions their verified ABI exposes (`utils/llm/abi_exposure.py`, following EIP-1967), not by hard-coded addresses. Failures are best-effort and never block the governance alert.
 
@@ -544,7 +546,7 @@ utils/llm/
 ├── base.py                  # Abstract LLMProvider base class + LLMError
 ├── credits.py               # Venice low-balance alert, run at the start of Safe/timelock monitors
 ├── factory.py               # Provider factory with env-based config + singleton
-├── infinifi_context.py      # Infinifi adapter: escrow → farm, accounting asset, whitelisted tokens
+├── infinifi_context.py      # Infinifi adapter: escrow → farm, custody, setRate APR, whitelist calls
 ├── openai_compat.py         # OpenAI-compatible provider (Venice, OpenAI, etc.)
 ├── protocol_context.py      # Registry fanning one call out to every protocol adapter
 ├── report.py                # Gist report: metadata header + deterministic call flow + analysis
