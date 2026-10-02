@@ -46,7 +46,7 @@ EXEMPT_UPDATED_TOPIC = "0x" + keccak(text="SupplyCapExemptUpdated(address,bool)"
 # Starting the scan just before keeps the log query small.
 EXEMPT_HISTORY_FROM_BLOCK = 26_050_000
 
-_LCC_GETTERS = {"getAccount", "assetConfig", "riskConfig", "totals"}
+_LCC_GETTERS = {"getAccount", "assetConfig", "riskConfig", "totals", "currentEpoch", "getEpochState", "syncState"}
 
 
 @dataclass(frozen=True)
@@ -87,6 +87,9 @@ class LCCBounceContext:
     exit_in_progress: bool
     min_deposit_margin_raw: int
     vault_active_commitment_raw: int
+    # Vault phase: bounceCommitment reverts InvalidPhase while either holds.
+    auction_pending: bool = False
+    call_unsettled: bool = False
 
     @property
     def addresses(self) -> list[str]:
@@ -114,8 +117,15 @@ class LCCBounceContext:
     def blocker(self) -> str:
         """Why the call would revert against the account's current state, or "" when it would not.
 
-        Mirrors the checks at the top of ``LCCVault.bounceCommitment``.
+        Mirrors the checks at the top of ``LCCVault.bounceCommitment``, vault phase first.
         """
+        if self.auction_pending:
+            return "a shortfall auction is pending settlement (InvalidPhase); it can succeed once that settles"
+        if self.call_unsettled:
+            return (
+                "this epoch's capital call is open and its slash is not finalized (InvalidPhase); it can succeed "
+                "once the call settles"
+            )
         if self.exit_in_progress:
             return "the user's exit is in progress (ExitInProgress)"
         if self.pending_margin_raw or self.pending_commitment_raw:
@@ -405,9 +415,13 @@ def _read_lcc_bounces(chain_id: int, target: str, calls: list[DecodedCall]) -> l
         batch.add(vault.functions.assetConfig())
         batch.add(vault.functions.riskConfig())
         batch.add(vault.functions.totals())
+        batch.add(vault.functions.syncState())
+        batch.add(vault.functions.currentEpoch())
         for user, _ in bounces:
             batch.add(vault.functions.getAccount(user))
-        asset_config, risk_config, totals, *accounts = client.execute_batch(batch)
+        asset_config, risk_config, totals, sync_state, current_epoch, *accounts = client.execute_batch(batch)
+    # ILCCVault.EpochState: callOpened (0), ..., slashFinalized (8)
+    epoch_state = vault.functions.getEpochState(int(current_epoch)).call()
 
     # ILCCVault.AssetConfig: (marginAsset, fundingAsset, usd3, notificationVault, marginOracle, treasury)
     margin = fetch_token_unit(chain_id, str(asset_config[0]))
@@ -436,6 +450,9 @@ def _read_lcc_bounces(chain_id: int, target: str, calls: list[DecodedCall]) -> l
                 min_deposit_margin_raw=int(risk_config[3]),
                 # ILCCVault.Totals: (activeMargin, activeCommitment, pendingMargin, pendingCommitment)
                 vault_active_commitment_raw=int(totals[1]),
+                # ILCCVault.SyncState: (..., pendingAuctionEpochPlusOne (3))
+                auction_pending=int(sync_state[3]) != 0,
+                call_unsettled=bool(epoch_state[0]) and not bool(epoch_state[8]),
             )
         )
     return contexts

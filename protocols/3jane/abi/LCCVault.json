@@ -45,6 +45,19 @@
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "currentEpoch",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "address",
@@ -136,6 +149,92 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "getEpochState",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "bool",
+            "name": "callOpened",
+            "type": "bool"
+          },
+          {
+            "internalType": "uint256",
+            "name": "commitmentDenominator",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "callAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "marginAtCallOpen",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "fundedAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "marginReleased",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "fundedUsersRemainingMargin",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "fundedUsersRemainingCommitment",
+            "type": "uint256"
+          },
+          {
+            "internalType": "bool",
+            "name": "slashFinalized",
+            "type": "bool"
+          },
+          {
+            "internalType": "bool",
+            "name": "slashDisabledByShutdown",
+            "type": "bool"
+          },
+          {
+            "internalType": "uint256",
+            "name": "slashedMargin",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "returnPool",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "returnCommitment",
+            "type": "uint256"
+          }
+        ],
+        "internalType": "struct ILCCVault.EpochState",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "riskConfig",
     "outputs": [
@@ -173,6 +272,41 @@
           }
         ],
         "internalType": "struct ILCCVault.RiskConfig",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "syncState",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint64",
+            "name": "lastActivationFolded",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "lastMaturityFolded",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "finalizedCallPrefix",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "pendingAuctionEpochPlusOne",
+            "type": "uint64"
+          }
+        ],
+        "internalType": "struct ILCCVault.SyncState",
         "name": "",
         "type": "tuple"
       }

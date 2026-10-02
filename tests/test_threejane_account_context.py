@@ -104,6 +104,14 @@ def _client(batch_results: list, code: bytes = b"", logs: list | None = None) ->
     return client
 
 
+# ILCCVault.SyncState with no pending auction, and an EpochState builder (callOpened 0, slashFinalized 8).
+_IDLE_SYNC = (0, 0, 0, 0)
+
+
+def _epoch_state(call_opened: bool = False, slash_finalized: bool = False) -> tuple:
+    return (call_opened, 0, 0, 0, 0, 0, 0, 0, slash_finalized, False, 0, 0, 0)
+
+
 def _exempt_log(account: str, exempt: bool, block: int, tx_hash: str) -> dict:
     return {
         "topics": [bytes.fromhex(account_context.EXEMPT_UPDATED_TOPIC[2:]), bytes(12) + bytes.fromhex(account[2:])],
@@ -173,6 +181,14 @@ class TestLCCBounce(unittest.TestCase):
         for address in (VAULT, USER, USDC.address, WAEUSDC.address):
             self.assertIn(f"https://etherscan.io/address/{address}", report)
         self.assertIn("`499,999.999986 USDC`", report)
+
+    def test_phase_blockers_come_first(self) -> None:
+        """bounceCommitment reverts InvalidPhase during a pending auction or an unsettled call."""
+        self.assertIn("shortfall auction is pending", _bounce(auction_pending=True).blocker())
+        unsettled = _bounce(call_unsettled=True)
+        self.assertIn("capital call is open and its slash is not finalized", unsettled.blocker())
+        self.assertIn("would REVERT", unsettled.effect_line())
+        self.assertEqual(unsettled.vault_share_line(), "")
 
     def test_labels_name_the_assets_by_role(self) -> None:
         labels = _bounce().labels
@@ -344,7 +360,8 @@ class TestReaders(unittest.TestCase):
         asset_config = (WAEUSDC.address, USDC.address, USD3_ADDRESS, OTHER, OTHER, OTHER)
         risk_config = (10**13, 10**12, 2000, 1_585_000_000, 10000, 0)
         totals = (575_342_153_334, 9_084_283_497_207, 0, 0)
-        client = _client([asset_config, risk_config, totals, account])
+        client = _client([asset_config, risk_config, totals, _IDLE_SYNC, 42, account])
+        client.get_contract.return_value.functions.getEpochState.return_value.call.return_value = _epoch_state()
         units = {USDC.address: USDC, WAEUSDC.address: WAEUSDC}
         with (
             patch.object(account_context, "exposes", return_value=True),
@@ -355,10 +372,28 @@ class TestReaders(unittest.TestCase):
 
         self.assertEqual(contexts, [_bounce()])
 
+    def test_lcc_bounce_reads_the_vault_phase(self) -> None:
+        account = (MARGIN, COMMITMENT, 0, 0, 0, 0, 0, 0, 0, False, 0, False, False, 0)
+        asset_config = (WAEUSDC.address, USDC.address, USD3_ADDRESS, OTHER, OTHER, OTHER)
+        client = _client([asset_config, (0, 0, 0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 43), 42, account])
+        epoch_call = client.get_contract.return_value.functions.getEpochState
+        epoch_call.return_value.call.return_value = _epoch_state(call_opened=True)
+        units = {USDC.address: USDC, WAEUSDC.address: WAEUSDC}
+        with (
+            patch.object(account_context, "exposes", return_value=True),
+            patch.object(account_context.ChainManager, "get_client", return_value=client),
+            patch.object(account_context, "fetch_token_unit", side_effect=lambda _chain, address: units[address]),
+        ):
+            (context,) = resolve_account_contexts(1, VAULT, [_bounce_call()])
+        self.assertTrue(context.auction_pending)
+        self.assertTrue(context.call_unsettled)
+        epoch_call.assert_called_with(42)
+
     def test_exit_claimed_is_not_in_progress(self) -> None:
         account = (MARGIN, COMMITMENT, 0, 0, 0, 0, 0, 0, 0, True, 0, True, False, 0)
         asset_config = (WAEUSDC.address, USDC.address, USD3_ADDRESS, OTHER, OTHER, OTHER)
-        client = _client([asset_config, (0, 0, 0, 0, 0, 0), (0, 0, 0, 0), account])
+        client = _client([asset_config, (0, 0, 0, 0, 0, 0), (0, 0, 0, 0), _IDLE_SYNC, 42, account])
+        client.get_contract.return_value.functions.getEpochState.return_value.call.return_value = _epoch_state()
         units = {USDC.address: USDC, WAEUSDC.address: WAEUSDC}
         with (
             patch.object(account_context, "exposes", return_value=True),
