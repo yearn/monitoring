@@ -43,7 +43,7 @@ STALE_DAYS = int(os.getenv("TIMELOCK_STALE_DAYS", "7"))
 LOOKBACK_DAYS = int(os.getenv("TIMELOCK_STALE_LOOKBACK_DAYS", "180"))
 PAGE_SIZE = 1000
 BATCH_SIZE = 50
-# A large batch lists only its first calls, so one operation always fits in a Telegram message.
+# Limit call details as well as their total character budget.
 MAX_CALLS_SHOWN = 10
 DAY = 86400
 
@@ -174,6 +174,24 @@ def _call_line(chain_id: int, target: str, data: str, explorer: str | None) -> s
     return f"- {link} `{function}`"
 
 
+def _format_calls(operation: Operation, budget: int) -> str:
+    """Fit complete call lines and an omitted-call notice into the available budget."""
+    lines: list[str] = []
+    chain_id = operation.timelock.chain_id
+    explorer = EXPLORER_URLS.get(chain_id)
+    for target, data in operation.calls[:MAX_CALLS_SHOWN]:
+        line = _call_line(chain_id, target, data, explorer)
+        remaining = len(operation.calls) - len(lines) - 1
+        notice = f"\n- … and {remaining} more calls (see the schedule tx)" if remaining else ""
+        if len("\n".join([*lines, line])) + len(notice) > budget:
+            break
+        lines.append(line)
+    remaining = len(operation.calls) - len(lines)
+    if remaining:
+        lines.append(f"- … and {remaining} more calls (see the schedule tx)")
+    return "\n".join(lines)
+
+
 def format_operation(operation: Operation, ready_at: int, now: int) -> str:
     """Alert text for one stale operation."""
     chain_id = operation.timelock.chain_id
@@ -185,17 +203,15 @@ def format_operation(operation: Operation, ready_at: int, now: int) -> str:
         if explorer
         else operation.transaction_hash
     )
-    shown = operation.calls[:MAX_CALLS_SHOWN]
-    calls = "\n".join(_call_line(chain_id, target, data, explorer) for target, data in shown)
-    if len(operation.calls) > len(shown):
-        calls += f"\n- … and {len(operation.calls) - len(shown)} more calls (see the schedule tx)"
-    return (
+    prefix = (
         f"*{operation.timelock.label}* (chain {chain_id}): {timelock}\n"
         f"Operation: `{operation.operation_id}`\n"
         f"Scheduled {_date(operation.scheduled_at)} in {tx}\n"
         f"Ready since {_date(ready_at)} ({(now - ready_at) // DAY} days)\n"
-        f"Calls:\n{calls}"
+        "Calls:\n"
     )
+    budget = MAX_MESSAGE_LENGTH - len(_HEADER) - len(_footer()) - len(prefix)
+    return prefix + _format_calls(operation, budget)
 
 
 _HEADER = "⏳ *Timelock operations ready but not executed*\n\n"
@@ -219,6 +235,8 @@ def chunk_entries(entries: list[tuple[str, str]]) -> list[list[tuple[str, str]]]
     chunks: list[list[tuple[str, str]]] = []
     size = 0
     for entry in entries:
+        if len(entry[1]) > budget:
+            raise ValueError(f"Stale-operation alert {entry[0]} exceeds the {budget}-character entry budget")
         added = len(entry[1]) + (len(_SEPARATOR) if chunks and chunks[-1] else 0)
         if not chunks or (chunks[-1] and size + added > budget):
             chunks.append([])

@@ -96,6 +96,36 @@ class TestFormatOperation(unittest.TestCase):
         self.assertIn("(39 days)", text)
         self.assertIn(f"[{RATE_MANAGER}](https://etherscan.io/address/{RATE_MANAGER}) `setRate(address,uint256)`", text)
 
+    @patch("utils.calldata.decoder._resolve_signature_via_abi")
+    def test_long_signatures_fit_with_an_explicit_omission_notice(self, resolve: MagicMock) -> None:
+        signature = "configure((" + ",".join(["uint256"] * 32) + "))"
+        resolve.return_value = signature
+        operation = Operation(SHORT, "0x" + "11" * 32, NOW, "0x" + "ab" * 32, ((RATE_MANAGER, "0x12345678"),) * 10)
+        text = format_operation(operation, NOW - 10 * DAY, NOW)
+        message = stale_operations._HEADER + text + stale_operations._footer()
+
+        self.assertLessEqual(len(message), stale_operations.MAX_MESSAGE_LENGTH)
+        shown = text.count(f"`{signature}`")
+        self.assertGreater(shown, 0)
+        self.assertLess(shown, len(operation.calls))
+        self.assertIn(f"… and {len(operation.calls) - shown} more calls (see the schedule tx)", text)
+        self.assertIn(operation.operation_id, text)
+        self.assertIn(operation.transaction_hash, text)
+
+    @patch("utils.calldata.decoder._resolve_signature_via_abi")
+    def test_a_single_oversized_call_is_omitted_without_breaking_markdown(self, resolve: MagicMock) -> None:
+        signature = "configure((" + ",".join(["uint256"] * 600) + "))"
+        resolve.return_value = signature
+        operation = Operation(SHORT, "0x" + "11" * 32, NOW, "0x" + "ab" * 32, ((RATE_MANAGER, "0x12345678"),))
+        text = format_operation(operation, NOW - 10 * DAY, NOW)
+        message = stale_operations._HEADER + text + stale_operations._footer()
+
+        self.assertLessEqual(len(message), stale_operations.MAX_MESSAGE_LENGTH)
+        self.assertNotIn(signature, text)
+        self.assertIn("… and 1 more calls (see the schedule tx)", text)
+        self.assertIn(_operation().operation_id, text)
+        self.assertEqual(text.count("`") % 2, 0)
+
 
 class TestMain(unittest.TestCase):
     @patch.object(stale_operations, "write_last_value_to_file")
@@ -137,6 +167,15 @@ class TestCacheKey(unittest.TestCase):
 
 
 class TestChunking(unittest.TestCase):
+    def test_an_entry_at_the_exact_limit_fits(self) -> None:
+        budget = stale_operations.MAX_MESSAGE_LENGTH - len(stale_operations._HEADER) - len(stale_operations._footer())
+        entry = ("exact-limit", "x" * budget)
+        self.assertEqual(stale_operations.chunk_entries([entry]), [[entry]])
+
+    def test_an_oversized_entry_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "oversized-key"):
+            stale_operations.chunk_entries([("oversized-key", "x" * stale_operations.MAX_MESSAGE_LENGTH)])
+
     def test_entries_are_split_under_the_telegram_limit(self) -> None:
         entries = [(f"k{i}", "x" * 1500) for i in range(5)]
         chunks = stale_operations.chunk_entries(entries)
