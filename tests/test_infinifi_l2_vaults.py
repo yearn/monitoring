@@ -3,7 +3,15 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 from protocols.infinifi import l2_vaults
-from protocols.infinifi.l2_vaults import VaultReport, check_report, drop_message, fetch_reports, stale_message
+from protocols.infinifi.l2_vaults import (
+    VaultReport,
+    check_report,
+    drop_message,
+    fetch_l2_farm_values,
+    fetch_reports,
+    mismatch_message,
+    stale_message,
+)
 
 VAULT = "0x4197F2ADFCe9fDeB36B02e96737Ddf646C841e45"
 NOW = 1_791_000_000
@@ -51,6 +59,46 @@ class TestStaleMessage(unittest.TestCase):
         self.assertIsNone(stale_message(_report("14.00", hours_ago=500, chain_id=143), NOW))
 
 
+class TestMismatchMessage(unittest.TestCase):
+    def test_injected_zero_against_funded_l2_alerts(self) -> None:
+        text = mismatch_message(_report("0"), Decimal("76371.81"))
+        assert text is not None
+        self.assertIn("Booked on mainnet: $0.00", text)
+        self.assertIn("On the L2 per infiniFi's API: $76,371.81", text)
+        self.assertIn("(100.0%)", text)
+
+    def test_report_lag_is_quiet(self) -> None:
+        # 02/10: mainnet 76,368.80 vs API 76,371.81.
+        self.assertIsNone(mismatch_message(_report("76368.80"), Decimal("76371.81")))
+
+    def test_dust_difference_is_quiet(self) -> None:
+        self.assertIsNone(mismatch_message(_report("14.00", chain_id=143), Decimal("23.01")))
+
+    def test_overstated_mainnet_alerts(self) -> None:
+        self.assertIsNotNone(mismatch_message(_report("100000"), Decimal("50000")))
+
+
+class TestFetchL2FarmValues(unittest.TestCase):
+    @patch.object(l2_vaults, "fetch_json")
+    def test_sums_l2_farms_per_chain(self, fetch: MagicMock) -> None:
+        fetch.return_value = {
+            "data": {
+                "farms": [
+                    {"chain": "MAINNET", "isL2LiquidityFarm": False, "assetsNormalized": 2_000_000},
+                    {"chain": "BASE", "isL2LiquidityFarm": True, "assetsNormalized": 76371.813053},
+                    {"chain": "BASE", "isL2LiquidityFarm": True, "assetsNormalized": 10},
+                    {"chain": "MONAD", "isL2LiquidityFarm": True, "assetsNormalized": 23.006463},
+                    {"chain": "NEWCHAIN", "isL2LiquidityFarm": True, "assetsNormalized": 5},
+                ]
+            }
+        }
+        self.assertEqual(fetch_l2_farm_values(), {8453: Decimal("76381.813053"), 143: Decimal("23.006463")})
+
+    @patch.object(l2_vaults, "fetch_json", return_value=None)
+    def test_api_failure_skips_comparison(self, _fetch: MagicMock) -> None:
+        self.assertIsNone(fetch_l2_farm_values())
+
+
 class TestCheckReport(unittest.TestCase):
     @patch.object(l2_vaults, "write_last_value_with_timestamp_to_file")
     @patch.object(l2_vaults, "send_alert")
@@ -63,6 +111,16 @@ class TestCheckReport(unittest.TestCase):
         written = {call.args[1]: call.args[2] for call in write.call_args_list}
         self.assertEqual(written[f"infinifi_l2_vault_value_{VAULT.lower()}"], "0")
         self.assertEqual(written[f"infinifi_l2_vault_stale_{VAULT.lower()}"], 0)
+        self.assertNotIn(f"infinifi_l2_vault_mismatch_{VAULT.lower()}", written)
+
+    @patch.object(l2_vaults, "write_last_value_with_timestamp_to_file")
+    @patch.object(l2_vaults, "send_alert")
+    @patch.object(l2_vaults, "get_fresh_last_value_for_key_from_file")
+    def test_mismatch_alerts_with_l2_value(self, fresh: MagicMock, send: MagicMock, _write: MagicMock) -> None:
+        fresh.side_effect = lambda _file, key, _stale: "0" if "_value_" in key else 0
+        check_report(_report("0"), NOW, Decimal("76371.81"))
+        send.assert_called_once()
+        self.assertIn("L2 Vault Mismatch", send.call_args.args[0].message)
 
     @patch.object(l2_vaults, "write_last_value_with_timestamp_to_file")
     @patch.object(l2_vaults, "send_alert")

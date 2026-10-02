@@ -13,7 +13,11 @@ For every chain the PortalHub lists, this script alerts (MEDIUM) when:
   (default 50%) since the previous run, including a fall to 0, and the fall is at
   least ``INFINIFI_L2_VAULT_MIN_VALUE`` USD (default 10,000);
 - the vault has not received a report for ``INFINIFI_L2_VAULT_STALE_HOURS``
-  (default 48h) while it holds at least the minimum value.
+  (default 48h) while it holds at least the minimum value;
+- the value mainnet has booked differs from what infiniFi's API shows on the L2
+  (its ``isL2LiquidityFarm`` farms for that chain) by more than
+  ``INFINIFI_L2_VAULT_MISMATCH_THRESHOLD`` (default 25%) and the minimum value.
+  This catches a wrong or injected report directly, without waiting for a drop.
 
 The baseline is keyed by vault address, so a planned migration, where the hub
 is pointed at a new vault, starts a fresh baseline and does not alert.
@@ -34,6 +38,7 @@ from utils.cache import (
 )
 from utils.chains import Chain
 from utils.config import Config
+from utils.http_client import fetch_json
 from utils.logger import get_logger
 from utils.web3_wrapper import ChainManager, Web3Client
 
@@ -46,6 +51,11 @@ EXPLORER = "https://etherscan.io/address"
 DROP_THRESHOLD = Decimal(Config.get_env("INFINIFI_L2_VAULT_DROP_THRESHOLD", "0.5") or "0.5")
 MIN_VALUE = Decimal(Config.get_env("INFINIFI_L2_VAULT_MIN_VALUE", "10000") or "10000")
 STALE_HOURS = Config.get_env_int("INFINIFI_L2_VAULT_STALE_HOURS", 48)
+MISMATCH_THRESHOLD = Decimal(Config.get_env("INFINIFI_L2_VAULT_MISMATCH_THRESHOLD", "0.25") or "0.25")
+
+API_URL = "https://api.infinifi.xyz/api/protocol/data"
+# The API names farm chains; Monad is not in utils.chains.Chain.
+API_CHAIN_IDS = {"BASE": 8453, "MONAD": 143}
 
 _HUB_ABI = [
     {
@@ -112,6 +122,43 @@ def fetch_reports(client: Web3Client) -> list[VaultReport]:
     return reports
 
 
+def fetch_l2_farm_values() -> dict[int, Decimal] | None:
+    """USD in infiniFi's L2 farms per chain id, from its API, or None when the API is unavailable."""
+    response = fetch_json(API_URL, timeout=10)
+    farms = (response or {}).get("data", {}).get("farms")
+    if not isinstance(farms, list):
+        logger.warning("infiniFi API returned no farms; skipping the L2 comparison")
+        return None
+    values: dict[int, Decimal] = {}
+    for farm in farms:
+        if not farm.get("isL2LiquidityFarm"):
+            continue
+        chain_id = API_CHAIN_IDS.get(str(farm.get("chain", "")).upper())
+        if chain_id is None:
+            logger.warning("infiniFi API L2 farm %s on unknown chain %s", farm.get("name"), farm.get("chain"))
+            continue
+        values[chain_id] = values.get(chain_id, Decimal(0)) + Decimal(str(farm.get("assetsNormalized", 0)))
+    return values
+
+
+def mismatch_message(report: VaultReport, l2_value: Decimal) -> str | None:
+    """Alert text when mainnet's booked value and the API's L2 value disagree too much, else None."""
+    difference = report.value - l2_value
+    larger = max(report.value, l2_value)
+    if abs(difference) < MIN_VALUE or abs(difference) <= MISMATCH_THRESHOLD * larger:
+        return None
+    return (
+        "⚠️ *Infinifi L2 Vault Mismatch*\n\n"
+        f"Chain: {_chain_name(report.chain_id)}\n"
+        f"Vault: {_link(report.vault)}\n"
+        f"Booked on mainnet: ${report.value:,.2f} (last assets update {_time(report.last_update)})\n"
+        f"On the L2 per infiniFi's API: ${l2_value:,.2f}\n"
+        f"Difference: ${difference:,.2f} ({abs(difference) / larger:.1%})\n\n"
+        "Mainnet's figure changes only through executed assets updates, including ones injected with "
+        "govReceive. Check the latest update against the L2."
+    )
+
+
 def drop_message(report: VaultReport, previous: Decimal) -> str | None:
     """Alert text when the vault's value fell too far since the previous run, else None."""
     fall = previous - report.value
@@ -153,8 +200,8 @@ def _alert_once(cache_key: str, message: str | None) -> None:
     write_last_value_with_timestamp_to_file(cache_filename, cache_key, 1)
 
 
-def check_report(report: VaultReport, now: int) -> None:
-    """Compare a vault's report with the previous run and its update age, and alert on a breach."""
+def check_report(report: VaultReport, now: int, l2_value: Decimal | None = None) -> None:
+    """Compare a vault's report with the previous run, its update age and the L2, and alert on a breach."""
     value_key = f"{PROTOCOL}_l2_vault_value_{report.vault.lower()}"
     previous = Decimal(
         str(get_fresh_last_value_for_key_from_file(cache_filename, value_key, HOURLY_CACHE_STALE_AFTER_SECONDS))
@@ -165,12 +212,16 @@ def check_report(report: VaultReport, now: int) -> None:
         send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
     write_last_value_with_timestamp_to_file(cache_filename, value_key, str(report.value))
     _alert_once(f"{PROTOCOL}_l2_vault_stale_{report.vault.lower()}", stale_message(report, now))
+    if l2_value is not None:
+        _alert_once(f"{PROTOCOL}_l2_vault_mismatch_{report.vault.lower()}", mismatch_message(report, l2_value))
 
 
 def main() -> None:
     client = ChainManager.get_client(Chain.MAINNET)
     now = int(datetime.now(UTC).timestamp())
+    l2_values = fetch_l2_farm_values()
     for report in fetch_reports(client):
+        l2_value = None if l2_values is None else l2_values.get(report.chain_id, Decimal(0))
         logger.info(
             "L2 vault %s %s: %s USD, last update %s",
             _chain_name(report.chain_id),
@@ -178,7 +229,7 @@ def main() -> None:
             f"{report.value:,.2f}",
             _time(report.last_update),
         )
-        check_report(report, now)
+        check_report(report, now, l2_value)
 
 
 if __name__ == "__main__":

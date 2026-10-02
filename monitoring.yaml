@@ -191,7 +191,7 @@ protocols:
       - name: "Junior TVL Coverage"
         description: "Junior TVL <50% of risky farm exposure; re-armed after a monitoring gap >3 hours"
       - name: "L2 Vault Reports"
-        description: "Per-chain L2 vault (OutlandVault) value falls >50% (and >$10k) since the previous run, or no assets update for >48h while holding >$10k"
+        description: "Per-chain L2 vault (OutlandVault) value falls >50% (and >$10k) since the previous run, differs >25% (and >$10k) from the API's L2 farm value, or no assets update for >48h while holding >$10k"
       - name: "Timelock"
         description: "Longtimelock and Shorttimelock events via Envio"
 
