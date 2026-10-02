@@ -413,9 +413,12 @@ protocols:
     cadence: "Hourly"
     tasks:
       - protocols/timelock/timelock_alerts.py
+      - protocols/timelock/stale_operations.py
     monitors:
       - name: "Timelock Events"
         description: "CallScheduled/ProposalQueued/QueueTransaction/StartVote/ProposalScheduled events across monitored timelocks via Envio"
+      - name: "Stale Ready Operations"
+        description: "Daily: TimelockController operations ready >7 days but neither executed nor cancelled (state read on-chain via getTimestamp); one silent alert per operation"
 
   unibtc:
     display_name: "Bedrock uniBTC"
