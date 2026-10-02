@@ -6,7 +6,6 @@ This folder contains monitoring scripts for the Infinifi protocol.
 
 - `main.py`: Monitors protocol reserves, backing, and liquid USDC reserves.
   Run this script hourly using github actions.
-- `escrow_valuation.py`: Compares each RWAEscrowRouter's reported `totalAssets` with the value of what it holds. Scheduling is paused pending investigation.
 - `l2_vaults.py`: Watches the value each L2 vault (OutlandVault) reports for its chain. Runs hourly.
 
 [Risk Score Report](https://github.com/yearn/risk-score/blob/master/reports/report/infinifi.md)
@@ -22,26 +21,22 @@ This folder contains monitoring scripts for the Infinifi protocol.
 - **Farm Activation**: Alert if a farm previously at `0` cached ratio moves above `FARM_RATIO_ACTIVATION_ALERT_THRESHOLD` of total TVL.
 - **Junior TVL Below Risky Exposure**: Alert if junior TVL (locked iUSD) covers less than 50% of risky farm TVL. Risky farms are all farms NOT in the `SAFE_FARM_IDENTIFIERS` whitelist.
 
-## Escrow Valuation Gap
+## RWA Monitoring Scope
 
-**Paused since 2026-10-02** while we investigate Midas valuation and possible cross-chain
-claims. The task is disabled in `automation/jobs.yaml` and omitted from active monitoring
-metadata. Re-enable it after the valuation is verified.
+Underlying RWA valuation and settlement are delegated to infiniFi. We monitor its reported
+backing, liquidity, redemption pressure, farm allocations, and junior coverage. These checks
+depend on infiniFi's reported asset values; they do not independently verify the off-chain
+portfolio or unpaid settlement claims.
 
-`escrow_valuation.py` checks every farm in the FarmRegistry whose escrow is an `RWAEscrowRouter`. A router's `totalAssets` is a stored figure: the rate manager raises it by a governance-set annual rate on each harvest, and nothing ties it to the tokens the router holds. The script values the holdings independently:
+The Midas escrow valuation monitor was removed on 2026-10-02. Wallet balances and the latest
+published NAV can omit accrued yield and deferred settlement entitlements. A discrepancy with
+infiniFi's carrying value is therefore insufficient evidence of impairment. Midas settlement
+terms would need to be verified for each position before such a comparison could support an alert.
 
-- **Stablecoins** (the escrow's asset, USDC, DAI, USDT) at par.
-- **Midas mTokens** at Midas's NAV feed. The router's whitelisted Midas vaults give each mToken and its data feed. The script reads the feed under the vault's adjusted ("PriceLowered", −7%) aggregator, not the adjusted price the redemption vaults pay.
-- **Pending Midas requests** opened by the router: redemptions at NAV, deposits at their USD amount. They are found in the vault's logs whose second indexed topic is the router.
-
-Every on-chain read and log query uses the same block, including infiniFi's total assets, so a redemption settling during the run cannot create a false gap. Discovery includes historical whitelist targets: disabling calls to a vault or token does not remove its remaining holdings or pending claims from the valuation.
-
-Alerts:
-
-- **Valuation gap**: reported `totalAssets` exceeds the holdings' value by more than `INFINIFI_ESCROW_GAP_THRESHOLD` (default `0.03`, 3% of the reported value). The alert is MEDIUM, and becomes HIGH when the gap is also more than `INFINIFI_ESCROW_GAP_TVL_HIGH_THRESHOLD` (default `0.05`) of infiniFi's total assets (`Accounting.totalAssetsValue()`). HIGH triggers the emergency dispatch below. An escalation from MEDIUM to HIGH alerts again.
-- **Unpriced holdings** (MEDIUM): the router holds a token the script cannot price. The gap check is skipped until every holding is priced.
-
-Plain `RWAEscrow`s send funds to an off-chain receiver, so there is nothing on-chain to compare them with; they are skipped. Background: on 29/09/2026 the mGLOBAL router's position was converted to mGLO at Midas's lowered redemption price, leaving the router about $1.67M above Midas NAV.
+infiniFi's [slashing mechanics](https://docs.infinifi.xyz/slashing-mechanics) describe locked
+iUSD as the first-loss tranche protecting senior siUSD until that junior capital is depleted.
+The junior coverage alert tracks reported locked capital relative to risky farm exposure;
+it does not establish the recoverable value of any individual RWA position.
 
 ## L2 Vault Reports
 
