@@ -56,8 +56,6 @@ profiles:
       - { name: "rtoken",                 script: protocols/rtoken/monitor_rtoken.py }
       - { name: "lrt-pegs-origin",        script: protocols/lrt-pegs/origin_protocol.py }
       - { name: "infinifi",               script: protocols/infinifi/main.py }
-      # Paused 2026-10-02 pending investigation of Midas valuation and cross-chain claims.
-      - { name: "infinifi-escrow-valuation", script: protocols/infinifi/escrow_valuation.py, enabled: false }
       - { name: "infinifi-l2-vaults", script: protocols/infinifi/l2_vaults.py }
       - { name: "usdai",                  script: protocols/usdai/main.py }
       - { name: "usdai-large-mints",      script: protocols/usdai/large_mints.py }
