@@ -6,7 +6,7 @@ This folder contains monitoring scripts for the Infinifi protocol.
 
 - `main.py`: Monitors protocol reserves, backing, and liquid USDC reserves.
   Run this script hourly using github actions.
-- `escrow_valuation.py`: Compares each RWAEscrowRouter's reported `totalAssets` with the value of what it holds. Runs hourly.
+- `escrow_valuation.py`: Compares each RWAEscrowRouter's reported `totalAssets` with the value of what it holds. Scheduling is paused pending investigation.
 - `l2_vaults.py`: Watches the value each L2 vault (OutlandVault) reports for its chain. Runs hourly.
 
 [Risk Score Report](https://github.com/yearn/risk-score/blob/master/reports/report/infinifi.md)
@@ -23,6 +23,10 @@ This folder contains monitoring scripts for the Infinifi protocol.
 - **Junior TVL Below Risky Exposure**: Alert if junior TVL (locked iUSD) covers less than 50% of risky farm TVL. Risky farms are all farms NOT in the `SAFE_FARM_IDENTIFIERS` whitelist.
 
 ## Escrow Valuation Gap
+
+**Paused since 2026-10-02** while we investigate Midas valuation and possible cross-chain
+claims. The task is disabled in `automation/jobs.yaml` and omitted from active monitoring
+metadata. Re-enable it after the valuation is verified.
 
 `escrow_valuation.py` checks every farm in the FarmRegistry whose escrow is an `RWAEscrowRouter`. A router's `totalAssets` is a stored figure: the rate manager raises it by a governance-set annual rate on each harvest, and nothing ties it to the tokens the router holds. The script values the holdings independently:
 
