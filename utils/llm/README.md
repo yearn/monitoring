@@ -113,9 +113,11 @@ Distinct mapping keys are kept: two `setCap(address,uint256)` calls for differen
 Simulates the transaction against current on-chain state to get:
 
 - **Success/failure** status and gas used
-- **Token transfers** (ERC-20 balance changes). The explainer swaps each transfer's symbol for the token's own on-chain `symbol()` (`_with_onchain_symbols`): Tenderly lowercases symbols it has no curated entry for (`waethusdc` for waEthUSDC), and the model copied them into alerts verbatim
+- **Token transfers** (ERC-20 balance changes). The explainer swaps each transfer's symbol for the token's own on-chain `symbol()` (`_with_onchain_symbols`): Tenderly lowercases symbols it has no curated entry for (`waethusdc` for waEthUSDC), and the model copied them into alerts verbatim. Transfer endpoints are labelled too (`_label_simulation_counterparties`, up to `MAX_SIMULATION_LABEL_LOOKUPS` distinct addresses) and added to the Address Links section. An address that appears only in the simulation, such as a fee receiver, used to reach the prompt as raw hex; a CAP harvest report then told reviewers to "confirm" a recipient that was simply cUSD's FeeAuction
 - **State changes** (storage slot diffs)
 - **Emitted events** (decoded log entries)
+
+Batch prompts render the first `MAX_PROMPT_SIMULATIONS` successful calls in full. Later calls keep their token transfers and drop only state changes and events, which are what made very large batches overflow the context. Dropping those calls outright hid the last two calls of a 10-call CAP batch, so the report never saw the OndoHolder deposit route into rUSDY.
 
 Requires `TENDERLY_API_KEY`. Simulation failure is non-blocking — the pipeline continues with the decoded calldata only.
 
