@@ -256,6 +256,7 @@ class TestOutlandMessage(unittest.TestCase):
         contract.portal.return_value.call.return_value = HUB
         contract.getVault.return_value.call.return_value = BASE_VAULT
         contract.portalAssetsReport.return_value.call.return_value = (80 * 10**18, 0, 0, 0)
+        contract.getMinDelay.return_value.call.return_value = 86400
         with (
             patch.object(infinifi_outland_context, "exposes", return_value=True),
             patch.object(infinifi_outland_context.ChainManager, "get_client", return_value=client),
@@ -263,7 +264,8 @@ class TestOutlandMessage(unittest.TestCase):
             (context,) = resolve_outland_context("infinifi", 1, [(CONNECTOR, call)])
         text = context.describe()
         self.assertIn("no bridge involved", text)
-        self.assertIn("1-hour Short Timelock", text)
+        self.assertIn("1-day timelock", text)
+        self.assertIn("current delay (getMinDelay) of 24h", text)
         self.assertIn("MESSAGE (assets update), nonce 41", text)
         self.assertIn("totalAssetsValue 81.000000", text)
         self.assertIn("reports 80.000000 now, so the change is +1.000000", text)

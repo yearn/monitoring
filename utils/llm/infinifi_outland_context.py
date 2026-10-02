@@ -41,6 +41,9 @@ PROTOCOL = "infinifi"
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
+# Holds PROTOCOL_PARAMETERS, which govReceive requires. Its delay has changed between 1h and 24h, so read it live.
+SHORT_TIMELOCK = "0x4B174afbeD7b98BA01F50E36109EEE5e6d327c32"
+
 # FarmTypes library: the uint256 FarmRegistry.addFarms takes as its first argument.
 FARM_TYPES: dict[int, tuple[str, str]] = {
     0: ("PROTOCOL", "not generating yield but capable of storing funds"),
@@ -68,6 +71,9 @@ _UINT_OUT = [{"name": "", "type": "uint256"}]
 _MATURITY_ABI = [
     {"name": name, "type": "function", "stateMutability": "view", "inputs": [], "outputs": [{"name": "", "type": kind}]}
     for name, kind in (("duration", "uint256"), ("perpetual", "bool"))
+]
+_MIN_DELAY_ABI = [
+    {"name": "getMinDelay", "type": "function", "stateMutability": "view", "inputs": [], "outputs": _UINT_OUT}
 ]
 _PORTAL_ABI = [{"name": "portal", "type": "function", "stateMutability": "view", "inputs": [], "outputs": _ADDRESS_OUT}]
 _VAULT_REPORT_ABI = [
@@ -253,6 +259,8 @@ class OutlandMessageContext:
     # Vault for the source chain and its current portalAssetsReport (assets, iUSD, siUSD), when readable.
     vault: str = ""
     current_report: tuple[int, int, int] | None = None
+    # Short Timelock getMinDelay() in seconds, read for govReceive.
+    timelock_delay: int | None = None
 
     @property
     def addresses(self) -> list[str]:
@@ -272,9 +280,14 @@ class OutlandMessageContext:
             action = (
                 f"govReceive on connector {self.target} queues this message on the PortalHub as if the bridge had "
                 f"delivered it from chain {self.source_chain_id} — no bridge involved. It runs once processMessage "
-                "executes it. govReceive needs PROTOCOL_PARAMETERS (the 1-hour Short Timelock), although its natspec "
-                "says it should sit behind a 1-day timelock"
+                "executes it. govReceive needs PROTOCOL_PARAMETERS; its natspec says it should sit behind a 1-day "
+                "timelock"
             )
+            if self.timelock_delay is not None:
+                action += (
+                    f". The Short Timelock {SHORT_TIMELOCK}, which holds that role, has a current delay "
+                    f"(getMinDelay) of {_duration(self.timelock_delay)}"
+                )
         else:
             action = (
                 f"processMessage on PortalHub {self.target} executes the queued chain-{self.source_chain_id} "
@@ -305,6 +318,13 @@ class OutlandMessageContext:
                 "from the connector and deposits it into the chain's OutlandVault."
             )
         return "Payload not decoded."
+
+
+def _duration(seconds: int) -> str:
+    """Seconds as whole hours (or minutes), e.g. ``24h``."""
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 60}m" if seconds % 60 == 0 else f"{seconds}s"
 
 
 def _e18(raw: int) -> str:
@@ -408,6 +428,12 @@ def _message_context(chain_id: int, target: str, call: DecodedCall) -> OutlandMe
         hub = to_checksum_address(client.get_contract(target, _PORTAL_ABI).functions.portal().call())
     elif not exposes(chain_id, target, {"processMessage", "getVault"}):
         return None
+    delay = None
+    if call.function_name == "govReceive":
+        try:
+            delay = int(client.get_contract(SHORT_TIMELOCK, _MIN_DELAY_ABI).functions.getMinDelay().call())
+        except Exception as error:  # noqa: BLE001 - the decoded message is still useful
+            logger.info("Short Timelock delay unavailable: %s", error)
     vault, report = "", None
     try:
         vault = to_checksum_address(client.get_contract(hub, _HUB_ABI).functions.getVault(source_chain).call())
@@ -424,6 +450,7 @@ def _message_context(chain_id: int, target: str, call: DecodedCall) -> OutlandMe
         payload=payload,
         vault=vault,
         current_report=report,
+        timelock_delay=delay,
     )
 
 
