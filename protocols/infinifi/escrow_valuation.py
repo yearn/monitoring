@@ -158,53 +158,65 @@ def _amount(raw: int, decimals: int) -> Decimal:
     return Decimal(raw) / (Decimal(10) ** decimals)
 
 
-def _router_escrows(client: Web3Client) -> list[tuple[str, str]]:
+def _router_escrows(client: Web3Client, block_identifier: int) -> list[tuple[str, str]]:
     """(farm, escrow) for every registered farm whose escrow is an RWAEscrowRouter."""
     routers: list[tuple[str, str]] = []
-    for farm in client.get_contract(FARM_REGISTRY, _REGISTRY_ABI).functions.getFarms().call():
+    for farm in (
+        client.get_contract(FARM_REGISTRY, _REGISTRY_ABI).functions.getFarms().call(block_identifier=block_identifier)
+    ):
         try:
-            escrow = to_checksum_address(client.get_contract(farm, _FARM_ABI).functions.escrow().call())
+            escrow = to_checksum_address(
+                client.get_contract(farm, _FARM_ABI).functions.escrow().call(block_identifier=block_identifier)
+            )
             # Only a router has the externalCall whitelist; plain escrows revert here.
-            client.get_contract(escrow, _ESCROW_ABI).functions.whitelist(escrow).call()
+            client.get_contract(escrow, _ESCROW_ABI).functions.whitelist(escrow).call(block_identifier=block_identifier)
         except _CALL_ERRORS:
             continue
         routers.append((to_checksum_address(farm), escrow))
     return routers
 
 
-def _midas_nav(client: Web3Client, data_feed: str) -> Decimal:
+def _midas_nav(client: Web3Client, data_feed: str, block_identifier: int) -> Decimal:
     """Midas's NAV for an mToken: the feed under the vault's (possibly adjusted) aggregator."""
-    aggregator = client.get_contract(data_feed, _DATA_FEED_ABI).functions.aggregator().call()
+    aggregator = (
+        client.get_contract(data_feed, _DATA_FEED_ABI).functions.aggregator().call(block_identifier=block_identifier)
+    )
     try:
         # CustomAggregatorV3CompatibleFeedAdjusted ("PriceLowered") wraps the NAV feed.
-        aggregator = client.get_contract(aggregator, _AGGREGATOR_ABI).functions.underlyingFeed().call()
+        aggregator = (
+            client.get_contract(aggregator, _AGGREGATOR_ABI)
+            .functions.underlyingFeed()
+            .call(block_identifier=block_identifier)
+        )
     except _CALL_ERRORS:
         pass
     contract = client.get_contract(aggregator, _AGGREGATOR_ABI).functions
-    answer = contract.latestRoundData().call()[1]
-    return _amount(int(answer), int(contract.decimals().call()))
+    answer = contract.latestRoundData().call(block_identifier=block_identifier)[1]
+    return _amount(int(answer), int(contract.decimals().call(block_identifier=block_identifier)))
 
 
-def _midas_vault(client: Web3Client, target: str) -> _MidasVault | None:
+def _midas_vault(client: Web3Client, target: str, block_identifier: int) -> _MidasVault | None:
     """The whitelisted target as a Midas deposit or redemption vault, or None when it is not one."""
     contract = client.get_contract(target, _MIDAS_VAULT_ABI).functions
     try:
-        mtoken = to_checksum_address(contract.mToken().call())
-        feed = to_checksum_address(contract.mTokenDataFeed().call())
+        mtoken = to_checksum_address(contract.mToken().call(block_identifier=block_identifier))
+        feed = to_checksum_address(contract.mTokenDataFeed().call(block_identifier=block_identifier))
     except _CALL_ERRORS:
         return None
-    return _MidasVault(target, mtoken, _midas_nav(client, feed))
+    return _MidasVault(target, mtoken, _midas_nav(client, feed, block_identifier))
 
 
-def _token_position(client: Web3Client, escrow: str, token: str, price: Decimal | None) -> Position | None:
+def _token_position(
+    client: Web3Client, escrow: str, token: str, price: Decimal | None, block_identifier: int
+) -> Position | None:
     """The router's balance of ``token``, or None when it holds none or ``token`` is not an ERC20."""
     contract = client.get_contract(token, _ERC20_ABI).functions
     try:
-        balance = int(contract.balanceOf(escrow).call())
+        balance = int(contract.balanceOf(escrow).call(block_identifier=block_identifier))
         if balance == 0:
             return None
-        amount = _amount(balance, int(contract.decimals().call()))
-        symbol = str(contract.symbol().call())
+        amount = _amount(balance, int(contract.decimals().call(block_identifier=block_identifier)))
+        symbol = str(contract.symbol().call(block_identifier=block_identifier))
     except _CALL_ERRORS:
         return None
     if price is None:
@@ -212,23 +224,31 @@ def _token_position(client: Web3Client, escrow: str, token: str, price: Decimal 
     return Position(f"{amount:,.2f} {symbol} × {price:,.6f}", amount * price)
 
 
-def _pending_requests(client: Web3Client, vault: _MidasVault, escrow: str, symbol: str) -> list[Position]:
+def _pending_requests(
+    client: Web3Client, vault: _MidasVault, escrow: str, symbol: str, block_identifier: int
+) -> list[Position]:
     """Midas requests the router opened on this vault that are still pending.
 
     Midas request events index the request id first and the user second, so the
     router's requests are the vault's logs whose second indexed topic is the router.
     """
     user_topic = "0x" + "0" * 24 + escrow[2:].lower()
-    logs = client.eth.get_logs({"address": vault.address, "topics": [None, None, user_topic], "fromBlock": 0})
+    logs = client.eth.get_logs(
+        {"address": vault.address, "topics": [None, None, user_topic], "fromBlock": 0, "toBlock": block_identifier}
+    )
     request_ids = sorted({int.from_bytes(bytes(log["topics"][1]), "big") for log in logs})
     contract = client.get_contract(vault.address, _MIDAS_VAULT_ABI).functions
     positions = []
     for request_id in request_ids:
         try:
-            sender, _, status, amount_mtoken, _, _ = contract.redeemRequests(request_id).call()
+            sender, _, status, amount_mtoken, _, _ = contract.redeemRequests(request_id).call(
+                block_identifier=block_identifier
+            )
             redeem = True
         except _CALL_ERRORS:
-            sender, _, status, _, usd_without_fees, _ = contract.mintRequests(request_id).call()
+            sender, _, status, _, usd_without_fees, _ = contract.mintRequests(request_id).call(
+                block_identifier=block_identifier
+            )
             redeem = False
         if to_checksum_address(sender) != escrow or status != _PENDING:
             continue
@@ -247,20 +267,41 @@ def _pending_requests(client: Web3Client, vault: _MidasVault, escrow: str, symbo
     return positions
 
 
-def protocol_assets(client: Web3Client) -> Decimal:
+def protocol_assets(client: Web3Client, block_identifier: int) -> Decimal:
     """infiniFi's total assets in USD, as its Accounting contract values them (18 decimals)."""
-    return _amount(int(client.get_contract(ACCOUNTING, _ACCOUNTING_ABI).functions.totalAssetsValue().call()), 18)
+    return _amount(
+        int(
+            client.get_contract(ACCOUNTING, _ACCOUNTING_ABI)
+            .functions.totalAssetsValue()
+            .call(block_identifier=block_identifier)
+        ),
+        18,
+    )
 
 
-def value_router(client: Web3Client, farm: str, escrow: str, total_assets: Decimal = Decimal(0)) -> EscrowValuation:
-    """Value a router's holdings and pending Midas requests next to its reported totalAssets."""
+def value_router(
+    client: Web3Client,
+    farm: str,
+    escrow: str,
+    total_assets: Decimal = Decimal(0),
+    *,
+    block_identifier: int | None = None,
+) -> EscrowValuation:
+    """Value a router's holdings and pending requests using one block for every read."""
+    if block_identifier is None:
+        block_identifier = int(client.eth.block_number)
     escrow_contract = client.get_contract(escrow, _ESCROW_ABI).functions
-    asset = to_checksum_address(escrow_contract.assetToken().call())
-    asset_decimals = int(client.get_contract(asset, _ERC20_ABI).functions.decimals().call())
-    reported = _amount(int(escrow_contract.totalAssets().call()), asset_decimals)
+    asset = to_checksum_address(escrow_contract.assetToken().call(block_identifier=block_identifier))
+    asset_decimals = int(
+        client.get_contract(asset, _ERC20_ABI).functions.decimals().call(block_identifier=block_identifier)
+    )
+    reported = _amount(int(escrow_contract.totalAssets().call(block_identifier=block_identifier)), asset_decimals)
 
-    targets = fetch_whitelist_targets(client, escrow)
-    vaults = [vault for vault in (_midas_vault(client, target) for target in targets) if vault is not None]
+    # Removing call permission does not remove balances or settle outstanding requests.
+    targets = fetch_whitelist_targets(client, escrow, block_identifier=block_identifier, include_disabled=True)
+    vaults = [
+        vault for vault in (_midas_vault(client, target, block_identifier) for target in targets) if vault is not None
+    ]
     nav_by_mtoken = {vault.mtoken.lower(): vault.nav for vault in vaults}
     vault_addresses = {vault.address.lower() for vault in vaults}
 
@@ -272,13 +313,15 @@ def value_router(client: Web3Client, farm: str, escrow: str, total_assets: Decim
     positions: list[Position] = []
     for key, token in tokens.items():
         price = Decimal(1) if key == asset.lower() or key in PAR_TOKENS else nav_by_mtoken.get(key)
-        position = _token_position(client, escrow, token, price)
+        position = _token_position(client, escrow, token, price, block_identifier)
         if position is not None:
             positions.append(position)
 
     for vault in vaults:
-        symbol = str(client.get_contract(vault.mtoken, _ERC20_ABI).functions.symbol().call())
-        positions.extend(_pending_requests(client, vault, escrow, symbol))
+        symbol = str(
+            client.get_contract(vault.mtoken, _ERC20_ABI).functions.symbol().call(block_identifier=block_identifier)
+        )
+        positions.extend(_pending_requests(client, vault, escrow, symbol, block_identifier))
 
     return EscrowValuation(
         farm=farm, escrow=escrow, reported=reported, positions=tuple(positions), protocol_assets=total_assets
@@ -353,9 +396,10 @@ def check_valuation(valuation: EscrowValuation) -> None:
 
 def main() -> None:
     client = ChainManager.get_client(Chain.MAINNET)
-    total_assets = protocol_assets(client)
-    for farm, escrow in _router_escrows(client):
-        valuation = value_router(client, farm, escrow, total_assets)
+    block_identifier = int(client.eth.block_number)
+    total_assets = protocol_assets(client, block_identifier)
+    for farm, escrow in _router_escrows(client, block_identifier):
+        valuation = value_router(client, farm, escrow, total_assets, block_identifier=block_identifier)
         logger.info(
             "Escrow %s: reported %s, holdings %s, gap %s (%.2f%%)",
             escrow,

@@ -30,6 +30,8 @@ This folder contains monitoring scripts for the Infinifi protocol.
 - **Midas mTokens** at Midas's NAV feed. The router's whitelisted Midas vaults give each mToken and its data feed. The script reads the feed under the vault's adjusted ("PriceLowered", −7%) aggregator, not the adjusted price the redemption vaults pay.
 - **Pending Midas requests** opened by the router: redemptions at NAV, deposits at their USD amount. They are found in the vault's logs whose second indexed topic is the router.
 
+Every on-chain read and log query uses the same block, including infiniFi's total assets, so a redemption settling during the run cannot create a false gap. Discovery includes historical whitelist targets: disabling calls to a vault or token does not remove its remaining holdings or pending claims from the valuation.
+
 Alerts:
 
 - **Valuation gap**: reported `totalAssets` exceeds the holdings' value by more than `INFINIFI_ESCROW_GAP_THRESHOLD` (default `0.03`, 3% of the reported value). The alert is MEDIUM, and becomes HIGH when the gap is also more than `INFINIFI_ESCROW_GAP_TVL_HIGH_THRESHOLD` (default `0.05`) of infiniFi's total assets (`Accounting.totalAssetsValue()`). HIGH triggers the emergency dispatch below. An escalation from MEDIUM to HIGH alerts again.
