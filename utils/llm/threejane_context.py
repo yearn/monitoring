@@ -18,7 +18,7 @@ identifies contracts from their verified ABI, reverses known hashed labels from
 a checked-in name table, and reads the surrounding state on-chain.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 
 from eth_utils import keccak, to_checksum_address
 
@@ -76,7 +76,10 @@ _HASHED_LABELS: dict[str, str] = {
     # --- ProtocolConfig: credit line (CreditLineConfig) ---
     "MAX_LTV": "maximum loan-to-value accepted when setting a credit line (WAD)",
     "MAX_VV": "maximum vv (verified value) accepted when setting a credit line",
-    "MAX_CREDIT_LINE": "maximum size of a single borrower credit line",
+    "MAX_CREDIT_LINE": (
+        "maximum credit line CreditLine.setCreditLines accepts, in waUSDC; checked only when a line is set, so "
+        "lowering it leaves larger existing lines in place"
+    ),
     "MIN_CREDIT_LINE": "minimum size of a single borrower credit line",
     "MAX_DRP": (
         "maximum borrower default-risk premium, per second in WAD; CreditLine also hard-caps it at 31709791983 "
@@ -150,6 +153,18 @@ _LABELS_BY_HASH: dict[str, tuple[str, str]] = {
 
 _MINTER_ROLE = keccak(text="MINTER_ROLE")
 
+WAUSDC_ADDRESS = "0xD4fa2D31b7968E448877f69A96DE69f5de8cD23E"
+MORPHO_CREDIT_ADDRESS = "0xDe6e08ac208088cc62812Ba30608D852c6B0EcBc"
+# Keys MorphoCredit and CreditLine compare against waUSDC amounts, the credit
+# market's loan token: borrowed assets, credit lines and vv. waUSDC is an
+# appreciating Aave wrapper (~1.19 USDC each in Oct 2026), so these render in
+# waUSDC with a USDC equivalent at the live rate rather than as USDC.
+_WAUSDC_KEYS = frozenset(
+    "0x" + keccak(text=name).hex()
+    for name in ("DEBT_CAP", "MAX_CREDIT_LINE", "MIN_CREDIT_LINE", "MAX_VV", "MIN_BORROW")
+)
+_DEBT_CAP_KEY = "0x" + keccak(text="DEBT_CAP").hex()
+
 
 @dataclass(frozen=True)
 class _UsageRead:
@@ -179,6 +194,16 @@ _USAGE_READS: dict[str, _UsageRead] = {
     ),
 }
 
+# DEBT_CAP caps MorphoCredit's borrowing, not a vault, so it is read from the market USD3 lends into.
+_DEBT_CAP_USAGE = _UsageRead(
+    vault_address=MORPHO_CREDIT_ADDRESS,
+    label="MorphoCredit totalBorrowAssets",
+    enforcement=(
+        "MorphoCredit._beforeBorrow rejects a borrow once totalBorrowAssets plus the amount would exceed DEBT_CAP, "
+        "and every borrow while DEBT_CAP is 0. Both sides are in waUSDC."
+    ),
+)
+
 _DISTRIBUTOR_GETTERS = {"useMint", "merkleRoot", "jane", "maxClaimable", "totalClaimed", "epochEmissions"}
 
 
@@ -201,10 +226,23 @@ class HashedLabelContext:
     # Values this transaction's setConfig calls write for the key, in call order.
     proposed_values: tuple[int, ...] = ()
     usage_enforcement: str = ""
+    # For waUSDC-denominated keys: USDC per whole waUSDC (raw USDC units), and the USDC unit.
+    usdc_per_unit_raw: int | None = None
+    usdc: TokenUnit | None = None
+
+    def amount_text(self, raw: int) -> str:
+        """An amount in its verified unit, plus its USDC equivalent when the unit is waUSDC."""
+        if self.unit is None:
+            return str(raw)
+        text = self.unit.amount(raw)
+        if self.usdc is not None and self.usdc_per_unit_raw:
+            usdc_raw = raw * self.usdc_per_unit_raw // 10**self.unit.decimals
+            text += f" (≈ {self.usdc.amount(usdc_raw)} at the current rate)"
+        return text
 
     def value_text(self, raw: int) -> str:
         """A config value in its verified unit with the raw integer beside it, else raw alone."""
-        return f"{self.unit.amount(raw)} (raw {raw})" if self.unit else str(raw)
+        return f"{self.amount_text(raw)} (raw {raw})" if self.unit else str(raw)
 
     def usage_lines(self) -> list[str]:
         """Where the capped quantity stands against the current cap and each proposed one."""
@@ -216,9 +254,9 @@ class HashedLabelContext:
             if cap is None:
                 continue
             if usage > cap:
-                lines.append(f"Against the {label} cap: above it by {self.unit.amount(usage - cap)}")
+                lines.append(f"Against the {label} cap: above it by {self.amount_text(usage - cap)}")
             else:
-                lines.append(f"Against the {label} cap: {self.unit.amount(cap - usage)} of headroom")
+                lines.append(f"Against the {label} cap: {self.amount_text(cap - usage)} of headroom")
         return lines
 
     @property
@@ -374,6 +412,8 @@ class _ConfigState:
     values: dict[str, int]
     usage: dict[str, int]
     units: dict[str, TokenUnit]
+    usdc_per_unit_raw: dict[str, int] = field(default_factory=dict)
+    usdc: TokenUnit | None = None
 
 
 def _read_config_state(chain_id: int, target: str, keys: list[str]) -> _ConfigState:
@@ -408,7 +448,47 @@ def _read_config_state(chain_id: int, target: str, keys: list[str]) -> _ConfigSt
         unit = fetch_token_unit(chain_id, str(usage_results[2 * index + 1]))
         if unit is not None:
             units[key] = unit
-    return _ConfigState(values=values, usage=usage, units=units)
+    state = _ConfigState(values=values, usage=usage, units=units)
+    wausdc_keys = [key for key in keys if key in _WAUSDC_KEYS]
+    if wausdc_keys:
+        state = _with_wausdc_units(chain_id, wausdc_keys, state)
+    return state
+
+
+def _with_wausdc_units(chain_id: int, keys: list[str], state: _ConfigState) -> _ConfigState:
+    """Give waUSDC-denominated keys their unit, a USDC rate, and DEBT_CAP its current borrowing.
+
+    Best-effort on top of the stored values: a failure returns the state unchanged, leaving these keys raw.
+    """
+    try:
+        client = ChainManager.get_client(Chain.from_chain_id(chain_id))
+        wausdc = client.get_contract(to_checksum_address(WAUSDC_ADDRESS), threejane_abi("ERC4626Vault"))
+        usd3 = client.get_contract(to_checksum_address(USD3_ADDRESS), threejane_abi("USD3"))
+        with client.batch_requests() as batch:
+            batch.add(wausdc.functions.decimals())
+            batch.add(wausdc.functions.asset())
+            batch.add(usd3.functions.marketId())
+            decimals, asset_address, market_id = client.execute_batch(batch)
+        rate = int(wausdc.functions.convertToAssets(10 ** int(decimals)).call())
+        unit = fetch_token_unit(chain_id, WAUSDC_ADDRESS)
+        usdc = fetch_token_unit(chain_id, str(asset_address))
+        if unit is None or usdc is None:
+            return state
+        usage = dict(state.usage)
+        if _DEBT_CAP_KEY in keys:
+            morpho = client.get_contract(to_checksum_address(MORPHO_CREDIT_ADDRESS), threejane_abi("MorphoCredit"))
+            # Market: (totalSupplyAssets, totalSupplyShares, totalBorrowAssets, ...)
+            usage[_DEBT_CAP_KEY] = int(morpho.functions.market(market_id).call()[2])
+    except Exception as error:  # noqa: BLE001 - units are enrichment; the raw values still render
+        logger.info("3Jane waUSDC unit read failed: %s", error)
+        return state
+    return replace(
+        state,
+        units={**state.units, **dict.fromkeys(keys, unit)},
+        usage=usage,
+        usdc_per_unit_raw={**state.usdc_per_unit_raw, **dict.fromkeys(keys, rate)},
+        usdc=usdc,
+    )
 
 
 def _resolve_hashed_labels(chain_id: int, target: str, calls: list[DecodedCall]) -> list[HashedLabelContext]:
@@ -430,7 +510,7 @@ def _resolve_hashed_labels(chain_id: int, target: str, calls: list[DecodedCall])
     contexts = []
     for as_hex in known:
         name, note = _LABELS_BY_HASH[as_hex]
-        usage_read = _USAGE_READS.get(as_hex)
+        usage_read = _USAGE_READS.get(as_hex) or (_DEBT_CAP_USAGE if as_hex == _DEBT_CAP_KEY else None)
         contexts.append(
             HashedLabelContext(
                 target=to_checksum_address(target),
@@ -444,6 +524,8 @@ def _resolve_hashed_labels(chain_id: int, target: str, calls: list[DecodedCall])
                 unit=state.units.get(as_hex),
                 proposed_values=proposed.get(as_hex, ()),
                 usage_enforcement=usage_read.enforcement if usage_read else "",
+                usdc_per_unit_raw=state.usdc_per_unit_raw.get(as_hex),
+                usdc=state.usdc if as_hex in state.usdc_per_unit_raw else None,
             )
         )
     return contexts
@@ -685,7 +767,7 @@ def format_threejane_report(
 
 def _report_value(context: HashedLabelContext, raw: int) -> str:
     """A config value for the gist: in its unit when verified, else the grouped raw integer."""
-    return f"`{context.unit.amount(raw)}`" if context.unit else f"`{raw:,}`"
+    return f"`{context.amount_text(raw)}`" if context.unit else f"`{raw:,}`"
 
 
 def _hashed_label_report(context: HashedLabelContext, chain_id: int, labels: dict[str, str]) -> str:

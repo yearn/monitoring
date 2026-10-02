@@ -298,6 +298,38 @@ class TestHashedLabelRendering(unittest.TestCase):
         ):
             self.assertIn("0x" + keccak(text=name).hex(), threejane_context._LABELS_BY_HASH)
 
+    def test_wausdc_keys_render_with_a_usdc_equivalent(self) -> None:
+        """Two HIGH alerts left DEBT_CAP and an 81.5M credit line in "raw units"; they are waUSDC."""
+        wausdc = TokenUnit(threejane_context.WAUSDC_ADDRESS, "waEthUSDC", 6)
+        usdc = TokenUnit("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "USDC", 6)
+        context = HashedLabelContext(
+            target="0x6b276A2A7dd8b629adBA8A06AD6573d01C84f34E",
+            argument_hex=threejane_context._DEBT_CAP_KEY,
+            name="DEBT_CAP",
+            note="cap",
+            is_config_key=True,
+            current_value=74_444_302_455_055,
+            usage_label="MorphoCredit totalBorrowAssets",
+            current_usage=74_444_282_765_422,
+            unit=wausdc,
+            proposed_values=(82_944_811_138_479,),
+            usdc_per_unit_raw=1_187_578,
+            usdc=usdc,
+        )
+        self.assertEqual(
+            context.value_text(82_944_811_138_479),
+            "82,944,811.138479 waEthUSDC (≈ 98,503,432.922212 USDC at the current rate) (raw 82944811138479)",
+        )
+        lines = context.usage_lines()
+        self.assertIn("Against the current cap: 19.689633 waEthUSDC", lines[1])
+        self.assertIn("Against the proposed cap: 8,500,528.373057 waEthUSDC", lines[2])
+
+    def test_wausdc_unit_failure_keeps_values_raw(self) -> None:
+        state = threejane_context._ConfigState(values={threejane_context._DEBT_CAP_KEY: 1}, usage={}, units={})
+        with patch.object(threejane_context.ChainManager, "get_client", side_effect=RuntimeError("rpc down")):
+            result = threejane_context._with_wausdc_units(1, [threejane_context._DEBT_CAP_KEY], state)
+        self.assertIs(result, state)
+
     def test_ownership_line_lists_sweep(self) -> None:
         line = threejane_context._ownership_line(_distributor_context())
         self.assertIn("sweep", line)
