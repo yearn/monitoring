@@ -204,9 +204,10 @@ class ExemptAccount:
     def pairing_issue(self) -> str:
         """How this change leaves the flag out of step with ringFenceConduit, or "".
 
-        Only a revocation that leaves the conduit flag set breaks the natspec's pairing.
-        An exempt account without the conduit flag is a direct depositor (every exempt
-        EOA is set up this way); flagging it once framed a routine grant as a deviation.
+        Only a revocation that leaves the conduit flag set breaks the natspec's pairing:
+        the ring fence only matters for LCC capital-call funding, so a wallet exempted
+        without it is not missing a protection. What a wallet exemption does mean is
+        stated once, in ``SupplyCapExemptContext.purpose_line``.
         """
         if not self.proposed_exempt and self.current_exempt and self.ring_fence_conduit:
             return (
@@ -295,15 +296,33 @@ class SupplyCapExemptContext:
             "or withdrawals."
         )
 
+    def purpose_line(self) -> str:
+        """Why the cap and the exemption exist, so a grant to a wallet reads as what it is.
+
+        Sources: 3Jane docs (``USD3_SUPPLY_CAP`` "controls overall protocol size and risk
+        exposure"), the USD3 contract header ("Supply-cap exemptions for protocol-controlled
+        deposit receivers"), and USD3's ``_effectiveDeployCapWaUSDC`` (deployment capped by
+        sUSD3 backing; borrowing bounded by DEBT_CAP, which reads debt, never supply).
+        """
+        return (
+            "Why it matters: USD3_SUPPLY_CAP controls overall protocol size and risk exposure (3Jane docs). USD3's "
+            "contract header reserves exemptions for protocol-controlled deposit receivers: LCC vaults, whose "
+            "capital-call funding and auction fills must not fail on a full cap. An exemption for an EOA, or any "
+            "account the protocol does not control, is a per-wallet right to grow USD3 past the cap, with no limit, "
+            "outside that documented purpose. A deposit above the cap adds no credit exposure (deployment to credit "
+            "is capped by sUSD3 backing via MIN_SUSD3_BACKING_RATIO, and borrowing by DEBT_CAP), so the excess "
+            "earns only waUSDC base yield and dilutes USD3's return."
+        )
+
     def pairing_line(self) -> str:
         """The natspec pairs the flag with ringFenceConduit; say where this batch breaks the pairing."""
         issues = [a for a in self.accounts if a.pairing_issue()]
         pairing = (
             "USD3 natspec pairs this flag with ringFenceConduit: with both set, every accepted deposit is a "
-            "self-deposit that gets ring-fence credit, and LCC deployment grants both atomically. An exempt account "
-            "without ringFenceConduit is a direct depositor whose deposits are ordinary withdrawable USD3 liquidity, "
-            "not ring-fenced; that is not a pairing error. The pairing breaks only when an exemption is revoked "
-            "while ringFenceConduit stays true."
+            "self-deposit that gets ring-fence credit, and LCC deployment grants both atomically. The ring fence only "
+            "matters for LCC capital-call funding: without ringFenceConduit, an exempt account's deposits are ordinary "
+            "withdrawable USD3 liquidity. The pairing breaks when an exemption is revoked while ringFenceConduit "
+            "stays true."
         )
         if not issues:
             return pairing + " No call in this batch leaves the two flags out of step."
@@ -571,6 +590,7 @@ def format_account_prompt(context: AccountContext) -> str:
         [
             f"USD3.setSupplyCapExempt on {context.usd3_address}: {context.overview_line()}",
             context.semantics_line(),
+            context.purpose_line(),
             context.pairing_line(),
             context.supply_line(),
             *([line] if (line := context.exempt_set_line()) else []),
@@ -601,6 +621,7 @@ def format_account_report(context: AccountContext, chain_id: int, labels: dict[s
         f"- **USD3 supply-cap exemptions** on {address_link(context.usd3_address, chain_id, labels)}: "
         f"{context.overview_line()}",
         f"  - {context.semantics_line()}",
+        f"  - {context.purpose_line()}",
         f"  - {context.pairing_line()}",
         f"  - {context.supply_line()}",
     ]

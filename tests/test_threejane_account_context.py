@@ -263,7 +263,17 @@ class TestSupplyCapExempt(unittest.TestCase):
         self.assertIn("1 account(s) end up out of step", _exemption(conduit_revoke).pairing_line())
         self.assertIn("No call in this batch", self._revocation().pairing_line())
         self.assertIn("No call in this batch", _exemption().pairing_line())
-        self.assertIn("is not a pairing error", _exemption().pairing_line())
+        self.assertIn("only matters for LCC capital-call funding", _exemption().pairing_line())
+
+    def test_purpose_line_states_the_documented_intent(self) -> None:
+        """A report once called a wallet exemption routine; the contract reserves it for protocol receivers."""
+        line = _exemption().purpose_line()
+        self.assertIn("controls overall protocol size and risk exposure", line)
+        self.assertIn("protocol-controlled deposit receivers", line)
+        self.assertIn("per-wallet right to grow USD3 past the cap", line)
+        self.assertIn("adds no credit exposure", line)
+        self.assertEqual(format_account_prompt(_exemption()).count("Why it matters"), 1)
+        self.assertEqual(format_account_report(_exemption(), 1, {}).count("Why it matters"), 1)
 
     def test_supply_line_above_cap_blocks_non_exempt(self) -> None:
         line = _exemption().supply_line()
