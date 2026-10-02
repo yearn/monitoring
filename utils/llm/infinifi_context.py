@@ -38,6 +38,7 @@ from utils.chains import Chain
 from utils.erc20_metadata import fetch_erc20_metadata
 from utils.formatting import format_decimal_amount, normalize_token_amount
 from utils.http_client import fetch_json
+from utils.infinifi_escrow import fetch_whitelist_targets
 from utils.llm.report import address_link, iter_address_values
 from utils.logger import get_logger
 from utils.source_context import fetch_abi_entries, get_contract_label
@@ -128,19 +129,6 @@ _FARM_ESCROW_ABI = [
         "stateMutability": "view",
         "inputs": [],
         "outputs": [{"name": "", "type": "address"}],
-    }
-]
-
-_WHITELIST_EVENT_ABI = [
-    {
-        "anonymous": False,
-        "name": "WhitelistUpdated",
-        "type": "event",
-        "inputs": [
-            {"indexed": True, "name": "timestamp", "type": "uint256"},
-            {"indexed": False, "name": "target", "type": "address"},
-            {"indexed": False, "name": "enabled", "type": "bool"},
-        ],
     }
 ]
 
@@ -435,22 +423,7 @@ def _farm_matches_escrow(chain_id: int, farm_address: str, escrow_address: str) 
 
 def _fetch_whitelist_targets(chain_id: int, escrow_address: str) -> list[str]:
     """Reconstruct the escrow's current whitelist from its emitted updates."""
-    client = ChainManager.get_client(Chain.from_chain_id(chain_id))
-    escrow = client.get_contract(to_checksum_address(escrow_address), _WHITELIST_EVENT_ABI)
-    events = escrow.events.WhitelistUpdated().get_logs(from_block=0, to_block="latest")
-    enabled_by_address: dict[str, tuple[str, bool]] = {}
-    for event in events:
-        args = event.get("args", {})
-        raw_address = args.get("target")
-        enabled = args.get("enabled")
-        if not isinstance(raw_address, str) or not isinstance(enabled, bool):
-            continue
-        try:
-            address = to_checksum_address(raw_address)
-        except ValueError:
-            continue
-        enabled_by_address[address.lower()] = (address, enabled)
-    return [address for address, enabled in enabled_by_address.values() if enabled]
+    return fetch_whitelist_targets(ChainManager.get_client(Chain.from_chain_id(chain_id)), escrow_address)
 
 
 def _read_token(chain_id: int, candidate: _TokenCandidate) -> TokenContext | None:
