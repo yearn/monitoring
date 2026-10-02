@@ -1,4 +1,4 @@
-"""Watch the value each infiniFi Outland vault reports for its chain.
+"""Watch the value each infiniFi L2 vault (OutlandVault) reports for its chain.
 
 An OutlandVault on mainnet mirrors infiniFi's deposits on one L2. Its value
 (``portalAssetsReport().totalAssetsValue``) only changes when an assets-update
@@ -9,10 +9,10 @@ on 23/09/2026 an injected all-zero update wrote the old Base vault down to 0.
 
 For every chain the PortalHub lists, this script alerts (MEDIUM) when:
 
-- the vault's value falls by more than ``INFINIFI_OUTLAND_DROP_THRESHOLD``
+- the vault's value falls by more than ``INFINIFI_L2_VAULT_DROP_THRESHOLD``
   (default 50%) since the previous run, including a fall to 0, and the fall is at
-  least ``INFINIFI_OUTLAND_MIN_VALUE`` USD (default 10,000);
-- the vault has not received a report for ``INFINIFI_OUTLAND_STALE_HOURS``
+  least ``INFINIFI_L2_VAULT_MIN_VALUE`` USD (default 10,000);
+- the vault has not received a report for ``INFINIFI_L2_VAULT_STALE_HOURS``
   (default 48h) while it holds at least the minimum value.
 
 The baseline is keyed by vault address, so a planned migration, where the hub
@@ -38,14 +38,14 @@ from utils.logger import get_logger
 from utils.web3_wrapper import ChainManager, Web3Client
 
 PROTOCOL = "infinifi"
-logger = get_logger(f"{PROTOCOL}.outland_vaults")
+logger = get_logger(f"{PROTOCOL}.l2_vaults")
 
 PORTAL_HUB = "0x13025F34C1ec2A16bF68f3a3c4e986a3E85CED61"
 EXPLORER = "https://etherscan.io/address"
 
-DROP_THRESHOLD = Decimal(Config.get_env("INFINIFI_OUTLAND_DROP_THRESHOLD", "0.5") or "0.5")
-MIN_VALUE = Decimal(Config.get_env("INFINIFI_OUTLAND_MIN_VALUE", "10000") or "10000")
-STALE_HOURS = Config.get_env_int("INFINIFI_OUTLAND_STALE_HOURS", 48)
+DROP_THRESHOLD = Decimal(Config.get_env("INFINIFI_L2_VAULT_DROP_THRESHOLD", "0.5") or "0.5")
+MIN_VALUE = Decimal(Config.get_env("INFINIFI_L2_VAULT_MIN_VALUE", "10000") or "10000")
+STALE_HOURS = Config.get_env_int("INFINIFI_L2_VAULT_STALE_HOURS", 48)
 
 _HUB_ABI = [
     {
@@ -118,7 +118,7 @@ def drop_message(report: VaultReport, previous: Decimal) -> str | None:
     if previous <= 0 or fall < MIN_VALUE or fall / previous <= DROP_THRESHOLD:
         return None
     return (
-        "⚠️ *Infinifi Outland Vault Value Drop*\n\n"
+        "⚠️ *Infinifi L2 Vault Value Drop*\n\n"
         f"Chain: {_chain_name(report.chain_id)}\n"
         f"Vault: {_link(report.vault)}\n"
         f"Reported value: ${previous:,.2f} → ${report.value:,.2f} (−{fall / previous:.1%})\n"
@@ -134,7 +134,7 @@ def stale_message(report: VaultReport, now: int) -> str | None:
     if report.value < MIN_VALUE or age_hours <= STALE_HOURS:
         return None
     return (
-        "⚠️ *Infinifi Outland Vault Report Stale*\n\n"
+        "⚠️ *Infinifi L2 Vault Report Stale*\n\n"
         f"Chain: {_chain_name(report.chain_id)}\n"
         f"Vault: {_link(report.vault)}\n"
         f"Reported value: ${report.value:,.2f}\n"
@@ -155,7 +155,7 @@ def _alert_once(cache_key: str, message: str | None) -> None:
 
 def check_report(report: VaultReport, now: int) -> None:
     """Compare a vault's report with the previous run and its update age, and alert on a breach."""
-    value_key = f"{PROTOCOL}_outland_value_{report.vault.lower()}"
+    value_key = f"{PROTOCOL}_l2_vault_value_{report.vault.lower()}"
     previous = Decimal(
         str(get_fresh_last_value_for_key_from_file(cache_filename, value_key, HOURLY_CACHE_STALE_AFTER_SECONDS))
     )
@@ -164,7 +164,7 @@ def check_report(report: VaultReport, now: int) -> None:
     if message is not None:
         send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
     write_last_value_with_timestamp_to_file(cache_filename, value_key, str(report.value))
-    _alert_once(f"{PROTOCOL}_outland_stale_{report.vault.lower()}", stale_message(report, now))
+    _alert_once(f"{PROTOCOL}_l2_vault_stale_{report.vault.lower()}", stale_message(report, now))
 
 
 def main() -> None:
@@ -172,7 +172,7 @@ def main() -> None:
     now = int(datetime.now(UTC).timestamp())
     for report in fetch_reports(client):
         logger.info(
-            "Outland %s vault %s: %s USD, last update %s",
+            "L2 vault %s %s: %s USD, last update %s",
             _chain_name(report.chain_id),
             report.vault,
             f"{report.value:,.2f}",

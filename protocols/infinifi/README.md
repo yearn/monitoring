@@ -6,7 +6,7 @@ This folder contains monitoring scripts for the Infinifi protocol.
 
 - `main.py`: Monitors protocol reserves, backing, and liquid USDC reserves.
   Run this script hourly using github actions.
-- `outland_vaults.py`: Watches the value each Outland vault reports for its chain. Runs hourly.
+- `l2_vaults.py`: Watches the value each L2 vault (OutlandVault) reports for its chain. Runs hourly.
 
 [Risk Score Report](https://github.com/yearn/risk-score/blob/master/reports/report/infinifi.md)
 
@@ -21,14 +21,14 @@ This folder contains monitoring scripts for the Infinifi protocol.
 - **Farm Activation**: Alert if a farm previously at `0` cached ratio moves above `FARM_RATIO_ACTIVATION_ALERT_THRESHOLD` of total TVL.
 - **Junior TVL Below Risky Exposure**: Alert if junior TVL (locked iUSD) covers less than 50% of risky farm TVL. Risky farms are all farms NOT in the `SAFE_FARM_IDENTIFIERS` whitelist.
 
-## Outland Vault Reports
+## L2 Vault Reports
 
 Each `OutlandVault` on mainnet mirrors infiniFi's deposits on one L2 (`PortalHub.getVaultChainIds()` / `getVault(chainId)`). Its value, `portalAssetsReport().totalAssetsValue`, changes only when an assets-update message executes, which mints or burns the vault's farm shares and books the change as profit or loss on mainnet. Messages normally arrive over the bridge, but governance can inject any message with `Connector.govReceive`. On 23/09/2026 an injected all-zero update wrote the old Base vault down to 0.
 
-`outland_vaults.py` sends MEDIUM alerts when:
+`l2_vaults.py` sends MEDIUM alerts when:
 
-- **Value drop**: a vault's value falls by more than `INFINIFI_OUTLAND_DROP_THRESHOLD` (default `0.5`) since the previous run, including a fall to 0, and the fall is at least `INFINIFI_OUTLAND_MIN_VALUE` (default `10000`) USD.
-- **Stale report**: a vault holding at least the minimum value has had no assets update for `INFINIFI_OUTLAND_STALE_HOURS` (default `48`). Base normally reports every 6–22h.
+- **Value drop**: a vault's value falls by more than `INFINIFI_L2_VAULT_DROP_THRESHOLD` (default `0.5`) since the previous run, including a fall to 0, and the fall is at least `INFINIFI_L2_VAULT_MIN_VALUE` (default `10000`) USD.
+- **Stale report**: a vault holding at least the minimum value has had no assets update for `INFINIFI_L2_VAULT_STALE_HOURS` (default `48`). Base normally reports every 6–22h.
 
 The baseline is keyed by vault address. A planned migration that points the hub at a new vault starts a fresh baseline instead of alerting on the old one.
 
