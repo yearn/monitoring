@@ -56,6 +56,7 @@ profiles:
       - { name: "rtoken",                 script: protocols/rtoken/monitor_rtoken.py }
       - { name: "lrt-pegs-origin",        script: protocols/lrt-pegs/origin_protocol.py }
       - { name: "infinifi",               script: protocols/infinifi/main.py }
+      - { name: "infinifi-outland-vaults", script: protocols/infinifi/outland_vaults.py }
       - { name: "usdai",                  script: protocols/usdai/main.py }
       - { name: "usdai-large-mints",      script: protocols/usdai/large_mints.py }
       - { name: "stables-oracles",         script: protocols/stables/oracles.py }
