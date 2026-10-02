@@ -109,7 +109,7 @@ class TestFormatOperation(unittest.TestCase):
         self.assertGreater(shown, 0)
         self.assertLess(shown, len(operation.calls))
         self.assertIn(f"… and {len(operation.calls) - shown} more calls (see the schedule tx)", text)
-        self.assertIn(operation.operation_id, text)
+        self.assertNotIn(operation.operation_id, text)
         self.assertIn(operation.transaction_hash, text)
 
     @patch("utils.calldata.decoder._resolve_signature_via_abi")
@@ -123,7 +123,8 @@ class TestFormatOperation(unittest.TestCase):
         self.assertLessEqual(len(message), stale_operations.MAX_MESSAGE_LENGTH)
         self.assertNotIn(signature, text)
         self.assertIn("… and 1 more calls (see the schedule tx)", text)
-        self.assertIn(_operation().operation_id, text)
+        self.assertNotIn(operation.operation_id, text)
+        self.assertIn(operation.transaction_hash, text)
         self.assertEqual(text.count("`") % 2, 0)
 
 

@@ -205,7 +205,6 @@ def format_operation(operation: Operation, ready_at: int, now: int) -> str:
     )
     prefix = (
         f"*{operation.timelock.label}* (chain {chain_id}): {timelock}\n"
-        f"Operation: `{operation.operation_id}`\n"
         f"Scheduled {_date(operation.scheduled_at)} in {tx}\n"
         f"Ready since {_date(ready_at)} ({(now - ready_at) // DAY} days)\n"
         "Calls:\n"
