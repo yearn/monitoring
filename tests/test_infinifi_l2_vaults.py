@@ -99,36 +99,83 @@ class TestFetchL2FarmValues(unittest.TestCase):
         self.assertIsNone(fetch_l2_farm_values())
 
 
+class _Cache:
+    """In-memory stand-in for utils.cache with the real freshness rule."""
+
+    def __init__(self, now: int) -> None:
+        self.now = now
+        self.values: dict[str, object] = {}
+
+    def set(self, key: str, value: object, age_seconds: int) -> None:
+        self.values[key] = value
+        self.values[f"{key}_timestamp"] = self.now - age_seconds
+
+    def last(self, _file: str, key: str) -> object:
+        return self.values.get(key, 0)
+
+    def fresh(self, _file: str, key: str, stale_after: int) -> object:
+        written = int(self.values.get(f"{key}_timestamp", 0))
+        return 0 if written == 0 or self.now - written > stale_after else self.values.get(key, 0)
+
+    def write(self, _file: str, key: str, value: object) -> None:
+        self.set(key, value, 0)
+
+
 class TestCheckReport(unittest.TestCase):
-    @patch.object(l2_vaults, "write_last_value_with_timestamp_to_file")
-    @patch.object(l2_vaults, "send_alert")
-    @patch.object(l2_vaults, "get_fresh_last_value_for_key_from_file")
-    def test_drop_alerts_and_updates_baseline(self, fresh: MagicMock, send: MagicMock, write: MagicMock) -> None:
-        fresh.side_effect = lambda _file, key, _stale: "33355.45" if "_value_" in key else 0
-        check_report(_report("0"), NOW)
+    VALUE_KEY = f"infinifi_l2_vault_value_{VAULT.lower()}"
+    STALE_KEY = f"infinifi_l2_vault_stale_{VAULT.lower()}"
+
+    def _run(self, cache: _Cache, report: VaultReport, l2_value: Decimal | None = None) -> MagicMock:
+        with (
+            patch.object(l2_vaults, "cache_timestamp_key", side_effect=lambda key: f"{key}_timestamp"),
+            patch.object(l2_vaults, "get_last_value_for_key_from_file", side_effect=cache.last),
+            patch.object(l2_vaults, "get_fresh_last_value_for_key_from_file", side_effect=cache.fresh),
+            patch.object(l2_vaults, "write_last_value_with_timestamp_to_file", side_effect=cache.write),
+            patch.object(l2_vaults, "send_alert") as send,
+        ):
+            check_report(report, NOW, l2_value)
+        return send
+
+    def test_drop_alerts_and_updates_baseline(self) -> None:
+        cache = _Cache(NOW)
+        cache.set(self.VALUE_KEY, "33355.45", HOUR)
+        send = self._run(cache, _report("0"))
         send.assert_called_once()
         self.assertIn("Value Drop", send.call_args.args[0].message)
-        written = {call.args[1]: call.args[2] for call in write.call_args_list}
-        self.assertEqual(written[f"infinifi_l2_vault_value_{VAULT.lower()}"], "0")
-        self.assertEqual(written[f"infinifi_l2_vault_stale_{VAULT.lower()}"], 0)
-        self.assertNotIn(f"infinifi_l2_vault_mismatch_{VAULT.lower()}", written)
+        self.assertEqual(cache.values[self.VALUE_KEY], "0")
+        self.assertEqual(cache.values[self.STALE_KEY], 0)
 
-    @patch.object(l2_vaults, "write_last_value_with_timestamp_to_file")
-    @patch.object(l2_vaults, "send_alert")
-    @patch.object(l2_vaults, "get_fresh_last_value_for_key_from_file")
-    def test_mismatch_alerts_with_l2_value(self, fresh: MagicMock, send: MagicMock, _write: MagicMock) -> None:
-        fresh.side_effect = lambda _file, key, _stale: "0" if "_value_" in key else 0
-        check_report(_report("0"), NOW, Decimal("76371.81"))
+    def test_drop_during_monitoring_gap_still_alerts(self) -> None:
+        # The baseline is 5h old, past the 3h fresh window: the drop must still be caught.
+        cache = _Cache(NOW)
+        cache.set(self.VALUE_KEY, "76368.80", 5 * HOUR)
+        send = self._run(cache, _report("0"))
+        send.assert_called_once()
+        self.assertIn("Previous reading:", send.call_args.args[0].message)
+
+    def test_first_run_does_not_alert(self) -> None:
+        send = self._run(_Cache(NOW), _report("0"))
+        send.assert_not_called()
+
+    def test_mismatch_alerts_with_l2_value(self) -> None:
+        send = self._run(_Cache(NOW), _report("0"), Decimal("76371.81"))
         send.assert_called_once()
         self.assertIn("L2 Vault Mismatch", send.call_args.args[0].message)
 
-    @patch.object(l2_vaults, "write_last_value_with_timestamp_to_file")
-    @patch.object(l2_vaults, "send_alert")
-    @patch.object(l2_vaults, "get_fresh_last_value_for_key_from_file")
-    def test_stale_alert_is_sent_once(self, fresh: MagicMock, send: MagicMock, _write: MagicMock) -> None:
-        fresh.side_effect = lambda _file, key, _stale: "76368.80" if "_value_" in key else 1
-        check_report(_report("76368.80", hours_ago=60), NOW)
+    def test_stale_alert_is_sent_once(self) -> None:
+        cache = _Cache(NOW)
+        cache.set(self.VALUE_KEY, "76368.80", HOUR)
+        cache.set(self.STALE_KEY, 1, HOUR)
+        send = self._run(cache, _report("76368.80", hours_ago=60))
         send.assert_not_called()
+
+    def test_stale_alert_rearms_after_a_gap(self) -> None:
+        cache = _Cache(NOW)
+        cache.set(self.VALUE_KEY, "76368.80", 5 * HOUR)
+        cache.set(self.STALE_KEY, 1, 5 * HOUR)
+        send = self._run(cache, _report("76368.80", hours_ago=60))
+        send.assert_called_once()
+        self.assertIn("Report Stale", send.call_args.args[0].message)
 
 
 class TestFetchReports(unittest.TestCase):

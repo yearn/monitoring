@@ -27,12 +27,12 @@ Each `OutlandVault` on mainnet mirrors infiniFi's deposits on one L2 (`PortalHub
 
 `l2_vaults.py` sends MEDIUM alerts when:
 
-- **Value drop**: a vault's value falls by more than `INFINIFI_L2_VAULT_DROP_THRESHOLD` (default `0.5`) since the previous run, including a fall to 0, and the fall is at least `INFINIFI_L2_VAULT_MIN_VALUE` (default `10000`) USD.
+- **Value drop**: a vault's value falls by more than `INFINIFI_L2_VAULT_DROP_THRESHOLD` (default `0.5`) since the last stored reading, including a fall to 0, and the fall is at least `INFINIFI_L2_VAULT_MIN_VALUE` (default `10000`) USD.
 - **Stale report**: a vault holding at least the minimum value has had no assets update for `INFINIFI_L2_VAULT_STALE_HOURS` (default `48`). Base normally reports every 6–22h.
 
 - **Mismatch with the L2**: the value mainnet has booked differs from what infiniFi's API shows on that L2 (the `isL2LiquidityFarm` farms in `/api/protocol/data`, the same response `main.py` uses for allocations) by more than `INFINIFI_L2_VAULT_MISMATCH_THRESHOLD` (default `0.25`) and the minimum value. This catches a wrong or injected report directly. If the API is down, only the on-chain checks run.
 
-The baseline is keyed by vault address. A planned migration that points the hub at a new vault starts a fresh baseline instead of alerting on the old one.
+The drop baseline never expires, so a write-down during a monitoring gap is still compared against the last value seen; only alert dedupe uses the 3h fresh window. The baseline is keyed by vault address. A planned migration that points the hub at a new vault starts a fresh baseline instead of alerting on the old one.
 
 ## Large Mint Monitoring (No Event Scanning)
 

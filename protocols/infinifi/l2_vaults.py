@@ -10,8 +10,8 @@ on 23/09/2026 an injected all-zero update wrote the old Base vault down to 0.
 For every chain the PortalHub lists, this script alerts (MEDIUM) when:
 
 - the vault's value falls by more than ``INFINIFI_L2_VAULT_DROP_THRESHOLD``
-  (default 50%) since the previous run, including a fall to 0, and the fall is at
-  least ``INFINIFI_L2_VAULT_MIN_VALUE`` USD (default 10,000);
+  (default 50%) since the last stored reading, however old, including a fall to
+  0, and the fall is at least ``INFINIFI_L2_VAULT_MIN_VALUE`` USD (default 10,000);
 - the vault has not received a report for ``INFINIFI_L2_VAULT_STALE_HOURS``
   (default 48h) while it holds at least the minimum value;
 - the value mainnet has booked differs from what infiniFi's API shows on the L2
@@ -33,7 +33,9 @@ from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import (
     HOURLY_CACHE_STALE_AFTER_SECONDS,
     cache_filename,
+    cache_timestamp_key,
     get_fresh_last_value_for_key_from_file,
+    get_last_value_for_key_from_file,
     write_last_value_with_timestamp_to_file,
 )
 from utils.chains import Chain
@@ -159,16 +161,18 @@ def mismatch_message(report: VaultReport, l2_value: Decimal) -> str | None:
     )
 
 
-def drop_message(report: VaultReport, previous: Decimal) -> str | None:
-    """Alert text when the vault's value fell too far since the previous run, else None."""
+def drop_message(report: VaultReport, previous: Decimal, previous_at: int = 0) -> str | None:
+    """Alert text when the vault's value fell too far since the last stored reading, else None."""
     fall = previous - report.value
     if previous <= 0 or fall < MIN_VALUE or fall / previous <= DROP_THRESHOLD:
         return None
+    previous_line = f"Previous reading: {_time(previous_at)}\n" if previous_at else ""
     return (
         "⚠️ *Infinifi L2 Vault Value Drop*\n\n"
         f"Chain: {_chain_name(report.chain_id)}\n"
         f"Vault: {_link(report.vault)}\n"
         f"Reported value: ${previous:,.2f} → ${report.value:,.2f} (−{fall / previous:.1%})\n"
+        f"{previous_line}"
         f"Last assets update: {_time(report.last_update)}\n\n"
         "An executed assets update burned the vault's farm shares, booking the fall as a loss on mainnet. "
         "Check whether it came over the bridge or through govReceive."
@@ -201,13 +205,14 @@ def _alert_once(cache_key: str, message: str | None) -> None:
 
 
 def check_report(report: VaultReport, now: int, l2_value: Decimal | None = None) -> None:
-    """Compare a vault's report with the previous run, its update age and the L2, and alert on a breach."""
+    """Compare a vault's report with its last stored value, its update age and the L2, and alert on a breach."""
     value_key = f"{PROTOCOL}_l2_vault_value_{report.vault.lower()}"
-    previous = Decimal(
-        str(get_fresh_last_value_for_key_from_file(cache_filename, value_key, HOURLY_CACHE_STALE_AFTER_SECONDS))
-    )
+    # The baseline never expires: a write-down during a monitoring gap must still compare against the last
+    # value seen. Only the alert dedupe below uses the hourly fresh window.
+    previous = Decimal(str(get_last_value_for_key_from_file(cache_filename, value_key)))
+    previous_at = int(get_last_value_for_key_from_file(cache_filename, cache_timestamp_key(value_key)))
     # A drop is a one-off event: alert on it directly instead of holding breach state.
-    message = drop_message(report, previous)
+    message = drop_message(report, previous, previous_at)
     if message is not None:
         send_alert(Alert(AlertSeverity.MEDIUM, message, PROTOCOL))
     write_last_value_with_timestamp_to_file(cache_filename, value_key, str(report.value))
