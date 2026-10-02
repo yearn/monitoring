@@ -1,3 +1,5 @@
+import os
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -12,6 +14,7 @@ from protocols.timelock.stale_operations import (
     stale_operations as find_stale,
 )
 from protocols.timelock.timelock_alerts import TIMELOCKS
+from utils import cache
 
 SHORT = TIMELOCKS[("0x4b174afbed7b98ba01f50e36109eee5e6d327c32", 1)]
 RATE_MANAGER = "0x11F6FAb3f4D8635880C3e80cbae8AEF8136D4189"
@@ -119,9 +122,52 @@ class TestMain(unittest.TestCase):
         send.assert_called_once()
         self.assertEqual(send.call_args.args[1], "INFINIFI")
         self.assertTrue(send.call_args.kwargs["disable_notification"])
-        write.assert_called_once_with(
-            stale_operations.cache_filename, f"TIMELOCK_STALE_{stale_operations._key(old)}", 1
-        )
+        write.assert_called_once_with(stale_operations.cache_filename, stale_operations.cache_key(old), 1)
+
+
+class TestCacheKey(unittest.TestCase):
+    def test_round_trips_through_the_file_backend(self) -> None:
+        # The legacy file backend stores "key:value" and splits on the first colon.
+        key = stale_operations.cache_key(_operation())
+        self.assertNotIn(":", key)
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"CACHE_BACKEND": "file"}):
+            path = os.path.join(directory, "cache.txt")
+            cache.write_last_value_to_file(path, key, 1)
+            self.assertEqual(str(cache.get_last_value_for_key_from_file(path, key)), "1")
+
+
+class TestChunking(unittest.TestCase):
+    def test_entries_are_split_under_the_telegram_limit(self) -> None:
+        entries = [(f"k{i}", "x" * 1500) for i in range(5)]
+        chunks = stale_operations.chunk_entries(entries)
+        self.assertEqual([len(chunk) for chunk in chunks], [2, 2, 1])
+        for chunk in chunks:
+            message = stale_operations._HEADER + stale_operations._SEPARATOR.join(t for _, t in chunk)
+            self.assertLessEqual(len(message + stale_operations._footer()), stale_operations.MAX_MESSAGE_LENGTH)
+
+    @patch.object(stale_operations, "write_last_value_to_file")
+    @patch.object(stale_operations, "send_telegram_message")
+    @patch.object(stale_operations, "get_last_value_for_key_from_file", return_value=0)
+    @patch.object(stale_operations, "format_operation", return_value="x" * 3000)
+    @patch.object(stale_operations, "ready_times", return_value={})
+    @patch.object(stale_operations, "load_scheduled_operations")
+    def test_only_sent_chunks_are_cached(
+        self, load: MagicMock, _ready: MagicMock, _fmt: MagicMock, _cached: MagicMock, send: MagicMock, write: MagicMock
+    ) -> None:
+        first, second = _operation("0x" + "aa" * 32), _operation("0x" + "bb" * 32)
+        load.return_value = [first, second]
+        send.side_effect = [None, RuntimeError("telegram down")]
+        with patch.object(stale_operations, "stale_operations", return_value=[(first, 0), (second, 0)]):
+            stale_operations.main()
+        self.assertEqual(send.call_count, 2)
+        write.assert_called_once_with(stale_operations.cache_filename, stale_operations.cache_key(first), 1)
+
+    @patch.object(stale_operations, "decode_calldata", return_value=None)
+    def test_large_batch_lists_only_the_first_calls(self, _decode: MagicMock) -> None:
+        operation = Operation(SHORT, "0x" + "11" * 32, NOW, "0x" + "ab" * 32, ((RATE_MANAGER, SET_RATE),) * 25)
+        text = format_operation(operation, NOW - 10 * DAY, NOW)
+        self.assertEqual(text.count(RATE_MANAGER), 2 * stale_operations.MAX_CALLS_SHOWN)
+        self.assertIn("… and 15 more calls", text)
 
 
 class TestYearnMirror(unittest.TestCase):

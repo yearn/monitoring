@@ -30,7 +30,8 @@ INTERNAL_PROTOCOL = "YEARN_TIMELOCK_INTERNAL"
 TIMELOCK_ADDRESS = Web3.to_checksum_address("0x88ba032be87d5ef1fbe87336b7090767f367bf73")
 EXPECTED_MIN_DELAY_SECONDS = 7 * 24 * 60 * 60
 
-CHAINS = [Chain.MAINNET, Chain.OPTIMISM, Chain.BASE, Chain.ARBITRUM, Chain.POLYGON, Chain.KATANA]
+# Optimism is not monitored: Yearn does not use its timelock there.
+CHAINS = [Chain.MAINNET, Chain.BASE, Chain.ARBITRUM, Chain.POLYGON, Chain.KATANA]
 
 TIMELOCK_ABI = [
     {

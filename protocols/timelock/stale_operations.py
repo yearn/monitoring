@@ -34,7 +34,7 @@ from utils.cache import cache_filename, get_last_value_for_key_from_file, write_
 from utils.calldata.decoder import decode_calldata
 from utils.chains import EXPLORER_URLS, Chain
 from utils.logger import get_logger
-from utils.telegram import send_envio_error_message, send_telegram_message
+from utils.telegram import MAX_MESSAGE_LENGTH, send_envio_error_message, send_telegram_message
 from utils.web3_wrapper import ChainManager
 
 logger = get_logger("timelock_stale_operations")
@@ -43,6 +43,8 @@ STALE_DAYS = int(os.getenv("TIMELOCK_STALE_DAYS", "7"))
 LOOKBACK_DAYS = int(os.getenv("TIMELOCK_STALE_LOOKBACK_DAYS", "180"))
 PAGE_SIZE = 1000
 BATCH_SIZE = 50
+# A large batch lists only its first calls, so one operation always fits in a Telegram message.
+MAX_CALLS_SHOWN = 10
 DAY = 86400
 
 # getTimestamp sentinels from OpenZeppelin TimelockController.
@@ -156,6 +158,11 @@ def _key(operation: Operation) -> str:
     return f"{operation.timelock.chain_id}:{operation.timelock.address}:{operation.operation_id}"
 
 
+def cache_key(operation: Operation) -> str:
+    """Dedupe key for an operation. No colons: the file cache backend stores rows as ``key:value``."""
+    return f"TIMELOCK_STALE_{operation.timelock.chain_id}_{operation.timelock.address}_{operation.operation_id}"
+
+
 def _date(timestamp: int) -> str:
     return datetime.fromtimestamp(timestamp, UTC).strftime("%d/%m/%Y")
 
@@ -178,7 +185,10 @@ def format_operation(operation: Operation, ready_at: int, now: int) -> str:
         if explorer
         else operation.transaction_hash
     )
-    calls = "\n".join(_call_line(chain_id, target, data, explorer) for target, data in operation.calls)
+    shown = operation.calls[:MAX_CALLS_SHOWN]
+    calls = "\n".join(_call_line(chain_id, target, data, explorer) for target, data in shown)
+    if len(operation.calls) > len(shown):
+        calls += f"\n- … and {len(operation.calls) - len(shown)} more calls (see the schedule tx)"
     return (
         f"*{operation.timelock.label}* (chain {chain_id}): {timelock}\n"
         f"Operation: `{operation.operation_id}`\n"
@@ -186,6 +196,55 @@ def format_operation(operation: Operation, ready_at: int, now: int) -> str:
         f"Ready since {_date(ready_at)} ({(now - ready_at) // DAY} days)\n"
         f"Calls:\n{calls}"
     )
+
+
+_HEADER = "⏳ *Timelock operations ready but not executed*\n\n"
+_SEPARATOR = "\n\n"
+
+
+def _footer() -> str:
+    return (
+        f"\n\nReady for more than {STALE_DAYS} days. A TimelockController operation never expires: "
+        "it can still be executed until it is cancelled."
+    )
+
+
+def chunk_entries(entries: list[tuple[str, str]]) -> list[list[tuple[str, str]]]:
+    """Group (cache_key, text) entries into messages that fit Telegram's limit.
+
+    send_telegram_message truncates an oversized message and still succeeds, so
+    an operation in a cut-off tail would be cached as alerted without being sent.
+    """
+    budget = MAX_MESSAGE_LENGTH - len(_HEADER) - len(_footer())
+    chunks: list[list[tuple[str, str]]] = []
+    size = 0
+    for entry in entries:
+        added = len(entry[1]) + (len(_SEPARATOR) if chunks and chunks[-1] else 0)
+        if not chunks or (chunks[-1] and size + added > budget):
+            chunks.append([])
+            size = 0
+            added = len(entry[1])
+        chunks[-1].append(entry)
+        size += added
+    return chunks
+
+
+def _send(protocol: str, message: str) -> bool:
+    """Send to the protocol's channel (and mirror Yearn internally); True when the protocol send landed."""
+    try:
+        send_telegram_message(
+            message, protocol, disable_notification=True, origin_protocol=alert_history_protocol(protocol)
+        )
+    except Exception:
+        logger.exception("Failed to send stale-operation alert for %s", protocol)
+        return False
+    if protocol == "YEARN_TIMELOCK":
+        # Mirror to the internal-only chat, as timelock_alerts.py does for every Yearn timelock alert.
+        try:
+            send_telegram_message(message, YEARN_TIMELOCK_INTERNAL_PROTOCOL, disable_notification=True)
+        except Exception:
+            logger.exception("Failed to mirror stale-operation alert to %s", YEARN_TIMELOCK_INTERNAL_PROTOCOL)
+    return True
 
 
 def main() -> None:
@@ -199,35 +258,21 @@ def main() -> None:
 
     by_protocol: dict[str, list[tuple[str, str]]] = {}
     for operation, ready_at in stale:
-        cache_key = f"TIMELOCK_STALE_{_key(operation)}"
-        if str(get_last_value_for_key_from_file(cache_filename, cache_key)) == "1":
+        key = cache_key(operation)
+        if str(get_last_value_for_key_from_file(cache_filename, key)) == "1":
             continue
         by_protocol.setdefault(operation.timelock.protocol, []).append(
-            (cache_key, format_operation(operation, ready_at, now))
+            (key, format_operation(operation, ready_at, now))
         )
 
     for protocol, entries in by_protocol.items():
-        message = (
-            "⏳ *Timelock operations ready but not executed*\n\n"
-            + "\n\n".join(text for _, text in entries)
-            + f"\n\nReady for more than {STALE_DAYS} days. A TimelockController operation never expires: "
-            "it can still be executed until it is cancelled."
-        )
-        try:
-            send_telegram_message(
-                message, protocol, disable_notification=True, origin_protocol=alert_history_protocol(protocol)
-            )
-        except Exception:
-            logger.exception("Failed to send stale-operation alert for %s", protocol)
-            continue
-        if protocol == "YEARN_TIMELOCK":
-            # Mirror to the internal-only chat, as timelock_alerts.py does for every Yearn timelock alert.
-            try:
-                send_telegram_message(message, YEARN_TIMELOCK_INTERNAL_PROTOCOL, disable_notification=True)
-            except Exception:
-                logger.exception("Failed to mirror stale-operation alert to %s", YEARN_TIMELOCK_INTERNAL_PROTOCOL)
-        for cache_key, _ in entries:
-            write_last_value_to_file(cache_filename, cache_key, 1)
+        for chunk in chunk_entries(entries):
+            message = _HEADER + _SEPARATOR.join(text for _, text in chunk) + _footer()
+            if not _send(protocol, message):
+                continue
+            # Cache only what this message carried, after it landed.
+            for key, _ in chunk:
+                write_last_value_to_file(cache_filename, key, 1)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ The script runs hourly via the [monitoring runner](../automation/jobs.yaml).
 
 1. Reads the `CallScheduled` events Envio indexed for the monitored timelocks over the last `TIMELOCK_STALE_LOOKBACK_DAYS` (default 180), and groups them by operation.
 2. Reads each operation's state on-chain with `getTimestamp(id)`, batched per chain. Envio indexes only `CallScheduled`, so it cannot tell whether an operation ran. 0 means unset or cancelled, 1 executed, and anything else is the time the operation became ready.
-3. Sends one silent alert per operation that has been ready for more than `TIMELOCK_STALE_DAYS` (default 7), grouped per protocol channel, with each call's target and decoded function. The cache key `TIMELOCK_STALE_<chain>:<timelock>:<operationId>` keeps it to one alert. Yearn alerts are also mirrored to the internal Yearn chat, as in `timelock_alerts.py`.
+3. Sends one silent alert per operation that has been ready for more than `TIMELOCK_STALE_DAYS` (default 7), grouped per protocol channel, with each call's target and decoded function. The cache key `TIMELOCK_STALE_<chain>_<timelock>_<operationId>` keeps it to one alert; it has no colons because the file cache backend stores rows as `key:value`. Alerts are split into messages under Telegram's 4096-character limit, and an operation is cached only after the message carrying it is sent. A batch lists its first 10 calls. Yearn alerts are also mirrored to the internal Yearn chat, as in `timelock_alerts.py`.
 
 Only `TimelockController` timelocks are checked. Compound-style queues expire after a grace period, and governor proposals have their own lifecycle.
 
