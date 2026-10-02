@@ -8,7 +8,9 @@ from utils.erc20_metadata import ERC20Metadata
 from utils.llm import infinifi_context
 from utils.llm.infinifi_context import (
     InfinifiEscrowContext,
+    RateChange,
     TokenContext,
+    WhitelistChange,
     _candidate_addresses,
     _EscrowState,
     _farm_matches_escrow,
@@ -16,7 +18,10 @@ from utils.llm.infinifi_context import (
     _fetch_farm_records,
     _fetch_whitelist_targets,
     _looks_like_escrow,
+    _rate_and_overrides,
+    _rate_percent,
     _resolve_configured_tokens,
+    _resolve_whitelist,
     _TokenCandidate,
     format_infinifi_prompt,
     format_infinifi_report,
@@ -61,7 +66,10 @@ class TestResolveInfinifiContext(unittest.TestCase):
     def setUp(self) -> None:
         infinifi_context.reset_cache()
 
-    @patch.object(infinifi_context, "_resolve_configured_tokens")
+    @patch.object(infinifi_context, "_keeper_label", return_value="")
+    @patch.object(infinifi_context, "_whitelist_changes", return_value=())
+    @patch.object(infinifi_context, "_rate_and_overrides", return_value=(None, ()))
+    @patch.object(infinifi_context, "_resolve_whitelist")
     @patch.object(infinifi_context, "_farm_matches_escrow", return_value=True)
     @patch.object(infinifi_context, "_read_token")
     @patch.object(infinifi_context, "_fetch_farm_records")
@@ -72,13 +80,16 @@ class TestResolveInfinifiContext(unittest.TestCase):
         mock_farms: MagicMock,
         mock_token: MagicMock,
         _mock_relationship: MagicMock,
-        mock_configured_tokens: MagicMock,
+        mock_whitelist: MagicMock,
+        _mock_rate: MagicMock,
+        _mock_changes: MagicMock,
+        _mock_keeper: MagicMock,
     ) -> None:
         state = _EscrowState(ESCROW, FARM, USDC, 3_003_294_554_623)
         mock_escrow.side_effect = lambda _chain, address: state if address.lower() == ESCROW.lower() else None
         mock_farms.return_value = (_FarmRecord(FARM, "New Silver 2 Senior", "new-silver-senior"),)
         mock_token.return_value = TokenContext(USDC, "USD Coin", "USDC", 6)
-        mock_configured_tokens.return_value = _resolved_context().configured_tokens
+        mock_whitelist.return_value = (_resolved_context().configured_tokens, ())
 
         result = resolve_infinifi_context("INFINIFI", 1, [(MANAGER, _set_rate_call())])
 
@@ -139,12 +150,14 @@ class TestConfiguredTokenDiscovery(unittest.TestCase):
 
         self.assertEqual(_fetch_whitelist_targets(1, ESCROW), [DROP, USDC])
 
+    @patch.object(infinifi_context, "_contract_label", return_value="Jane")
     @patch.object(infinifi_context, "_read_token")
     @patch.object(infinifi_context, "_fetch_whitelist_targets")
     def test_keeps_only_non_accounting_erc20_targets(
         self,
         mock_candidates: MagicMock,
         mock_read: MagicMock,
+        _mock_label: MagicMock,
     ) -> None:
         zero_token = "0x333333330522F64EE8d0b3039c460b41670e3404"
         mock_candidates.return_value = [
@@ -158,6 +171,9 @@ class TestConfiguredTokenDiscovery(unittest.TestCase):
         state = _EscrowState(ESCROW, FARM, USDC, 0)
         self.assertEqual(_resolve_configured_tokens(1, state), (drop,))
         self.assertEqual(mock_read.call_count, 2)
+        mock_read.side_effect = [drop, None]
+        tokens, contracts = _resolve_whitelist(1, state)
+        self.assertEqual((tokens, contracts), ((drop,), ((zero_token, "Jane"),)))
 
 
 class TestInfinifiContextFormatting(unittest.TestCase):
@@ -166,7 +182,7 @@ class TestInfinifiContextFormatting(unittest.TestCase):
         self.assertIn("New Silver 2 Senior", result)
         self.assertIn("New Silver Series 2 DROP", result)
         self.assertIn("3,003,294.554623 USDC", result)
-        self.assertIn("Configured non-accounting ERC20 target", result)
+        self.assertIn("Whitelisted ERC20 call target", result)
 
     def test_report_links_all_context_addresses(self) -> None:
         context = _resolved_context()
@@ -175,7 +191,7 @@ class TestInfinifiContextFormatting(unittest.TestCase):
         self.assertIn(f"https://etherscan.io/address/{FARM}", report)
         self.assertIn(f"https://etherscan.io/address/{DROP}", report)
         self.assertIn("New Silver Series 2 DROP", report)
-        self.assertIn("Configured non-accounting ERC-20 targets", report)
+        self.assertIn("Whitelisted call targets", report)
 
 
 class TestReadToken(unittest.TestCase):
@@ -274,3 +290,68 @@ class TestFormattingEdgeCases(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+ROUTER = "0x7912Eaff92B2f5Bc64Cdd21C76d79FFC12eA855E"
+MGLO = "0x1DD91a111606382B77A917633ED90feAf25E0F76"
+
+
+class TestEscrowCallMeaning(unittest.TestCase):
+    """setRate is an annual WAD rate; reports had read it as a relative change of a raw number."""
+
+    def _context(self, **overrides: object) -> InfinifiEscrowContext:
+        base = _resolved_context()
+        fields = {**base.__dict__, "total_assets_raw": 2_607_624_600_324, **overrides}
+        return InfinifiEscrowContext(**fields)
+
+    def test_rate_percent(self) -> None:
+        self.assertEqual(_rate_percent(1_086_830_000_000_000_000), "+8.683%")
+        self.assertEqual(_rate_percent(950_000_000_000_000_000), "-5%")
+        self.assertEqual(_rate_percent(10**18), "+0%")
+
+    def test_rate_line_states_annual_percentages_and_yearly_amount(self) -> None:
+        context = self._context(rate_change=RateChange(1_075_100_000_000_000_000, 1_086_830_000_000_000_000))
+        (line,) = context.rate_lines()
+        self.assertIn("+7.51% a year (raw 1075100000000000000) → +8.683% a year", line)
+        self.assertIn("accrues about 226,420.044046 USDC a year", line)
+        self.assertIn("bounded to ±20%", line)
+
+    def test_unset_rate_and_assets_override(self) -> None:
+        context = self._context(
+            rate_change=RateChange(0, 1_070_000_000_000_000_000), assets_overrides=(2_500_000_000_000,)
+        )
+        rate, override = context.rate_lines()
+        self.assertIn("unset (no accrual) → +7%", rate)
+        self.assertIn("booking a loss of 107,624.600324 USDC", override)
+
+    def test_router_custody_and_whitelisted_token(self) -> None:
+        mglo = TokenContext(MGLO, "Midas Fasanara Global Open", "mGLO", 18)
+        change = WhitelistChange(MGLO, "mGLO", False, True, mglo, 12_043_884_528_783_500_000_000_000)
+        context = self._context(is_router=True, receiver=ROUTER, keeper=MANAGER, whitelist_changes=(change,))
+        self.assertIn("externalCall — no timelock", context.custody_line())
+        (line,) = context.whitelist_lines()
+        self.assertIn("false → true", line)
+        self.assertIn("router balance 12,043,884.5287835 mGLO", line)
+        self.assertIn("can transfer or approve that balance", line)
+        prompt = format_infinifi_prompt([context])
+        self.assertIn("totalAssets is a reported value", prompt)
+
+    def test_plain_escrow_names_its_off_chain_receiver(self) -> None:
+        receiver = "0x4831C121879d3DE0E2B181d9d55E9B0724f5D926"
+        line = self._context(receiver=receiver, keeper=MANAGER, keeper_label="RWAEscrowRateManager").custody_line()
+        self.assertIn(f"forwarded to the off-chain receiver {receiver}", line)
+        self.assertIn("RWAEscrowRateManager", line)
+
+    @patch.object(infinifi_context.ChainManager, "get_client")
+    def test_rate_and_overrides_read_the_stored_rate(self, mock_client: MagicMock) -> None:
+        rates = MagicMock()
+        rates.call.return_value = 1_075_100_000_000_000_000
+        mock_client.return_value.get_contract.return_value.functions.rates.return_value = rates
+        override = DecodedCall(
+            "governanceUpdateTotalAssets",
+            "governanceUpdateTotalAssets(address,uint256)",
+            [("address", ESCROW), ("uint256", 5)],
+        )
+        change, overrides = _rate_and_overrides(1, ESCROW, [(MANAGER, _set_rate_call()), (MANAGER, override)])
+        self.assertEqual(change, RateChange(1_075_100_000_000_000_000, 1_067_660_000_000_000_000))
+        self.assertEqual(overrides, (5,))

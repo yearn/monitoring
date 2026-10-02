@@ -49,5 +49,18 @@
     ],
     "stateMutability": "view",
     "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "marketId",
+    "outputs": [
+      {
+        "internalType": "Id",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
   }
 ]

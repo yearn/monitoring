@@ -309,7 +309,13 @@ MAX_REFINE_ROUNDS = 3
 MAX_STATE_READ_KEYS_PER_SIGNATURE = 12
 
 # Prompt-size guards for independent per-call simulations and raw calldata dumps.
+# Calls past the cap keep their token transfers (the fund flows) but drop state
+# changes and events, which are what made a 30-call batch overflow the context.
 MAX_PROMPT_SIMULATIONS = 8
+# Distinct simulation transfer counterparties looked up for labels. Addresses that
+# only appear in a simulation (a fee receiver, an exchange) were otherwise raw hex
+# the model could not name; the cap bounds explorer lookups on very large batches.
+MAX_SIMULATION_LABEL_LOOKUPS = 20
 MAX_PROMPT_CALLDATA_CHARS = 256
 # Undecoded batches up to this size name every target/value in the Telegram
 # summary; larger ones defer to a linked report to stay inside the message budget.
@@ -1236,11 +1242,13 @@ def _format_prepared_calldata(
     return "\n\n".join(parts)
 
 
-def _format_batch_simulation_section(items: list[_PreparedCall]) -> str:
+def _format_batch_simulation_section(items: list[_PreparedCall], labels: dict[str, str] | None = None) -> str:
     """Prompt section for the successful calls of the batch-order simulation.
 
     Failed and missing sims are omitted here (they bias the model toward a
     false revert). They are still logged and attached to the gist call flow.
+    The first ``MAX_PROMPT_SIMULATIONS`` successful calls render in full; later
+    ones keep only their token transfers, so the model still sees where funds go.
     """
     if any(item.unsimulated_reason == "bundle_unavailable" for item in items):
         return (
@@ -1248,22 +1256,29 @@ def _format_batch_simulation_section(items: list[_PreparedCall]) -> str:
             "Do not infer that any call succeeds or reverts."
         )
     blocks: list[str] = []
-    omitted = 0
+    full = 0
+    condensed = 0
     for item in items:
         sim = item.simulation
         if sim is None or not sim.success:
             continue
-        if len(blocks) >= MAX_PROMPT_SIMULATIONS:
-            omitted += 1
+        if full >= MAX_PROMPT_SIMULATIONS:
+            condensed += 1
+            header = f"Call {item.index} (batch order, after calls 1-{item.index - 1}; token transfers only):"
+            blocks.append(header + "\n" + _format_simulation_context(sim, labels, transfers_only=True))
             continue
+        full += 1
         header = (
             f"Call {item.index} (simulated in batch order, after calls 1-{item.index - 1}):"
             if item.index > 1
             else f"Call {item.index} (simulated in batch order, first call):"
         )
-        blocks.append(header + "\n" + _format_simulation_context(sim))
-    if omitted:
-        blocks.append(f"{omitted} further successful simulations omitted from this prompt; see the call flow.")
+        blocks.append(header + "\n" + _format_simulation_context(sim, labels))
+    if condensed:
+        blocks.append(
+            f"{condensed} further successful simulations are shown as token transfers only; "
+            "their state changes and events are omitted from this prompt."
+        )
     return "\n\n".join(blocks)
 
 
@@ -1283,8 +1298,19 @@ def _with_onchain_symbols(sim: SimulationResult | None, chain_id: int) -> Simula
     return replace(sim, asset_changes=changes)
 
 
-def _format_simulation_context(sim: SimulationResult) -> str:
-    """Format simulation results into a readable string for the LLM prompt."""
+def _format_simulation_context(
+    sim: SimulationResult,
+    labels: dict[str, str] | None = None,
+    *,
+    transfers_only: bool = False,
+) -> str:
+    """Format simulation results into a readable string for the LLM prompt.
+
+    Transfer endpoints carry their label when one is known, so a recipient that
+    appears nowhere in the calldata (a fee receiver, say) can still be named.
+    ``transfers_only`` drops state changes and events for condensed batch entries.
+    """
+    labels = labels or {}
     parts: list[str] = []
 
     parts.append(f"Simulation: {'SUCCESS' if sim.success else 'FAILED'}")
@@ -1296,7 +1322,12 @@ def _format_simulation_context(sim: SimulationResult) -> str:
         parts.append("\nToken transfers:")
         for change in sim.asset_changes:
             amount = change.amount
-            parts.append(f"  {amount} {change.token_symbol} from {change.from_address} to {change.to_address}")
+            sender = _annotate_address(change.from_address, labels)
+            recipient = _annotate_address(change.to_address, labels)
+            parts.append(f"  {amount} {change.token_symbol} from {sender} to {recipient}")
+
+    if transfers_only:
+        return "\n".join(parts)
 
     if sim.state_changes:
         # Show up to 10 most relevant state changes to avoid prompt bloat
@@ -1316,6 +1347,41 @@ def _format_simulation_context(sim: SimulationResult) -> str:
             parts.append(f"  {name}({', '.join(input_strs)})")
 
     return "\n".join(parts)
+
+
+def _simulation_counterparties(sims: list[SimulationResult | None]) -> list[str]:
+    """Distinct non-zero transfer endpoints across successful sims, checksummed, first-seen order."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for sim in sims:
+        if sim is None or not sim.success:
+            continue
+        for change in sim.asset_changes:
+            for raw in (change.from_address, change.to_address):
+                checksum = _checksum_or_none(raw) if raw else None
+                if checksum is None or int(checksum, 16) == 0 or checksum in seen:
+                    continue
+                seen.add(checksum)
+                out.append(checksum)
+    return out
+
+
+def _label_simulation_counterparties(
+    sims: list[SimulationResult | None],
+    chain_id: int,
+    address_labels: dict[str, str],
+) -> list[str]:
+    """Label transfer endpoints that only appear in the simulation, in place.
+
+    Returns the endpoints (capped at ``MAX_SIMULATION_LABEL_LOOKUPS``) so the
+    caller can add them to the Address Links section. Endpoints already labelled
+    from the calldata are kept and not looked up again.
+    """
+    counterparties = _simulation_counterparties(sims)[:MAX_SIMULATION_LABEL_LOOKUPS]
+    unlabelled: list[tuple[str, DecodedCall | None]] = [(a, None) for a in counterparties if a not in address_labels]
+    for address, label in _collect_address_labels(unlabelled, chain_id).items():
+        address_labels.setdefault(address, label)
+    return counterparties
 
 
 def _collect_related_tokens(
@@ -1529,7 +1595,7 @@ def _build_prompt(
     if simulation_section:
         parts.append(f"\n--- Simulation Results ---\n{simulation_section}")
     elif simulation:
-        parts.append(f"\n--- Simulation Results ---\n{_format_simulation_context(simulation)}")
+        parts.append(f"\n--- Simulation Results ---\n{_format_simulation_context(simulation, address_labels)}")
 
     return "\n".join(parts)
 
@@ -1900,7 +1966,10 @@ def explain_transaction(
         else:
             logger.info("Simulation unavailable, proceeding with decoded calldata only")
 
-    addresses = list(dict.fromkeys([*collect_unique_addresses([(target, decoded)]), *protocol_ctx.addresses]))
+    sim_addresses = _label_simulation_counterparties([simulation], chain_id, address_labels)
+    addresses = list(
+        dict.fromkeys([*collect_unique_addresses([(target, decoded)]), *protocol_ctx.addresses, *sim_addresses])
+    )
     address_links = format_address_links_block(addresses, chain_id, address_labels)
 
     prompt = _build_prompt(
@@ -2278,9 +2347,12 @@ def explain_batch_transaction(
 
     targets = ", ".join(item.target or "?" for item in items)
     total_value = sum(item.value for item in items)
-    addresses = list(dict.fromkeys([*collect_unique_addresses(all_targets_for_labels), *protocol_ctx.addresses]))
+    sim_addresses = _label_simulation_counterparties([item.simulation for item in items], chain_id, address_labels)
+    addresses = list(
+        dict.fromkeys([*collect_unique_addresses(all_targets_for_labels), *protocol_ctx.addresses, *sim_addresses])
+    )
     address_links = format_address_links_block(addresses, chain_id, address_labels)
-    simulation_section = _format_batch_simulation_section(items)
+    simulation_section = _format_batch_simulation_section(items, address_labels)
     decoded_section = _format_prepared_calldata(items, address_labels, param_names_per_item)
 
     prompt = _build_prompt(

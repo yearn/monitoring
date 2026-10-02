@@ -10,6 +10,7 @@ from utils.llm.threejane_account_context import (
     UNLIMITED,
     USD3_ADDRESS,
     ExemptAccount,
+    ExemptionChange,
     LCCBounceContext,
     SupplyCapExemptContext,
     TokenUnit,
@@ -90,11 +91,34 @@ def _exempt_call(account: str = OTHER, exempt: bool = True) -> DecodedCall:
     )
 
 
-def _client(batch_results: list, code: bytes = b"") -> MagicMock:
+# The live alert: 0x6477… was exempted in the 25/09 batch, revoked with 43 others on 30/09, then re-granted.
+REGRANTED = "0x6477841947E73B025d69bc9a7dA7cD5890E7Cf0E"
+REVOKE_TX = "0xd7f79155b132a9788d63bb015db3ca7e43600d4cf21930756a3bfe14335bc8fd"
+
+
+def _client(batch_results: list, code: bytes = b"", logs: list | None = None) -> MagicMock:
     client = MagicMock()
     client.execute_batch.return_value = batch_results
     client.eth.get_code.return_value = code
+    client.eth.get_logs.return_value = logs or []
     return client
+
+
+# ILCCVault.SyncState with no pending auction, and an EpochState builder (callOpened 0, slashFinalized 8).
+_IDLE_SYNC = (0, 0, 0, 0)
+
+
+def _epoch_state(call_opened: bool = False, slash_finalized: bool = False) -> tuple:
+    return (call_opened, 0, 0, 0, 0, 0, 0, 0, slash_finalized, False, 0, 0, 0)
+
+
+def _exempt_log(account: str, exempt: bool, block: int, tx_hash: str) -> dict:
+    return {
+        "topics": [bytes.fromhex(account_context.EXEMPT_UPDATED_TOPIC[2:]), bytes(12) + bytes.fromhex(account[2:])],
+        "data": int(exempt).to_bytes(32, "big"),
+        "blockNumber": block,
+        "transactionHash": bytes.fromhex(tx_hash[2:]),
+    }
 
 
 class TestTokenUnit(unittest.TestCase):
@@ -158,6 +182,14 @@ class TestLCCBounce(unittest.TestCase):
             self.assertIn(f"https://etherscan.io/address/{address}", report)
         self.assertIn("`499,999.999986 USDC`", report)
 
+    def test_phase_blockers_come_first(self) -> None:
+        """bounceCommitment reverts InvalidPhase during a pending auction or an unsettled call."""
+        self.assertIn("shortfall auction is pending", _bounce(auction_pending=True).blocker())
+        unsettled = _bounce(call_unsettled=True)
+        self.assertIn("capital call is open and its slash is not finalized", unsettled.blocker())
+        self.assertIn("would REVERT", unsettled.effect_line())
+        self.assertEqual(unsettled.vault_share_line(), "")
+
     def test_labels_name_the_assets_by_role(self) -> None:
         labels = _bounce().labels
         self.assertEqual(labels[VAULT], "LCCVault")
@@ -176,9 +208,19 @@ class TestExemptAccount(unittest.TestCase):
         self.assertEqual(_account(proposed_exempt=False, current_exempt=True).change(), "true → false")
         self.assertEqual(_account(current_exempt=True).change(), "already true (no change)")
 
-    def test_grant_without_ring_fence_is_an_issue(self) -> None:
-        self.assertIn("no ring-fence credit", _account().pairing_issue())
+    def test_grant_without_ring_fence_is_not_an_issue(self) -> None:
+        """Every exempt EOA is a direct depositor without the conduit flag; the ⚠️ framed that as a deviation."""
+        self.assertEqual(_account().pairing_issue(), "")
         self.assertEqual(_account(ring_fence_conduit=True).pairing_issue(), "")
+
+    def test_history_names_a_regrant(self) -> None:
+        account = _account(last_change=ExemptionChange(26091398, False, REVOKE_TX))
+        self.assertEqual(account.history(), f"re-grants an exemption revoked at block 26091398 (tx {REVOKE_TX})")
+
+    def test_history_states_the_last_change_otherwise(self) -> None:
+        revoke = _account(proposed_exempt=False, current_exempt=True, last_change=ExemptionChange(1, True, "0xab"))
+        self.assertEqual(revoke.history(), "before this transaction, last set to true at block 1 (tx 0xab)")
+        self.assertEqual(_account().history(), "no earlier exemption change on record")
 
     def test_revoke_leaving_ring_fence_set_is_an_issue(self) -> None:
         issue = _account(proposed_exempt=False, current_exempt=True, ring_fence_conduit=True).pairing_issue()
@@ -233,8 +275,21 @@ class TestSupplyCapExempt(unittest.TestCase):
         self.assertIn("does not touch existing balances or withdrawals", line)
 
     def test_pairing_line_counts_out_of_step_accounts(self) -> None:
-        self.assertIn("1 account(s) end up out of step", _exemption().pairing_line())
+        conduit_revoke = _account(proposed_exempt=False, current_exempt=True, ring_fence_conduit=True)
+        self.assertIn("1 account(s) end up out of step", _exemption(conduit_revoke).pairing_line())
         self.assertIn("No call in this batch", self._revocation().pairing_line())
+        self.assertIn("No call in this batch", _exemption().pairing_line())
+        self.assertIn("only matters for LCC capital-call funding", _exemption().pairing_line())
+
+    def test_purpose_line_states_the_documented_intent(self) -> None:
+        """A report once called a wallet exemption routine; the contract reserves it for protocol receivers."""
+        line = _exemption().purpose_line()
+        self.assertIn("controls overall protocol size and risk exposure", line)
+        self.assertIn("protocol-controlled deposit receivers", line)
+        self.assertIn("per-wallet right to grow USD3 past the cap", line)
+        self.assertIn("adds no credit exposure", line)
+        self.assertEqual(format_account_prompt(_exemption()).count("Why it matters"), 1)
+        self.assertEqual(format_account_report(_exemption(), 1, {}).count("Why it matters"), 1)
 
     def test_supply_line_above_cap_blocks_non_exempt(self) -> None:
         line = _exemption().supply_line()
@@ -272,8 +327,28 @@ class TestSupplyCapExempt(unittest.TestCase):
         self.assertIn("`1,271,316.91341 USD3`", report)
 
     def test_report_flags_out_of_step_accounts(self) -> None:
-        report = format_account_report(_exemption(), 1, {})
-        self.assertIn("⚠️ exempt without ringFenceConduit", report)
+        conduit_revoke = _account(proposed_exempt=False, current_exempt=True, ring_fence_conduit=True)
+        self.assertIn(
+            "⚠️ exemption revoked while ringFenceConduit stays true",
+            format_account_report(_exemption(conduit_revoke), 1, {}),
+        )
+        self.assertNotIn("⚠️", format_account_report(_exemption(), 1, {}))
+
+    def test_history_appears_only_when_read(self) -> None:
+        account = _account(address=REGRANTED, last_change=ExemptionChange(26091398, False, REVOKE_TX))
+        context = _exemption(account, history_read=True, exempt_before=5, exempt_conduits_before=2)
+        prompt = format_account_prompt(context)
+        self.assertIn(
+            "Exempt before this transaction (replayed from SupplyCapExemptUpdated): 5 account(s), 2 of them", prompt
+        )
+        self.assertIn(f"re-grants an exemption revoked at block 26091398 (tx {REVOKE_TX})", prompt)
+        report = format_account_report(context, 1, {})
+        self.assertIn("| USD3 balance | Last change |", report)
+        self.assertIn(f"set false at [block 26091398](https://etherscan.io/tx/{REVOKE_TX})", report)
+
+        unread = _exemption(account)
+        self.assertNotIn("re-grants", format_account_prompt(unread))
+        self.assertNotIn("Last change", format_account_report(unread, 1, {}))
 
     def test_addresses_include_every_account(self) -> None:
         self.assertEqual(self._revocation().addresses, [USD3_ADDRESS, OTHER, DELEGATED, SAFE, USER])
@@ -285,7 +360,8 @@ class TestReaders(unittest.TestCase):
         asset_config = (WAEUSDC.address, USDC.address, USD3_ADDRESS, OTHER, OTHER, OTHER)
         risk_config = (10**13, 10**12, 2000, 1_585_000_000, 10000, 0)
         totals = (575_342_153_334, 9_084_283_497_207, 0, 0)
-        client = _client([asset_config, risk_config, totals, account])
+        client = _client([asset_config, risk_config, totals, _IDLE_SYNC, 42, account])
+        client.get_contract.return_value.functions.getEpochState.return_value.call.return_value = _epoch_state()
         units = {USDC.address: USDC, WAEUSDC.address: WAEUSDC}
         with (
             patch.object(account_context, "exposes", return_value=True),
@@ -296,10 +372,28 @@ class TestReaders(unittest.TestCase):
 
         self.assertEqual(contexts, [_bounce()])
 
+    def test_lcc_bounce_reads_the_vault_phase(self) -> None:
+        account = (MARGIN, COMMITMENT, 0, 0, 0, 0, 0, 0, 0, False, 0, False, False, 0)
+        asset_config = (WAEUSDC.address, USDC.address, USD3_ADDRESS, OTHER, OTHER, OTHER)
+        client = _client([asset_config, (0, 0, 0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 43), 42, account])
+        epoch_call = client.get_contract.return_value.functions.getEpochState
+        epoch_call.return_value.call.return_value = _epoch_state(call_opened=True)
+        units = {USDC.address: USDC, WAEUSDC.address: WAEUSDC}
+        with (
+            patch.object(account_context, "exposes", return_value=True),
+            patch.object(account_context.ChainManager, "get_client", return_value=client),
+            patch.object(account_context, "fetch_token_unit", side_effect=lambda _chain, address: units[address]),
+        ):
+            (context,) = resolve_account_contexts(1, VAULT, [_bounce_call()])
+        self.assertTrue(context.auction_pending)
+        self.assertTrue(context.call_unsettled)
+        epoch_call.assert_called_with(42)
+
     def test_exit_claimed_is_not_in_progress(self) -> None:
         account = (MARGIN, COMMITMENT, 0, 0, 0, 0, 0, 0, 0, True, 0, True, False, 0)
         asset_config = (WAEUSDC.address, USDC.address, USD3_ADDRESS, OTHER, OTHER, OTHER)
-        client = _client([asset_config, (0, 0, 0, 0, 0, 0), (0, 0, 0, 0), account])
+        client = _client([asset_config, (0, 0, 0, 0, 0, 0), (0, 0, 0, 0), _IDLE_SYNC, 42, account])
+        client.get_contract.return_value.functions.getEpochState.return_value.call.return_value = _epoch_state()
         units = {USDC.address: USDC, WAEUSDC.address: WAEUSDC}
         with (
             patch.object(account_context, "exposes", return_value=True),
@@ -347,6 +441,7 @@ class TestReaders(unittest.TestCase):
                     usd3_balance_raw=5,
                 ),
                 _account(address=SAFE, is_contract=True, usd3_balance_raw=7),
+                history_read=True,
             ),
         )
         # Code is read through the batch, never with a direct per-account RPC.
@@ -368,6 +463,38 @@ class TestReaders(unittest.TestCase):
         self.assertEqual(grant.change(), "false → true")
         self.assertEqual(revoke.change(), "true → false")
         self.assertIn("1 grant (false → true), 1 revoke (true → false), 0 no-op", context.overview_line())
+
+    def test_history_marks_the_regrant_and_counts_exempt_conduits(self) -> None:
+        shared = [USDC.address, 100_435_135_055_453, 1_000_000_000, 100_000_000_000_000, "USD3", 6]
+        logs = [
+            _exempt_log(VAULT, True, 26057349, "0x01"),
+            _exempt_log(REGRANTED, True, 26057378, "0x02"),
+            _exempt_log(OTHER, True, 26079019, "0x03"),
+            _exempt_log(REGRANTED, False, 26091398, REVOKE_TX),
+        ]
+        # The account's own reads, then ringFenceConduit for each account exempt before the call: VAULT, OTHER.
+        client = _client([*shared, *(False, False, 86_026_259_570, b""), True, False], logs=logs)
+        with (
+            patch.object(account_context.ChainManager, "get_client", return_value=client),
+            patch.object(account_context, "fetch_token_unit", return_value=USDC),
+        ):
+            (context,) = resolve_account_contexts(1, USD3_ADDRESS, [_exempt_call(REGRANTED)])
+
+        self.assertEqual(context.accounts[0].last_change, ExemptionChange(26091398, False, REVOKE_TX))
+        self.assertEqual((context.exempt_before, context.exempt_conduits_before), (2, 1))
+        self.assertIn("re-grants an exemption revoked at block 26091398", format_account_prompt(context))
+
+    def test_unreadable_history_keeps_the_context(self) -> None:
+        shared = [USDC.address, 1, 1_000_000_000, 100_000_000_000_000, "USD3", 6]
+        client = _client([*shared, *(False, False, 0, b"")])
+        client.eth.get_logs.side_effect = ValueError("query exceeds max block range")
+        with (
+            patch.object(account_context.ChainManager, "get_client", return_value=client),
+            patch.object(account_context, "fetch_token_unit", return_value=USDC),
+        ):
+            (context,) = resolve_account_contexts(1, USD3_ADDRESS, [_exempt_call(REGRANTED)])
+        self.assertFalse(context.history_read)
+        self.assertIsNone(context.accounts[0].last_change)
 
     def test_exemption_on_another_target_is_ignored(self) -> None:
         with patch.object(account_context.ChainManager, "get_client") as get_client:

@@ -18,7 +18,7 @@ identifies contracts from their verified ABI, reverses known hashed labels from
 a checked-in name table, and reads the surrounding state on-chain.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 
 from eth_utils import keccak, to_checksum_address
 
@@ -48,30 +48,55 @@ PROTOCOL = "3jane"
 # show whether a weekly allocation is in line with recent ones.
 EMISSION_HISTORY_EPOCHS = 3
 
+# Keys ProtocolConfigLib declares that no deployed 3Jane contract reads. Checked against the verified
+# sources of MorphoCredit, CreditLine, USD3, sUSD3, MarkdownController, LCCVault, LCCVaultFactory,
+# AdaptiveCurveIrm, Helper, InsuranceFund and NotificationVault (USD3l); re-check after an upgrade.
+_UNUSED_KEY = "declared in ProtocolConfigLib but read by no deployed 3Jane contract: setting it has no on-chain effect"
+
 # Hashed labels 3Jane passes as bytes32 arguments. Names are the pre-image; the
 # note explains what the value controls so the LLM does not have to guess from
-# the name alone. Sourced from ProtocolConfigLib, IProtocolConfig's config
-# structs, and the Jane / EmergencyController role declarations.
+# the name alone. Each note is read from the contract that consumes the key
+# (ProtocolConfig itself only stores values), plus the Jane / EmergencyController
+# role declarations. Zero values are called out where a consumer treats 0 as a
+# switch or a default rather than as the number zero.
 _HASHED_LABELS: dict[str, str] = {
     # --- ProtocolConfig: market control ---
-    "IS_PAUSED": "protocol-wide pause flag for the credit market (non-zero pauses)",
-    "MAX_ON_CREDIT": "share of supplied assets allowed to be lent on credit",
-    "DEBT_CAP": "ceiling on total protocol debt",
+    "IS_PAUSED": (
+        "MorphoCredit pause flag: non-zero blocks USD3 supplying to the credit market and new borrows; "
+        "repayments and USD3 withdrawals from MorphoCredit continue"
+    ),
+    "MAX_ON_CREDIT": (
+        "share of USD3's waUSDC that USD3 supplies to MorphoCredit, in bps (10000 = 100%); a deployment target, "
+        "not a lending limit (DEBT_CAP bounds borrowing); 0 stops deployment"
+    ),
+    "DEBT_CAP": (
+        "ceiling on MorphoCredit totalBorrowAssets, in waUSDC (the market's loan token), not USDC; 0 blocks all "
+        "new borrowing; sUSD3's deposit cap is sized from max(actual debt, DEBT_CAP)"
+    ),
     # --- ProtocolConfig: credit line (CreditLineConfig) ---
     "MAX_LTV": "maximum loan-to-value accepted when setting a credit line (WAD)",
     "MAX_VV": "maximum vv (verified value) accepted when setting a credit line",
-    "MAX_CREDIT_LINE": "maximum size of a single borrower credit line",
+    "MAX_CREDIT_LINE": (
+        "maximum credit line CreditLine.setCreditLines accepts, in waUSDC; checked only when a line is set, so "
+        "lowering it leaves larger existing lines in place"
+    ),
     "MIN_CREDIT_LINE": "minimum size of a single borrower credit line",
-    "MAX_DRP": "maximum borrower default-risk premium, per second in WAD",
+    "MAX_DRP": (
+        "maximum borrower default-risk premium, per second in WAD; CreditLine also hard-caps it at 31709791983 "
+        "(100% a year)"
+    ),
     # --- ProtocolConfig: market timing (MarketConfig) ---
     "GRACE_PERIOD": "seconds after cycle end before a borrower counts as delinquent",
     "DELINQUENCY_PERIOD": "seconds of delinquency before a borrower defaults",
     "MIN_BORROW": "minimum outstanding loan balance, prevents dust positions",
     "IRP": "penalty rate charged to delinquent borrowers, per second in WAD",
-    "CYCLE_DURATION": "length of a payment cycle in seconds",
-    "MIN_LOAN_DURATION": "minimum loan duration in seconds",
-    "LATE_REPAYMENT_THRESHOLD": "threshold at which a repayment counts as late",
-    "DEFAULT_THRESHOLD": "threshold at which a borrower is treated as defaulted",
+    "CYCLE_DURATION": (
+        "minimum spacing between payment cycles in seconds; 0 freezes the market (MorphoCredit blocks borrows and "
+        "repayments)"
+    ),
+    "MIN_LOAN_DURATION": _UNUSED_KEY,
+    "LATE_REPAYMENT_THRESHOLD": _UNUSED_KEY,
+    "DEFAULT_THRESHOLD": _UNUSED_KEY,
     # --- ProtocolConfig: interest rate model (IRMConfig) ---
     "CURVE_STEEPNESS": "AdaptiveCurveIRM curve steepness",
     "ADJUSTMENT_SPEED": "AdaptiveCurveIRM rate adjustment speed",
@@ -80,21 +105,44 @@ _HASHED_LABELS: dict[str, str] = {
     "MIN_RATE_AT_TARGET": "IRM lower bound on the rate at target utilization",
     "MAX_RATE_AT_TARGET": "IRM upper bound on the rate at target utilization",
     # --- ProtocolConfig: tranches ---
-    "TRANCHE_RATIO": "junior/senior tranche ratio",
-    "TRANCHE_SHARE_VARIANT": "tranche share variant selector",
-    "MIN_SUSD3_BACKING_RATIO": "minimum sUSD3 backing ratio; 0 disables the ratio floor",
-    "SUSD3_NOMINAL_BACKING_FLOOR": "absolute sUSD3 backing floor; sUSD3 redemptions block below it",
+    "TRANCHE_RATIO": (
+        "maximum sUSD3 size as a share of debt, in bps: sUSD3 deposits stop at max(actual debt, DEBT_CAP) x ratio; "
+        "0 falls back to 1500 (15%)"
+    ),
+    "TRANCHE_SHARE_VARIANT": (
+        "sUSD3's share of USD3 yield, in bps (at most 10000); written into USD3's performance fee only when a "
+        "keeper calls USD3.syncTrancheShare, so it has no effect until then"
+    ),
+    "MIN_SUSD3_BACKING_RATIO": (
+        "in bps: sUSD3 withdrawals stop below debt x ratio, and USD3 deploys to credit at most sUSD3 value / "
+        "ratio; 0 disables both"
+    ),
+    "SUSD3_NOMINAL_BACKING_FLOOR": "absolute sUSD3 backing floor in USDC; sUSD3 withdrawals block below it",
     # --- ProtocolConfig: timing and caps ---
     "SUSD3_LOCK_DURATION": "sUSD3 lock duration in seconds",
     "SUSD3_COOLDOWN_PERIOD": "sUSD3 cooldown period in seconds",
-    "SUSD3_WITHDRAWAL_WINDOW": "seconds after cooldown during which sUSD3 can be withdrawn",
-    "USD3_COMMITMENT_TIME": "USD3 deposit commitment period in seconds",
+    "SUSD3_WITHDRAWAL_WINDOW": "seconds after cooldown during which sUSD3 can be withdrawn; 0 falls back to 2 days",
+    "USD3_COMMITMENT_TIME": _UNUSED_KEY,
     "USD3_SUPPLY_CAP": "cap on USD3 totalAssets, in the vault's asset",
+    "USD3_REDEMPTION_FLOOR": (
+        "hard USD3 redemption floor in USDC: withdrawals cannot take USD3 totalAssets below it (the higher of "
+        "this and USD3_REDEMPTION_FLOOR_BPS applies)"
+    ),
+    "USD3_REDEMPTION_FLOOR_BPS": (
+        "USD3 redemption floor as bps of totalAssets; applied to the then-current total, so repeated "
+        "redemptions drain toward the nominal floor"
+    ),
+    "TEND_DRIFT_THRESHOLD": (
+        "bps that USD3's credit deployment may drift from its target before keepers rebalance; 0 falls back to 10"
+    ),
     "FULL_MARKDOWN_DURATION": "seconds over which a defaulted loan is marked down to zero",
     # --- Roles (Jane token, EmergencyController, MorphoCredit) ---
     "OWNER_ROLE": "owner role: manages all other roles and contract parameters",
     "MINTER_ROLE": "minter role: can mint new JANE",
-    "TRANSFER_ROLE": "transfer role: can move JANE while transfers are globally disabled",
+    "TRANSFER_ROLE": (
+        "transfer role: while JANE transfers are globally disabled, a transfer is allowed when the sender or the "
+        "recipient holds it"
+    ),
     "EMERGENCY_AUTHORIZED_ROLE": "emergency role: pause, zero caps, revoke credit lines — bypasses the timelocks",
 }
 
@@ -104,6 +152,18 @@ _LABELS_BY_HASH: dict[str, tuple[str, str]] = {
 }
 
 _MINTER_ROLE = keccak(text="MINTER_ROLE")
+
+WAUSDC_ADDRESS = "0xD4fa2D31b7968E448877f69A96DE69f5de8cD23E"
+MORPHO_CREDIT_ADDRESS = "0xDe6e08ac208088cc62812Ba30608D852c6B0EcBc"
+# Keys MorphoCredit and CreditLine compare against waUSDC amounts, the credit
+# market's loan token: borrowed assets, credit lines and vv. waUSDC is an
+# appreciating Aave wrapper (~1.19 USDC each in Oct 2026), so these render in
+# waUSDC with a USDC equivalent at the live rate rather than as USDC.
+_WAUSDC_KEYS = frozenset(
+    "0x" + keccak(text=name).hex()
+    for name in ("DEBT_CAP", "MAX_CREDIT_LINE", "MIN_CREDIT_LINE", "MAX_VV", "MIN_BORROW")
+)
+_DEBT_CAP_KEY = "0x" + keccak(text="DEBT_CAP").hex()
 
 
 @dataclass(frozen=True)
@@ -117,11 +177,11 @@ class _UsageRead:
 
 # A cap only reads as slack or binding next to what it is capping. USD3's cap
 # and its totalAssets are both denominated in the vault's asset (USDC), so the
-# two are directly comparable and both render in that asset's units; DEBT_CAP is
-# deliberately absent until its denomination against the market's borrow
-# accounting is confirmed. The enforcement note is read from USD3's
-# availableDepositLimit — without it the model hedged that totalAssets might not
-# be the measure the cap checks.
+# two are directly comparable and both render in that asset's units. DEBT_CAP is
+# absent: MorphoCredit compares it to totalBorrowAssets in waUSDC (sUSD3 converts
+# it with WAUSDC.convertToAssets), so it needs a waUSDC unit, not USDC. The
+# enforcement note is read from USD3's availableDepositLimit — without it the
+# model hedged that totalAssets might not be the measure the cap checks.
 _USAGE_READS: dict[str, _UsageRead] = {
     "0x" + keccak(text="USD3_SUPPLY_CAP").hex(): _UsageRead(
         vault_address=USD3_ADDRESS,
@@ -133,6 +193,16 @@ _USAGE_READS: dict[str, _UsageRead] = {
         ),
     ),
 }
+
+# DEBT_CAP caps MorphoCredit's borrowing, not a vault, so it is read from the market USD3 lends into.
+_DEBT_CAP_USAGE = _UsageRead(
+    vault_address=MORPHO_CREDIT_ADDRESS,
+    label="MorphoCredit totalBorrowAssets",
+    enforcement=(
+        "MorphoCredit._beforeBorrow rejects a borrow once totalBorrowAssets plus the amount would exceed DEBT_CAP, "
+        "and every borrow while DEBT_CAP is 0. Both sides are in waUSDC."
+    ),
+)
 
 _DISTRIBUTOR_GETTERS = {"useMint", "merkleRoot", "jane", "maxClaimable", "totalClaimed", "epochEmissions"}
 
@@ -156,10 +226,23 @@ class HashedLabelContext:
     # Values this transaction's setConfig calls write for the key, in call order.
     proposed_values: tuple[int, ...] = ()
     usage_enforcement: str = ""
+    # For waUSDC-denominated keys: USDC per whole waUSDC (raw USDC units), and the USDC unit.
+    usdc_per_unit_raw: int | None = None
+    usdc: TokenUnit | None = None
+
+    def amount_text(self, raw: int) -> str:
+        """An amount in its verified unit, plus its USDC equivalent when the unit is waUSDC."""
+        if self.unit is None:
+            return str(raw)
+        text = self.unit.amount(raw)
+        if self.usdc is not None and self.usdc_per_unit_raw:
+            usdc_raw = raw * self.usdc_per_unit_raw // 10**self.unit.decimals
+            text += f" (≈ {self.usdc.amount(usdc_raw)} at the current rate)"
+        return text
 
     def value_text(self, raw: int) -> str:
         """A config value in its verified unit with the raw integer beside it, else raw alone."""
-        return f"{self.unit.amount(raw)} (raw {raw})" if self.unit else str(raw)
+        return f"{self.amount_text(raw)} (raw {raw})" if self.unit else str(raw)
 
     def usage_lines(self) -> list[str]:
         """Where the capped quantity stands against the current cap and each proposed one."""
@@ -171,9 +254,9 @@ class HashedLabelContext:
             if cap is None:
                 continue
             if usage > cap:
-                lines.append(f"Against the {label} cap: above it by {self.unit.amount(usage - cap)}")
+                lines.append(f"Against the {label} cap: above it by {self.amount_text(usage - cap)}")
             else:
-                lines.append(f"Against the {label} cap: {self.unit.amount(cap - usage)} of headroom")
+                lines.append(f"Against the {label} cap: {self.amount_text(cap - usage)} of headroom")
         return lines
 
     @property
@@ -329,6 +412,8 @@ class _ConfigState:
     values: dict[str, int]
     usage: dict[str, int]
     units: dict[str, TokenUnit]
+    usdc_per_unit_raw: dict[str, int] = field(default_factory=dict)
+    usdc: TokenUnit | None = None
 
 
 def _read_config_state(chain_id: int, target: str, keys: list[str]) -> _ConfigState:
@@ -363,7 +448,47 @@ def _read_config_state(chain_id: int, target: str, keys: list[str]) -> _ConfigSt
         unit = fetch_token_unit(chain_id, str(usage_results[2 * index + 1]))
         if unit is not None:
             units[key] = unit
-    return _ConfigState(values=values, usage=usage, units=units)
+    state = _ConfigState(values=values, usage=usage, units=units)
+    wausdc_keys = [key for key in keys if key in _WAUSDC_KEYS]
+    if wausdc_keys:
+        state = _with_wausdc_units(chain_id, wausdc_keys, state)
+    return state
+
+
+def _with_wausdc_units(chain_id: int, keys: list[str], state: _ConfigState) -> _ConfigState:
+    """Give waUSDC-denominated keys their unit, a USDC rate, and DEBT_CAP its current borrowing.
+
+    Best-effort on top of the stored values: a failure returns the state unchanged, leaving these keys raw.
+    """
+    try:
+        client = ChainManager.get_client(Chain.from_chain_id(chain_id))
+        wausdc = client.get_contract(to_checksum_address(WAUSDC_ADDRESS), threejane_abi("ERC4626Vault"))
+        usd3 = client.get_contract(to_checksum_address(USD3_ADDRESS), threejane_abi("USD3"))
+        with client.batch_requests() as batch:
+            batch.add(wausdc.functions.decimals())
+            batch.add(wausdc.functions.asset())
+            batch.add(usd3.functions.marketId())
+            decimals, asset_address, market_id = client.execute_batch(batch)
+        rate = int(wausdc.functions.convertToAssets(10 ** int(decimals)).call())
+        unit = fetch_token_unit(chain_id, WAUSDC_ADDRESS)
+        usdc = fetch_token_unit(chain_id, str(asset_address))
+        if unit is None or usdc is None:
+            return state
+        usage = dict(state.usage)
+        if _DEBT_CAP_KEY in keys:
+            morpho = client.get_contract(to_checksum_address(MORPHO_CREDIT_ADDRESS), threejane_abi("MorphoCredit"))
+            # Market: (totalSupplyAssets, totalSupplyShares, totalBorrowAssets, ...)
+            usage[_DEBT_CAP_KEY] = int(morpho.functions.market(market_id).call()[2])
+    except Exception as error:  # noqa: BLE001 - units are enrichment; the raw values still render
+        logger.info("3Jane waUSDC unit read failed: %s", error)
+        return state
+    return replace(
+        state,
+        units={**state.units, **dict.fromkeys(keys, unit)},
+        usage=usage,
+        usdc_per_unit_raw={**state.usdc_per_unit_raw, **dict.fromkeys(keys, rate)},
+        usdc=usdc,
+    )
 
 
 def _resolve_hashed_labels(chain_id: int, target: str, calls: list[DecodedCall]) -> list[HashedLabelContext]:
@@ -385,7 +510,7 @@ def _resolve_hashed_labels(chain_id: int, target: str, calls: list[DecodedCall])
     contexts = []
     for as_hex in known:
         name, note = _LABELS_BY_HASH[as_hex]
-        usage_read = _USAGE_READS.get(as_hex)
+        usage_read = _USAGE_READS.get(as_hex) or (_DEBT_CAP_USAGE if as_hex == _DEBT_CAP_KEY else None)
         contexts.append(
             HashedLabelContext(
                 target=to_checksum_address(target),
@@ -399,6 +524,8 @@ def _resolve_hashed_labels(chain_id: int, target: str, calls: list[DecodedCall])
                 unit=state.units.get(as_hex),
                 proposed_values=proposed.get(as_hex, ()),
                 usage_enforcement=usage_read.enforcement if usage_read else "",
+                usdc_per_unit_raw=state.usdc_per_unit_raw.get(as_hex),
+                usdc=state.usdc if as_hex in state.usdc_per_unit_raw else None,
             )
         )
     return contexts
@@ -527,8 +654,9 @@ def _ownership_line(context: RewardsDistributorContext) -> str:
     """
     return (
         f"Ownership: RewardsDistributor.owner() = {context.owner_address}. The distributor is owned BY "
-        "this address (not the other way round); only it can call the onlyOwner setters "
-        "setEpochEmissions, updateRoot and setUseMint."
+        "this address (not the other way round); only it can call the onlyOwner functions "
+        "setEpochEmissions, updateRoot, setUseMint and sweep (which sends the distributor's whole balance of any "
+        "token to the owner)."
     )
 
 
@@ -639,7 +767,7 @@ def format_threejane_report(
 
 def _report_value(context: HashedLabelContext, raw: int) -> str:
     """A config value for the gist: in its unit when verified, else the grouped raw integer."""
-    return f"`{context.unit.amount(raw)}`" if context.unit else f"`{raw:,}`"
+    return f"`{context.amount_text(raw)}`" if context.unit else f"`{raw:,}`"
 
 
 def _hashed_label_report(context: HashedLabelContext, chain_id: int, labels: dict[str, str]) -> str:

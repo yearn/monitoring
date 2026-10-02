@@ -2170,7 +2170,7 @@ class TestPromptSizeGuards(unittest.TestCase):
         _mock_label: MagicMock,
         _mock_source: MagicMock,
     ) -> None:
-        """Every sim used to be rendered; a 30-call batch could overflow the context."""
+        """Every sim used to be rendered in full; a 30-call batch could overflow the context."""
         total = MAX_PROMPT_SIMULATIONS + 2
         mock_simulate.return_value = [SimulationResult(success=True, gas_used=100 + i) for i in range(total)]
         provider = self._provider()
@@ -2184,7 +2184,57 @@ class TestPromptSizeGuards(unittest.TestCase):
         assert result is not None
         prompt = provider.complete.call_args[0][0]
         self.assertEqual(prompt.count("(simulated in batch order"), MAX_PROMPT_SIMULATIONS)
-        self.assertIn("2 further successful simulations omitted", prompt)
+        self.assertEqual(prompt.count("token transfers only):"), 2)
+        self.assertIn("2 further successful simulations are shown as token transfers only", prompt)
+
+    @patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None)
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_bundle")
+    @patch("utils.llm.ai_explainer.decode_calldata", return_value=PAUSE)
+    def test_calls_past_the_cap_keep_labelled_transfers(
+        self,
+        _mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_label: MagicMock,
+        _mock_source: MagicMock,
+        _mock_meta: MagicMock,
+    ) -> None:
+        """A CAP batch's last two calls (the OndoHolder deposit) were dropped, and the
+        harvest's fee receiver appeared only as raw hex, so the report could not name it."""
+        receiver = "0x0000000000000000000000000000000000000FEE"  # checksummed, as rendered
+        sender = "0x00000000000000000000000000000000000000AB"
+        mock_label.side_effect = lambda _chain, addr: "FeeAuction" if addr == receiver else ""
+        total = MAX_PROMPT_SIMULATIONS + 1
+        transfer = AssetChange(
+            token_address=_addr(0xC0),
+            token_name="USD Coin",
+            token_symbol="USDC",
+            from_address=sender.lower(),
+            to_address=receiver.lower(),
+            amount="98999.899127",
+            raw_amount="98999899127",
+            decimals=6,
+        )
+        sims = [SimulationResult(success=True, gas_used=100 + i) for i in range(total - 1)]
+        sims.append(SimulationResult(success=True, gas_used=999, asset_changes=[transfer]))
+        mock_simulate.return_value = sims
+        provider = self._provider()
+        mock_get_provider.return_value = provider
+
+        result = explain_batch_transaction(
+            calls=[{"target": _addr(i), "data": PAUSE_DATA, "value": "0"} for i in range(total)],
+            chain_id=1,
+            refine=False,
+        )
+        assert result is not None
+        prompt = provider.complete.call_args[0][0]
+        self.assertIn(f"Call {total} (batch order, after calls 1-{total - 1}; token transfers only):", prompt)
+        self.assertIn(f"98999.899127 USDC from {sender} to {receiver} (FeeAuction)", prompt)
+        links = prompt.split("--- Address Links", 1)[1].split("\n---", 1)[0]
+        self.assertIn(receiver, links)
 
     @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
     @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
