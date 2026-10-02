@@ -413,9 +413,12 @@ protocols:
     cadence: "Hourly"
     tasks:
       - protocols/timelock/timelock_alerts.py
+      - protocols/timelock/stale_operations.py
     monitors:
       - name: "Timelock Events"
         description: "CallScheduled/ProposalQueued/QueueTransaction/StartVote/ProposalScheduled events across monitored timelocks via Envio"
+      - name: "Stale Ready Operations"
+        description: "Daily: TimelockController operations ready >7 days but neither executed nor cancelled (state read on-chain via getTimestamp); one silent alert per operation showing the timelock, readiness date, call details, and schedule transaction link, with an omitted-call count when details exceed the message budget"
 
   unibtc:
     display_name: "Bedrock uniBTC"
@@ -506,7 +509,7 @@ protocols:
       - name: "Small Parent Vault Flows"
         description: "Deposits and withdrawals with a raw ERC-4626 assets value below 10,000 for non-retired Yearn v3 parent vaults; aggregated into one Telegram message per run and routed to the internal Yearn maintenance chat"
       - name: "Timelock Delay"
-        description: "Yearn TimelockController getMinDelay() < 7 days across Mainnet, Base, Arbitrum, Polygon, Optimism, Katana"
+        description: "Yearn TimelockController getMinDelay() < 7 days across Mainnet, Base, Arbitrum, Polygon, Katana"
       - name: "Timelock Events"
         description: "Yearn TimelockController events via Envio"
       - name: "Safe Multisigs"

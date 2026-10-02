@@ -340,9 +340,9 @@ All chains use the same contract address: `0x88ba032be87d5ef1fbe87336b7090767f36
 | Polygon | [polygonscan.com](https://polygonscan.com/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
 | Katana | [katanascan.com](https://katanascan.com/address/0x88ba032be87d5ef1fbe87336b7090767f367bf73) |
 
-Optimism is not covered: the Envio indexer stopped indexing it, so its timelock events are no longer available.
+Optimism is not covered: Yearn does not use its timelock there, and the Envio indexer does not index it.
 
-Separately, `yearn/check_timelock_delay.py` reads `getMinDelay()` on every chain (including Optimism) and sends a HIGH alert when it drops below 7 days. Like the event alerts, it goes to the public Yearn timelock topic (stored as `yearn`) and is mirrored to the internal chat (`TELEGRAM_CHAT_ID_YEARN_TIMELOCK_INTERNAL`, stored as `YEARN_TIMELOCK_INTERNAL`).
+Separately, `yearn/check_timelock_delay.py` reads `getMinDelay()` on the same chains and sends a HIGH alert when it drops below 7 days. Like the event alerts, it goes to the public Yearn timelock topic (stored as `yearn`) and is mirrored to the internal chat (`TELEGRAM_CHAT_ID_YEARN_TIMELOCK_INTERNAL`, stored as `YEARN_TIMELOCK_INTERNAL`).
 
 =======
 
