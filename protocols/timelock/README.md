@@ -11,6 +11,18 @@ Monitors all timelock contract types (TimelockController, Aave, Compound, Lido, 
 
 The script runs hourly via the [monitoring runner](../automation/jobs.yaml).
 
+## Stale Ready Operations
+
+`stale_operations.py` runs daily. An OpenZeppelin TimelockController operation never expires: once its delay passes, it stays executable until someone executes or cancels it. A forgotten operation can therefore land weeks later, and `timelock_alerts.py` reported it only once, when it was scheduled.
+
+1. Reads the `CallScheduled` events Envio indexed for the monitored timelocks over the last `TIMELOCK_STALE_LOOKBACK_DAYS` (default 180), and groups them by operation.
+2. Reads each operation's state on-chain with `getTimestamp(id)`, batched per chain. Envio indexes only `CallScheduled`, so it cannot tell whether an operation ran. 0 means unset or cancelled, 1 executed, and anything else is the time the operation became ready.
+3. Sends one silent alert per operation that has been ready for more than `TIMELOCK_STALE_DAYS` (default 7), grouped per protocol channel, with each call's target and decoded function. The cache key `TIMELOCK_STALE_<chain>_<timelock>_<operationId>` keeps it to one alert; it has no colons because the file cache backend stores rows as `key:value`. Alerts are split into messages under Telegram's 4096-character limit, and an operation is cached only after the message carrying it is sent. A batch lists up to its first 10 calls that fit the message budget, with an omitted-call count and a link to the schedule transaction for the complete batch. Yearn alerts are also mirrored to the internal Yearn chat, as in `timelock_alerts.py`.
+
+Only `TimelockController` timelocks are checked. Compound-style queues expire after a grace period, and governor proposals have their own lifecycle.
+
+Alerts show the timelock, schedule transaction link, readiness date, and call details. Operation IDs are omitted from the alert text.
+
 ## GraphQL Schema
 
 The script queries the unified `TimelockEvent` type from the Envio indexer. The query fetches all timelock types (TimelockController, Aave, Compound, Lido, Maple) for monitored addresses.
