@@ -23,7 +23,13 @@ from datetime import UTC, datetime
 
 from eth_utils import to_checksum_address
 
-from protocols.timelock.timelock_alerts import TIMELOCKS, TimelockConfig, alert_history_protocol, load_events
+from protocols.timelock.timelock_alerts import (
+    TIMELOCKS,
+    YEARN_TIMELOCK_INTERNAL_PROTOCOL,
+    TimelockConfig,
+    alert_history_protocol,
+    load_events,
+)
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.calldata.decoder import decode_calldata
 from utils.chains import EXPLORER_URLS, Chain
@@ -214,6 +220,12 @@ def main() -> None:
         except Exception:
             logger.exception("Failed to send stale-operation alert for %s", protocol)
             continue
+        if protocol == "YEARN_TIMELOCK":
+            # Mirror to the internal-only chat, as timelock_alerts.py does for every Yearn timelock alert.
+            try:
+                send_telegram_message(message, YEARN_TIMELOCK_INTERNAL_PROTOCOL, disable_notification=True)
+            except Exception:
+                logger.exception("Failed to mirror stale-operation alert to %s", YEARN_TIMELOCK_INTERNAL_PROTOCOL)
         for cache_key, _ in entries:
             write_last_value_to_file(cache_filename, cache_key, 1)
 

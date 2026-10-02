@@ -124,5 +124,24 @@ class TestMain(unittest.TestCase):
         )
 
 
+class TestYearnMirror(unittest.TestCase):
+    @patch.object(stale_operations, "write_last_value_to_file")
+    @patch.object(stale_operations, "send_telegram_message")
+    @patch.object(stale_operations, "get_last_value_for_key_from_file", return_value=0)
+    @patch.object(stale_operations, "format_operation", return_value="op")
+    @patch.object(stale_operations, "ready_times", return_value={})
+    @patch.object(stale_operations, "load_scheduled_operations")
+    def test_yearn_alert_is_mirrored_internally(
+        self, load: MagicMock, _ready: MagicMock, _fmt: MagicMock, _cached: MagicMock, send: MagicMock, _w: MagicMock
+    ) -> None:
+        yearn = TIMELOCKS[("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 1)]
+        operation = Operation(yearn, "0x" + "cc" * 32, NOW, "0x" + "ab" * 32, ())
+        load.return_value = [operation]
+        with patch.object(stale_operations, "stale_operations", return_value=[(operation, 0)]):
+            stale_operations.main()
+        self.assertEqual([call.args[1] for call in send.call_args_list], ["YEARN_TIMELOCK", "YEARN_TIMELOCK_INTERNAL"])
+        self.assertEqual(send.call_args_list[0].kwargs["origin_protocol"], "yearn")
+
+
 if __name__ == "__main__":
     unittest.main()
