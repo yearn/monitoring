@@ -144,6 +144,7 @@ The alert format varies by timelock type:
 📌 Type: TimelockController
 📝 Event: CallScheduled
 ⏳ Delay: 2d
+🆔 Operation ID: 0x5f3a...
 🎯 Target: 0x1234...
 📝 Function: 0xabcdef12
 🔗 Tx: https://etherscan.io/tx/0x...
@@ -176,6 +177,8 @@ The alert format varies by timelock type:
 🆔 Vote ID: 123
 🔗 Tx: https://etherscan.io/tx/0x...
 ```
+
+TimelockController and Compound alerts show the full operation ID in inline code, in the same `Operation ID` format as the stale-operation alert, so you can match the two and copy the ID into TimelockController's `getTimestamp(id)` or `cancel(id)`. For Compound it is the `queuedTransactions` hash.
 
 For batch operations (`scheduleBatch`), all calls are included in a single message with `--- Call N ---` separators. Calls are numbered from 1 (the on-chain batch index + 1) so they match the numbering in the AI report's call flow.
 
