@@ -303,6 +303,7 @@ class TestSuccessfulTaskWarnings(unittest.TestCase):
         class _Result:
             returncode = 0
             stderr = ""
+            stdout: str
 
         _Result.stdout = stdout
         return _Result()

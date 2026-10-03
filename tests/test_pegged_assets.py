@@ -118,10 +118,15 @@ class TestRegistry(unittest.TestCase):
 
     def test_chainlink_feed_quote_denomination(self):
         # BTC-denominated feeds (answer ~1.0) vs USD-denominated feeds (absolute price).
-        self.assertEqual(get_asset("WBTC").chainlink_feed.quote, PegTarget.BTC)
-        self.assertEqual(get_asset("LBTC").chainlink_feed.quote, PegTarget.BTC)
-        self.assertEqual(get_asset("cbBTC").chainlink_feed.quote, PegTarget.USD)
-        self.assertEqual(get_asset("USDC").chainlink_feed.quote, PegTarget.USD)
+        for name, quote in (
+            ("WBTC", PegTarget.BTC),
+            ("LBTC", PegTarget.BTC),
+            ("cbBTC", PegTarget.USD),
+            ("USDC", PegTarget.USD),
+        ):
+            feed = get_asset(name).chainlink_feed
+            assert feed is not None
+            self.assertEqual(feed.quote, quote)
 
 
 if __name__ == "__main__":

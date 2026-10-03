@@ -1,6 +1,7 @@
 """Tests for the control-transfer protocol-context adapter."""
 
 import unittest
+from collections.abc import Mapping
 from unittest.mock import MagicMock, patch
 
 from eth_abi import encode as abi_encode
@@ -27,7 +28,7 @@ def _sel(signature: str) -> str:
     return "0x" + function_signature_to_4byte_selector(signature).hex()
 
 
-def _chain(responses: dict[tuple[str, str], bytes], code: dict[str, bytes]) -> MagicMock:
+def _chain(responses: dict[tuple[str, str], bytes], code: Mapping[str, bytes]) -> MagicMock:
     """Mock client: eth_call answers (address, signature) pairs; anything else reverts."""
     by_selector = {(address.lower(), _sel(sig)): raw for (address, sig), raw in responses.items()}
 
@@ -58,7 +59,7 @@ def _funding_distributor_chain() -> MagicMock:
         **_safe(YCHAD, 6, 9),
         **_safe(EXEC_SAFE, 2, 4),
     }
-    code = {a.lower(): b"\x60\x80" for a in (TARGET, YCHAD, EXECUTOR, EXEC_SAFE)}
+    code: dict[str, bytes] = {a.lower(): b"\x60\x80" for a in (TARGET, YCHAD, EXECUTOR, EXEC_SAFE)}
     return _chain(responses, code)
 
 
@@ -116,7 +117,7 @@ class TestResolve(unittest.TestCase):
     @patch.object(control_transfer_context, "exposes", return_value=False)
     @patch.object(control_transfer_context, "ChainManager")
     def test_eip7702_delegated_account(self, mock_cm: MagicMock, _exposes: MagicMock, _label: MagicMock) -> None:
-        code = {EOA.lower(): bytes.fromhex("ef0100" + "11" * 20)}
+        code: dict[str, bytes] = {EOA.lower(): bytes.fromhex("ef0100" + "11" * 20)}
         mock_cm.get_client.return_value = _chain({}, code)
         call = DecodedCall("grantRole", "grantRole(bytes32,address)", [("bytes32", b"\x01" * 32), ("address", EOA)])
 

@@ -1,7 +1,7 @@
 """Tests for timelock/calldata_decoder.py."""
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from eth_utils import to_checksum_address
 
@@ -249,9 +249,10 @@ class TestDecodeCalldata(unittest.TestCase):
         mock_resolve.return_value = "transfer(address,uint256)"
         result = decode_calldata(TRANSFER_CALLDATA)
 
-        self.assertIsNotNone(result)
+        assert result is not None
         self.assertIsInstance(result, DecodedCall)
         self.assertEqual(result.function_name, "transfer")
+        assert result is not None
         self.assertEqual(result.signature, "transfer(address,uint256)")
         self.assertEqual(len(result.params), 2)
         self.assertEqual(result.params[0][0], "address")
@@ -264,7 +265,7 @@ class TestDecodeCalldata(unittest.TestCase):
         # selector only, no param data
         result = decode_calldata("0xabcd1234")
 
-        self.assertIsNotNone(result)
+        assert result is not None
         self.assertEqual(result.function_name, "pause")
         self.assertEqual(result.signature, "pause()")
         self.assertEqual(result.params, [])
@@ -278,7 +279,8 @@ class TestDecodeCalldata(unittest.TestCase):
     def test_data_too_short(self):
         self.assertIsNone(decode_calldata("0x1234"))
         self.assertIsNone(decode_calldata(""))
-        self.assertIsNone(decode_calldata(None))
+        # Malformed callers must receive the decoder's empty result.
+        self.assertIsNone(decode_calldata(None))  # ty: ignore[invalid-argument-type]
 
     @patch("utils.calldata.decoder.resolve_selector")
     def test_malformed_param_data_still_returns(self, mock_resolve):
@@ -287,7 +289,7 @@ class TestDecodeCalldata(unittest.TestCase):
         # Valid selector but truncated param data
         result = decode_calldata("0xa9059cbb0000")
 
-        self.assertIsNotNone(result)
+        assert result is not None
         self.assertEqual(result.function_name, "transfer")
         self.assertEqual(result.params, [])
 
@@ -311,6 +313,7 @@ class TestDecodeCalldata(unittest.TestCase):
         result = decode_calldata(TRANSFER_CALLDATA, chain_id=1, target="0xToken")
         mock_abi.assert_called_once()
         mock_resolve.assert_not_called()  # ABI hit → Sourcify skipped
+        assert result is not None
         self.assertEqual(result.signature, "transfer(address,uint256)")
 
     @patch("utils.calldata.decoder._resolve_signature_via_abi", return_value=None)
@@ -319,6 +322,7 @@ class TestDecodeCalldata(unittest.TestCase):
         result = decode_calldata(TRANSFER_CALLDATA, chain_id=1, target="0xToken")
         mock_abi.assert_called_once()
         mock_resolve.assert_called_once()
+        assert result is not None
         self.assertEqual(result.signature, "transfer(address,uint256)")
 
     @patch("utils.calldata.decoder._resolve_signature_via_abi")
@@ -359,7 +363,8 @@ class TestFormatCallLines(unittest.TestCase):
     def test_short_data_returns_empty(self):
         self.assertEqual(format_call_lines("0x12"), [])
         self.assertEqual(format_call_lines(""), [])
-        self.assertEqual(format_call_lines(None), [])
+        # Malformed callers must receive the formatter's empty result.
+        self.assertEqual(format_call_lines(None), [])  # ty: ignore[invalid-argument-type]
 
     @patch("utils.calldata.decoder.resolve_selector")
     def test_no_params_format(self, mock_resolve):
@@ -393,12 +398,10 @@ class TestPersistentSelectorCache(unittest.TestCase):
             pass
 
     @patch("utils.calldata.decoder.fetch_json")
-    def test_sourcify_hit_is_persisted(self, mock_fetch: object) -> None:
+    def test_sourcify_hit_is_persisted(self, mock_fetch: MagicMock) -> None:
         from utils.calldata.decoder import _load_selector_cache
 
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
-            "result": {"function": {_UNKNOWN_SELECTOR: [{"name": "doSomething(uint256)"}]}}
-        }
+        mock_fetch.return_value = {"result": {"function": {_UNKNOWN_SELECTOR: [{"name": "doSomething(uint256)"}]}}}
         sig = resolve_selector(_UNKNOWN_SELECTOR)
         self.assertEqual(sig, "doSomething(uint256)")
         # The on-disk cache should now contain it.
@@ -406,14 +409,14 @@ class TestPersistentSelectorCache(unittest.TestCase):
         self.assertEqual(reloaded.get(_UNKNOWN_SELECTOR), "doSomething(uint256)")
 
     @patch("utils.calldata.decoder.fetch_json")
-    def test_transient_failure_not_persisted(self, mock_fetch: object) -> None:
+    def test_transient_failure_not_persisted(self, mock_fetch: MagicMock) -> None:
         # `fetch_json` returns None on HTTP error / timeout / network failure.
         # We must NOT persist a __NONE__ entry — that would permanently
         # blacklist the selector across the shared CI cache after a single
         # bad request.
         from utils.calldata.decoder import _load_selector_cache
 
-        mock_fetch.return_value = None  # type: ignore[attr-defined]
+        mock_fetch.return_value = None
         self.assertIsNone(resolve_selector(_UNKNOWN_SELECTOR))
         reloaded = _load_selector_cache()
         self.assertNotIn(_UNKNOWN_SELECTOR, reloaded)
@@ -422,44 +425,40 @@ class TestPersistentSelectorCache(unittest.TestCase):
         self.assertIsNone(_selector_cache[_UNKNOWN_SELECTOR])
 
     @patch("utils.calldata.decoder.fetch_json")
-    def test_malformed_response_not_persisted(self, mock_fetch: object) -> None:
+    def test_malformed_response_not_persisted(self, mock_fetch: MagicMock) -> None:
         # Response doesn't match the {"result": {"function": {...}}} shape —
         # treat as transient, same as a network error.
         from utils.calldata.decoder import _load_selector_cache
 
-        mock_fetch.return_value = {"unexpected": "shape"}  # type: ignore[attr-defined]
+        mock_fetch.return_value = {"unexpected": "shape"}
         self.assertIsNone(resolve_selector(_UNKNOWN_SELECTOR))
         self.assertNotIn(_UNKNOWN_SELECTOR, _load_selector_cache())
 
     @patch("utils.calldata.decoder.fetch_json")
-    def test_explicit_miss_is_persisted(self, mock_fetch: object) -> None:
+    def test_explicit_miss_is_persisted(self, mock_fetch: MagicMock) -> None:
         # Well-formed response with an empty result list for this selector —
         # Sourcify is explicitly saying "we don't know this one". Safe to
         # persist so future runs skip the lookup.
         from utils.calldata.decoder import _load_selector_cache
 
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
-            "result": {"function": {_UNKNOWN_SELECTOR: []}}
-        }
+        mock_fetch.return_value = {"result": {"function": {_UNKNOWN_SELECTOR: []}}}
         self.assertIsNone(resolve_selector(_UNKNOWN_SELECTOR))
         reloaded = _load_selector_cache()
         self.assertIn(_UNKNOWN_SELECTOR, reloaded)
         self.assertIsNone(reloaded[_UNKNOWN_SELECTOR])
 
     @patch("utils.calldata.decoder.fetch_json")
-    def test_well_formed_response_with_no_key_persists(self, mock_fetch: object) -> None:
+    def test_well_formed_response_with_no_key_persists(self, mock_fetch: MagicMock) -> None:
         # Schema looks right but the selector isn't even in the response
         # dict. Same semantics as an empty list — definitive miss.
         from utils.calldata.decoder import _load_selector_cache
 
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
-            "result": {"function": {}}
-        }
+        mock_fetch.return_value = {"result": {"function": {}}}
         self.assertIsNone(resolve_selector(_UNKNOWN_SELECTOR))
         self.assertIn(_UNKNOWN_SELECTOR, _load_selector_cache())
 
     @patch("utils.calldata.decoder.fetch_json")
-    def test_persisted_negative_avoids_retry(self, mock_fetch: object) -> None:
+    def test_persisted_negative_avoids_retry(self, mock_fetch: MagicMock) -> None:
         # Pre-populate disk cache with a negative result, then ensure
         # the in-memory cache picks it up and skips the network call.
         with open(self._tmp.name, "w") as f:
@@ -469,7 +468,7 @@ class TestPersistentSelectorCache(unittest.TestCase):
         cache = _load_selector_cache()
         _selector_cache.update(cache)
         self.assertIsNone(resolve_selector(_UNKNOWN_SELECTOR))
-        mock_fetch.assert_not_called()  # type: ignore[attr-defined]
+        mock_fetch.assert_not_called()
 
 
 if __name__ == "__main__":

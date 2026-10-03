@@ -10,3 +10,11 @@ repos:
       - id: ruff-check
         args: [--fix]
       - id: ruff-format
+  - repo: local
+    hooks:
+      - id: ty
+        name: Check types with ty
+        entry: uv run --locked --extra dev ty check
+        language: system
+        types: [python]
+        pass_filenames: false

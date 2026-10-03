@@ -319,7 +319,7 @@ def _monitor_chainlink_assets(client: Web3Client) -> None:
     peg_prices = resolve_peg_prices(needed_targets)
 
     market_prices = fetch_prices([a.defillama_key for a in assets])
-    readings = read_feeds(client, [a.chainlink_feed.address for a in assets])  # type: ignore[union-attr]
+    readings = read_feeds(client, [a.chainlink_feed.address for a in assets if a.chainlink_feed is not None])
     now = int(client.eth.get_block("latest")["timestamp"])
 
     for asset in assets:

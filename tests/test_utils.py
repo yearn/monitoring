@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import unittest
+from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import requests
@@ -86,9 +87,9 @@ class TestTelegram(unittest.TestCase):
     @patch("utils.telegram.requests.post")
     def test_send_telegram_message_success(self, mock_post):
         # Setup mock response
-        mock_response = unittest.mock.Mock()
+        mock_response = mock.Mock()
         mock_response.status_code = 200
-        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_response.raise_for_status = mock.Mock()
         mock_post.return_value = mock_response
 
         # Test with environment variables
@@ -111,9 +112,9 @@ class TestTelegram(unittest.TestCase):
 
     @patch("utils.telegram.requests.post")
     def test_send_telegram_message_plain_text_omits_parse_mode(self, mock_post):
-        mock_response = unittest.mock.Mock()
+        mock_response = mock.Mock()
         mock_response.status_code = 200
-        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_response.raise_for_status = mock.Mock()
         mock_post.return_value = mock_response
 
         with patch.dict(
@@ -163,9 +164,9 @@ class TestTelegram(unittest.TestCase):
     @patch("utils.telegram.requests.post")
     def test_send_telegram_message_with_topic(self, mock_post):
         """When TELEGRAM_TOPIC_ID is set, message goes to topics chat with message_thread_id."""
-        mock_response = unittest.mock.Mock()
+        mock_response = mock.Mock()
         mock_response.status_code = 200
-        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_response.raise_for_status = mock.Mock()
         mock_post.return_value = mock_response
 
         with patch.dict(
@@ -189,9 +190,9 @@ class TestTelegram(unittest.TestCase):
     @patch("utils.telegram.requests.post")
     def test_send_telegram_message_topic_uses_default_bot(self, mock_post):
         """Topic routing always uses the default bot, even if protocol-specific bot exists."""
-        mock_response = unittest.mock.Mock()
+        mock_response = mock.Mock()
         mock_response.status_code = 200
-        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_response.raise_for_status = mock.Mock()
         mock_post.return_value = mock_response
 
         with patch.dict(
@@ -212,9 +213,9 @@ class TestTelegram(unittest.TestCase):
     @patch("utils.telegram.requests.post")
     def test_send_telegram_message_no_topic_falls_back(self, mock_post):
         """Without topic ID, uses legacy per-protocol chat routing."""
-        mock_response = unittest.mock.Mock()
+        mock_response = mock.Mock()
         mock_response.status_code = 200
-        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_response.raise_for_status = mock.Mock()
         mock_post.return_value = mock_response
 
         with patch.dict(
@@ -240,9 +241,9 @@ class TestTelegram(unittest.TestCase):
         (Markdown-escaped so protocol names with `_` and the brackets don't trip a
         400 parse error), and never applies topic threading.
         """
-        mock_response = unittest.mock.Mock()
+        mock_response = mock.Mock()
         mock_response.status_code = 200
-        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_response.raise_for_status = mock.Mock()
         mock_post.return_value = mock_response
 
         with patch.dict(
@@ -305,9 +306,9 @@ class TestSendErrorMessage(unittest.TestCase):
     @patch("utils.telegram.requests.post")
     def test_routes_to_errors_chat_with_label_silent_plain(self, mock_post):
         """With an errors chat configured, the message goes there labelled, silent, plain."""
-        mock_response = unittest.mock.Mock()
+        mock_response = mock.Mock()
         mock_response.status_code = 200
-        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_response.raise_for_status = mock.Mock()
         mock_post.return_value = mock_response
 
         with patch.dict(
@@ -336,9 +337,9 @@ class TestSendErrorMessage(unittest.TestCase):
     @patch("utils.telegram.requests.post")
     def test_errors_topic_takes_precedence(self, mock_post):
         """TELEGRAM_TOPIC_ID_ERRORS routes to the topics group on the errors thread."""
-        mock_response = unittest.mock.Mock()
+        mock_response = mock.Mock()
         mock_response.status_code = 200
-        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_response.raise_for_status = mock.Mock()
         mock_post.return_value = mock_response
 
         with patch.dict(
@@ -362,9 +363,9 @@ class TestSendErrorMessage(unittest.TestCase):
     @patch("utils.telegram.requests.post")
     def test_falls_back_to_protocol_channel_when_unconfigured(self, mock_post):
         """With no errors destination set, the error routes to the protocol's own chat (no label)."""
-        mock_response = unittest.mock.Mock()
+        mock_response = mock.Mock()
         mock_response.status_code = 200
-        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_response.raise_for_status = mock.Mock()
         mock_post.return_value = mock_response
 
         with patch.dict(
@@ -395,9 +396,9 @@ class TestSendEnvioErrorMessage(unittest.TestCase):
 
     @staticmethod
     def _ok_response(mock_post):
-        mock_response = unittest.mock.Mock()
+        mock_response = mock.Mock()
         mock_response.status_code = 200
-        mock_response.raise_for_status = unittest.mock.Mock()
+        mock_response.raise_for_status = mock.Mock()
         mock_post.return_value = mock_response
 
     @patch("utils.telegram.requests.post")
@@ -503,7 +504,8 @@ class TestAlert(unittest.TestCase):
     def test_alert_dataclass_immutability(self):
         alert = Alert(severity=AlertSeverity.HIGH, message="test", protocol="proto")
         with self.assertRaises(AttributeError):
-            alert.message = "changed"
+            # Deliberately attempt mutation to verify the frozen dataclass.
+            alert.message = "changed"  # ty: ignore[invalid-assignment]
 
     @patch("utils.alert.send_telegram_message")
     def test_emoji_prefix_low(self, mock_send):

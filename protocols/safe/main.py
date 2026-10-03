@@ -72,9 +72,9 @@ def load_safe_api_keys() -> list[str]:
     while True:
         name = "SAFE_API_KEY" if index == 1 else f"SAFE_API_KEY_{index}"
         value = os.getenv(name)
-        if not _is_usable_api_key(value):
+        if value is None or not _is_usable_api_key(value):
             break
-        keys.append(value.strip().strip("\"'"))  # type: ignore[union-attr]
+        keys.append(value.strip().strip("\"'"))
         index += 1
     return keys
 

@@ -1,6 +1,9 @@
 """Tests for the Yearn V3 vault protocol-context adapter."""
 
 import unittest
+from collections.abc import Sequence
+from dataclasses import replace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from utils.calldata.decoder import DecodedCall
@@ -22,15 +25,15 @@ LOOPER = "0x68A14629cb07c74259f481382fE8b6cFD8970121"
 E18 = 10**18
 
 
-def _strategy(address: str, name: str, current: int, max_debt: int, **kwargs: object) -> StrategyState:
+def _strategy(address: str, name: str, current: int, max_debt: int, **kwargs: Any) -> StrategyState:
     return StrategyState(
         address=address,
         name=name,
-        activation=kwargs.pop("activation", 1),  # type: ignore[arg-type]
+        activation=kwargs.pop("activation", 1),
         current_debt=current,
         max_debt=max_debt,
-        in_default_queue=kwargs.pop("in_default_queue", True),  # type: ignore[arg-type]
-        **kwargs,  # type: ignore[arg-type]
+        in_default_queue=kwargs.pop("in_default_queue", True),
+        **kwargs,
     )
 
 
@@ -97,7 +100,7 @@ class TestProposalLines(unittest.TestCase):
     def test_add_strategy_with_mismatched_asset_reverts(self) -> None:
         context = _context([ADD_LOOPER])
         other = _strategy(LOOPER, "Looper", 0, 0, activation=0, in_default_queue=False, asset=PEER)
-        context = YearnV3VaultContext(**{**context.__dict__, "other_strategies": (other,)})
+        context = replace(context, other_strategies=(other,))
         (line,) = context.proposal_lines()
         self.assertIn("DOES NOT match — the call reverts", line)
 
@@ -123,9 +126,9 @@ class TestProposalLines(unittest.TestCase):
         self.assertIn("current_debt stays 921 WETH", line)
 
     def test_update_debt_deposit_from_idle(self) -> None:
-        context = YearnV3VaultContext(**{**_context([]).__dict__, "total_idle": 100 * E18})
+        context = replace(_context([]), total_idle=100 * E18)
         call = _call("update_debt", ["address", "uint256"], [PEER, 1_000 * E18])
-        context = YearnV3VaultContext(**{**context.__dict__, "calls": (call,)})
+        context = replace(context, calls=(call,))
         (line,) = context.proposal_lines()
         self.assertIn("MOVES FUNDS NOW — deposits 79 WETH;", line)
         self.assertIn("current_debt 921 WETH → 1,000 WETH; vault idle 100 WETH → 21 WETH", line)
@@ -203,7 +206,7 @@ class TestResolve(unittest.TestCase):
         self.assertEqual(resolve_yearn_v3_context("yearn", 1, [(VAULT, ADD_LOOPER)]), [])
 
 
-def _client(batches: list[list[object]]) -> MagicMock:
+def _client(batches: Sequence[Sequence[object]]) -> MagicMock:
     client = MagicMock()
     client.batch_requests.return_value.__enter__.return_value = MagicMock()
     client.batch_requests.return_value.__exit__.return_value = False
@@ -342,7 +345,7 @@ class TestBatchDebtAccounting(unittest.TestCase):
     def test_withdrawal_limited_by_strategy_liquidity(self) -> None:
         context = _cap_context([_debt(GAUNT, 0)])
         gaunt = _strategy(GAUNT, "Gauntlet", 633_217 * E6, 51_000_000 * E6, max_withdraw=100_000 * E6)
-        context = YearnV3VaultContext(**{**context.__dict__, "default_queue": (context.default_queue[0], gaunt)})
+        context = replace(context, default_queue=(context.default_queue[0], gaunt))
         (line,) = context.proposal_lines()
         self.assertIn("withdraws 100,000 USDC, limited by what the strategy can redeem now", line)
 

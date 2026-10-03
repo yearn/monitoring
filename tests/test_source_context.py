@@ -3,7 +3,7 @@
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from utils.source_context import (
     _extract_function_body,
@@ -208,8 +208,8 @@ class TestFetchedRecordShape(unittest.TestCase):
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_verified_contract_keeps_files_and_target(self, mock_fetch: object) -> None:
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+    def test_verified_contract_keeps_files_and_target(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": self.BUNDLE, "ContractName": "Foo", "ABI": "[]"}],
         }
@@ -222,8 +222,8 @@ class TestFetchedRecordShape(unittest.TestCase):
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_fetch_source_still_returns_flat_text_for_search(self, mock_fetch: object) -> None:
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+    def test_fetch_source_still_returns_flat_text_for_search(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": self.BUNDLE, "ContractName": "Foo", "ABI": "[]"}],
         }
@@ -236,8 +236,8 @@ class TestFetchedRecordShape(unittest.TestCase):
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_single_file_source_is_kept_verbatim(self, mock_fetch: object) -> None:
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+    def test_single_file_source_is_kept_verbatim(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": "contract Foo {}", "ContractName": "Foo", "ABI": "[]"}],
         }
@@ -252,8 +252,8 @@ class TestGetSourceContext(unittest.TestCase):
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_returns_context_for_verified_contract(self, mock_fetch: object) -> None:
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+    def test_returns_context_for_verified_contract(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": INFINIFI_FARM_SOURCE, "ContractName": "Farm"}],
         }
@@ -267,18 +267,18 @@ class TestGetSourceContext(unittest.TestCase):
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": ""}, clear=False)
     @patch("utils.source_context.fetch_json")
-    def test_missing_api_key_returns_none(self, mock_fetch: object) -> None:
+    def test_missing_api_key_returns_none(self, mock_fetch: MagicMock) -> None:
         import os
 
         os.environ.pop("ETHERSCAN_TOKEN", None)
         ctx = get_source_context(1, "0xabc", "setMaxSlippage")
         self.assertIsNone(ctx)
-        mock_fetch.assert_not_called()  # type: ignore[attr-defined]
+        mock_fetch.assert_not_called()
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_unverified_contract_returns_none(self, mock_fetch: object) -> None:
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+    def test_unverified_contract_returns_none(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": "", "ContractName": ""}],
         }
@@ -287,19 +287,19 @@ class TestGetSourceContext(unittest.TestCase):
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_caches_per_address(self, mock_fetch: object) -> None:
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+    def test_caches_per_address(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": INFINIFI_FARM_SOURCE, "ContractName": "Farm"}],
         }
         get_source_context(1, "0xabc", "setMaxSlippage")
         get_source_context(1, "0xabc", "setMaxSlippage")
         # Two calls — Etherscan should be hit only once
-        self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]
+        self.assertEqual(mock_fetch.call_count, 1)
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_concurrent_same_address_lookup_single_flights(self, mock_fetch: object) -> None:
+    def test_concurrent_same_address_lookup_single_flights(self, mock_fetch: MagicMock) -> None:
         def slow_response(*args: object, **kwargs: object) -> dict:
             time.sleep(0.02)
             return {
@@ -307,20 +307,20 @@ class TestGetSourceContext(unittest.TestCase):
                 "result": [{"SourceCode": INFINIFI_FARM_SOURCE, "ContractName": "Farm"}],
             }
 
-        mock_fetch.side_effect = slow_response  # type: ignore[attr-defined]
+        mock_fetch.side_effect = slow_response
 
         with ThreadPoolExecutor(max_workers=8) as executor:
             results = list(executor.map(lambda _: get_source_context(1, "0xabc", "setMaxSlippage"), range(8)))
 
         self.assertTrue(all(result is not None for result in results))
-        self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]
+        self.assertEqual(mock_fetch.call_count, 1)
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_verified_source_persists_across_process_restart(self, mock_fetch: object) -> None:
+    def test_verified_source_persists_across_process_restart(self, mock_fetch: MagicMock) -> None:
         # A persistent disk cache should serve the same address after the in-memory
         # layer is dropped (reset_cache simulates a fresh cron process).
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": INFINIFI_FARM_SOURCE, "ContractName": "Farm"}],
         }
@@ -328,47 +328,47 @@ class TestGetSourceContext(unittest.TestCase):
         reset_cache()  # clears in-memory only; disk cache survives
         ctx = get_source_context(1, "0xabc", "setMaxSlippage")
         self.assertIsNotNone(ctx)
-        self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]  # served from disk
+        self.assertEqual(mock_fetch.call_count, 1)  # served from disk
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_unverified_negative_persists_across_process_restart(self, mock_fetch: object) -> None:
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+    def test_unverified_negative_persists_across_process_restart(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": "", "ContractName": ""}],
         }
         self.assertIsNone(get_source_context(1, "0xabc", "setMaxSlippage"))
         reset_cache()
         self.assertIsNone(get_source_context(1, "0xabc", "setMaxSlippage"))
-        self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]  # negative cached on disk
+        self.assertEqual(mock_fetch.call_count, 1)  # negative cached on disk
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_transient_error_is_not_persisted(self, mock_fetch: object) -> None:
+    def test_transient_error_is_not_persisted(self, mock_fetch: MagicMock) -> None:
         # A request failure (fetch_json -> None) must not be cached as "unverified".
-        mock_fetch.return_value = None  # type: ignore[attr-defined]
+        mock_fetch.return_value = None
         self.assertIsNone(get_source_context(1, "0xabc", "setMaxSlippage"))
         reset_cache()
         # Etherscan recovers: a later run should re-fetch and succeed, proving the
         # blip was never persisted.
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": INFINIFI_FARM_SOURCE, "ContractName": "Farm"}],
         }
         self.assertIsNotNone(get_source_context(1, "0xabc", "setMaxSlippage"))
-        self.assertEqual(mock_fetch.call_count, 2)  # type: ignore[attr-defined]
+        self.assertEqual(mock_fetch.call_count, 2)
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.proxy.get_current_implementation")
     @patch("utils.source_context.fetch_json")
-    def test_follows_proxy_when_function_not_in_target(self, mock_fetch: object, mock_impl: object) -> None:
+    def test_follows_proxy_when_function_not_in_target(self, mock_fetch: MagicMock, mock_impl: MagicMock) -> None:
         # Proxy source has no `setMaxSlippage`; implementation has it.
         proxy_source = "contract ERC1967Proxy { fallback() external payable {} }"
-        mock_fetch.side_effect = [  # type: ignore[attr-defined]
+        mock_fetch.side_effect = [
             {"status": "1", "result": [{"SourceCode": proxy_source, "ContractName": "ERC1967Proxy"}]},
             {"status": "1", "result": [{"SourceCode": INFINIFI_FARM_SOURCE, "ContractName": "Farm"}]},
         ]
-        mock_impl.return_value = "0xImplementation"  # type: ignore[attr-defined]
+        mock_impl.return_value = "0xImplementation"
 
         ctx = get_source_context(1, "0xProxy", "setMaxSlippage")
 
@@ -376,15 +376,15 @@ class TestGetSourceContext(unittest.TestCase):
         assert ctx is not None
         self.assertEqual(ctx.contract_name, "Farm")
         self.assertIn("so actually 1 - slippage", ctx.state_var_snippets[0])
-        mock_impl.assert_called_once_with("0xProxy", 1)  # type: ignore[attr-defined]
+        mock_impl.assert_called_once_with("0xProxy", 1)
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.proxy.get_current_implementation", return_value=None)
     @patch("utils.source_context.fetch_json")
-    def test_no_proxy_follow_when_no_impl(self, mock_fetch: object, mock_impl: object) -> None:
+    def test_no_proxy_follow_when_no_impl(self, mock_fetch: MagicMock, mock_impl: MagicMock) -> None:
         # Function missing from source, no proxy impl → return None.
         proxy_source = "contract ERC1967Proxy { fallback() external payable {} }"
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": proxy_source, "ContractName": "ERC1967Proxy"}],
         }
@@ -394,18 +394,18 @@ class TestGetSourceContext(unittest.TestCase):
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.proxy.get_current_implementation")
     @patch("utils.source_context.fetch_json")
-    def test_proxy_follow_skipped_when_impl_equals_target(self, mock_fetch: object, mock_impl: object) -> None:
+    def test_proxy_follow_skipped_when_impl_equals_target(self, mock_fetch: MagicMock, mock_impl: MagicMock) -> None:
         # get_current_implementation returns same address (heuristic guard) → don't loop.
         proxy_source = "contract Plain { function bar() external {} }"
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": proxy_source, "ContractName": "Plain"}],
         }
-        mock_impl.return_value = "0xABC"  # type: ignore[attr-defined]
+        mock_impl.return_value = "0xABC"
         ctx = get_source_context(1, "0xABC", "setMaxSlippage")
         self.assertIsNone(ctx)
         # Should only fetch once (the target), not retry for impl
-        self.assertEqual(mock_fetch.call_count, 1)  # type: ignore[attr-defined]
+        self.assertEqual(mock_fetch.call_count, 1)
 
 
 class TestGetContractLabel(unittest.TestCase):
@@ -416,8 +416,8 @@ class TestGetContractLabel(unittest.TestCase):
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_returns_verified_contract_name(self, mock_fetch: object) -> None:
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+    def test_returns_verified_contract_name(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": "contract Farm { }", "ContractName": "MorphoFarm"}],
         }
@@ -426,8 +426,8 @@ class TestGetContractLabel(unittest.TestCase):
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_unverified_returns_empty(self, mock_fetch: object) -> None:
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+    def test_unverified_returns_empty(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": "", "ContractName": ""}],
         }
@@ -442,26 +442,26 @@ class TestGetContractLabel(unittest.TestCase):
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.proxy.get_current_implementation")
     @patch("utils.source_context.fetch_json")
-    def test_follows_proxy_when_name_is_generic(self, mock_fetch: object, mock_impl: object) -> None:
-        mock_fetch.side_effect = [  # type: ignore[attr-defined]
+    def test_follows_proxy_when_name_is_generic(self, mock_fetch: MagicMock, mock_impl: MagicMock) -> None:
+        mock_fetch.side_effect = [
             {"status": "1", "result": [{"SourceCode": "/* proxy */", "ContractName": "TransparentUpgradeableProxy"}]},
             {"status": "1", "result": [{"SourceCode": "/* impl */", "ContractName": "InfinifiBorrowingFarm"}]},
         ]
-        mock_impl.return_value = "0x000000000000000000000000000000000000beef"  # type: ignore[attr-defined]
+        mock_impl.return_value = "0x000000000000000000000000000000000000beef"
         label = get_contract_label(1, "0xac21b22b5aeb11bc32de4ecf59e4538fca48b694")
         self.assertEqual(label, "InfinifiBorrowingFarm")
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.proxy.get_current_implementation", return_value=None)
     @patch("utils.source_context.fetch_json")
-    def test_keeps_specific_name_without_proxy_follow(self, mock_fetch: object, mock_impl: object) -> None:
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+    def test_keeps_specific_name_without_proxy_follow(self, mock_fetch: MagicMock, mock_impl: MagicMock) -> None:
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": "/* x */", "ContractName": "FarmRegistry"}],
         }
         label = get_contract_label(1, "0xac21b22b5aeb11bc32de4ecf59e4538fca48b694")
         self.assertEqual(label, "FarmRegistry")
-        mock_impl.assert_not_called()  # type: ignore[attr-defined]
+        mock_impl.assert_not_called()
 
     def test_empty_address_returns_empty(self) -> None:
         self.assertEqual(get_contract_label(1, ""), "")
@@ -469,31 +469,31 @@ class TestGetContractLabel(unittest.TestCase):
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.swiss_knife.fetch_json")
     @patch("utils.source_context.fetch_json")
-    def test_prefers_swiss_knife_over_etherscan(self, mock_es: object, mock_sk: object) -> None:
+    def test_prefers_swiss_knife_over_etherscan(self, mock_es: MagicMock, mock_sk: MagicMock) -> None:
         # Swiss Knife knows USDC by its full curated name; Etherscan would just
         # return "FiatTokenV2_2". We want the curated label.
         from utils.swiss_knife import reset_cache as sk_reset
 
         sk_reset()
-        mock_sk.return_value = ["Circle: USDC Token", "circle", "stablecoin"]  # type: ignore[attr-defined]
-        mock_es.return_value = {  # type: ignore[attr-defined]
+        mock_sk.return_value = ["Circle: USDC Token", "circle", "stablecoin"]
+        mock_es.return_value = {
             "status": "1",
             "result": [{"SourceCode": "/* x */", "ContractName": "FiatTokenV2_2"}],
         }
         label = get_contract_label(1, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
         self.assertEqual(label, "Circle: USDC Token")
         # Etherscan should not have been hit since Swiss Knife was authoritative.
-        mock_es.assert_not_called()  # type: ignore[attr-defined]
+        mock_es.assert_not_called()
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.swiss_knife.fetch_json")
     @patch("utils.source_context.fetch_json")
-    def test_falls_back_to_etherscan_when_swiss_knife_empty(self, mock_es: object, mock_sk: object) -> None:
+    def test_falls_back_to_etherscan_when_swiss_knife_empty(self, mock_es: MagicMock, mock_sk: MagicMock) -> None:
         from utils.swiss_knife import reset_cache as sk_reset
 
         sk_reset()
-        mock_sk.return_value = {"error": "Error fetching data"}  # type: ignore[attr-defined]
-        mock_es.return_value = {  # type: ignore[attr-defined]
+        mock_sk.return_value = {"error": "Error fetching data"}
+        mock_es.return_value = {
             "status": "1",
             "result": [{"SourceCode": "/* x */", "ContractName": "FarmRegistry"}],
         }
@@ -516,8 +516,8 @@ class TestFetchFunctionInputNames(unittest.TestCase):
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_returns_named_inputs(self, mock_fetch: object) -> None:
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+    def test_returns_named_inputs(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": "/* x */", "ContractName": "Farm", "ABI": self._SAMPLE_ABI}],
         }
@@ -526,8 +526,8 @@ class TestFetchFunctionInputNames(unittest.TestCase):
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_empty_inputs_for_noarg_function(self, mock_fetch: object) -> None:
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+    def test_empty_inputs_for_noarg_function(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": "/* x */", "ContractName": "Farm", "ABI": self._SAMPLE_ABI}],
         }
@@ -535,10 +535,10 @@ class TestFetchFunctionInputNames(unittest.TestCase):
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_returns_none_when_inputs_unnamed(self, mock_fetch: object) -> None:
+    def test_returns_none_when_inputs_unnamed(self, mock_fetch: MagicMock) -> None:
         # Mixing named + anonymous params is worse than nothing — return None
         # so the formatter falls back to bare types for the whole signature.
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": "/* x */", "ContractName": "Farm", "ABI": self._SAMPLE_ABI}],
         }
@@ -546,8 +546,8 @@ class TestFetchFunctionInputNames(unittest.TestCase):
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_returns_none_when_function_not_in_abi(self, mock_fetch: object) -> None:
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+    def test_returns_none_when_function_not_in_abi(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": "/* x */", "ContractName": "Farm", "ABI": self._SAMPLE_ABI}],
         }
@@ -556,13 +556,13 @@ class TestFetchFunctionInputNames(unittest.TestCase):
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.proxy.get_current_implementation")
     @patch("utils.source_context.fetch_json")
-    def test_follows_proxy_to_impl_abi(self, mock_fetch: object, mock_impl: object) -> None:
+    def test_follows_proxy_to_impl_abi(self, mock_fetch: MagicMock, mock_impl: MagicMock) -> None:
         proxy_abi = '[{"type":"function","name":"fallback","inputs":[]}]'
-        mock_fetch.side_effect = [  # type: ignore[attr-defined]
+        mock_fetch.side_effect = [
             {"status": "1", "result": [{"SourceCode": "/* x */", "ContractName": "ERC1967Proxy", "ABI": proxy_abi}]},
             {"status": "1", "result": [{"SourceCode": "/* x */", "ContractName": "Farm", "ABI": self._SAMPLE_ABI}]},
         ]
-        mock_impl.return_value = "0x" + "11" * 20  # type: ignore[attr-defined]
+        mock_impl.return_value = "0x" + "11" * 20
         names = fetch_function_input_names(1, "0xProxy", "setMaxSlippage")
         self.assertEqual(names, ["_maxSlippage"])
 
@@ -581,15 +581,15 @@ class TestOverloadedInputNames(unittest.TestCase):
     def setUp(self) -> None:
         reset_cache()
 
-    def _mock(self, mock_fetch: object) -> None:
-        mock_fetch.return_value = {  # type: ignore[attr-defined]
+    def _mock(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = {
             "status": "1",
             "result": [{"SourceCode": "# vyper", "ContractName": "Yearn V3 Vault", "ABI": self._ABI}],
         }
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_signature_selects_matching_overload(self, mock_fetch: object) -> None:
+    def test_signature_selects_matching_overload(self, mock_fetch: MagicMock) -> None:
         self._mock(mock_fetch)
         names = fetch_function_input_names(1, "0xabc", "add_strategy", "add_strategy(address,bool)")
         self.assertEqual(names, ["new_strategy", "add_to_queue"])
@@ -599,14 +599,14 @@ class TestOverloadedInputNames(unittest.TestCase):
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_overload_without_signature_is_ambiguous(self, mock_fetch: object) -> None:
+    def test_overload_without_signature_is_ambiguous(self, mock_fetch: MagicMock) -> None:
         # Picking the first overload labeled the two-argument call with one name.
         self._mock(mock_fetch)
         self.assertIsNone(fetch_function_input_names(1, "0xabc", "add_strategy"))
 
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.source_context.fetch_json")
-    def test_unmatched_signature_returns_none(self, mock_fetch: object) -> None:
+    def test_unmatched_signature_returns_none(self, mock_fetch: MagicMock) -> None:
         self._mock(mock_fetch)
         self.assertIsNone(fetch_function_input_names(1, "0xabc", "add_strategy", "add_strategy(uint256)"))
 

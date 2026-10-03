@@ -114,7 +114,9 @@ class _Cache:
         return self.values.get(key, 0)
 
     def fresh(self, _file: str, key: str, stale_after: int) -> object:
-        written = int(self.values.get(f"{key}_timestamp", 0))
+        timestamp = self.values.get(f"{key}_timestamp", 0)
+        assert isinstance(timestamp, int)
+        written = timestamp
         return 0 if written == 0 or self.now - written > stale_after else self.values.get(key, 0)
 
     def write(self, _file: str, key: str, value: object) -> None:

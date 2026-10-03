@@ -2,7 +2,7 @@
 
 import unittest
 import unittest.mock
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from protocols.timelock.timelock_alerts import (
     TIMELOCKS,
@@ -137,14 +137,14 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
 
     @patch("protocols.timelock.timelock_alerts.format_explanation_line")
     @patch("protocols.timelock.timelock_alerts._get_ai_explanation")
-    def test_ai_summary_preserved_over_call_details(self, mock_ai: object, mock_format: object) -> None:
+    def test_ai_summary_preserved_over_call_details(self, mock_ai: MagicMock, mock_format: MagicMock) -> None:
         """AI summary must be preserved even when call details are long."""
         from utils.llm.ai_explainer import Explanation
 
         ai_summary = "AI says this is a governance transfer with LOW risk."
         explanation = Explanation(summary=ai_summary, detail="")
-        mock_ai.return_value = explanation  # type: ignore[union-attr]
-        mock_format.return_value = f"\n🤖 *AI Summary:*\n{ai_summary}"  # type: ignore[union-attr]
+        mock_ai.return_value = explanation
+        mock_format.return_value = f"\n🤖 *AI Summary:*\n{ai_summary}"
 
         events = [
             _make_event(
@@ -166,13 +166,13 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
 
     @patch("protocols.timelock.timelock_alerts.format_explanation_line")
     @patch("protocols.timelock.timelock_alerts._get_ai_explanation")
-    def test_message_under_limit_with_ai(self, mock_ai: object, mock_format: object) -> None:
+    def test_message_under_limit_with_ai(self, mock_ai: MagicMock, mock_format: MagicMock) -> None:
         """When everything fits, nothing should be truncated."""
         from utils.llm.ai_explainer import Explanation
 
         explanation = Explanation(summary="Short summary.", detail="")
-        mock_ai.return_value = explanation  # type: ignore[union-attr]
-        mock_format.return_value = "\n🤖 *AI Summary:*\nShort summary."  # type: ignore[union-attr]
+        mock_ai.return_value = explanation
+        mock_format.return_value = "\n🤖 *AI Summary:*\nShort summary."
 
         events = [_make_event()]
         msg = build_alert_message(events, TIMELOCK_INFO)
@@ -182,7 +182,7 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         self.assertNotIn("...", msg)
 
     @patch("protocols.timelock.timelock_alerts._get_ai_explanation")
-    def test_ai_skipped_for_governance_protocol(self, mock_ai: object) -> None:
+    def test_ai_skipped_for_governance_protocol(self, mock_ai: MagicMock) -> None:
         """Protocols with dedicated governance monitoring skip the AI summary entirely."""
         aave_info = TimelockConfig(
             address="0x" + "bb" * 20,
@@ -192,7 +192,7 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         )
         msg = build_alert_message([_make_event()], aave_info)
 
-        mock_ai.assert_not_called()  # type: ignore[attr-defined]
+        mock_ai.assert_not_called()
         self.assertNotIn("AI Summary", msg)
         self.assertIn("TIMELOCK: New Operation Scheduled", msg)
 
@@ -225,7 +225,7 @@ class TestMapleProposalUnwrap(unittest.TestCase):
         return "0x" + selector.hex() + body.hex()
 
     @patch("protocols.timelock.timelock_alerts.ChainManager")
-    def test_unwraps_safe_wrapped_schedule_proposals(self, mock_cm: object) -> None:
+    def test_unwraps_safe_wrapped_schedule_proposals(self, mock_cm: MagicMock) -> None:
         from protocols.timelock.timelock_alerts import _maple_proposal_calls
 
         targets = ["0x" + "aa" * 20, "0x" + "bb" * 20]
@@ -235,7 +235,7 @@ class TestMapleProposalUnwrap(unittest.TestCase):
 
         mock_client = unittest.mock.MagicMock()
         mock_client.eth.get_transaction.return_value = {"input": outer}
-        mock_cm.get_client.return_value = mock_client  # type: ignore[attr-defined]
+        mock_cm.get_client.return_value = mock_client
 
         event = _make_event(timelock_type="Maple", transactionHash="0x" + "ff" * 32)
         calls = _maple_proposal_calls(event, chain_id=1)
@@ -248,7 +248,7 @@ class TestMapleProposalUnwrap(unittest.TestCase):
         self.assertEqual(calls[1]["data"], "0x3f4ba83a")
 
     @patch("protocols.timelock.timelock_alerts.ChainManager")
-    def test_unwraps_direct_schedule_proposals(self, mock_cm: object) -> None:
+    def test_unwraps_direct_schedule_proposals(self, mock_cm: MagicMock) -> None:
         from protocols.timelock.timelock_alerts import _maple_proposal_calls
 
         targets = ["0x" + "cc" * 20]
@@ -257,7 +257,7 @@ class TestMapleProposalUnwrap(unittest.TestCase):
 
         mock_client = unittest.mock.MagicMock()
         mock_client.eth.get_transaction.return_value = {"input": inner_hex}
-        mock_cm.get_client.return_value = mock_client  # type: ignore[attr-defined]
+        mock_cm.get_client.return_value = mock_client
 
         event = _make_event(timelock_type="Maple", transactionHash="0x" + "ff" * 32)
         calls = _maple_proposal_calls(event, chain_id=1)
@@ -266,13 +266,13 @@ class TestMapleProposalUnwrap(unittest.TestCase):
         self.assertEqual(calls[0]["data"], "0x8456cb59")
 
     @patch("protocols.timelock.timelock_alerts.ChainManager")
-    def test_returns_none_for_unknown_selector(self, mock_cm: object) -> None:
+    def test_returns_none_for_unknown_selector(self, mock_cm: MagicMock) -> None:
         from protocols.timelock.timelock_alerts import _maple_proposal_calls
 
         # proposeRoleUpdates path — we can't synthesize (target, data) pairs from it.
         mock_client = unittest.mock.MagicMock()
         mock_client.eth.get_transaction.return_value = {"input": "0x2d6e853c" + "00" * 100}
-        mock_cm.get_client.return_value = mock_client  # type: ignore[attr-defined]
+        mock_cm.get_client.return_value = mock_client
 
         event = _make_event(timelock_type="Maple", transactionHash="0x" + "ff" * 32)
         self.assertIsNone(_maple_proposal_calls(event, chain_id=1))

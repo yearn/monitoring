@@ -119,7 +119,7 @@ class FakeClient:
         return self._logs
 
     def get_contract(self, address: str, abi: list) -> SimpleNamespace:
-        keeper = self._keepers[address]
+        keeper = self._keepers[Web3.to_checksum_address(address)]
         total_assets = 0 if address in self._empty else 10**18
         return SimpleNamespace(
             functions=SimpleNamespace(

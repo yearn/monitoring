@@ -1,19 +1,19 @@
 import functools
 import os
 import time
-from typing import Any, Callable, Dict, List, TypeVar
+from typing import Any, Callable, Dict, List, TypeVar, cast
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+from eth_typing import ChecksumAddress
 from web3 import Web3
 from web3.contract import Contract
 from web3.exceptions import ProviderConnectionError
 from web3.providers.rpc import HTTPProvider
 from web3.types import RPCEndpoint, RPCResponse
 
+from utils.chains import PUBLIC_RPC_URLS, Chain
 from utils.logger import get_logger
-
-from .chains import PUBLIC_RPC_URLS, Chain
 
 load_dotenv()
 
@@ -98,7 +98,7 @@ class MultiHTTPProvider(HTTPProvider, RetryProviders):
     def __init__(
         self,
         providers: List[str],
-        request_kwargs: Dict[str, Any] = None,
+        request_kwargs: Dict[str, Any] | None = None,
         max_retries: int = 3,
         backoff_factor: float = 1,
     ):
@@ -129,7 +129,7 @@ class MultiHTTPProvider(HTTPProvider, RetryProviders):
         return super().make_request(method, params)
 
     @retry_with_provider_rotation
-    def make_batch_request(self, methods: List[Any]) -> List[RPCResponse]:
+    def make_batch_request(self, methods: List[Any]) -> List[RPCResponse] | RPCResponse:
         return super().make_batch_request(methods)
 
 
@@ -198,7 +198,7 @@ class Web3Client(RetryProviders):
 
     def get_contract(self, address: str, abi: List[Dict]) -> Contract:
         """Get contract instance"""
-        return self.w3.eth.contract(address=address, abi=abi)
+        return self.w3.eth.contract(address=cast(ChecksumAddress, address), abi=abi)
 
     def make_request(self, method: str, params: List[Any]) -> RPCResponse:
         """Send a raw JSON-RPC request, bypassing web3's response formatters.

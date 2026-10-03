@@ -102,7 +102,9 @@ def test_wal_read_while_write(monkeypatch, tmp_path):
     try:
         assert reader.execute("SELECT count(*) FROM alert_events").fetchone()[0] == 1
         store.update_alert_delivery(alert_id, status="delivered")
-        assert store.get_alert(alert_id)["delivery_status"] == "delivered"  # type: ignore[index]
+        alert = store.get_alert(alert_id)
+        assert alert is not None
+        assert alert["delivery_status"] == "delivered"
     finally:
         reader.close()
 

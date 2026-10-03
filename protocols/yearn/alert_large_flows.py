@@ -5,6 +5,7 @@ import os
 import sys
 import time
 from decimal import Decimal, getcontext
+from typing import TypedDict
 
 import requests
 from dotenv import load_dotenv
@@ -38,7 +39,17 @@ L2_THRESHOLD_USD = Decimal("200000")
 ERC20_ABI = load_abi("common-abi/ERC20.json")
 _total_supply_cache: dict[tuple[int, str], Decimal] = {}
 
-VAULTS = {
+
+class VaultConfig(TypedDict):
+    """Token and chain information for a monitored vault."""
+
+    symbol: str
+    decimals: int
+    chain_id: int
+    token_address: str
+
+
+VAULTS: dict[str, VaultConfig] = {
     "0xbe53a109b494e5c9f97b9cd39fe969be68bf6204": {
         "symbol": "USDC",
         "decimals": 6,
@@ -391,7 +402,7 @@ def get_vault_total_supply(chain_id: int, vault_address: str, decimals: int) -> 
 
 def send_large_flow_alert(
     event: dict,
-    vault: dict,
+    vault: VaultConfig,
     amount: Decimal,
     value: Decimal | None,
 ) -> str:
@@ -421,7 +432,7 @@ def send_large_flow_alert(
     return tx_hash
 
 
-def resolve_threshold_usd(event: dict, vault: dict, default_threshold_usd: Decimal) -> Decimal:
+def resolve_threshold_usd(event: dict, vault: VaultConfig, default_threshold_usd: Decimal) -> Decimal:
     """Return the USD alert threshold for a flow event.
 
     L2 deposits and withdrawals use a lower fixed threshold; mainnet uses the

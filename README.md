@@ -39,6 +39,8 @@ Monitoring scripts for DeFi protocols to track key metrics and send alerts. Join
 
 ## Installation
 
+Use Python 3.14, pinned in `.python-version` and selected automatically by uv.
+
 1. **Clone the repository**
 
 ```bash
@@ -85,11 +87,12 @@ The optional read-only alerts API exposes persisted alert history from SQLite an
 
 ## Code Style
 
-Format and lint code with ruff:
+Format and lint code with ruff, and check types with ty:
 
 ```bash
 uv run ruff format .
 uv run ruff check --fix .
+uv run ty check
 uv run pytest tests/
 ```
 

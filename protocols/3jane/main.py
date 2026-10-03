@@ -781,7 +781,7 @@ def check_withdraw_limit(withdraw_limit: float) -> None:
         mark_alerted_value(CACHE_KEY_WITHDRAW_LIMIT_ALERTED, withdraw_limit)
 
 
-def check_vault_shutdown(client, usd3_vault, susd3_vault) -> None:  # type: ignore[no-untyped-def]
+def check_vault_shutdown(client, usd3_vault, susd3_vault) -> None:
     """Check if either vault has been emergency shut down.
 
     Uses alert-once pattern: only sends alert when shutdown state transitions

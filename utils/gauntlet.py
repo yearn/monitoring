@@ -1,5 +1,5 @@
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import requests
 
@@ -31,7 +31,7 @@ def get_gauntlet_build_id() -> str | None:
     return None
 
 
-def get_markets_for_protocol(protocol, max_retries=3) -> list[dict]:
+def get_markets_for_protocol(protocol, max_retries=3) -> list[dict] | None:
     base_url = "https://dashboards.gauntlet.xyz/_next/data/{}/protocols/{}.json?protocolSlug={}"
 
     for attempt in range(max_retries):
@@ -106,7 +106,7 @@ def get_charts_for_protocol_market(protocol, market, max_retries=3):
 
 def get_timestamp_before(hours: int):
     """Get timestamp from one hour ago in ISO format"""
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     one_hour_ago = now - timedelta(hours=hours)
     return one_hour_ago.strftime("%Y-%m-%dT%H:00:00.000Z")
 

@@ -308,7 +308,7 @@ def get_verification_status(chain_id: int, address: str) -> bool | None:
         return None
     results = data.get("result") or []
     entry = results[0] if isinstance(results, list) and results else {}
-    if not (entry.get("SourceCode") or ""):
+    if not entry.get("SourceCode"):
         return False
     return None
 

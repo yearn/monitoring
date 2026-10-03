@@ -1,7 +1,7 @@
 """Tests for utils/address_resolver.py."""
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from utils.address_resolver import register_backend, resolve_address_label
 
@@ -16,21 +16,21 @@ class TestResolveAddressLabel(unittest.TestCase):
 
     @patch("utils.address_resolver._etherscan_backend", return_value="EtherscanName")
     @patch("utils.address_resolver._swiss_knife_backend", return_value="SwissName")
-    def test_swiss_knife_wins_over_etherscan(self, mock_sk: object, mock_es: object) -> None:
+    def test_swiss_knife_wins_over_etherscan(self, mock_sk: MagicMock, mock_es: MagicMock) -> None:
         # Random address that doesn't hit the Safe registry.
         label = resolve_address_label(1, "0x" + "ab" * 20)
         self.assertEqual(label, "SwissName")
-        mock_es.assert_not_called()  # type: ignore[attr-defined]
+        mock_es.assert_not_called()
 
     @patch("utils.address_resolver._etherscan_backend", return_value="EtherscanName")
     @patch("utils.address_resolver._swiss_knife_backend", return_value="")
-    def test_falls_through_to_etherscan(self, mock_sk: object, mock_es: object) -> None:
+    def test_falls_through_to_etherscan(self, mock_sk: MagicMock, mock_es: MagicMock) -> None:
         label = resolve_address_label(1, "0x" + "ab" * 20)
         self.assertEqual(label, "EtherscanName")
 
     @patch("utils.address_resolver._etherscan_backend", return_value="")
     @patch("utils.address_resolver._swiss_knife_backend", return_value="")
-    def test_all_miss_returns_empty(self, mock_sk: object, mock_es: object) -> None:
+    def test_all_miss_returns_empty(self, mock_sk: MagicMock, mock_es: MagicMock) -> None:
         self.assertEqual(resolve_address_label(1, "0x" + "ab" * 20), "")
 
     def test_empty_address(self) -> None:
@@ -38,7 +38,7 @@ class TestResolveAddressLabel(unittest.TestCase):
 
     @patch("utils.address_resolver._etherscan_backend", return_value="EtherscanName")
     @patch("utils.address_resolver._swiss_knife_backend", side_effect=RuntimeError("API down"))
-    def test_failed_backend_skipped(self, mock_sk: object, mock_es: object) -> None:
+    def test_failed_backend_skipped(self, mock_sk: MagicMock, mock_es: MagicMock) -> None:
         # Swiss Knife raising shouldn't kill the chain — Etherscan still tried.
         label = resolve_address_label(1, "0x" + "ab" * 20)
         self.assertEqual(label, "EtherscanName")

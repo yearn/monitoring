@@ -23,7 +23,7 @@ defines it as ``bytes32(0)``, so it is mapped explicitly.
 """
 
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 
 from eth_utils import keccak
 
@@ -119,7 +119,7 @@ def harvest_role_names(source: str) -> dict[str, str]:
 
 
 def resolve_role_names(
-    role_hashes: list[object], chain_id: int | None = None, target: str | None = None
+    role_hashes: Sequence[object], chain_id: int | None = None, target: str | None = None
 ) -> dict[str, str]:
     """Resolve role hashes to names, consulting the static table then ``target``'s source.
 

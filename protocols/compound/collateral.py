@@ -238,7 +238,7 @@ def _analyze_market(market: MarketData) -> list[str]:
             continue
 
         c_usd = c.base_value * base_usd_price
-        asset_risk_tier: int = int(SUPPLY_ASSETS_DICT.get(c.symbol, 5))  # type: ignore[call-overload]
+        asset_risk_tier: int = int(SUPPLY_ASSETS_DICT.get(c.symbol, 5))
         if c.symbol not in SUPPLY_ASSETS_DICT:
             unknown_assets.append(c.symbol)
 

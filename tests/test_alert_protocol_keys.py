@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from protocols.timelock.timelock_alerts import (
     TIMELOCK_LIST,
@@ -85,7 +85,7 @@ def test_timelock_alert_keys_are_displayable() -> None:
 @patch("protocols.timelock.timelock_alerts.build_alert_message", return_value="msg")
 def test_process_events_stores_every_timelock_under_a_displayable_key(
     _mock_build: object,
-    mock_send: object,
+    mock_send: MagicMock,
 ) -> None:
     """End-to-end guard on the wiring: unmapped keys reach the store, not just the map.
 
@@ -110,10 +110,7 @@ def test_process_events_stores_every_timelock_under_a_displayable_key(
     process_events(events, use_cache=False)
 
     known = _known_keys()
-    stored = {
-        call.args[1]: call.kwargs.get("origin_protocol") or call.args[1]
-        for call in mock_send.call_args_list  # type: ignore[attr-defined]
-    }
+    stored = {call.args[1]: call.kwargs.get("origin_protocol") or call.args[1] for call in mock_send.call_args_list}
     assert stored, "no alerts were sent; the fixture no longer matches TIMELOCKS"
     unknown = {routing: key for routing, key in stored.items() if key not in known}
     assert not unknown, (

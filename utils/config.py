@@ -7,7 +7,7 @@ interface for accessing environment variables and other configuration values.
 
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, overload
 
 from dotenv import load_dotenv
 
@@ -36,6 +36,14 @@ class Config:
     DEFAULT_TIMEOUT = 30  # seconds
     DEFAULT_RETRY_COUNT = 3
     DEFAULT_BACKOFF_FACTOR = 1.0
+
+    @staticmethod
+    @overload
+    def get_env(key: str, default: str) -> str: ...
+
+    @staticmethod
+    @overload
+    def get_env(key: str, default: None = None) -> str | None: ...
 
     @staticmethod
     def get_env(key: str, default: Optional[str] = None) -> Optional[str]:
