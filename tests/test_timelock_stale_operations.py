@@ -94,6 +94,7 @@ class TestFormatOperation(unittest.TestCase):
             text,
         )
         self.assertIn("(39 days)", text)
+        self.assertIn(f"Operation ID: `{_operation().operation_id}`\n", text)
         self.assertIn(f"[{RATE_MANAGER}](https://etherscan.io/address/{RATE_MANAGER}) `setRate(address,uint256)`", text)
 
     @patch("utils.calldata.decoder._resolve_signature_via_abi")
@@ -109,7 +110,7 @@ class TestFormatOperation(unittest.TestCase):
         self.assertGreater(shown, 0)
         self.assertLess(shown, len(operation.calls))
         self.assertIn(f"… and {len(operation.calls) - shown} more calls (see the schedule tx)", text)
-        self.assertNotIn(operation.operation_id, text)
+        self.assertIn(f"Operation ID: `{operation.operation_id}`\n", text)
         self.assertIn(operation.transaction_hash, text)
 
     @patch("utils.calldata.decoder._resolve_signature_via_abi")
@@ -123,7 +124,7 @@ class TestFormatOperation(unittest.TestCase):
         self.assertLessEqual(len(message), stale_operations.MAX_MESSAGE_LENGTH)
         self.assertNotIn(signature, text)
         self.assertIn("… and 1 more calls (see the schedule tx)", text)
-        self.assertNotIn(operation.operation_id, text)
+        self.assertIn(f"Operation ID: `{operation.operation_id}`\n", text)
         self.assertIn(operation.transaction_hash, text)
         self.assertEqual(text.count("`") % 2, 0)
 

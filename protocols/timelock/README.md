@@ -21,7 +21,7 @@ The script runs hourly via the [monitoring runner](../automation/jobs.yaml).
 
 Only `TimelockController` timelocks are checked. Compound-style queues expire after a grace period, and governor proposals have their own lifecycle.
 
-Alerts show the timelock, schedule transaction link, readiness date, and call details. Operation IDs are omitted from the alert text.
+Alerts show the timelock, full operation ID in inline code for copying into `getTimestamp(id)` or other state queries, schedule transaction link, readiness date, and call details.
 
 ## GraphQL Schema
 
