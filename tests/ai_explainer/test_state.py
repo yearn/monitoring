@@ -11,7 +11,7 @@ from utils.llm.ai_explainer import (
     explain_batch_transaction,
 )
 
-from .helpers import _addr, _set_cap, make_provider
+from .helpers import make_address, make_provider, make_set_cap
 
 
 class TestCollectSafetyChecks(unittest.TestCase):
@@ -172,12 +172,12 @@ class TestMappingKeyStateReads(unittest.TestCase):
                 key_args=_setter_key(decoded),
             )
         ]
-        a, b = _addr(1), _addr(2)
+        a, b = make_address(1), make_address(2)
         result = _collect_state_reads(
             [
-                ("0xT", _set_cap(a, 10)),
-                ("0xT", _set_cap(b, 20)),
-                ("0xT", _set_cap(a, 99)),
+                ("0xT", make_set_cap(a, 10)),
+                ("0xT", make_set_cap(b, 20)),
+                ("0xT", make_set_cap(a, 99)),
             ],
             chain_id=1,
         )
@@ -220,7 +220,7 @@ class TestMappingKeyStateReads(unittest.TestCase):
                 key_args=(decoded.params[0][1],),
             )
         ]
-        calls = [("0xT", _set_cap(_addr(i))) for i in range(1, 41)]
+        calls = [("0xT", make_set_cap(make_address(i))) for i in range(1, 41)]
         result = _collect_state_reads(calls, chain_id=1)
         self.assertEqual(mock_read.call_count, MAX_STATE_READ_KEYS_PER_SIGNATURE)
         self.assertIn("28 additional mapping keys skipped", result.prompt_text())
@@ -249,7 +249,7 @@ class TestMappingKeyStateReads(unittest.TestCase):
     ) -> None:
         from utils.on_chain_state import StateRead
 
-        mock_decode.side_effect = [_set_cap(_addr(i)) for i in range(1, 41)]
+        mock_decode.side_effect = [make_set_cap(make_address(i)) for i in range(1, 41)]
         mock_read.side_effect = lambda _chain, _target, decoded: [
             StateRead(
                 var_name="cap",
@@ -278,7 +278,7 @@ class TestMappingKeyStateReads(unittest.TestCase):
         from utils.on_chain_state import StateRead
 
         mock_read.return_value = [StateRead(var_name="cap", type_str="uint256", value=1)]
-        addr_calls = [("0xT", _set_cap(_addr(i))) for i in range(1, 14)]
+        addr_calls = [("0xT", make_set_cap(make_address(i))) for i in range(1, 14)]
         bytes_calls = [
             (
                 "0xT",
@@ -300,12 +300,14 @@ class TestMappingKeyStateReads(unittest.TestCase):
         from utils.on_chain_state import StateRead
 
         def read(_chain: int, _target: str, decoded: DecodedCall) -> list[StateRead]:
-            if decoded.params[0][1] == _addr(2):
+            if decoded.params[0][1] == make_address(2):
                 raise RuntimeError("rpc down")
             return [StateRead(var_name="cap", type_str="uint256", value=5, key_args=(decoded.params[0][1],))]
 
         mock_read.side_effect = read
-        result = _collect_state_reads([("0xT", _set_cap(_addr(1))), ("0xT", _set_cap(_addr(2)))], chain_id=1)
+        result = _collect_state_reads(
+            [("0xT", make_set_cap(make_address(1))), ("0xT", make_set_cap(make_address(2)))], chain_id=1
+        )
         reads = result.by_target[0][1]
         unavailable = [r for r in reads if not r.available]
         self.assertEqual(len(unavailable), 1)
@@ -319,7 +321,9 @@ class TestMappingKeyStateReads(unittest.TestCase):
         Emitting ``setPeer(30183) = unavailable`` would name a getter that does
         not exist, which is worse than saying nothing.
         """
-        result = _collect_state_reads([("0xT", _set_cap(_addr(1))), ("0xT", _set_cap(_addr(2)))], chain_id=1)
+        result = _collect_state_reads(
+            [("0xT", make_set_cap(make_address(1))), ("0xT", make_set_cap(make_address(2)))], chain_id=1
+        )
         self.assertEqual(result.by_target, [])
         self.assertEqual(result.prompt_text(), "")
         self.assertEqual(mock_read.call_count, 2)

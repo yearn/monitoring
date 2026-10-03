@@ -11,7 +11,7 @@ from utils.llm.ai_explainer import (
 )
 from utils.tenderly.simulation import SimulationResult
 
-from .helpers import PAUSE, PAUSE_DATA, UNKNOWN_DATA, _addr, make_provider
+from .helpers import PAUSE, PAUSE_DATA, UNKNOWN_DATA, make_address, make_provider
 
 
 class TestBatchUndecodedCalls(unittest.TestCase):
@@ -77,12 +77,12 @@ class TestBatchUndecodedCalls(unittest.TestCase):
         set_owner = DecodedCall(
             function_name="setOwner",
             signature="setOwner(address)",
-            params=[("address", _addr(1))],
+            params=[("address", make_address(1))],
         )
         set_cap = DecodedCall(
             function_name="setCap",
             signature="setCap(address,uint256)",
-            params=[("address", _addr(2)), ("uint256", 99)],
+            params=[("address", make_address(2)), ("uint256", 99)],
         )
         owner_data = "0xf2fde38b" + "00" * 32
         cap_data = "0xabcdef01" + "00" * 64
@@ -218,7 +218,7 @@ class TestBatchUndecodedCalls(unittest.TestCase):
         """Too many entries to inline: the facts must survive in a linked report."""
         total = MAX_INLINE_UNDECODED_CALLS + 2
         result = explain_batch_transaction(
-            calls=[{"target": _addr(i), "data": "0x", "value": "0"} for i in range(total)],
+            calls=[{"target": make_address(i), "data": "0x", "value": "0"} for i in range(total)],
             chain_id=1,
             label="Test Timelock",
         )

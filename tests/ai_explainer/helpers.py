@@ -18,11 +18,13 @@ def make_provider(response: str, model_name: str = "test") -> MagicMock:
     return provider
 
 
-def _addr(i: int) -> str:
+def make_address(i: int) -> str:
+    """Build a deterministic address from an integer."""
     return "0x" + f"{i:040x}"
 
 
-def _set_cap(key: str, cap: int = 1) -> DecodedCall:
+def make_set_cap(key: str, cap: int = 1) -> DecodedCall:
+    """Build a decoded cap setter for an address key."""
     return DecodedCall(
         function_name="setCap",
         signature="setCap(address,uint256)",

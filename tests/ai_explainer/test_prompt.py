@@ -18,7 +18,7 @@ from utils.related_tokens import RelatedToken
 from utils.source_context import SourceContext
 from utils.tenderly.simulation import AssetChange, SimulationResult
 
-from .helpers import PAUSE, PAUSE_DATA, UNKNOWN_DATA, _addr, make_provider
+from .helpers import PAUSE, PAUSE_DATA, UNKNOWN_DATA, make_address, make_provider
 
 
 class TestBuildPrompt(unittest.TestCase):
@@ -438,7 +438,7 @@ class TestPromptSizeGuards(unittest.TestCase):
         mock_get_provider.return_value = provider
 
         result = explain_batch_transaction(
-            calls=[{"target": _addr(i), "data": PAUSE_DATA, "value": "0"} for i in range(total)],
+            calls=[{"target": make_address(i), "data": PAUSE_DATA, "value": "0"} for i in range(total)],
             chain_id=1,
             refine=False,
         )
@@ -470,7 +470,7 @@ class TestPromptSizeGuards(unittest.TestCase):
         mock_label.side_effect = lambda _chain, addr: "FeeAuction" if addr == receiver else ""
         total = MAX_PROMPT_SIMULATIONS + 1
         transfer = AssetChange(
-            token_address=_addr(0xC0),
+            token_address=make_address(0xC0),
             token_name="USD Coin",
             token_symbol="USDC",
             from_address=sender.lower(),
@@ -486,7 +486,7 @@ class TestPromptSizeGuards(unittest.TestCase):
         mock_get_provider.return_value = provider
 
         result = explain_batch_transaction(
-            calls=[{"target": _addr(i), "data": PAUSE_DATA, "value": "0"} for i in range(total)],
+            calls=[{"target": make_address(i), "data": PAUSE_DATA, "value": "0"} for i in range(total)],
             chain_id=1,
             refine=False,
         )

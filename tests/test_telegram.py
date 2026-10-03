@@ -16,7 +16,7 @@ class TestTelegram(unittest.TestCase):
     @patch("utils.telegram.requests.post")
     def test_send_telegram_message_success(self, mock_post):
         # Setup mock response
-        mock_post.return_value = mock.Mock(status_code=200)
+        mock_post.return_value = mock.Mock(status_code=200, raise_for_status=mock.Mock(return_value=None))
 
         # Test with environment variables
         with patch.dict(
@@ -38,7 +38,7 @@ class TestTelegram(unittest.TestCase):
 
     @patch("utils.telegram.requests.post")
     def test_send_telegram_message_plain_text_omits_parse_mode(self, mock_post):
-        mock_post.return_value = mock.Mock(status_code=200)
+        mock_post.return_value = mock.Mock(status_code=200, raise_for_status=mock.Mock(return_value=None))
 
         with patch.dict(
             os.environ,
@@ -87,7 +87,7 @@ class TestTelegram(unittest.TestCase):
     @patch("utils.telegram.requests.post")
     def test_send_telegram_message_with_topic(self, mock_post):
         """When TELEGRAM_TOPIC_ID is set, message goes to topics chat with message_thread_id."""
-        mock_post.return_value = mock.Mock(status_code=200)
+        mock_post.return_value = mock.Mock(status_code=200, raise_for_status=mock.Mock(return_value=None))
 
         with patch.dict(
             os.environ,
@@ -110,7 +110,7 @@ class TestTelegram(unittest.TestCase):
     @patch("utils.telegram.requests.post")
     def test_send_telegram_message_topic_uses_default_bot(self, mock_post):
         """Topic routing always uses the default bot, even if protocol-specific bot exists."""
-        mock_post.return_value = mock.Mock(status_code=200)
+        mock_post.return_value = mock.Mock(status_code=200, raise_for_status=mock.Mock(return_value=None))
 
         with patch.dict(
             os.environ,
@@ -130,7 +130,7 @@ class TestTelegram(unittest.TestCase):
     @patch("utils.telegram.requests.post")
     def test_send_telegram_message_no_topic_falls_back(self, mock_post):
         """Without topic ID, uses legacy per-protocol chat routing."""
-        mock_post.return_value = mock.Mock(status_code=200)
+        mock_post.return_value = mock.Mock(status_code=200, raise_for_status=mock.Mock(return_value=None))
 
         with patch.dict(
             os.environ,
@@ -155,7 +155,7 @@ class TestTelegram(unittest.TestCase):
         (Markdown-escaped so protocol names with `_` and the brackets don't trip a
         400 parse error), and never applies topic threading.
         """
-        mock_post.return_value = mock.Mock(status_code=200)
+        mock_post.return_value = mock.Mock(status_code=200, raise_for_status=mock.Mock(return_value=None))
 
         with patch.dict(
             os.environ,
@@ -217,7 +217,7 @@ class TestSendErrorMessage(unittest.TestCase):
     @patch("utils.telegram.requests.post")
     def test_routes_to_errors_chat_with_label_silent_plain(self, mock_post):
         """With an errors chat configured, the message goes there labelled, silent, plain."""
-        mock_post.return_value = mock.Mock(status_code=200)
+        mock_post.return_value = mock.Mock(status_code=200, raise_for_status=mock.Mock(return_value=None))
 
         with patch.dict(
             os.environ,
@@ -245,7 +245,7 @@ class TestSendErrorMessage(unittest.TestCase):
     @patch("utils.telegram.requests.post")
     def test_errors_topic_takes_precedence(self, mock_post):
         """TELEGRAM_TOPIC_ID_ERRORS routes to the topics group on the errors thread."""
-        mock_post.return_value = mock.Mock(status_code=200)
+        mock_post.return_value = mock.Mock(status_code=200, raise_for_status=mock.Mock(return_value=None))
 
         with patch.dict(
             os.environ,
@@ -268,7 +268,7 @@ class TestSendErrorMessage(unittest.TestCase):
     @patch("utils.telegram.requests.post")
     def test_falls_back_to_protocol_channel_when_unconfigured(self, mock_post):
         """With no errors destination set, the error routes to the protocol's own chat (no label)."""
-        mock_post.return_value = mock.Mock(status_code=200)
+        mock_post.return_value = mock.Mock(status_code=200, raise_for_status=mock.Mock(return_value=None))
 
         with patch.dict(
             os.environ,
@@ -298,7 +298,7 @@ class TestSendEnvioErrorMessage(unittest.TestCase):
 
     @staticmethod
     def _ok_response(mock_post):
-        mock_post.return_value = mock.Mock(status_code=200)
+        mock_post.return_value = mock.Mock(status_code=200, raise_for_status=mock.Mock(return_value=None))
 
     @patch("utils.telegram.requests.post")
     def test_routes_to_envio_chat_with_label_silent_plain(self, mock_post):
