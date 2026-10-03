@@ -152,7 +152,12 @@ def test_future_nonce_is_not_immediately_executable(deps: Dependencies) -> None:
     fetch, client, contract = deps
     fetch.return_value["nonce"] = "5"
     context = resolve_safe_context("YEARN_MS", 1, [(SAFE, approval())])[0]
-    assert "nonce differs from current nonce" in format_safe_prompt([context])
+    prompt = format_safe_prompt([context])
+    assert "nonce 5 is higher than current nonce 0" in prompt
+    assert "queued behind earlier nonces and cannot execute yet" in prompt
+    assert "conditional on the state when its nonce becomes current" in prompt
+    assert "On successful separate execution" in prompt
+    assert "permanently unexecutable" not in prompt
 
 
 def test_already_existing_owner_does_not_claim_owner_count_increase(deps: Dependencies) -> None:
@@ -254,3 +259,54 @@ def test_partial_state_decode_does_not_publish_incomplete_configuration(deps: De
     assert context.transaction is not None
     assert context.owners is None
     assert "owners/threshold/nonce unavailable" in format_safe_prompt([context])
+
+
+@pytest.mark.parametrize("owner_already_added", [False, True])
+def test_consumed_nonce_cannot_enable_execution_or_prospective_effects(
+    deps: Dependencies, owner_already_added: bool
+) -> None:
+    fetch, client, contract = deps
+    fetch.return_value["nonce"] = "3"
+    client.execute_batch.return_value[2] = 4
+    if owner_already_added:
+        client.execute_batch.return_value[0].append(NEW_OWNER)
+    context = resolve_safe_context("CAP", 1, [(SAFE, approval())])[0]
+    for text in (format_safe_prompt([context]), format_safe_report([context], 1, context.labels)):
+        assert "nonce 3 is already consumed (current nonce 4)" in text
+        assert "permanently unexecutable" in text
+        assert "Preimage VERIFIED" in text
+        assert "addOwnerWithThreshold(address,uint256)" in text
+        assert "On successful separate execution" not in text
+        assert "would revert" not in text
+        assert "owners 5 -> 6" not in text
+        assert "proposed threshold applies" not in text
+        assert "final execution status" in text
+
+
+@pytest.mark.parametrize("threshold", [0, 6, 9])
+def test_change_threshold_rejects_out_of_range_values(deps: Dependencies, threshold: int) -> None:
+    fetch, client, contract = deps
+    fetch.return_value["data"] = (
+        "0x"
+        + (function_signature_to_4byte_selector("changeThreshold(uint256)") + encode(["uint256"], [threshold])).hex()
+    )
+    context = resolve_safe_context("CAP", 1, [(SAFE, approval())])[0]
+    for text in (format_safe_prompt([context]), format_safe_report([context], 1, context.labels)):
+        assert f"threshold {threshold} is invalid for 5 owners" in text
+        assert "would revert against this state" in text
+        assert "On successful separate execution" not in text
+        assert f"change threshold 1 -> {threshold}" not in text
+        assert "proposed threshold applies" not in text
+
+
+@pytest.mark.parametrize("threshold", [1, 5])
+def test_change_threshold_accepts_both_valid_boundaries(deps: Dependencies, threshold: int) -> None:
+    fetch, client, contract = deps
+    fetch.return_value["data"] = (
+        "0x"
+        + (function_signature_to_4byte_selector("changeThreshold(uint256)") + encode(["uint256"], [threshold])).hex()
+    )
+    context = resolve_safe_context("CAP", 1, [(SAFE, approval())])[0]
+    prompt = format_safe_prompt([context])
+    assert f"change threshold 1 -> {threshold}" in prompt
+    assert "invalid" not in prompt

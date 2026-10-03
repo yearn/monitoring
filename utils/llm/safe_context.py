@@ -220,6 +220,10 @@ def _effect_lines(context: SafeApprovalContext) -> list[str]:
     tx, call = context.transaction, context.call
     if not tx or not call or tx["operation"] != 0 or tx["to"].lower() != context.safe.lower():
         return []
+    if context.nonce is not None and tx["nonce"] < context.nonce:
+        # Hash verification accepts historical nonces, but execTransaction
+        # always authorizes the hash formed with the Safe's current nonce.
+        return []
     params = [value for _, value in call.params]
     if call.function_name == "addOwnerWithThreshold" and context.owners is not None:
         owner, threshold = to_checksum_address(params[0]), int(params[1])
@@ -237,8 +241,13 @@ def _effect_lines(context: SafeApprovalContext) -> list[str]:
         return [
             f"On successful separate execution: add owner {owner}; threshold {context.threshold} -> {threshold}; owners {len(context.owners)} -> {count} ({threshold}-of-{count})."
         ]
-    if call.function_name == "changeThreshold":
-        return [f"On successful separate execution: change threshold {context.threshold} -> {params[0]}."]
+    if call.function_name == "changeThreshold" and context.owners is not None:
+        threshold, count = int(params[0]), len(context.owners)
+        if threshold < 1 or threshold > count:
+            return [
+                f"The proposed threshold {threshold} is invalid for {count} owners; execution would revert against this state."
+            ]
+        return [f"On successful separate execution: change threshold {context.threshold} -> {threshold}."]
     return []
 
 
@@ -268,16 +277,27 @@ def format_safe_prompt(contexts: list[SafeApprovalContext]) -> str:
             lines.append(
                 f"Current receiving Safe: {context.threshold}-of-{len(context.owners)}; nonce={context.nonce}; owners={', '.join(context.owners)}."
             )
-            if context.nonce != tx["nonce"]:
+            nonce_consumed = context.nonce is not None and tx["nonce"] < context.nonce
+            if nonce_consumed:
                 lines.append(
-                    "Referenced nonce differs from current nonce; do not assume this payload is immediately executable."
+                    f"Referenced nonce {tx['nonce']} is already consumed (current nonce {context.nonce}). "
+                    "This transaction is permanently unexecutable through normal Safe execution. "
+                    "The approval cannot enable execution of this payload; do not describe its requested changes as prospective effects."
+                )
+            elif context.nonce is not None and tx["nonce"] > context.nonce:
+                lines.append(
+                    f"Referenced nonce {tx['nonce']} is higher than current nonce {context.nonce}; "
+                    "this payload is queued behind earlier nonces and cannot execute yet. "
+                    "Any effects below are conditional on the state when its nonce becomes current; "
+                    "owners and threshold may change before then."
                 )
             effects = _effect_lines(context)
             lines.extend(effects)
-            lines.append(
-                "Separate execution must satisfy the receiving Safe's current authorization requirements and applicable guards."
-            )
-            if effects and context.call and context.call.function_name in {"addOwnerWithThreshold", "changeThreshold"}:
+            if not nonce_consumed:
+                lines.append(
+                    "Separate execution must satisfy the receiving Safe's current authorization requirements and applicable guards."
+                )
+            if any(effect.startswith("On successful separate execution:") for effect in effects):
                 lines.append(
                     "The proposed threshold applies only after successful separate execution; it is not the threshold authorizing this payload."
                 )
