@@ -454,6 +454,14 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
     if delay_line:
         header_lines.append(delay_line)
 
+    # Show the full id as inline code, in the same "Operation ID" line as the
+    # stale-operation alert, so the two alerts can be matched and the id copied
+    # into getTimestamp/cancel. Aave, Lido and Maple show their proposal or vote
+    # number with the type-specific details below.
+    operation_id = first.get("operationId")
+    if operation_id and timelock_type not in ("Aave", "Lido", "Maple"):
+        header_lines.append(f"🆔 Operation ID: `{operation_id}`")
+
     # Type-specific call details (truncated first when message is too long)
     call_lines: list[str] = []
     if timelock_type == "Aave":
@@ -480,10 +488,6 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
     elif timelock_type in ("TimelockController", "Compound"):
         for event in events:
             call_lines.extend(_build_call_info(event, explorer, len(events) > 1, chain_id))
-
-    else:
-        # Unknown type - show operationId at minimum
-        call_lines.append(f"🆔 Operation: {first.get('operationId') or ''}")
 
     # AI explanation (best-effort, non-blocking). Skipped for protocols whose
     # governance proposals are already monitored by a dedicated script.

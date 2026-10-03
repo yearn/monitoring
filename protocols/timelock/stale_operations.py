@@ -34,7 +34,7 @@ from utils.cache import cache_filename, get_last_value_for_key_from_file, write_
 from utils.calldata.decoder import decode_calldata
 from utils.chains import EXPLORER_URLS, Chain
 from utils.logger import get_logger
-from utils.telegram import MAX_MESSAGE_LENGTH, send_envio_error_message, send_telegram_message
+from utils.telegram import MAX_MESSAGE_LENGTH, escape_markdown, send_envio_error_message, send_telegram_message
 from utils.web3_wrapper import ChainManager
 
 logger = get_logger("timelock_stale_operations")
@@ -204,7 +204,7 @@ def format_operation(operation: Operation, ready_at: int, now: int) -> str:
         else operation.transaction_hash
     )
     prefix = (
-        f"*{operation.timelock.label}* (chain {chain_id}): {timelock}\n"
+        f"*{escape_markdown(operation.timelock.label)}* (chain {chain_id}): {timelock}\n"
         f"Operation ID: `{operation.operation_id}`\n"
         f"Scheduled {_date(operation.scheduled_at)} in {tx}\n"
         f"Ready since {_date(ready_at)} ({(now - ready_at) // DAY} days)\n"

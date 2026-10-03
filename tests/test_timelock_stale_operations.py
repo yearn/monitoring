@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 from protocols.timelock import stale_operations
@@ -96,6 +97,17 @@ class TestFormatOperation(unittest.TestCase):
         self.assertIn("(39 days)", text)
         self.assertIn(f"Operation ID: `{_operation().operation_id}`\n", text)
         self.assertIn(f"[{RATE_MANAGER}](https://etherscan.io/address/{RATE_MANAGER}) `setRate(address,uint256)`", text)
+
+    @patch.object(stale_operations, "decode_calldata")
+    def test_label_markdown_is_escaped(self, decode: MagicMock) -> None:
+        """A `_` in a config label must not open an unclosed italic and get the message rejected."""
+        decode.return_value.signature = "setRate(address,uint256)"
+        timelock = replace(SHORT, label="Foo_Bar *Timelock*")
+        operation = Operation(timelock, "0x" + "11" * 32, NOW, "0x" + "ab" * 32, ((RATE_MANAGER, SET_RATE),))
+        text = format_operation(operation, NOW - 10 * DAY, NOW)
+
+        self.assertIn(r"*Foo\_Bar \*Timelock\** (chain 1)", text)
+        self.assertIn(f"Operation ID: `{operation.operation_id}`\n", text)
 
     @patch("utils.calldata.decoder._resolve_signature_via_abi")
     def test_long_signatures_fit_with_an_explicit_omission_notice(self, resolve: MagicMock) -> None:

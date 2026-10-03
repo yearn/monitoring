@@ -197,6 +197,51 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         self.assertIn("TIMELOCK: New Operation Scheduled", msg)
 
 
+@patch("protocols.timelock.timelock_alerts._get_ai_explanation", return_value=None)
+class TestOperationIdLine(unittest.TestCase):
+    """The scheduled alert shows the same copyable Operation ID as the stale-operation alert."""
+
+    OPERATION_ID = "0x" + "5f" * 32
+
+    def test_timelock_controller_shows_id_before_calls(self, _mock_ai: object) -> None:
+        msg = build_alert_message([_make_event(operationId=self.OPERATION_ID)], TIMELOCK_INFO)
+        self.assertIn(f"🆔 Operation ID: `{self.OPERATION_ID}`\n", msg)
+        self.assertLess(msg.index("Operation ID"), msg.index("🎯 Target"))
+
+    def test_batch_shows_id_once(self, _mock_ai: object) -> None:
+        events = [_make_event(operationId=self.OPERATION_ID, index=i) for i in range(3)]
+        msg = build_alert_message(events, TIMELOCK_INFO)
+        self.assertEqual(msg.count(self.OPERATION_ID), 1)
+
+    def test_id_survives_call_truncation(self, _mock_ai: object) -> None:
+        events = [
+            _make_event(operationId=self.OPERATION_ID, index=i, target=f"0x{i:040x}", data="0x" + "ab" * 200)
+            for i in range(30)
+        ]
+        msg = build_alert_message(events, TIMELOCK_INFO)
+        self.assertIn("truncated", msg)
+        self.assertIn(f"🆔 Operation ID: `{self.OPERATION_ID}`", msg)
+
+    def test_compound_and_unknown_types_show_id(self, _mock_ai: object) -> None:
+        for timelock_type in ("Compound", "SomethingNew"):
+            with self.subTest(timelock_type=timelock_type):
+                event = _make_event(timelock_type, operationId=self.OPERATION_ID)
+                msg = build_alert_message([event], TIMELOCK_INFO)
+                self.assertIn(f"🆔 Operation ID: `{self.OPERATION_ID}`", msg)
+
+    def test_governance_types_keep_their_own_id_label(self, _mock_ai: object) -> None:
+        for timelock_type, label in (("Aave", "Proposal"), ("Lido", "Vote"), ("Maple", "Proposal")):
+            with self.subTest(timelock_type=timelock_type):
+                msg = build_alert_message([_make_event(timelock_type, operationId="42")], TIMELOCK_INFO)
+                self.assertIn(f"🆔 {label}: 42", msg)
+                self.assertNotIn("Operation ID", msg)
+
+    def test_missing_id_adds_no_empty_code_span(self, _mock_ai: object) -> None:
+        msg = build_alert_message([_make_event(operationId=None)], TIMELOCK_INFO)
+        self.assertNotIn("Operation ID", msg)
+        self.assertNotIn("``", msg)
+
+
 class TestMapleProposalUnwrap(unittest.TestCase):
     """Maple ProposalScheduled has no target/data; recover them from the source tx."""
 
