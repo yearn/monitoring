@@ -281,7 +281,17 @@ For any protocol, calls that hand over control (`set_management`, `transferOwner
 
 Involved Safes get `Safe m-of-n` labels. These are applied with `setdefault`, so curated names win. Failures are best-effort and never block the alert.
 
-### 5g. Adapter Registry (`utils/llm/protocol_context.py`)
+### 5g. Transactions Behind Safe Approvals (`utils/llm/safe_context.py`)
+
+A Safe can itself own another Safe. Its queued `approveHash(bytes32)` call approves a separate transaction on the **receiving Safe**. The adapter retrieves that transaction from the Safe transaction service and decodes its raw calldata so the summary can explain the intended action. It applies across configured Safe networks, including CAP and Yearn, and distinguishes the calling Safe's label from the receiving Safe.
+
+For Safe owner/threshold self-calls, an optional batch reads current owners, threshold, and nonce to show the proposed configuration change. Consumed nonces suppress prospective effects; future nonces remain conditional on intervening transactions. Threshold changes are checked against the owner count. Other calls use the existing decoder without these state reads, and failed RPC reads still preserve the intended action.
+
+Each uncached approval uses one service lookup (at most eight per alert), with `SAFE_API_KEY` or `SAFE_API_KEY_2` when available. Found action fields are cached on disk under `safe-approval-payloads` (bounded to 256 entries / 4 MiB); Safe state and missing records are refreshed on later alerts. Reports identify the payload's source as the Safe transaction service. API descriptions, decoded metadata, signatures, and execution status are excluded. Missing or malformed records retain an explicit unresolved reason.
+
+For the [CAP alert of 2026-10-03](https://gist.wavey.info/tkPoAMPBVhYy2wmCLd2lJHMR), the [referenced transaction](https://api.safe.global/tx-service/eth/api/v2/multisig-transactions/0xceeaf03bee90198fb795396734d1b15c72f543264d6f6d12399387d1acc66881/) adds [0x4E2eF0C45f624912A6979726D82b717D3EA4Ad72](https://etherscan.io/address/0x4E2eF0C45f624912A6979726D82b717D3EA4Ad72) as an owner and sets the threshold to three. Against investigation-time state, separate execution would change the receiving Safe from **1-of-5 to 3-of-6**. The approval itself executes no transaction and moves no funds.
+
+### 5h. Adapter Registry (`utils/llm/protocol_context.py`)
 
 Adapters register in `_ADAPTERS`; `resolve_protocol_context()` fans one call out to all of them and merges the rendered prompt text, report text, introduced addresses, and address labels. Each adapter guards itself, so registration order carries no meaning and one adapter raising is logged and skipped rather than dropping the alert. Most guard on protocol and chain. The Yearn V3 adapter guards on call shape and `apiVersion()`, and the control-transfer adapter on call shape alone.
 

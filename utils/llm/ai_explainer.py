@@ -1568,8 +1568,9 @@ def _build_prompt(
     if protocol_context:
         parts.append(
             "\n--- Protocol Context (computed from protocol APIs and live on-chain reads) ---\n"
-            "Every fact below is VERIFIED for this protocol: identities, resolved hashes, decimals, "
-            "and current values. State them; do not hedge about them or call them unavailable.\n" + protocol_context
+            "Use the identities, decoded actions, resolved hashes, decimals, and current values below with their stated provenance. "
+            "Respect explicit unresolved/unavailable fields and distinguish current state from "
+            "conditional effects of a later execution.\n" + protocol_context
         )
 
     if source_contexts:
@@ -1968,9 +1969,17 @@ def explain_transaction(
 
     sim_addresses = _label_simulation_counterparties([simulation], chain_id, address_labels)
     addresses = list(
-        dict.fromkeys([*collect_unique_addresses([(target, decoded)]), *protocol_ctx.addresses, *sim_addresses])
+        dict.fromkeys(
+            [from_address, *collect_unique_addresses([(target, decoded)]), *protocol_ctx.addresses, *sim_addresses]
+        )
     )
     address_links = format_address_links_block(addresses, chain_id, address_labels)
+
+    execution_context = [f"Caller/executor: {from_address}. Call target: {target}."]
+    if label:
+        execution_context.append(f"The alert label '{label}' names {label_address or from_address}.")
+    if context_note:
+        execution_context.append(context_note)
 
     prompt = _build_prompt(
         target=target,
@@ -1982,7 +1991,7 @@ def explain_transaction(
         token_flows=token_flows,
         proxy_upgrade_info=proxy_upgrade_info,
         source_contexts=source_contexts,
-        context_note=context_note,
+        context_note="\n".join(execution_context),
         state_section=state_reads.prompt_text(),
         address_labels=address_labels,
         param_names_per_call=param_names,
