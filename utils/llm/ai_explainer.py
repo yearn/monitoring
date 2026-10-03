@@ -1568,7 +1568,7 @@ def _build_prompt(
     if protocol_context:
         parts.append(
             "\n--- Protocol Context (computed from protocol APIs and live on-chain reads) ---\n"
-            "Use the verified identities, resolved hashes, decimals, and current values below. "
+            "Use the identities, decoded actions, resolved hashes, decimals, and current values below with their stated provenance. "
             "Respect explicit unresolved/unavailable fields and distinguish current state from "
             "conditional effects of a later execution.\n" + protocol_context
         )
