@@ -281,7 +281,25 @@ For any protocol, calls that hand over control (`set_management`, `transferOwner
 
 Involved Safes get `Safe m-of-n` labels. These are applied with `setdefault`, so curated names win. Failures are best-effort and never block the alert.
 
-### 5g. Adapter Registry (`utils/llm/protocol_context.py`)
+### 5g. Safe Hash Approval Context (`utils/llm/safe_context.py`)
+
+A Safe can itself own another Safe. A queued `approveHash(bytes32)` from the monitored Safe records an approval on the **receiving Safe**, while the transaction it authorizes lives outside the approval calldata. This pattern occurs across protocols, so this adapter applies to all configured Safe networks, including CAP and Yearn.
+
+For each distinct approval (at most eight per alert), the adapter:
+
+1. Fetches a candidate transaction from the Safe transaction service's `/api/v2/multisig-transactions/{safeTxHash}/` endpoint, using `SAFE_API_KEY` or `SAFE_API_KEY_2` when available.
+2. Checks the receiving Safe and hash, then passes all ten signed fields to that Safe's on-chain `getTransactionHash`. Only a matching digest establishes the payload as verified. Service-provided `dataDecoded`, origin descriptions, signatures, and execution status are not treated as verified facts.
+3. Decodes the verified raw calldata. Safe owner/threshold administration calls are decoded locally; other calls use the existing calldata decoder.
+4. Reads the receiving Safe's current owners, threshold, and nonce. Owner additions show the prospective authorization change, and a different current nonce is identified explicitly.
+5. Adds the verified payload, Safe state, and conditional downstream effects to both the prompt and deterministic report context. Checked-in CAP/Yearn address labels apply to newly introduced addresses.
+
+Missing preimages, API failures, and hash mismatches retain an explicit reason and unknown downstream impact. A failed optional state read still preserves a verified payload. Mutable Safe state and absent preimages are not cached. The adapter does not execute or simulate the referenced transaction, establish existing signatures/approvals, or infer the identity of an unlabeled owner address.
+
+The CAP alert of 2026-10-03 illustrates the missing context: monitored Safe `0xb8FC49402dF3ee4f8587268FB89fda4d621a8793`, outer nonce 256, calls `approveHash` on receiving Safe `0xFBF18B80569b29C897C6a857456b5adEA720B984`. Its approved digest `0xceeaf03bee90198fb795396734d1b15c72f543264d6f6d12399387d1acc66881` resolves to that receiving Safe's nonce-0 self-call `addOwnerWithThreshold(0x4E2eF0C45f624912A6979726D82b717D3EA4Ad72, 3)`, with zero value and operation CALL. On-chain hash verification matched, and investigation-time reads showed five owners, threshold one, nonce zero, and no existing hash approval by the CAP Safe. Successful separate execution would change the receiving Safe from **1-of-5 to 3-of-6**. The original [report](https://gist.wavey.info/tkPoAMPBVhYy2wmCLd2lJHMR) correctly described the immediate approval-only effect but confused the caller's label with the receiving Safe and lacked this retrievable payload.
+
+Sources: [Safe approveHash reference](https://docs.safe.global/reference-smart-account/signatures/approveHash), [getTransactionHash reference](https://docs.safe.global/reference-smart-account/transactions/getTransactionHash), and the [approved transaction record](https://api.safe.global/tx-service/eth/api/v2/multisig-transactions/0xceeaf03bee90198fb795396734d1b15c72f543264d6f6d12399387d1acc66881/).
+
+### 5h. Adapter Registry (`utils/llm/protocol_context.py`)
 
 Adapters register in `_ADAPTERS`; `resolve_protocol_context()` fans one call out to all of them and merges the rendered prompt text, report text, introduced addresses, and address labels. Each adapter guards itself, so registration order carries no meaning and one adapter raising is logged and skipped rather than dropping the alert. Most guard on protocol and chain. The Yearn V3 adapter guards on call shape and `apiVersion()`, and the control-transfer adapter on call shape alone.
 
