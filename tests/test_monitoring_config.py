@@ -5,6 +5,7 @@ import threading
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -32,6 +33,7 @@ def test_protocol_to_json_structure():
     assert data["slug"] == "3jane"
     assert data["display_name"] == "3Jane"
     assert data["cadence"] == "Hourly"
+    assert isinstance(data["monitors"], list)
     assert data["monitor_count"] == len(data["monitors"])
     assert all("name" in m and "description" in m for m in data["monitors"])
 
@@ -41,6 +43,7 @@ def test_monitoring_to_json_is_sorted_and_counted():
     data = monitoring_to_json(config)
     assert data["version"] == config.version
     assert data["count"] == len(config.protocols)
+    assert isinstance(data["data"], list)
     slugs = [p["slug"] for p in data["data"]]
     assert slugs == sorted(slugs)
 
@@ -104,7 +107,7 @@ def test_monitoring_tasks_exist_in_jobs_yaml():
 
 
 def _request(server: ThreadingHTTPServer, method: str, path: str) -> tuple[int, dict]:
-    host, port = server.server_address
+    host, port = cast(tuple[str, int], server.server_address)
     conn = HTTPConnection(host, port)
     try:
         conn.request(method, path)

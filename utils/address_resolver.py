@@ -113,7 +113,7 @@ def register_backend(backend: Backend, position: int | None = None) -> None:
     name-based lookup in :func:`resolve_address_label` finds it. Lower
     position = higher priority.
     """
-    name = backend.__name__
+    name = getattr(backend, "__name__")
     globals()[name] = backend
     if name in _BACKEND_NAMES:
         return

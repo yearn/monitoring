@@ -6,6 +6,7 @@ import threading
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from typing import cast
 
 from api.server import AlertsHandler, parse_alert_query
 from automation.config import JobsConfig, Profile, Task
@@ -19,7 +20,7 @@ def _use_cache_dir(monkeypatch, tmp_path) -> None:
 
 
 def _request(server: ThreadingHTTPServer, method: str, path: str) -> tuple[int, dict]:
-    host, port = server.server_address
+    host, port = cast(tuple[str, int], server.server_address)
     conn = HTTPConnection(host, port)
     try:
         conn.request(method, path)

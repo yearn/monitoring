@@ -1,6 +1,7 @@
 """Tests for Infinifi-specific LLM farm and token enrichment."""
 
 import unittest
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 from utils.calldata.decoder import DecodedCall
@@ -301,8 +302,7 @@ class TestEscrowCallMeaning(unittest.TestCase):
 
     def _context(self, **overrides: object) -> InfinifiEscrowContext:
         base = _resolved_context()
-        fields = {**base.__dict__, "total_assets_raw": 2_607_624_600_324, **overrides}
-        return InfinifiEscrowContext(**fields)
+        return replace(base, **{"total_assets_raw": 2_607_624_600_324, **overrides})
 
     def test_rate_percent(self) -> None:
         self.assertEqual(_rate_percent(1_086_830_000_000_000_000), "+8.683%")

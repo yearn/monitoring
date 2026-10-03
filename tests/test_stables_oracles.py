@@ -1,5 +1,6 @@
 import unittest
 from decimal import Decimal
+from typing import Any
 
 from protocols.stables.oracles import (
     OracleObservation,
@@ -39,12 +40,19 @@ def _reading(
     return FeedReading(address=address, round_data=rd, decimals=decimals)
 
 
+def _cbbtc_feed() -> ChainlinkFeed:
+    """Return the registered cbBTC feed, asserting that it exists."""
+    feed = get_asset("cbBTC").chainlink_feed
+    assert feed is not None
+    return feed
+
+
 def _cbbtc_obs(**overrides) -> OracleObservation:
     """A healthy cbBTC (USD-quoted feed, BTC peg) observation; override per test."""
     asset = get_asset("cbBTC")
-    defaults = dict(
+    defaults: dict[str, Any] = dict(
         asset=asset,
-        reading=_reading(asset.chainlink_feed.address, 60_100 * 10**8),  # $60,100
+        reading=_reading(_cbbtc_feed().address, 60_100 * 10**8),  # $60,100
         peg_price_usd=Decimal("60000"),
         quote_price_usd=Decimal("1"),  # USD-quoted feed
         now=NOW,
@@ -65,20 +73,16 @@ class TestStaleness(unittest.TestCase):
         self.assertIsNone(check_staleness(_cbbtc_obs(), buffer=600))
 
     def test_forced_stale_fires(self):
-        stale = _cbbtc_obs(
-            reading=_reading(
-                get_asset("cbBTC").chainlink_feed.address, 60_100 * 10**8, updated_at=NOW - (HEARTBEAT + 1000)
-            )
-        )
+        stale = _cbbtc_obs(reading=_reading(_cbbtc_feed().address, 60_100 * 10**8, updated_at=NOW - (HEARTBEAT + 1000)))
         alert = check_staleness(stale, buffer=600)
-        self.assertIsNotNone(alert)
+        assert alert is not None
         self.assertEqual(alert.severity, AlertSeverity.HIGH)
         # cbBTC has no dispatchable owner: protocol is "pegs", channel override empty.
         self.assertEqual(alert.channel, "pegs")
         self.assertEqual(alert.protocol, "coinbase")
 
     def test_zero_updated_at_is_stale(self):
-        obs = _cbbtc_obs(reading=_reading(get_asset("cbBTC").chainlink_feed.address, 60_100 * 10**8, updated_at=0))
+        obs = _cbbtc_obs(reading=_reading(_cbbtc_feed().address, 60_100 * 10**8, updated_at=0))
         self.assertIsNotNone(check_staleness(obs))
 
 
@@ -87,22 +91,22 @@ class TestRoundHealth(unittest.TestCase):
         self.assertIsNone(check_round_health(_cbbtc_obs()))
 
     def test_non_positive_answer_is_critical(self):
-        obs = _cbbtc_obs(reading=_reading(get_asset("cbBTC").chainlink_feed.address, 0))
+        obs = _cbbtc_obs(reading=_reading(_cbbtc_feed().address, 0))
         alert = check_round_health(obs)
-        self.assertIsNotNone(alert)
+        assert alert is not None
         self.assertEqual(alert.severity, AlertSeverity.CRITICAL)
 
     def test_lagging_answered_in_round_is_high(self):
-        addr = get_asset("cbBTC").chainlink_feed.address
+        addr = _cbbtc_feed().address
         obs = _cbbtc_obs(reading=_reading(addr, 60_100 * 10**8, round_id=100, answered_in_round=99))
         alert = check_round_health(obs)
-        self.assertIsNotNone(alert)
+        assert alert is not None
         self.assertEqual(alert.severity, AlertSeverity.HIGH)
 
     def test_roundid_backwards_is_critical(self):
         obs = _cbbtc_obs(prev_round_id=200)  # current round_id is 100
         alert = check_round_health(obs)
-        self.assertIsNotNone(alert)
+        assert alert is not None
         self.assertEqual(alert.severity, AlertSeverity.CRITICAL)
 
 
@@ -112,14 +116,14 @@ class TestPegDeviation(unittest.TestCase):
 
     def test_off_peg_fires(self):
         # cbBTC is downside_only; oracle $58,200 vs $60,000 peg = -3% < -2% tolerance
-        obs = _cbbtc_obs(reading=_reading(get_asset("cbBTC").chainlink_feed.address, 58_200 * 10**8))
+        obs = _cbbtc_obs(reading=_reading(_cbbtc_feed().address, 58_200 * 10**8))
         alert = check_peg_deviation(obs)
-        self.assertIsNotNone(alert)
+        assert alert is not None
         self.assertEqual(alert.severity, AlertSeverity.HIGH)
 
     def test_upside_does_not_fire_for_downside_only(self):
         # cbBTC can legitimately trade above BTC; +5% upside must NOT alert.
-        obs = _cbbtc_obs(reading=_reading(get_asset("cbBTC").chainlink_feed.address, 63_000 * 10**8))
+        obs = _cbbtc_obs(reading=_reading(_cbbtc_feed().address, 63_000 * 10**8))
         self.assertIsNone(check_peg_deviation(obs))
 
 
@@ -131,14 +135,14 @@ class TestMarketDivergence(unittest.TestCase):
         # The production false positive: cbBTC feed band is 2%, so the oracle lagging
         # the live market by ~1.14% is normal update lag, NOT an anomaly.
         obs = _cbbtc_obs(
-            reading=_reading(get_asset("cbBTC").chainlink_feed.address, 59_211 * 10**8),
+            reading=_reading(_cbbtc_feed().address, 59_211 * 10**8),
             market_price_usd=Decimal("58544"),
         )
         self.assertIsNone(check_market_divergence(obs))  # ~1.14% < 2% band + 0.5% buffer
 
     def test_volatile_feed_uses_wider_buffer(self):
         # cbBTC overrides the buffer to 0.5%; band 2% -> trigger 2.5%.
-        addr = get_asset("cbBTC").chainlink_feed.address
+        addr = _cbbtc_feed().address
         quiet = _cbbtc_obs(reading=_reading(addr, 61_320 * 10**8), market_price_usd=Decimal("60000"))
         self.assertIsNone(check_market_divergence(quiet))  # 2.2% < 2.5%
         fires = _cbbtc_obs(reading=_reading(addr, 61_560 * 10**8), market_price_usd=Decimal("60000"))
@@ -147,11 +151,13 @@ class TestMarketDivergence(unittest.TestCase):
     def test_stable_feed_uses_tight_default_buffer(self):
         # USDC: 0.25% band + 0.25% default buffer -> 0.5% trigger (no per-feed override).
         usdc = get_asset("USDC")
+        feed = usdc.chainlink_feed
+        assert feed is not None
 
         def usdc_obs(oracle_usd: str, market_usd: str) -> OracleObservation:
             return OracleObservation(
                 asset=usdc,
-                reading=_reading(usdc.chainlink_feed.address, int(Decimal(oracle_usd) * 10**8)),
+                reading=_reading(feed.address, int(Decimal(oracle_usd) * 10**8)),
                 peg_price_usd=Decimal("1"),
                 quote_price_usd=Decimal("1"),
                 now=NOW,
@@ -165,7 +171,7 @@ class TestMarketDivergence(unittest.TestCase):
         # oracle $60,100 vs market $50,000 ~ +20% >> 2% band + buffer
         obs = _cbbtc_obs(market_price_usd=Decimal("50000"))
         alert = check_market_divergence(obs)
-        self.assertIsNotNone(alert)
+        assert alert is not None
         self.assertEqual(alert.severity, AlertSeverity.HIGH)
 
     def test_missing_market_price_skips(self):
@@ -176,9 +182,11 @@ class TestQuoteConversion(unittest.TestCase):
     def test_btc_quoted_feed_scales_to_usd(self):
         # LBTC/BTC feed answer 1.004 BTC, BTC at $60,000 -> oracle $60,240
         lbtc = get_asset("LBTC")
+        feed = lbtc.chainlink_feed
+        assert feed is not None
         obs = OracleObservation(
             asset=lbtc,
-            reading=_reading(lbtc.chainlink_feed.address, 100_400_000),  # 1.004 * 1e8
+            reading=_reading(feed.address, 100_400_000),  # 1.004 * 1e8
             peg_price_usd=Decimal("60000"),
             quote_price_usd=Decimal("60000"),  # feed quotes in BTC
             now=NOW,
@@ -224,16 +232,18 @@ class TestDispatchRouting(unittest.TestCase):
 
     def test_owned_asset_uses_dispatchable_protocol(self):
         usde = get_asset("USDe")  # owner "ethena", peg USD, 3% tolerance
+        feed = usde.chainlink_feed
+        assert feed is not None
         obs = OracleObservation(
             asset=usde,
-            reading=_reading(usde.chainlink_feed.address, 90 * 10**6),  # $0.90 -> off peg
+            reading=_reading(feed.address, 90 * 10**6),  # $0.90 -> off peg
             peg_price_usd=Decimal("1"),
             quote_price_usd=Decimal("1"),
             now=NOW,
             market_price_usd=Decimal("0.90"),
         )
         alert = check_peg_deviation(obs)
-        self.assertIsNotNone(alert)
+        assert alert is not None
         # protocol (not channel) carries the owner; dispatch keys off alert.protocol.
         self.assertEqual(alert.protocol, "ethena")
         self.assertIn(alert.protocol, DISPATCHABLE_PROTOCOLS)

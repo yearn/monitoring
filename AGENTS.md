@@ -1,13 +1,13 @@
-# CLAUDE.md - Monitoring Scripts Python Codebase
+# Monitoring Scripts Python Codebase Guidelines
 
 ## Commands
 
 ### Installation
 - Create virtual environment: `uv venv`
-- Activate virtual environment: `source .venv/bin/activate` (On Windows: `.venv\Scripts\activate`)
+- Activate virtual environment: `source .venv/bin/activate`
 - Install dependencies:
-  - Regular installation: `uv pip install .`
-  - Development installation: `uv pip install -e ".[dev]"`
+  - Regular installation: `uv sync --locked`
+  - Development installation: `uv sync --locked --extra dev`
 - Environment setup: `cp .env.example .env` (then edit with your API keys)
 
 ### Usage
@@ -18,11 +18,16 @@
 - Format code: `uv run ruff format .`
 - Lint code: `uv run ruff check .`
 - Fix fixable lint issues: `uv run ruff check --fix .`
-- Type checking: `uv run mypy .`
-- use .env file to load API keys and other environment variables
-- Always pull latest main branch
+- Type checking: `uv run ty check`
+- Tests: `uv run pytest -q tests/` (run the relevant test files while developing)
+- Install git hooks: `prek install`
+- Check all hooks before committing: `prek run --all-files`
+- Use `.env` to load API keys and other environment variables.
+- Fetch the latest remote state with `git fetch origin` before starting work. Sync main only
+  when the working tree is clean; do not pull main into a feature branch automatically.
 
 ## Code Style Guidelines
+- **Python**: 3.14 (pinned in `.python-version`; minimum version in `pyproject.toml`)
 - **Imports**: Use ruff for organizing imports (stdlib, third-party, local)
 - **Formatting**: Use ruff format with line length 120
 - **Typing**: Use type hints for all functions (parameters and return values)
@@ -51,7 +56,7 @@
 - Add proper type annotations to improve IDE support and catch errors
 - Keep files small and focused on a single task. If a file is too large, split it into smaller files.
 - Ask questions if you are not sure about the code. Ask for clarification if needed before writing the code.
-- always print full addresses with links instead of truncated ones.
+- Always print full addresses with links instead of truncated ones.
 - Every script's `if __name__ == "__main__":` block must wrap its entrypoint with `run_with_alert` from `utils/runner.py` so an unhandled crash sends a Telegram alert and lets the CI loop continue:
 
   ```python

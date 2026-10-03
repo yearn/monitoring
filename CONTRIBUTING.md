@@ -14,6 +14,7 @@ cp .env.example .env  # then edit with your API keys
 ```bash
 uv run ruff format .          # format code
 uv run ruff check --fix .     # lint + autofix
+uv run ty check              # type check
 uv run pytest tests/          # run tests
 ```
 
@@ -49,9 +50,14 @@ Shared utilities live in `utils/`:
 ### General
 
 - **Line length**: 120 characters (configured in `pyproject.toml`)
-- **Python version**: 3.10+
+- **Python version**: 3.14 (pinned in `.python-version`)
 - **Formatter/linter**: ruff (run both format and check before committing)
+- **Type checker**: ty (run `uv run ty check` before committing)
 - **Naming**: `snake_case` for functions/variables, `UPPER_CASE` for constants, `PascalCase` for classes
+
+ty reads the target Python version from `requires-python` in `pyproject.toml` and checks
+unannotated function bodies too. Keep annotating function signatures as described below;
+ty does not enforce the former mypy requirement for annotated signatures.
 
 ### Logging
 

@@ -126,6 +126,7 @@ def test_parse_entities_error_plain_retry_failure_marks_failed(monkeypatch, tmp_
             send_telegram_message("`broken", "aave")
     row = store.query_alerts()[0]
     assert row["delivery_status"] == "failed"
+    assert row["delivery_error"] is not None
     assert "chat not found" in row["delivery_error"]
 
 

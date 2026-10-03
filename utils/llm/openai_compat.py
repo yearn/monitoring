@@ -7,7 +7,10 @@ Works with any provider that implements the OpenAI chat completions API:
 """
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from openai.types.chat import ChatCompletionMessageParam
 
 from utils.llm.base import LLMError, LLMProvider, wrap_llm_errors
 from utils.logger import get_logger
@@ -63,7 +66,7 @@ class OpenAICompatProvider(LLMProvider):
     def complete_structured(self, prompt: str, schema: dict[str, Any], system_prompt: str = "") -> dict[str, Any]:
         """Request a JSON-schema-constrained response and return it parsed."""
         with wrap_llm_errors("Structured LLM call failed"):
-            response = self._client.chat.completions.create(  # type: ignore[call-overload]
+            response = self._client.chat.completions.create(
                 model=self._model,
                 messages=self._build_messages(prompt, system_prompt),
                 response_format={
@@ -80,9 +83,9 @@ class OpenAICompatProvider(LLMProvider):
                 raise LLMError(f"Structured response was not valid JSON: {e}") from e
             return parsed
 
-    def _build_messages(self, prompt: str, system_prompt: str) -> list[dict[str, str]]:
+    def _build_messages(self, prompt: str, system_prompt: str) -> list[ChatCompletionMessageParam]:
         """Assemble chat messages, prepending the system prompt when present."""
-        messages: list[dict[str, str]] = []
+        messages: list[ChatCompletionMessageParam] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})

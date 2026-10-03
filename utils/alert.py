@@ -97,7 +97,7 @@ def _ensure_default_dispatch_hook() -> None:
         logger.debug("utils.dispatch not available, skipping default hook")
 
 
-def register_alert_hook(callback: Callable[[Alert], None]) -> None:
+def register_alert_hook(callback: Callable[[Alert], None] | None) -> None:
     """Register a hook callback invoked for HIGH and CRITICAL alerts.
 
     Args:

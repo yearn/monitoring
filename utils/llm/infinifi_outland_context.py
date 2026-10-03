@@ -297,7 +297,8 @@ class OutlandMessageContext:
 
     def _payload_text(self) -> str:
         if self.message_type == 0 and len(self.payload) == 3:
-            assets, receipt, staked = (int(value) for value in self.payload)  # type: ignore[call-overload]
+            # ABI decoding supplies integers; malformed payloads are handled by the caller.
+            assets, receipt, staked = (int(value) for value in self.payload)  # ty: ignore[invalid-argument-type]
             text = (
                 f"Reports totalAssetsValue {_e18(assets)}, L2 iUSD supply {_e18(receipt)}, L2 siUSD supply "
                 f"{_e18(staked)} (18 decimals). Executing it mints or burns OutlandFarm shares toward that value, "
@@ -415,7 +416,7 @@ def _message_context(chain_id: int, target: str, call: DecodedCall) -> OutlandMe
     type_str, data = call.params[1]
     if source_chain is None or type_str != "bytes":
         return None
-    raw = bytes.fromhex(data[2:]) if isinstance(data, str) else bytes(data)  # type: ignore[arg-type]
+    raw = bytes.fromhex(data[2:]) if isinstance(data, str) else bytes(data)
     decoded = _decode_message(raw)
     if decoded is None:
         return None

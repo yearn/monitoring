@@ -14,7 +14,8 @@ class TestLLMProviderBase(unittest.TestCase):
 
     def test_cannot_instantiate_abstract(self) -> None:
         with self.assertRaises(TypeError):
-            LLMProvider()  # type: ignore[abstract]
+            # Instantiation must fail because the provider is abstract.
+            LLMProvider()  # ty: ignore[call-non-callable]
 
 
 class TestOpenAICompatProvider(unittest.TestCase):

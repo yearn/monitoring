@@ -1261,11 +1261,13 @@ class TestOnchainSymbols(unittest.TestCase):
     def test_symbol_comes_from_the_token(self) -> None:
         with patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=ERC20Metadata("waEthUSDC", 6)):
             sim = _with_onchain_symbols(self._sim(self.TOKEN), 1)
+        assert sim is not None
         self.assertEqual(sim.asset_changes[0].token_symbol, "waEthUSDC")
 
     def test_tenderly_symbol_kept_when_metadata_unavailable(self) -> None:
         with patch("utils.llm.ai_explainer.fetch_erc20_metadata", return_value=None):
             sim = _with_onchain_symbols(self._sim(self.TOKEN), 1)
+        assert sim is not None
         self.assertEqual(sim.asset_changes[0].token_symbol, "waethusdc")
 
     def test_no_lookup_without_asset_changes_or_address(self) -> None:
@@ -1390,6 +1392,7 @@ class TestCollectRoleNames(unittest.TestCase):
         "615a688d53344290b742a2e72e4f187e5b88227c01f9d77ce2406d32f8bd0eda"
         "000000000000000000000000a69e4155f62c097ce92daadef7a925dd40907c0c"
     )
+    assert GRANT is not None
 
     def test_decoded_role_param_is_raw_bytes(self) -> None:
         """Guards the assumption the collector depends on."""

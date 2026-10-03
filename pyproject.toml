@@ -69,9 +69,9 @@ dev = [
     "anthropic==1.8.0",
     "openai==3.19.2",
     "mdformat==1.0.0",
-    "mypy==2.3.1",
     "pytest==9.1.1",
     "ruff==0.16.8",
+    "ty==0.0.84",
     "types-deprecated==1.3.1.20260728",
     "types-python-dateutil==2.9.0.20260807",
     "types-pyyaml==6.0.12.20260906",
@@ -108,7 +108,6 @@ target-version = "py314"
 # Exclude a variety of commonly ignored directories
 exclude = [
     ".git",
-    ".mypy_cache",
     ".ruff_cache",
     ".venv",
     "venv",
@@ -128,23 +127,15 @@ indent-style = "space"
 line-ending = "auto"
 skip-magic-trailing-comma = false
 
-[tool.mypy]
-python_version = "3.14"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
-check_untyped_defs = true
-disallow_untyped_decorators = true
-no_implicit_optional = true
-strict_optional = true
+[tool.ty.rules]
+possibly-missing-attribute = "error"
+possibly-unresolved-reference = "error"
+
+[tool.ty.analysis]
+allowed-unresolved-imports = ["web3.**", "cytoolz.**"]
 
 [tool.pytest.ini_options]
 filterwarnings = [
     # web3 imports this compatibility module; monitoring code does not use the deprecated API.
     "ignore:websockets\\.legacy is deprecated:DeprecationWarning:websockets\\.legacy",
 ]
-
-[[tool.mypy.overrides]]
-module = ["web3.*", "cytoolz.*"]
-ignore_missing_imports = true

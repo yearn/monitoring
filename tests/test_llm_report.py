@@ -3,6 +3,7 @@
 import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
+from typing import Any
 from unittest.mock import patch
 
 from utils.calldata.decoder import MAX_BYTES_RECURSION_DEPTH, DecodedCall
@@ -35,7 +36,7 @@ def _add_farms_ctx(**overrides) -> ReportContext:
         signature="addFarms(uint256,address[])",
         params=[("uint256", 2), ("address[]", (FARM,))],
     )
-    defaults = {
+    defaults: dict[str, Any] = {
         "entries": [CallEntry(target=REGISTRY, call=call, param_names=["_type", "_farms"], original_index=1)],
         "chain_id": 1,
         "labels": {REGISTRY: "FarmRegistry"},
@@ -44,7 +45,7 @@ def _add_farms_ctx(**overrides) -> ReportContext:
         "from_address": TIMELOCK,
     }
     defaults.update(overrides)
-    ctx = ReportContext(**defaults)  # type: ignore[arg-type]
+    ctx = ReportContext(**defaults)
     numbered = []
     for i, entry in enumerate(ctx.entries, start=1):
         numbered.append(entry if entry.original_index is not None else replace(entry, original_index=i))

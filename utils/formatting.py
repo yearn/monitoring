@@ -119,6 +119,7 @@ def parse_wei(value: object) -> int:
     if value is None or value == "":
         return 0
     try:
-        return int(value)  # type: ignore[arg-type]
+        # Untrusted JSON values deliberately pass through int's runtime validation.
+        return int(value)  # ty: ignore[invalid-argument-type]
     except TypeError, ValueError:
         return 0

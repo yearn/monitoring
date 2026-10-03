@@ -1,7 +1,8 @@
 import json
-from typing import List, Tuple
+from typing import List, Tuple, cast
 
 from eth_abi import decode
+from eth_typing import ChecksumAddress
 from eth_utils import to_checksum_address
 from web3 import Web3
 
@@ -47,7 +48,7 @@ def get_contract_name(w3: Web3, address: str) -> str:
         }
     ]
 
-    contract = w3.eth.contract(address=address, abi=name_abi)
+    contract = w3.eth.contract(address=cast(ChecksumAddress, address), abi=name_abi)
     try:
         name = contract.functions.name().call()
         return name

@@ -34,7 +34,7 @@ from utils.llm.report import address_link
 from utils.logger import get_logger
 from utils.on_chain_state import resolve_function_source
 from utils.source_context import find_state_var_writes, get_contract_label
-from utils.web3_wrapper import ChainManager
+from utils.web3_wrapper import ChainManager, Web3Client
 
 logger = get_logger("utils.llm.control_transfer_context")
 
@@ -225,10 +225,10 @@ def _selector(signature: str) -> str:
     return "0x" + function_signature_to_4byte_selector(signature).hex()
 
 
-def _call(client: object, address: str, signature: str, output: str) -> object | None:
+def _call(client: Web3Client, address: str, signature: str, output: str) -> object | None:
     """eth_call a no-arg view and decode one output; None when it reverts or doesn't decode."""
     try:
-        raw = client.eth.call({"to": address, "data": _selector(signature)})  # type: ignore[attr-defined]
+        raw = client.eth.call({"to": address, "data": _selector(signature)})
         if not raw:
             return None
         decoded: object = abi_decode([output], bytes(raw))[0]
@@ -237,13 +237,13 @@ def _call(client: object, address: str, signature: str, output: str) -> object |
         return None
 
 
-def _code_hex(client: object, address: str) -> str:
+def _code_hex(client: Web3Client, address: str) -> str:
     """Deployed bytecode as bare lowercase hex ("" for an EOA)."""
-    code = client.eth.get_code(address)  # type: ignore[attr-defined]
+    code = client.eth.get_code(address)
     return bytes(code).hex().lower()
 
 
-def _describe_controller(chain_id: int, client: object, address: str, hops: int = 1) -> ControllerInfo:
+def _describe_controller(chain_id: int, client: Web3Client, address: str, hops: int = 1) -> ControllerInfo:
     """Classify ``address`` and, for a plain contract, follow its own controller ``hops`` deep."""
     address = to_checksum_address(address)
     if address == ZERO_ADDRESS:
@@ -282,7 +282,7 @@ def _describe_controller(chain_id: int, client: object, address: str, hops: int 
     )
 
 
-def _current_holder(client: object, target: str, role: _Role) -> str | None:
+def _current_holder(client: Web3Client, target: str, role: _Role) -> str | None:
     """Address currently holding ``role`` on ``target``, read from its getter."""
     for getter in role.getters:
         holder = _call(client, target, f"{getter}()", "address")
@@ -291,7 +291,7 @@ def _current_holder(client: object, target: str, role: _Role) -> str | None:
     return None
 
 
-def _has_pending_slot(client: object, target: str, role: _Role) -> bool:
+def _has_pending_slot(client: Web3Client, target: str, role: _Role) -> bool:
     """Whether ``target`` exposes a pending slot for ``role``."""
     return any(_call(client, target, f"{getter}()", "address") is not None for getter in role.pending_getters)
 
@@ -335,7 +335,7 @@ def _first_address(call: DecodedCall) -> str | None:
     return None
 
 
-def _resolve_one(chain_id: int, client: object, target: str, call: DecodedCall) -> ControlTransferContext | None:
+def _resolve_one(chain_id: int, client: Web3Client, target: str, call: DecodedCall) -> ControlTransferContext | None:
     """Build the context for one call, or None when it does not transfer control."""
     normalized = (call.function_name or "").replace("_", "").lower()
     target = to_checksum_address(target)

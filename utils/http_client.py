@@ -73,7 +73,8 @@ def request_with_retry(
             time.sleep(wait_time)
 
     logger.error("Request to %s failed after %d attempts: %s", url, retries + 1, last_exception)
-    raise last_exception  # type: ignore[misc]
+    # Failed attempts record an exception; preserve the existing invalid-budget behavior.
+    raise last_exception  # ty: ignore[invalid-raise]
 
 
 def fetch_json(

@@ -1,6 +1,7 @@
 """Tests for utils/calldata/role_names.py."""
 
 import unittest
+from unittest import mock
 from unittest.mock import patch
 
 from eth_utils import keccak
@@ -118,7 +119,7 @@ class TestResolveRoleNames(unittest.TestCase):
         mock_impl.assert_not_called()
 
     @patch("utils.source_context.fetch_source")
-    def test_skips_source_lookup_when_static_table_suffices(self, mock_fetch: unittest.mock.MagicMock) -> None:
+    def test_skips_source_lookup_when_static_table_suffices(self, mock_fetch: mock.MagicMock) -> None:
         resolve_role_names(["0x" + keccak(text="PAUSER_ROLE").hex()], chain_id=1, target="0xF6d4")
         mock_fetch.assert_not_called()
 
@@ -129,7 +130,7 @@ class TestResolveRoleNames(unittest.TestCase):
         self.assertEqual(resolve_role_names([RECEIPT_TOKEN_MINTER], chain_id=1, target="0xF6d4"), {})
 
     @patch("utils.source_context.fetch_source")
-    def test_source_failure_never_raises(self, mock_fetch: unittest.mock.MagicMock) -> None:
+    def test_source_failure_never_raises(self, mock_fetch: mock.MagicMock) -> None:
         mock_fetch.side_effect = RuntimeError("etherscan down")
         self.assertEqual(resolve_role_names([RECEIPT_TOKEN_MINTER], chain_id=1, target="0xF6d4"), {})
 

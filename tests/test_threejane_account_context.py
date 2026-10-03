@@ -385,6 +385,7 @@ class TestReaders(unittest.TestCase):
             patch.object(account_context, "fetch_token_unit", side_effect=lambda _chain, address: units[address]),
         ):
             (context,) = resolve_account_contexts(1, VAULT, [_bounce_call()])
+        assert isinstance(context, LCCBounceContext)
         self.assertTrue(context.auction_pending)
         self.assertTrue(context.call_unsettled)
         epoch_call.assert_called_with(42)
@@ -401,6 +402,7 @@ class TestReaders(unittest.TestCase):
             patch.object(account_context, "fetch_token_unit", side_effect=lambda _chain, address: units[address]),
         ):
             (context,) = resolve_account_contexts(1, VAULT, [_bounce_call()])
+        assert isinstance(context, LCCBounceContext)
         self.assertFalse(context.exit_in_progress)
 
     def test_non_lcc_target_is_not_read(self) -> None:
@@ -427,6 +429,7 @@ class TestReaders(unittest.TestCase):
             patch.object(account_context, "fetch_token_unit", return_value=USDC),
         ):
             (context,) = resolve_account_contexts(1, USD3_ADDRESS, calls)
+        assert isinstance(context, SupplyCapExemptContext)
 
         self.assertEqual(
             context,
@@ -458,6 +461,7 @@ class TestReaders(unittest.TestCase):
             patch.object(account_context, "fetch_token_unit", return_value=USDC),
         ):
             (context,) = resolve_account_contexts(1, USD3_ADDRESS, [_exempt_call(OTHER), _exempt_call(OTHER, False)])
+        assert isinstance(context, SupplyCapExemptContext)
 
         grant, revoke = context.accounts
         self.assertEqual(grant.change(), "false → true")
@@ -479,6 +483,7 @@ class TestReaders(unittest.TestCase):
             patch.object(account_context, "fetch_token_unit", return_value=USDC),
         ):
             (context,) = resolve_account_contexts(1, USD3_ADDRESS, [_exempt_call(REGRANTED)])
+        assert isinstance(context, SupplyCapExemptContext)
 
         self.assertEqual(context.accounts[0].last_change, ExemptionChange(26091398, False, REVOKE_TX))
         self.assertEqual((context.exempt_before, context.exempt_conduits_before), (2, 1))
@@ -493,6 +498,7 @@ class TestReaders(unittest.TestCase):
             patch.object(account_context, "fetch_token_unit", return_value=USDC),
         ):
             (context,) = resolve_account_contexts(1, USD3_ADDRESS, [_exempt_call(REGRANTED)])
+        assert isinstance(context, SupplyCapExemptContext)
         self.assertFalse(context.history_read)
         self.assertIsNone(context.accounts[0].last_change)
 

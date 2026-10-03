@@ -48,7 +48,7 @@ def make_state(**overrides: object) -> unibtc.UnibtcState:
         "vault_wbtc_balance": 46_065_725,
     }
     values.update(overrides)
-    return unibtc.UnibtcState(**values)  # type: ignore[arg-type]
+    return unibtc.UnibtcState(**values)
 
 
 # Bedrock API per-chain supplies captured 2026-09-16 09:20Z, before the API dropped BOB.
@@ -94,9 +94,9 @@ def make_api(
     return unibtc.ApiStats(total_supply=total, updated_at=updated_at, chain_supplies=supplies)
 
 
-def make_client(responses: Sequence[object]) -> tuple[SimpleNamespace, list[object]]:
+def make_client(responses: Sequence[object]) -> tuple[SimpleNamespace, list[tuple[str, int]]]:
     """Build a batch-capable fake client and capture submitted calls."""
-    added_calls: list[object] = []
+    added_calls: list[tuple[str, int]] = []
 
     class ContractCall:
         def __init__(self, name: str) -> None:
@@ -112,7 +112,7 @@ def make_client(responses: Sequence[object]) -> tuple[SimpleNamespace, list[obje
         def __exit__(self, *_args: object) -> None:
             return None
 
-        def add(self, call: object) -> None:
+        def add(self, call: tuple[str, int]) -> None:
             added_calls.append(call)
 
         def execute(self) -> list[object]:
@@ -689,7 +689,7 @@ def test_api_rejected_when_mainnet_disagrees_with_chain() -> None:
     assert "differs from on-chain totalSupply" in problems[0]
 
 
-def stub_api_attempts(monkeypatch: pytest.MonkeyPatch, results: list[object]) -> list[str]:
+def stub_api_attempts(monkeypatch: pytest.MonkeyPatch, results: list[unibtc.ApiStats | Exception]) -> list[str]:
     """Serve ``results`` (ApiStats or ApiStatsError) to successive fetches; capture errors, skip sleeps."""
     queue = list(results)
 
@@ -697,7 +697,7 @@ def stub_api_attempts(monkeypatch: pytest.MonkeyPatch, results: list[object]) ->
         result = queue.pop(0)
         if isinstance(result, Exception):
             raise result
-        return result  # type: ignore[return-value]
+        return result
 
     errors: list[str] = []
     monkeypatch.setattr(unibtc, "fetch_api_stats", fake_fetch)

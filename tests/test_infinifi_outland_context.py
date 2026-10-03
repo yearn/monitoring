@@ -12,6 +12,7 @@ from utils.llm.infinifi_outland_context import (
     FarmTypeContext,
     HubVaultContext,
     OracleAssignmentContext,
+    OutlandMessageContext,
     RouteConfig,
     format_outland_prompt,
     format_outland_report,
@@ -82,6 +83,7 @@ class TestFarmType(unittest.TestCase):
         farm.perpetual.return_value.call.return_value = True
         with patch.object(infinifi_outland_context.ChainManager, "get_client", return_value=client):
             (context,) = resolve_outland_context("infinifi", 1, [(REGISTRY, call)])
+        assert isinstance(context, FarmTypeContext)
         self.assertEqual(context.maturity_terms, ((FARM, 2_419_200, True),))
         self.assertIn("perpetual, rolling 28-day notice period", format_outland_prompt([context]))
 
@@ -262,6 +264,7 @@ class TestOutlandMessage(unittest.TestCase):
             patch.object(infinifi_outland_context.ChainManager, "get_client", return_value=client),
         ):
             (context,) = resolve_outland_context("infinifi", 1, [(CONNECTOR, call)])
+        assert isinstance(context, OutlandMessageContext)
         text = context.describe()
         self.assertIn("no bridge involved", text)
         self.assertIn("1-day timelock", text)
