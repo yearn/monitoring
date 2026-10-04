@@ -6,6 +6,8 @@ import pytest
 import protocols.cap.liquidity as liquidity
 from utils.alert import Alert, AlertSeverity
 
+type RpcCall = tuple[str, tuple[object, ...], int]
+
 
 def run_monitor(
     monkeypatch: pytest.MonkeyPatch,
@@ -13,13 +15,14 @@ def run_monitor(
     *,
     current_supply: int = 1_000_000 * 10**18,
     previous_supply: int = 0,
-) -> tuple[list[Alert], list[object], list[object]]:
+) -> tuple[list[Alert], list[RpcCall], list[tuple[object, ...]]]:
     """Run the monitor with mocked RPC and cache, capturing calls and alerts."""
     alerts: list[Alert] = []
-    calls: list[object] = []
-    writes: list[object] = []
+    calls: list[RpcCall] = []
+    writes: list[tuple[object, ...]] = []
     assets = [f"asset-{i}" for i in range(len(asset_responses) // 5)]
-    batches = iter([[f"vault-{i}" for i in range(len(assets))], asset_responses])
+    vault_responses: list[object] = [f"vault-{i}" for i in range(len(assets))]
+    batches = iter([vault_responses, asset_responses])
 
     class ContractCall:
         def __init__(self, name: str, args: tuple[object, ...]) -> None:
@@ -40,7 +43,7 @@ def run_monitor(
         def __exit__(self, *_args: object) -> None:
             return None
 
-        def add(self, call: object) -> None:
+        def add(self, call: RpcCall) -> None:
             calls.append(call)
 
         def execute(self) -> list[object]:
