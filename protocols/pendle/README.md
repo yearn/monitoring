@@ -10,3 +10,13 @@ Additionally, other contracts like vePENDLE, PENDLE, RewardDistributor, and Voti
     Arbitrum Safe Multisig: 0x7877AdFaDEd756f3248a0EBfe8Ac2E2eF87b75Ac
 
 The owner of SY contracts was changed to [governance proxy contract](https://etherscan.io/address/0x2aD631F72fB16d91c4953A7f4260A97C2fE2f31e) with an additional guardian role that can only pause SY contracts. The governance proxy contract owner is multisig defined above.
+
+## AI governance context
+
+PendleSwap upgrade alerts on Ethereum and Arbitrum include the proxy's live owner,
+current/proposed verified swap and authorization code, and a pinned reference for
+the standard router integration. This distinguishes the optional aggregator leg
+from market, PT/YT and SY contracts, and makes swap payload/enum changes visible
+even when the external ABI is unchanged. The context is included in the AI prompt
+and full report; it does not impose a risk rating. See
+[the LLM context documentation](../../utils/llm/README.md#5f-4-pendleswap-upgrade-context-utilsllmpendle_contextpy).

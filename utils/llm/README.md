@@ -281,6 +281,31 @@ For any protocol, calls that hand over control (`set_management`, `transferOwner
 
 Involved Safes get `Safe m-of-n` labels. These are applied with `setdefault`, so curated names win. Failures are best-effort and never block the alert.
 
+### 5f-4. PendleSwap Upgrade Context (`utils/llm/pendle_context.py`)
+
+For Pendle alerts on Ethereum and Arbitrum, direct `upgradeTo` and `upgradeToAndCall`
+calls to the published PendleSwap proxy (including calls in Safe multisend batches)
+receive adapter-specific context. This identifies the optional aggregator leg separately
+from markets, PT/YT and SY contracts, and cites a pinned upstream `ActionBase` integration
+reference for input pre-funding, output returned to the calling router, aggregator bypass
+branches and caller-supplied output constraints. The architecture reference is explicitly
+separate from a live execution trace or a claim about current balances or route usage.
+
+The adapter reads `owner()` at the proxy and includes complete, contract-scoped verified
+members from both current and proposed implementations: swap dispatch, output handling,
+scaling, approvals and the upgrade authorization hook. The verified swap payload/enum and
+ownership guard are also included when uniquely resolved in the bundle. This exposes
+semantic enum changes despite an unchanged ABI, unsupported scaling reverts, and unchanged
+authorization/approval code that a diff alone omits. Missing source or owner reads remain
+explicitly unavailable; a replacement with a different contract name is not assumed to
+retain PendleSwap behavior. Context is rendered in both the prompt and gist and sets no
+fixed risk tag or storage-safety verdict. Nested governance wrappers are not resolved by
+this adapter.
+
+The summary critique also checks functional claims against supplied code: removing a
+scaling branch does not establish removal of unscaled routes, and an UNKNOWN storage
+verdict is not evidence that collisions are more likely.
+
 ### 5g. Adapter Registry (`utils/llm/protocol_context.py`)
 
 Adapters register in `_ADAPTERS`; `resolve_protocol_context()` fans one call out to all of them and merges the rendered prompt text, report text, introduced addresses, and address labels. Each adapter guards itself, so registration order carries no meaning and one adapter raising is logged and skipped rather than dropping the alert. Most guard on protocol and chain. The Yearn V3 adapter guards on call shape and `apiVersion()`, and the control-transfer adapter on call shape alone.
@@ -548,6 +573,7 @@ utils/llm/
 ├── factory.py               # Provider factory with env-based config + singleton
 ├── infinifi_context.py      # Infinifi adapter: escrow → farm, custody, setRate APR, whitelist calls
 ├── openai_compat.py         # OpenAI-compatible provider (Venice, OpenAI, etc.)
+├── pendle_context.py        # PendleSwap upgrades: router integration, owner, complete source members
 ├── protocol_context.py      # Registry fanning one call out to every protocol adapter
 ├── report.py                # Gist report: metadata header + deterministic call flow + analysis
 ├── threejane_abi.py         # 3Jane checked-in ABIs + verified-ABI probes (proxy-aware)

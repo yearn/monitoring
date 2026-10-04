@@ -280,6 +280,9 @@ Check the TLDR above against this checklist. Each item is a yes/no question:
    confirmed?
 5. Does the risk tag match the magnitude of change shown in the context?
    (A 10× change to a critical parameter is rarely LOW; a no-op is rarely HIGH.)
+6. Are functional claims supported by the full supplied code and context? Do not turn
+   removal of one scaling branch into removal of all unscaled routes, or treat UNKNOWN
+   storage compatibility as evidence of a collision or increased collision likelihood.
 
 Hard rules for the revision (if you choose to revise):
 - Do NOT introduce a unit/scale assumption that wasn't supported by the context.
@@ -290,7 +293,7 @@ Hard rules for the revision (if you choose to revise):
 - Do NOT remove an explicit hedge ("unit cannot be confirmed", "without source
   context", etc.).
 - Do NOT polish for style alone. Only edit if there's a concrete, specific issue
-  from items 1-5.
+   from items 1-6.
 
 If every check is satisfied AND no hard rule would be violated by the draft as-is,
 output exactly:
@@ -1567,9 +1570,10 @@ def _build_prompt(
 
     if protocol_context:
         parts.append(
-            "\n--- Protocol Context (computed from protocol APIs and live on-chain reads) ---\n"
-            "Every fact below is VERIFIED for this protocol: identities, resolved hashes, decimals, "
-            "and current values. State them; do not hedge about them or call them unavailable.\n" + protocol_context
+            "\n--- Protocol Context (verified source, integration references and live on-chain reads) ---\n"
+            "Resolved identities, hashes, decimals, units and current values are VERIFIED facts. "
+            "State supplied facts; do not call them unavailable. Distinguish documented integration "
+            "architecture from live observations, and preserve any explicit validation limits.\n" + protocol_context
         )
 
     if source_contexts:

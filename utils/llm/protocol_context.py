@@ -36,6 +36,11 @@ from utils.llm.infinifi_outland_context import (
     format_outland_report,
     resolve_outland_context,
 )
+from utils.llm.pendle_context import (
+    format_pendle_prompt,
+    format_pendle_report,
+    resolve_pendle_context,
+)
 from utils.llm.threejane_context import (
     format_threejane_prompt,
     format_threejane_report,
@@ -65,6 +70,7 @@ _ADAPTERS: tuple[_Adapter, ...] = (
     _Adapter("infinifi", resolve_infinifi_context, format_infinifi_prompt, format_infinifi_report),
     _Adapter("infinifi-outland", resolve_outland_context, format_outland_prompt, format_outland_report),
     _Adapter("3jane", resolve_threejane_context, format_threejane_prompt, format_threejane_report),
+    _Adapter("pendle", resolve_pendle_context, format_pendle_prompt, format_pendle_report),
     _Adapter("yearn-v3", resolve_yearn_v3_context, format_yearn_v3_prompt, format_yearn_v3_report),
     _Adapter(
         "control-transfer",
