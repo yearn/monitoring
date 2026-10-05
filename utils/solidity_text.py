@@ -18,7 +18,7 @@ are valid in the other and in the original text:
 """
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # Comment / string-literal spans, replaced by same-length whitespace.
 _NOISE_RE = re.compile(
@@ -79,6 +79,9 @@ class FunctionDef:
     header: str = ""  # whitespace-normalized text between the params and the body
     span: tuple[int, int] = (0, 0)  # (start, end) of the definition within the scanned text
     literals: tuple[str, ...] = ()  # string literals in the definition, verbatim and in order
+    # Parameter names in order, "" for an unnamed one. Renaming a parameter changes no behavior,
+    # so names are left out of equality.
+    param_names: tuple[str, ...] = field(default=(), compare=False)
 
     @property
     def signature(self) -> str:
@@ -363,6 +366,16 @@ def normalize_params(params: str) -> str:
     return ",".join(types)
 
 
+def parameter_names(params: str) -> tuple[str, ...]:
+    """Names in a parameter list, "" for an unnamed one: `address to, bytes calldata` → `("to", "")`."""
+    names: list[str] = []
+    for raw in _split_top_level(params):
+        tokens = [t for t in raw.split() if t not in _DATA_LOCATIONS]
+        if tokens:
+            names.append(tokens[-1] if len(tokens) > 1 else "")
+    return tuple(names)
+
+
 def _declaration_match(cleaned: str, name: str) -> re.Match[str] | None:
     """Match for ``name``'s declaration header; group 1 is the text before its `{`."""
     pattern = re.compile(
@@ -448,6 +461,7 @@ def _parse_function(
         return None
     # Parameters carry no string literals — Solidity has no default arguments.
     params = normalize_params(body[paren_idx + 1 : close])
+    param_names = parameter_names(body[paren_idx + 1 : close])
 
     header_end, terminator = _scan_header(body, close + 1)
     if terminator is None:
@@ -467,6 +481,7 @@ def _parse_function(
             header=" ".join(header_text.split()),
             span=(start + offset, header_end + 1 + offset),
             literals=_string_literals(header_text),
+            param_names=param_names,
         )
 
     body_end = _match_brace(body, header_end)
@@ -484,6 +499,7 @@ def _parse_function(
         header=" ".join(header_text.split()),
         span=(start + offset, body_end + 1 + offset),
         literals=_string_literals(definition_text),
+        param_names=param_names,
     )
 
 

@@ -69,6 +69,11 @@ class TimelockExecutionContext:
     def via_executor(self) -> bool:
         return self.target.lower() != self.timelock.lower()
 
+    @property
+    def ready(self) -> bool:
+        """Scheduled, not yet executed, and past its ready time."""
+        return _DONE_TIMESTAMP < self.ready_at <= self.now
+
     def status(self) -> str:
         """Operation status in plain text."""
         if self.ready_at == 0:
@@ -87,13 +92,26 @@ class TimelockExecutionContext:
         target = f"{self.target} ({self.target_label})" if self.target_label else self.target
         route = f"{target} forwards to timelock {timelock}" if self.via_executor else f"timelock {timelock}"
         calls = "1 call" if self.call_count == 1 else f"{self.call_count} calls"
-        return [
+        lines = [
             f"{self.signature.split('(')[0]} via {route}: releases operation {self.operation_id} ({calls}); "
             f"timelock min delay {_duration(self.min_delay)}.",
             f"Operation status: {self.status()}.",
-            "The inner calls are not new proposals: they sat publicly in the timelock queue for at least the "
-            "delay, and a timelock alert from scheduling carries this operation ID. This call only executes them.",
         ]
+        if self.ready:
+            lines.append(
+                "The inner calls are not new proposals: they sat publicly in the timelock queue for at least the "
+                "delay, and a timelock alert from scheduling carries this operation ID. This call only executes them."
+            )
+        elif self.ready_at == 0:
+            lines.append(
+                "No operation with this ID is in the timelock queue, so these inner calls have NOT gone through "
+                "the delay as encoded here."
+            )
+        elif self.ready_at != _DONE_TIMESTAMP:
+            lines.append(
+                "The delay has NOT elapsed: the inner calls are queued but cannot execute until the ready time."
+            )
+        return lines
 
 
 def _utc(timestamp: int) -> str:

@@ -11,17 +11,22 @@ For a call that writes an address-keyed allowlist (a mapping or an OpenZeppelin
 lists the external functions that check that allowlist against ``msg.sender`` —
 directly, through a modifier, or through a helper such as
 ``isExecutor(msg.sender)`` — flagging the ones that forward arbitrary calldata.
+A forwarder whose body or modifiers check the target or calldata is reported as
+restricted, not arbitrary. Each check's polarity is read too: an entry that is
+refused (``require(!blocked[msg.sender])``) makes a denylist, and a list whose
+checks disagree or can't be read is skipped rather than guessed.
 The holder is classified (EOA / Safe / contract); for a contract, its own
 arbitrary-call functions are listed too, since whoever can drive it inherits the
 entry. When the contract exposes an ``address[]`` getter for the allowlist, the
-holders before and after the call are listed.
+holders before and after the call are listed, carried through earlier calls
+of the same batch.
 
 It keys on call shape and verified source, not protocol. Vyper sources are
 skipped: their access checks don't follow these Solidity shapes.
 """
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from eth_utils import to_checksum_address
 
@@ -53,8 +58,9 @@ _INDEXED_WRITE_RE = re.compile(r"\b([A-Za-z_]\w*)\s*(?:\[[^\[\]]*\])+\s*=(?!=)")
 # `_executors.add(x)` / `.remove(x)` on an EnumerableSet.
 _SET_WRITE_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\.\s*(?:add|remove)\s*\(")
 _CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
-_ARBITRARY_CALL_RE = re.compile(r"\.call\s*[({]|functionCall\w*\s*\(")
-_DELEGATECALL_RE = re.compile(r"\.delegatecall\s*\(|functionDelegateCall\s*\(")
+# Conditions that can restrict a forwarded call or decide a caller check.
+_CONDITION_RE = re.compile(r"\b(require|assert|if)\s*\(")
+_REVERT_AFTER_RE = re.compile(r"\s*\{?\s*revert\b")
 
 
 @dataclass(frozen=True)
@@ -64,6 +70,10 @@ class GatedFunction:
     signature: str
     via: str  # "modifier onlyKeepers", "helper isExecutor", or "inline check"
     arbitrary_call: str = ""  # "call" / "delegatecall" when it forwards arbitrary calldata
+    # The checks that limit a forwarded call's target or calldata, when it has any.
+    restricted_by: str = ""
+    # True: a listed caller passes; False: a listed caller is refused; None: could not be told.
+    allows: bool | None = True
 
 
 @dataclass(frozen=True)
@@ -75,13 +85,15 @@ class PermissionGrantContext:
     signature: str
     allowlist: str
     holder: ControllerInfo
-    # True: the entry is enabled; False: removed; None: could not be told from the call.
+    # True: the entry is set; False: cleared; None: could not be told from the call.
     enabled: bool | None
     gated: tuple[GatedFunction, ...]
     # The holder's own arbitrary-call entry points, with their source modifiers.
     holder_forwarders: tuple[str, ...] = ()
     # Allowlist members before the call, when the contract exposes an address[] getter.
     holders_before: tuple[str, ...] | None = None
+    # A listed caller is refused rather than let through (`require(!blocked[msg.sender])`).
+    denylist: bool = False
 
     @property
     def addresses(self) -> list[str]:
@@ -105,10 +117,17 @@ class PermissionGrantContext:
         return labels
 
     @property
+    def access(self) -> bool | None:
+        """Whether the holder can call the gated entry points after the call."""
+        return None if self.enabled is None else self.enabled != self.denylist
+
+    @property
     def verb(self) -> str:
-        """What the call does to the entry."""
+        """What the call does to the holder's access."""
         if self.enabled is None:
             return "CHANGES"
+        if self.denylist:
+            return "BLOCKS" if self.enabled else "UNBLOCKS"
         return "GRANTS" if self.enabled else "REVOKES"
 
     def holders_after(self) -> tuple[str, ...] | None:
@@ -124,7 +143,8 @@ class PermissionGrantContext:
         for fn in self.gated:
             by_via.setdefault(fn.via, []).append(fn.signature)
         groups = "; ".join(f"{via} gates {', '.join(signatures)}" for via, signatures in by_via.items())
-        return f"Verified source: `{self.allowlist}` is checked against msg.sender — {groups}."
+        polarity = "a denylist: listed callers are refused" if self.denylist else "listed callers pass"
+        return f"Verified source: `{self.allowlist}` is checked against msg.sender ({polarity}) — {groups}."
 
     def forwarder_line(self) -> str:
         """Warn when an allowlisted caller can make the target call anything."""
@@ -134,9 +154,20 @@ class PermissionGrantContext:
         names = ", ".join(f"{fn.signature} ({fn.arbitrary_call})" for fn in forwarders)
         target = self.target_label or self.target
         return (
-            f"ARBITRARY CALL: {names} forwards any calldata to any address as {target}, so an allowlisted "
-            f"caller can use every permission {target} itself holds (keeper and role grants on other "
-            "contracts, its token balances and approvals) — the entry is not limited to the named functions."
+            f"ARBITRARY CALL: {names} forwards any calldata to any address as {target}, so a caller that "
+            f"passes this check can use every permission {target} itself holds (keeper and role grants on "
+            "other contracts, its token balances and approvals) — the entry is not limited to the named functions."
+        )
+
+    def restricted_line(self) -> str:
+        """Forwarders whose target or calldata are checked: their reach is only what the checks allow."""
+        restricted = [fn for fn in self.gated if fn.restricted_by]
+        if not restricted:
+            return ""
+        names = "; ".join(f"{fn.signature} checks {fn.restricted_by}" for fn in restricted)
+        return (
+            f"RESTRICTED FORWARD: {names}. These forward calls, but only to the targets and calldata those "
+            "checks allow — not arbitrary calls."
         )
 
     def lines(self) -> list[str]:
@@ -146,9 +177,7 @@ class PermissionGrantContext:
             f"{self.signature} on {target} {self.verb} {self.holder.address} an entry in `{self.allowlist}`.",
             self.scope_line(),
         ]
-        forwarder = self.forwarder_line()
-        if forwarder:
-            lines.append(forwarder)
+        lines.extend(line for line in (self.forwarder_line(), self.restricted_line()) if line)
         lines.append(f"Holder: {self.holder.describe()}.")
         if self.holder_forwarders:
             lines.append(
@@ -168,11 +197,18 @@ def _client(chain_id: int) -> Web3Client:
     return ChainManager.get_client(Chain.from_chain_id(chain_id))
 
 
-def _entry_state(call: DecodedCall) -> bool | None:
-    """Whether the call enables (True) or removes (False) the entry, from a bool arg or its name."""
+def _entry_state(call: DecodedCall, denylist: bool) -> bool | None:
+    """Whether the call sets (True) or clears (False) the entry, from a bool arg or its name.
+
+    A name says what happens to access (``revoke``, ``blacklist``), which is the
+    entry's value only on an allowlist. On a denylist ``addBlocked`` and
+    ``blacklist`` both set the entry, so a name alone is left undecided there.
+    """
     for type_str, value in call.params:
         if type_str == "bool":
             return bool(value)
+    if denylist:
+        return None
     name = (call.function_name or "").lower()
     if name.startswith(_REVOKE_PREFIXES):
         return False
@@ -244,49 +280,141 @@ def _written_allowlists(setter: FunctionDef, named: dict[str, list[FunctionDef]]
     return written
 
 
-def _arbitrary_call(fn: FunctionDef) -> str:
-    """ "call"/"delegatecall" when ``fn`` takes an address and bytes and forwards them, else ""."""
-    params = fn.params.split(",")
-    if "address" not in params or not any(p in ("bytes", "bytes[]") for p in params):
-        return ""
-    if _DELEGATECALL_RE.search(fn.body):
-        return "delegatecall"
-    return "call" if _ARBITRARY_CALL_RE.search(fn.body) else ""
+def _conditions(body: str) -> list[tuple[str, int, int]]:
+    """(keyword, start, end) of every ``require``/``assert``/``if`` condition, ``start:end`` inside its parens."""
+    found: list[tuple[str, int, int]] = []
+    for match in _CONDITION_RE.finditer(body):
+        depth = 0
+        for i in range(match.end() - 1, len(body)):
+            depth += {"(": 1, ")": -1}.get(body[i], 0)
+            if depth == 0:
+                found.append((match.group(1), match.end(), i))
+                break
+    return found
+
+
+def _forwarded_call(fn: FunctionDef) -> tuple[str, str, str] | None:
+    """(kind, target param, data param) when ``fn`` sends its own bytes argument to its own address argument."""
+    names = fn.param_names
+    types = fn.params.split(",")
+    targets = [n for n, t in zip(names, types, strict=False) if n and t in ("address", "address payable")]
+    payloads = [n for n, t in zip(names, types, strict=False) if n and t == "bytes"]
+    for target in targets:
+        for data in payloads:
+            a, d = re.escape(target), re.escape(data)
+            low_level = re.search(rf"\b{a}\s*\.\s*(call|delegatecall)\s*(?:\{{[^{{}}]*\}})?\s*\(\s*{d}\s*[,)]", fn.body)
+            if low_level:
+                return low_level.group(1), target, data
+            helper = re.search(rf"\bfunction(Delegate)?Call\w*\s*\(\s*{a}\s*,\s*{d}\s*[,)]", fn.body)
+            if helper:
+                return ("delegatecall" if helper.group(1) else "call"), target, data
+    return None
+
+
+def _forward_restrictions(fn: FunctionDef, params: tuple[str, ...]) -> str:
+    """The checks in ``fn``'s body or modifiers that read a forwarded parameter, e.g. ``require(s == strategy)``."""
+    found: list[str] = []
+    for param in params:
+        mention = re.compile(rf"\b{re.escape(param)}\b")
+        for keyword, start, end in _conditions(fn.body):
+            if mention.search(fn.body[start:end]):
+                found.append(f"`{keyword}({fn.body[start:end].strip()})`")
+        found.extend(f"modifier `{m}`" for m in fn.modifiers if "(" in m and mention.search(m.split("(", 1)[1]))
+    return ", ".join(dict.fromkeys(found))
+
+
+def _arbitrary_call(fn: FunctionDef) -> tuple[str, str]:
+    """("call"/"delegatecall", restricting checks) when ``fn`` forwards its calldata to its target, else ("", "").
+
+    The forward counts as arbitrary only when nothing checks the target or the
+    calldata; a function that forwards ``report()`` to one strategy is restricted.
+    """
+    forwarded = _forwarded_call(fn)
+    if forwarded is None:
+        return "", ""
+    kind, target, data = forwarded
+    return kind, _forward_restrictions(fn, (target, data))
+
+
+def _negated(body: str, start: int, end: int) -> bool:
+    """Whether the expression at ``start:end`` is negated: ``!x``, ``x == false`` or ``x != true``."""
+    before = body[:start].rstrip()
+    after = body[end:]
+    return before.endswith("!") != bool(re.match(r"\s*(?:==\s*false|!=\s*true)\b", after))
+
+
+def _passes_when_true(body: str, start: int, end: int) -> bool | None:
+    """Whether the expression at ``start:end`` being true lets the caller through.
+
+    Read from the innermost ``require``/``assert`` (true passes) or
+    ``if (…) revert`` (true is refused) around it, or a ``return`` (the value
+    itself); None when the check's outcome can't be read from the text.
+    """
+    enclosing = [(kw, s, e) for kw, s, e in _conditions(body) if s <= start and end <= e]
+    if enclosing:
+        keyword, _, close = max(enclosing, key=lambda c: c[1])
+        if keyword != "if":
+            truthy = True
+        elif _REVERT_AFTER_RE.match(body[close + 1 :]):
+            truthy = False
+        else:
+            return None
+    elif re.search(r"\breturn\b[^;]*$", body[:start]):
+        truthy = True
+    else:
+        return None
+    return truthy != _negated(body, start, end)
+
+
+def _agree(polarities: list[bool | None]) -> bool | None:
+    """The shared polarity of several checks, None when any is unknown or they disagree."""
+    unique = set(polarities)
+    return unique.pop() if len(unique) == 1 else None
 
 
 def _gated_functions(functions: list[FunctionDef], allowlist: str) -> list[GatedFunction]:
-    """External entry points that check ``allowlist`` against ``msg.sender``."""
+    """External entry points that check ``allowlist`` against ``msg.sender``, with each check's polarity."""
     var = re.escape(allowlist)
     reads_sender = re.compile(rf"\b{var}\s*\[\s*{_SENDER}\s*\]|\b{var}\s*\.\s*contains\s*\(\s*{_SENDER}\s*\)")
-    # Functions that look an address up in the allowlist: `isExecutor(a)` → `_executors.contains(a)`.
+    reads_any = re.compile(rf"\b{var}\s*\[[^\[\]]*\]|\b{var}\s*\.\s*contains\s*\([^()]*\)")
+    # Functions that look an address up in the allowlist — `isExecutor(a)` → `_executors.contains(a)` —
+    # and whether the value they return means "listed".
     lookups = {
-        fn.name
+        fn.name: _agree([_passes_when_true(fn.body, m.start(), m.end()) for m in reads_any.finditer(fn.body)])
         for fn in functions
-        if fn.kind == "function" and re.search(rf"\b{var}\s*(?:\[|\.\s*contains\s*\()", fn.body)
-    }
-    # Internal helpers that check the caller themselves: `_checkKeeper()` → `keepers[msg.sender]`.
-    checkers = {
-        fn.name
-        for fn in functions
-        if fn.kind == "function" and fn.visibility in ("internal", "private") and reads_sender.search(fn.body)
+        if fn.kind == "function" and reads_any.search(fn.body)
     }
 
-    def check(body: str) -> str:
-        if reads_sender.search(body):
-            return "inline check"
+    def check(body: str) -> tuple[str, bool | None]:
+        inline = list(reads_sender.finditer(body))
+        if inline:
+            return "inline check", _agree([_passes_when_true(body, m.start(), m.end()) for m in inline])
         for name in sorted(lookups):
-            if re.search(rf"\b{re.escape(name)}\s*\(\s*{_SENDER}\s*\)", body):
-                return f"helper {name}"
+            calls = list(re.finditer(rf"\b{re.escape(name)}\s*\(\s*{_SENDER}\s*\)", body))
+            if calls:
+                # A helper returning "not listed" (`return !blocked[a]`) flips what its call site means.
+                listed = lookups[name]
+                sites = [_passes_when_true(body, m.start(), m.end()) for m in calls]
+                if listed is None or None in sites:
+                    return f"helper {name}", None
+                return f"helper {name}", _agree([site == listed for site in sites])
         for name in sorted(checkers):
             if re.search(rf"\b{re.escape(name)}\s*\(", body):
-                return f"helper {name}"
-        return ""
+                return f"helper {name}", checkers[name]
+        return "", None
 
-    modifiers: dict[str, str] = {}
+    # Internal helpers that check the caller themselves: `_checkKeeper()` → `require(keepers[msg.sender])`.
+    checkers: dict[str, bool | None] = {}
     for fn in functions:
-        how = check(fn.body) if fn.kind == "modifier" else ""
+        if fn.kind == "function" and fn.visibility in ("internal", "private") and reads_sender.search(fn.body):
+            checkers[fn.name] = check(fn.body)[1]
+
+    modifiers: dict[str, tuple[str, bool | None]] = {}
+    for fn in functions:
+        how, allows = check(fn.body) if fn.kind == "modifier" else ("", None)
         if how:
-            modifiers[fn.name] = f"modifier {fn.name}" if how == "inline check" else f"modifier {fn.name} ({how})"
+            via = f"modifier {fn.name}" if how == "inline check" else f"modifier {fn.name} ({how})"
+            modifiers[fn.name] = (via, allows)
     gated: list[GatedFunction] = []
     seen: set[str] = set()
     for fn in functions:
@@ -294,12 +422,23 @@ def _gated_functions(functions: list[FunctionDef], allowlist: str) -> list[Gated
             continue
         if fn.signature in seen:
             continue
-        via = next((modifiers[m.split("(")[0]] for m in fn.modifiers if m.split("(")[0] in modifiers), "") or check(
-            fn.body
+        via, allows = next(
+            (modifiers[m.split("(")[0]] for m in fn.modifiers if m.split("(")[0] in modifiers), ("", None)
         )
+        if not via:
+            via, allows = check(fn.body)
         if via:
             seen.add(fn.signature)
-            gated.append(GatedFunction(fn.signature, via, _arbitrary_call(fn)))
+            kind, restricted_by = _arbitrary_call(fn)
+            gated.append(
+                GatedFunction(
+                    fn.signature,
+                    via,
+                    arbitrary_call="" if restricted_by else kind,
+                    restricted_by=restricted_by,
+                    allows=allows,
+                )
+            )
     return gated
 
 
@@ -310,7 +449,10 @@ def _holder_forwarders(chain_id: int, holder: ControllerInfo) -> tuple[str, ...]
     contract = fetch_verified_contract(chain_id, holder.address)
     found: list[str] = []
     for fn in _functions(contract) if contract else []:
-        if fn.kind == "function" and fn.visibility in ("external", "public") and _arbitrary_call(fn):
+        if fn.kind != "function" or fn.visibility not in ("external", "public"):
+            continue
+        kind, restricted_by = _arbitrary_call(fn)
+        if kind and not restricted_by:
             guards = [m for m in fn.modifiers if m not in ("payable", "view", "pure", "nonpayable")]
             found.append(f"{fn.signature} [{', '.join(guards) or 'no modifier'}]")
     return tuple(dict.fromkeys(found))
@@ -352,8 +494,11 @@ def _resolve_one(chain_id: int, client: Web3Client, target: str, call: DecodedCa
 
     for allowlist in _written_allowlists(setter, named):
         gated = _gated_functions(functions, allowlist)
-        if not gated:
+        polarity = _agree([fn.allows for fn in gated])
+        if not gated or polarity is None:
+            # Unchecked, or checks that disagree or can't be read: no claim beats a wrong one.
             continue
+        denylist = not polarity
         target = to_checksum_address(target)
         holder = describe_controller(chain_id, client, holder_address)
         return PermissionGrantContext(
@@ -362,10 +507,11 @@ def _resolve_one(chain_id: int, client: Web3Client, target: str, call: DecodedCa
             signature=call.signature,
             allowlist=allowlist,
             holder=holder,
-            enabled=_entry_state(call),
+            enabled=_entry_state(call, denylist),
             gated=tuple(gated),
             holder_forwarders=_holder_forwarders(chain_id, holder),
             holders_before=_enumerated_members(chain_id, client, target, allowlist),
+            denylist=denylist,
         )
     return None
 
@@ -386,25 +532,31 @@ def resolve_permission_grant_context(
     client = _client(chain_id)
 
     contexts: list[PermissionGrantContext] = []
-    seen: set[tuple[str, str, str]] = set()
+    # Members after the latest call to each (target, allowlist): on-chain reads predate the whole batch.
+    members: dict[tuple[str, str], tuple[str, ...] | None] = {}
     for target, call in candidates:
-        key = (target.lower(), call.signature, str(call.params))
-        if key in seen:
-            continue
-        seen.add(key)
         try:
             context = _resolve_one(chain_id, client, target, call)
         except Exception as error:  # noqa: BLE001 - enrichment must never block an alert
             logger.info("Permission-grant context failed for %s.%s: %s", target, call.function_name, error)
             continue
-        if context is not None:
-            contexts.append(context)
+        if context is None:
+            continue
+        key = (context.target.lower(), context.allowlist)
+        if key in members:
+            context = replace(context, holders_before=members[key])
+        members[key] = context.holders_after()
+        contexts.append(context)
     return contexts
 
 
 def format_permission_grant_prompt(contexts: list[PermissionGrantContext]) -> str:
     """Render verified allowlist-scope facts for the LLM prompt."""
     return "\n\n".join("\n".join(context.lines()) for context in contexts)
+
+
+# What the call does to the gated entry points, keyed by the holder's access afterwards.
+_EFFECT: dict[bool | None, str] = {True: "opens", False: "closes", None: "controls"}
 
 
 def format_permission_grant_report(
@@ -419,10 +571,12 @@ def format_permission_grant_report(
             f"**`{context.signature}`** on {address_link(context.target, chain_id, labels)} — "
             f"{context.verb.lower()} an entry in `{context.allowlist}`",
             f"- **Holder:** {describe_controller_markdown(context.holder, chain_id, labels)}",
-            "- **Entry points it opens:**",
+            f"- **Entry points it {_EFFECT[context.access]}:**",
         ]
         for fn in context.gated:
             flag = f" — **arbitrary {fn.arbitrary_call}**" if fn.arbitrary_call else ""
+            if fn.restricted_by:
+                flag = f" — forwards calls, restricted by {fn.restricted_by}"
             lines.append(f"  - `{fn.signature}` ({fn.via}){flag}")
         if any(fn.arbitrary_call for fn in context.gated):
             lines.append(

@@ -288,10 +288,10 @@ Involved Safes get `Safe m-of-n` labels. These are applied with `setdefault`, so
 For any protocol, setter-shaped calls with an address argument (`set*`, `add*`, `remove*`, `grant*`, `revoke*`, `allow*`, `enable*`, …) are checked against the target's verified Solidity source, following an EIP-1967 proxy to its implementation:
 
 1. **The allowlist written**: an indexed write (`keepers[a] = …`) or an `EnumerableSet` `.add` / `.remove`, followed through one internal call.
-2. **The entry points it opens**: external functions that check it against `msg.sender`, whether inline, through a modifier, or through a helper (`onlyExecutor` → `isExecutor(msg.sender)` → `_executors.contains`). Bases in other files of the bundle are included.
-3. **Arbitrary-call entry points** (an `address` and `bytes` argument forwarded via `.call` / `functionCall` / `delegatecall`) are flagged. The holder can then use every permission the target holds.
+2. **The entry points it gates**: external functions that check it against `msg.sender`, whether inline, through a modifier, or through a helper (`onlyExecutor` → `isExecutor(msg.sender)` → `_executors.contains`). Bases in other files of the bundle are included. Each check's polarity is read from its `require` / `if (…) revert` / `return`, so `require(!blocked[msg.sender])` makes a **denylist**: setting the entry BLOCKS the holder and the report lists the entry points it closes. Lists whose checks disagree, or whose outcome can't be read, are skipped.
+3. **Arbitrary-call entry points** are flagged when the function sends its own `bytes` argument to its own `address` argument via `.call` / `functionCall` / `delegatecall`. The holder can then use every permission the target holds. When a `require` / `if` or a modifier argument reads the target or the calldata (`require(_target == strategy)`, a selector check), the function is reported as a **restricted forward**, quoting those checks.
 4. **The holder**: an EOA, a Safe, or a contract followed one hop to its controller. A contract holder's own arbitrary-call functions are listed with their modifiers, since whoever passes its checks acts with the entry.
-5. **Members before → after**, when the contract exposes a no-argument `address[]` getter named after the allowlist (`getExecutors()`).
+5. **Members before → after**, when the contract exposes a no-argument `address[]` getter named after the allowlist (`getExecutors()`). Within a batch, each call starts from the membership the previous call to the same allowlist left, not from a fresh on-chain read.
 
 Allowlists that gate no entry point (`setOwner` writing a plain `owner`) produce nothing. Vyper sources are skipped. Failures are best-effort and never block the alert.
 
@@ -299,7 +299,7 @@ Allowlists that gate no entry point (`setOwner` writing a plain `owner`) produce
 
 A Safe that executes a timelock batch sends the real actions as payloads. Nothing in the calldata says they already sat in a public queue. A report on Yearn's `TimelockExecutor.executeBatch` described four strategy changes as if the Safe were making them directly, without saying they had waited a week in the Yearn TimelockController.
 
-For OpenZeppelin `execute` / `executeBatch` calls, the adapter finds the timelock. That is the target itself, or the `TIMELOCK()` / `timelock()` that a forwarding executor names. It recomputes the operation ID exactly as `hashOperation` / `hashOperationBatch` does, then reads `getTimestamp` and `getMinDelay`. The status is one of: not scheduled (the call reverts), not ready until a given time, ready since a given time (so scheduled no later than ready − delay), or already executed. Reviewers can then match the operation ID against the timelock alert sent at scheduling.
+For OpenZeppelin `execute` / `executeBatch` calls, the adapter finds the timelock. That is the target itself, or the `TIMELOCK()` / `timelock()` that a forwarding executor names. It recomputes the operation ID exactly as `hashOperation` / `hashOperationBatch` does, then reads `getTimestamp` and `getMinDelay`. The status is one of: not scheduled (the call reverts), not ready until a given time, ready since a given time (so scheduled no later than ready − delay), or already executed. Only a ready operation is described as having sat in the queue for the delay. For an unscheduled or not-yet-ready one, the prompt says the delay has not been served. Reviewers can then match the operation ID against the timelock alert sent at scheduling.
 
 ### 5f-4. PendleSwap Upgrade Context (`utils/llm/pendle_context.py`)
 

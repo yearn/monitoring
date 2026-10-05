@@ -20,6 +20,8 @@ MULTICALL = "0x4E440bbC8D0a63fb53791fCb0375DF8E58f41567"
 BRAIN = "0x16388463d60FFE0661Cf7F1f31a7D658aC790ff7"
 EXECUTOR = "0xF8f60BF9456A6e0141149Db2DD6f02C60da5779B"
 OPS_EOA = "0x1b5f15DCb82d25f91c65b53CEe151E8b9fBdD271"
+HARVESTER = "0x00000000000000000000000000000000000000A1"
+DENY_VAULT = "0x00000000000000000000000000000000000000A2"
 
 # yHaaSRelayer as verified on mainnet, trimmed to the members that matter here.
 RELAYER_SOURCE = """
@@ -142,6 +144,49 @@ contract TKSRelayerMulticall is Multicall {
 }
 """
 
+# A forwarder pinned to one target and one selector: not an arbitrary call.
+HARVESTER_SOURCE = """
+pragma solidity 0.8.23;
+
+contract Harvester {
+    address public strategy;
+    mapping(address => bool) public keepers;
+
+    modifier onlyKeepers() {
+        require(keepers[msg.sender], "!keeper");
+        _;
+    }
+
+    function forward(address _target, bytes calldata _data) external onlyKeepers {
+        require(_target == strategy, "!strategy");
+        require(bytes4(_data) == IStrategy.report.selector, "!report");
+        (bool ok, ) = _target.call(_data);
+        require(ok);
+    }
+
+    function setKeeper(address _keeper, bool _allowed) external {
+        keepers[_keeper] = _allowed;
+    }
+}
+"""
+
+# A denylist: a listed caller is refused.
+DENY_SOURCE = """
+pragma solidity 0.8.23;
+
+contract DenyVault {
+    mapping(address => bool) public blocked;
+
+    function withdraw(uint256 amount) external {
+        require(!blocked[msg.sender], "blocked");
+    }
+
+    function setBlocked(address account, bool isBlocked) external {
+        blocked[account] = isBlocked;
+    }
+}
+"""
+
 GET_EXECUTORS_ABI = {
     "type": "function",
     "name": "getExecutors",
@@ -170,6 +215,8 @@ VERIFIED = {
         [GET_EXECUTORS_ABI],
     ),
     MULTICALL: _verified("TKSRelayerMulticall", {"TKSRelayerMulticall.sol": MULTICALL_SOURCE}),
+    HARVESTER: _verified("Harvester", {"Harvester.sol": HARVESTER_SOURCE}),
+    DENY_VAULT: _verified("DenyVault", {"DenyVault.sol": DENY_SOURCE}),
 }
 
 HOLDERS = {
@@ -181,6 +228,7 @@ HOLDERS = {
         controlled_by=ControllerInfo(address=BRAIN, kind="safe", threshold=3, owner_count=7),
     ),
     OPS_EOA: ControllerInfo(address=OPS_EOA, kind="eoa"),
+    BRAIN: ControllerInfo(address=BRAIN, kind="safe", threshold=3, owner_count=8),
 }
 
 
@@ -218,6 +266,16 @@ class TestGatedFunctions(unittest.TestCase):
             ],
         )
 
+    def test_checked_forward_is_restricted_not_arbitrary(self) -> None:
+        (fn,) = _gated_functions(_functions(VERIFIED[HARVESTER]), "keepers")
+        self.assertEqual(fn.arbitrary_call, "")
+        self.assertIn('`require(_target == strategy, "!strategy")`', fn.restricted_by)
+        self.assertIn("`require(bytes4(_data) == IStrategy.report.selector", fn.restricted_by)
+
+    def test_negated_check_is_a_denylist(self) -> None:
+        (fn,) = _gated_functions(_functions(VERIFIED[DENY_VAULT]), "blocked")
+        self.assertEqual((fn.signature, fn.allows), ("withdraw(uint256)", False))
+
     def test_unrelated_state_gates_nothing(self) -> None:
         self.assertEqual(_gated_functions(_functions(VERIFIED[RELAYER]), "owner"), [])
 
@@ -252,6 +310,38 @@ class TestResolve(unittest.TestCase):
         self.assertIn("modifier onlyExecutor (helper isExecutor) gates executeBatch(", lines[1])
         self.assertNotIn("ARBITRARY CALL", "\n".join(lines))
         self.assertIn(f"members before: {BRAIN}, {OPS_EOA}; after: {BRAIN}.", lines[-1])
+
+    def test_restricted_forward_is_not_reported_as_arbitrary(self, mock_client: MagicMock, *_mocks: MagicMock) -> None:
+        call = DecodedCall("setKeeper", "setKeeper(address,bool)", [("address", OPS_EOA), ("bool", True)])
+        (context,) = resolve_permission_grant_context("YEARN_MS", 1, [(HARVESTER, call)])
+        prompt = format_permission_grant_prompt([context])
+        self.assertNotIn("ARBITRARY CALL", prompt)
+        self.assertIn("RESTRICTED FORWARD: forward(address,bytes) checks", prompt)
+        report = format_permission_grant_report([context], 1, {})
+        self.assertNotIn("every permission", report)
+        self.assertIn("forwards calls, restricted by", report)
+
+    def test_denylist_entry_blocks_instead_of_granting(self, mock_client: MagicMock, *_mocks: MagicMock) -> None:
+        call = DecodedCall("setBlocked", "setBlocked(address,bool)", [("address", OPS_EOA), ("bool", True)])
+        (context,) = resolve_permission_grant_context("YEARN_MS", 1, [(DENY_VAULT, call)])
+        self.assertIn(f"BLOCKS {OPS_EOA}", context.lines()[0])
+        self.assertIn("a denylist: listed callers are refused", context.lines()[1])
+        report = format_permission_grant_report([context], 1, {})
+        self.assertIn("**Entry points it closes:**", report)
+        self.assertNotIn("opens", report)
+
+    def test_batch_membership_carries_earlier_changes(self, mock_client: MagicMock, *_mocks: MagicMock) -> None:
+        mock_client.return_value.get_contract.return_value.functions.__getitem__.return_value.return_value.call.return_value = [
+            BRAIN,
+            OPS_EOA,
+        ]
+        remove_brain = DecodedCall("removeExecutor", "removeExecutor(address)", [("address", BRAIN)])
+        first, second = resolve_permission_grant_context(
+            "YEARN_MS", 1, [(EXECUTOR, _remove_executor()), (EXECUTOR, remove_brain)]
+        )
+        self.assertEqual((first.holders_before, first.holders_after()), ((BRAIN, OPS_EOA), (BRAIN,)))
+        self.assertEqual((second.holders_before, second.holders_after()), ((BRAIN,), ()))
+        self.assertIn("members before: " + BRAIN + "; after: none.", second.lines()[-1])
 
     def test_ignores_non_setters_without_source_lookups(self, mock_client: MagicMock, *_mocks: MagicMock) -> None:
         call = DecodedCall("transfer", "transfer(address,uint256)", [("address", OPS_EOA), ("uint256", 1)])

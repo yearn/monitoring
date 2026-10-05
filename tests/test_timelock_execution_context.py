@@ -79,6 +79,15 @@ class TestStatus(unittest.TestCase):
         self.assertIn("ALREADY EXECUTED", _context(1).status())
         self.assertIn("NOT READY until 2026-10-02 17:22 UTC", _context(READY_AT, now=READY_AT - 60).status())
 
+    def test_queue_claim_only_for_ready_operations(self) -> None:
+        unscheduled = "\n".join(_context(0).lines())
+        early = "\n".join(_context(READY_AT, now=READY_AT - 60).lines())
+        done = "\n".join(_context(1).lines())
+        for text in (unscheduled, early, done):
+            self.assertNotIn("sat publicly in the timelock queue", text)
+        self.assertIn("have NOT gone through the delay", unscheduled)
+        self.assertIn("The delay has NOT elapsed", early)
+
     def test_report(self) -> None:
         report = format_timelock_execution_report([_context(READY_AT)], 1, {})
         self.assertIn(f"**Operation ID:** `{OPERATION_ID}` (4 call(s))", report)
