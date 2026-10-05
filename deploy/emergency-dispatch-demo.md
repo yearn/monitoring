@@ -39,15 +39,7 @@ monitoring-scripts-py                    liquidity-monitoring
 
 ## Protocols with dispatch enabled
 
-| Protocol | Telegram channel | Example alerts |
-|---|---|---|
-| infinifi | infinifi | Backing < 0.999, reserves < $15M |
-| cap | cap | Withdrawable liquidity < $50M |
-| ethena | ethena | USDe not fully backed |
-| ethplus | rtoken | Coverage below threshold, StRSR rate drop |
-| origin | pegs | Wrapped OETH redeem value drop, backing ratio drop |
-| usdai | usdai | _(hook registered)_ |
-| 3jane | 3jane | USD3/sUSD3 PPS decrease, junior buffer low, vault shutdown, protocol pause |
+The authoritative list is `DISPATCHABLE_PROTOCOLS` in [`utils/dispatch.py`](../utils/dispatch.py). Only HIGH and CRITICAL alerts whose `protocol` is in that set trigger a dispatch.
 
 ## Safety mechanisms
 
@@ -99,4 +91,4 @@ curl -sS -X POST http://127.0.0.1:8080/webhook/emergency \
   --data-binary "$body"
 ```
 
-Replace `usdai` with any protocol from the list above.
+Replace `usdai` with any protocol from `DISPATCHABLE_PROTOCOLS`.

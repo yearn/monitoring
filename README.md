@@ -6,6 +6,9 @@ Monitoring scripts for DeFi protocols to track key metrics and send alerts. Join
 
 ## Supported Protocols
 
+Live status for every monitor is on [curation.yearn.fi/monitoring](https://curation.yearn.fi/monitoring/), generated from [`monitoring.yaml`](./monitoring.yaml).
+
+- [3Jane](./protocols/3jane/README.md)
 - [Aave V3](./protocols/aave/README.md)
 - [APYUSD](./protocols/apyusd/README.md)
 - [Bedrock uniBTC](./protocols/unibtc/README.md)
@@ -32,6 +35,7 @@ Monitoring scripts for DeFi protocols to track key metrics and send alerts. Join
 
 - [Timelock Alerts](./protocols/timelock/README.md) — monitors OpenZeppelin `TimelockController` contracts for `CallScheduled` events across multiple protocols and sends Telegram alerts to protocol-specific channels.
 - [Safe Multisigs](./protocols/safe/main.py) — monitors Safe multisig wallets for queued transactions across multiple protocols.
+- [Stablecoins](./protocols/stables/) — depeg alerts via DeFiLlama and Chainlink oracle health checks (staleness, round health, peg and market divergence).
 
 ## Telegram Alerts
 
