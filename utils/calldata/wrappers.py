@@ -85,6 +85,10 @@ _WRAPPERS: dict[str, tuple[str, list[str], _Extractor]] = {
     for sig, extractor in _WRAPPER_SIGNATURES.items()
 }
 
+# Wrappers whose inner calls run inside the wrapping transaction. The others
+# only queue their inner calls for a later transaction.
+_EXECUTING_WRAPPERS = frozenset({"execute", "executeBatch", "executeTransaction"})
+
 
 def is_wrapper_call(data_hex: str) -> bool:
     """True when the calldata's selector is a supported wrapper."""
@@ -117,3 +121,15 @@ def unwrap_calls(data_hex: str) -> list[InnerCall]:
         )
         for i, (target, data) in enumerate(pairs, start=1)
     ]
+
+
+def unwrap_executed_calls(data_hex: str) -> list[InnerCall]:
+    """Inner calls that run in this transaction: those of an ``execute``-type wrapper.
+
+    A ``schedule``/``queueTransaction`` only queues its inner calls, so treating
+    them as executed now would describe state changes this transaction does not
+    make — wrong whenever one batch schedules one operation and executes another.
+    """
+    if not is_wrapper_call(data_hex) or _WRAPPERS[data_hex[:10].lower()][0] not in _EXECUTING_WRAPPERS:
+        return []
+    return unwrap_calls(data_hex)

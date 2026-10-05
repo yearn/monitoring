@@ -243,7 +243,7 @@ def _code_hex(client: Web3Client, address: str) -> str:
     return bytes(code).hex().lower()
 
 
-def _describe_controller(chain_id: int, client: Web3Client, address: str, hops: int = 1) -> ControllerInfo:
+def describe_controller(chain_id: int, client: Web3Client, address: str, hops: int = 1) -> ControllerInfo:
     """Classify ``address`` and, for a plain contract, follow its own controller ``hops`` deep."""
     address = to_checksum_address(address)
     if address == ZERO_ADDRESS:
@@ -268,7 +268,7 @@ def _describe_controller(chain_id: int, client: Web3Client, address: str, hops: 
         for getter in _CONTROLLER_GETTERS:
             holder = _call(client, address, f"{getter}()", "address")
             if isinstance(holder, str) and int(holder, 16) != 0 and holder.lower() != address.lower():
-                controlled_by = _describe_controller(chain_id, client, holder, hops - 1)
+                controlled_by = describe_controller(chain_id, client, holder, hops - 1)
                 controller_getter = getter
                 break
     has_operators = exposes(chain_id, address, {"operators"})
@@ -350,7 +350,7 @@ def _resolve_one(chain_id: int, client: Web3Client, target: str, call: DecodedCa
             target_label=get_contract_label(chain_id, target),
             signature=call.signature,
             role="role",
-            proposed=_describe_controller(chain_id, client, grantee),
+            proposed=describe_controller(chain_id, client, grantee),
             role_hash=role_hash,
         )
 
@@ -365,8 +365,8 @@ def _resolve_one(chain_id: int, client: Web3Client, target: str, call: DecodedCa
         target_label=get_contract_label(chain_id, target),
         signature=call.signature,
         role=role.name,
-        proposed=_describe_controller(chain_id, client, new_holder),
-        current=_describe_controller(chain_id, client, current) if current else None,
+        proposed=describe_controller(chain_id, client, new_holder),
+        current=describe_controller(chain_id, client, current) if current else None,
         two_step=_two_step(chain_id, target, call, role, pending_slot),
         pending_slot=pending_slot,
     )
@@ -413,7 +413,7 @@ def format_control_transfer_prompt(contexts: list[ControlTransferContext]) -> st
     return "\n\n".join("\n".join(context.lines()) for context in contexts)
 
 
-def _describe_markdown(info: ControllerInfo, chain_id: int, labels: dict[str, str]) -> str:
+def describe_controller_markdown(info: ControllerInfo, chain_id: int, labels: dict[str, str]) -> str:
     """Markdown twin of ``ControllerInfo.describe`` with explorer links."""
     link = address_link(info.address, chain_id, labels)
     if info.kind == "none":
@@ -426,7 +426,9 @@ def _describe_markdown(info: ControllerInfo, chain_id: int, labels: dict[str, st
         return f"{link} — Safe multisig, **{info.threshold}-of-{info.owner_count}**"
     parts = [f"{link} — contract"]
     if info.controlled_by is not None:
-        parts.append(f"its `{info.controller_getter}()` is {_describe_markdown(info.controlled_by, chain_id, labels)}")
+        parts.append(
+            f"its `{info.controller_getter}()` is {describe_controller_markdown(info.controlled_by, chain_id, labels)}"
+        )
     if info.has_operators:
         parts.append("keeps an **operator whitelist** (approved addresses act through it)")
     return "; ".join(parts)
@@ -446,9 +448,11 @@ def format_control_transfer_report(
         else:
             lines = [f"**`{context.signature}`** on {target} — hands over **{context.role}**"]
         if context.current is not None:
-            lines.append(f"- **Current {context.role}:** {_describe_markdown(context.current, chain_id, labels)}")
+            lines.append(
+                f"- **Current {context.role}:** {describe_controller_markdown(context.current, chain_id, labels)}"
+            )
         who = "Grantee" if context.role_hash else f"Proposed {context.role}"
-        lines.append(f"- **{who}:** {_describe_markdown(context.proposed, chain_id, labels)}")
+        lines.append(f"- **{who}:** {describe_controller_markdown(context.proposed, chain_id, labels)}")
         timing = context.timing_note()
         if timing:
             heading, _, detail = timing.partition(": ")

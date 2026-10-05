@@ -3,9 +3,10 @@
 import unittest
 from unittest.mock import patch
 
+from tests.test_calldata_wrappers import CUSD, ORACLE, ZERO32, encode_call, execute_batch, upgrade_to_and_call
 from utils.calldata.decoder import DecodedCall
 from utils.llm import protocol_context
-from utils.llm.protocol_context import _Adapter, resolve_protocol_context
+from utils.llm.protocol_context import _Adapter, expand_executed_calls, resolve_protocol_context
 
 TARGET = "0x6b276A2A7dd8b629adBA8A06AD6573d01C84f34E"
 TOKEN = "0x333333330522F64EE8d0b3039c460b41670e3404"
@@ -81,8 +82,51 @@ class TestResolveProtocolContext(unittest.TestCase):
     def test_registered_adapters_cover_the_known_protocols(self) -> None:
         self.assertEqual(
             {adapter.name for adapter in protocol_context._ADAPTERS},
-            {"infinifi", "infinifi-outland", "3jane", "pendle", "yearn-v3", "control-transfer"},
+            {
+                "infinifi",
+                "infinifi-outland",
+                "3jane",
+                "pendle",
+                "yearn-v3",
+                "control-transfer",
+                "permission-grant",
+                "timelock-execution",
+            },
         )
+
+
+class TestExpandExecutedCalls(unittest.TestCase):
+    """Adapters see the inner calls of an executed timelock batch, in order, after the wrapper."""
+
+    def setUp(self) -> None:
+        self.inner_a = DecodedCall("add_strategy", "add_strategy(address,bool)", [("address", TOKEN), ("bool", True)])
+        self.inner_b = DecodedCall("update_debt", "update_debt(address,uint256)", [("address", TOKEN), ("uint256", 1)])
+        self.wrapper = DecodedCall("executeBatch", "executeBatch(address[],uint256[],bytes[],bytes32,bytes32)", [])
+        self.top = DecodedCall("set_default_queue", "set_default_queue(address[])", [("address[]", [TOKEN])])
+
+    def _decode(self, data: str, chain_id: int | None = None, target: str | None = None) -> DecodedCall | None:
+        return {ORACLE: self.inner_a, CUSD: self.inner_b}.get(target or "")
+
+    def test_inner_calls_follow_their_wrapper(self) -> None:
+        data = execute_batch([ORACLE, CUSD], [upgrade_to_and_call(TARGET), upgrade_to_and_call(TARGET)])
+        with patch.object(protocol_context, "decode_calldata", side_effect=self._decode):
+            expanded = expand_executed_calls(1, [(TARGET, data, self.wrapper), (TOKEN, "0x", self.top)])
+        self.assertEqual(
+            expanded,
+            [(TARGET, self.wrapper), (ORACLE, self.inner_a), (CUSD, self.inner_b), (TOKEN, self.top)],
+        )
+
+    def test_scheduled_calls_are_not_expanded(self) -> None:
+        data = encode_call(
+            "scheduleBatch(address[],uint256[],bytes[],bytes32,bytes32,uint256)",
+            ["address[]", "uint256[]", "bytes[]", "bytes32", "bytes32", "uint256"],
+            [[ORACLE], [0], [bytes.fromhex(upgrade_to_and_call(TARGET)[2:])], ZERO32, ZERO32, 86400],
+        )
+        with patch.object(protocol_context, "decode_calldata", side_effect=self._decode):
+            self.assertEqual(expand_executed_calls(1, [(TARGET, data, self.wrapper)]), [(TARGET, self.wrapper)])
+
+    def test_undecoded_calls_are_dropped(self) -> None:
+        self.assertEqual(expand_executed_calls(1, [(TARGET, "0x", None)]), [])
 
 
 if __name__ == "__main__":

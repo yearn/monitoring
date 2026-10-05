@@ -95,7 +95,7 @@ class TestProposalLines(unittest.TestCase):
     def test_add_strategy_defaults_to_queue(self) -> None:
         # The one-argument overload leaves add_to_queue at its default of True.
         (line,) = _context([_call("add_strategy", ["address"], [LOOPER])]).proposal_lines()
-        self.assertIn("add_to_queue=True: appended to the default queue (holds 1/10 before this batch)", line)
+        self.assertIn("add_to_queue=True: appended to the default queue (holds 1/10 before this call)", line)
 
     def test_add_strategy_with_mismatched_asset_reverts(self) -> None:
         context = _context([ADD_LOOPER])
@@ -374,3 +374,81 @@ class TestBatchDebtAccounting(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+RECOVERY = "0xd7a540ba3626c0aa66e7DB4088971d0CD64695B6"
+WETH1 = "0xc56413869c6CDf96496f2b1eF801fEDBdFA7dDB0"
+FLEX = "0xfaC55fAFD0b55BFb8dD41F735EfCc195adA9891F"
+FLEX_OTHER = "0x7E4a6A89583e117C641aB3ce8897209800A3F2E3"
+WETH1_DEBT = 1_957_483_253_785_268_466_043
+
+
+def _recovery_context(calls: list[DecodedCall]) -> YearnV3VaultContext:
+    """yETH recovery vault as Safe nonce 3356 found it, with Flex not yet registered."""
+    flex = _strategy(
+        FLEX,
+        "Flex WETH yVault",
+        0,
+        0,
+        activation=0,
+        in_default_queue=False,
+        asset=WETH,
+        total_assets=10 * E18,
+        is_vault=True,
+        sub_strategies=("WETH-1 yVault", "Other WETH strategy"),
+        sub_strategy_addresses=(WETH1, FLEX_OTHER),
+        auto_allocate=True,
+        max_deposit=MAX_UINT256,
+    )
+    return YearnV3VaultContext(
+        vault_address=RECOVERY,
+        name="Yearn yETH Recovery Vault",
+        symbol="yETH-Recovery",
+        api_version="3.0.4",
+        asset_address=WETH,
+        asset_symbol="WETH",
+        asset_decimals=18,
+        total_assets=WETH1_DEBT + 489_320_000_000_000_000_000,
+        total_debt=WETH1_DEBT + 489_320_000_000_000_000_000,
+        total_idle=0,
+        is_shutdown=False,
+        deposit_limit=3_000 * E18,
+        minimum_total_idle=0,
+        use_default_queue=False,
+        default_queue=(
+            _strategy(WETH1, "WETH-1 yVault", WETH1_DEBT, MAX_UINT256, max_withdraw=WETH1_DEBT),
+            _strategy(VAULT, "WETH-2 yVault", 489_320_000_000_000_000_000, 500 * E18),
+        ),
+        other_strategies=(flex,),
+        calls=tuple(calls),
+    )
+
+
+class TestNestedRegistrationBatch(unittest.TestCase):
+    """Safe nonce 3356: a timelock batch registers Flex, then top-level calls fund it and reset the queue."""
+
+    def setUp(self) -> None:
+        calls = [
+            _call("add_strategy", ["address", "bool"], [FLEX, True]),
+            _call("update_max_debt_for_strategy", ["address", "uint256"], [FLEX, 500 * E18]),
+            _call("update_debt", ["address", "uint256"], [WETH1, WETH1_DEBT - 100 * E18]),
+            _call("update_debt", ["address", "uint256"], [FLEX, 100 * E18]),
+            _call("set_default_queue", ["address[]"], [[WETH1, VAULT]]),
+        ]
+        self.lines = _recovery_context(calls).proposal_lines()
+
+    def test_funding_after_registration_moves_funds(self) -> None:
+        # Without the nested add_strategy this line read "REVERTS — inactive strategy".
+        self.assertIn(
+            "update_debt(Flex WETH yVault) target_debt 100 WETH: MOVES FUNDS NOW — deposits 100 WETH", self.lines[3]
+        )
+
+    def test_allocator_strategy_overlaps_parent_exposure(self) -> None:
+        self.assertIn("auto_allocate is True, so every deposit into it is forwarded at once", self.lines[0])
+        self.assertIn("it allocates to WETH-1 yVault, which this vault already funds directly", self.lines[0])
+
+    def test_queue_reset_drops_the_strategy_added_in_the_batch(self) -> None:
+        line = self.lines[4]
+        self.assertIn("[WETH-1 yVault, WETH-2 yVault, Flex WETH yVault] → [WETH-1 yVault, WETH-2 yVault]", line)
+        self.assertIn("includes changes made earlier in this batch", line)
+        self.assertIn("removed from the queue: Flex WETH yVault — still holds 100 WETH of debt", line)

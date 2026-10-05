@@ -258,11 +258,11 @@ The adapter runs for any protocol and chain: the same vault code is governed by 
 
 1. Name, symbol, API version, asset (symbol/decimals), `totalAssets` / `totalDebt` / `totalIdle`, `deposit_limit`, `use_default_queue` and shutdown state.
 2. The default queue, with each strategy's name, `current_debt` and `max_debt`.
-3. For each strategy the calls name: its registration (`strategies()`), `asset()` (a mismatch makes `add_strategy` revert), `totalAssets`, its ERC-4626 limits with the vault as owner (`maxDeposit(vault)` and `convertToAssets(maxRedeem(vault))`), and whether it is itself a V3 vault (an allocator) together with the strategies it allocates to.
+3. For each strategy the calls name: its registration (`strategies()`), `asset()` (a mismatch makes `add_strategy` revert), `totalAssets`, its ERC-4626 limits with the vault as owner (`maxDeposit(vault)` and `convertToAssets(maxRedeem(vault))`), and whether it is itself a V3 vault (an allocator) together with the strategies it allocates to and its `auto_allocate` flag. When an allocator forwards to a strategy the parent vault already funds directly, the line says debt routed through it is an extra vault layer over the same exposure, not diversification.
 
 It then states each proposed value in the vault asset against that state, in batch order: the cap as a share or multiple of `totalAssets`, whether it matches the other queue strategies' caps and the deposit limit, and whether a strategy left out of the default queue can still be withdrawn from (it cannot while `use_default_queue` is true). It also states that funds move only through `update_debt`.
 
-`update_debt(strategy, target_debt)` is a **target, not an amount**. `utils/llm/yearn_v3_batch.py` mirrors the vault's `_update_debt` over a running copy of the vault state, so each call's expected amount reflects what the earlier calls in the batch left. Withdrawals keep `minimum_total_idle` and are capped by what the strategy can redeem. On deposits, the target is capped by `max_debt` and the amount by the strategy's `maxDeposit` and by idle above `minimum_total_idle`. The model also covers shutdown, the "new debt equals current debt" revert and inactive strategies. Each line gives the amount moved, what limited it, and the vault's idle before → after. Previously the line printed `target − current_debt` and the pre-batch idle. A Cap batch that withdrew 26.9M USDC from two Morpho strategies and set Aave's target to 50M was then reported as "deposits 50,000,000 USDC; idle now 0 USDC", and the model flagged a funding gap that cannot exist; the vault deposits the 26.93M it holds. The semantics line also spells out `use_default_queue`: `False` only permits custom withdrawal queues, and ordinary withdrawals still use the default queue. A report had called a queue reorder inert because the flag was false. The system prompt treats a unit the Protocol Context states as verified, so the model normalizes `max_debt` without hedging. Failures are best-effort and never block the governance alert.
+`update_debt(strategy, target_debt)` is a **target, not an amount**. `utils/llm/yearn_v3_batch.py` mirrors the vault's `_update_debt` over a running copy of the vault state, so each call's expected amount reflects what the earlier calls in the batch left. Withdrawals keep `minimum_total_idle` and are capped by what the strategy can redeem. On deposits, the target is capped by `max_debt` and the amount by the strategy's `maxDeposit` and by idle above `minimum_total_idle`. The model also covers shutdown, the "new debt equals current debt" revert and inactive strategies. Each line gives the amount moved, what limited it, and the vault's idle before → after. Previously the line printed `target − current_debt` and the pre-batch idle. A Cap batch that withdrew 26.9M USDC from two Morpho strategies and set Aave's target to 50M was then reported as "deposits 50,000,000 USDC; idle now 0 USDC", and the model flagged a funding gap that cannot exist; the vault deposits the 26.93M it holds. The default queue is tracked through the batch too: `add_strategy(…, true)` appends to it and a revoke removes from it. A later `set_default_queue` is therefore compared against the queue as the batch left it, and any strategy it drops that still holds debt is named with that debt. Yearn's yETH recovery batch (Strategist Safe nonce 3356) registered and funded Flex WETH with 100 WETH, then restored the original queue, leaving Flex funded but out of default withdrawals. The semantics line also spells out `use_default_queue`: `False` only permits custom withdrawal queues, and ordinary withdrawals still use the default queue. A report had called a queue reorder inert because the flag was false. The system prompt treats a unit the Protocol Context states as verified, so the model normalizes `max_debt` without hedging. Failures are best-effort and never block the governance alert.
 
 ### 5f-3. Control Transfer Context (`utils/llm/control_transfer_context.py`)
 
@@ -280,6 +280,26 @@ For any protocol, calls that hand over control (`set_management`, `transferOwner
 4. **The change in signing threshold** behind control when both sides resolve to a Safe (for example 6-of-9 → 2-of-4, a LOWER threshold).
 
 Involved Safes get `Safe m-of-n` labels. These are applied with `setdefault`, so curated names win. Failures are best-effort and never block the alert.
+
+### 5f-3a. Allowlist Scope Context (`utils/llm/permission_grant_context.py`)
+
+`setKeeper(0x4E44…, true)` names a mapping entry, not a capability. A report on a yHaaS relayer keeper grant called the keeper scope "not shown", yet the verified source is 70 lines long. One of its keeper functions, `forwardCall(address,bytes)`, makes any call as the relayer, so a keeper holds every permission the relayer holds.
+
+For any protocol, setter-shaped calls with an address argument (`set*`, `add*`, `remove*`, `grant*`, `revoke*`, `allow*`, `enable*`, …) are checked against the target's verified Solidity source, following an EIP-1967 proxy to its implementation:
+
+1. **The allowlist written**: an indexed write (`keepers[a] = …`) or an `EnumerableSet` `.add` / `.remove`, followed through one internal call.
+2. **The entry points it opens**: external functions that check it against `msg.sender`, whether inline, through a modifier, or through a helper (`onlyExecutor` → `isExecutor(msg.sender)` → `_executors.contains`). Bases in other files of the bundle are included.
+3. **Arbitrary-call entry points** (an `address` and `bytes` argument forwarded via `.call` / `functionCall` / `delegatecall`) are flagged. The holder can then use every permission the target holds.
+4. **The holder**: an EOA, a Safe, or a contract followed one hop to its controller. A contract holder's own arbitrary-call functions are listed with their modifiers, since whoever passes its checks acts with the entry.
+5. **Members before → after**, when the contract exposes a no-argument `address[]` getter named after the allowlist (`getExecutors()`).
+
+Allowlists that gate no entry point (`setOwner` writing a plain `owner`) produce nothing. Vyper sources are skipped. Failures are best-effort and never block the alert.
+
+### 5f-3b. Timelock Execution Context (`utils/llm/timelock_execution_context.py`)
+
+A Safe that executes a timelock batch sends the real actions as payloads. Nothing in the calldata says they already sat in a public queue. A report on Yearn's `TimelockExecutor.executeBatch` described four strategy changes as if the Safe were making them directly, without saying they had waited a week in the Yearn TimelockController.
+
+For OpenZeppelin `execute` / `executeBatch` calls, the adapter finds the timelock. That is the target itself, or the `TIMELOCK()` / `timelock()` that a forwarding executor names. It recomputes the operation ID exactly as `hashOperation` / `hashOperationBatch` does, then reads `getTimestamp` and `getMinDelay`. The status is one of: not scheduled (the call reverts), not ready until a given time, ready since a given time (so scheduled no later than ready − delay), or already executed. Reviewers can then match the operation ID against the timelock alert sent at scheduling.
 
 ### 5f-4. PendleSwap Upgrade Context (`utils/llm/pendle_context.py`)
 
@@ -308,7 +328,9 @@ verdict is not evidence that collisions are more likely.
 
 ### 5g. Adapter Registry (`utils/llm/protocol_context.py`)
 
-Adapters register in `_ADAPTERS`; `resolve_protocol_context()` fans one call out to all of them and merges the rendered prompt text, report text, introduced addresses, and address labels. Each adapter guards itself, so registration order carries no meaning and one adapter raising is logged and skipped rather than dropping the alert. Most guard on protocol and chain. The Yearn V3 adapter guards on call shape and `apiVersion()`, and the control-transfer adapter on call shape alone.
+Adapters register in `_ADAPTERS`; `resolve_protocol_context()` fans one call out to all of them and merges the rendered prompt text, report text, introduced addresses, and address labels. Each adapter guards itself, so registration order carries no meaning and one adapter raising is logged and skipped rather than dropping the alert. Most guard on protocol and chain. The Yearn V3 adapter guards on call shape and `apiVersion()`. The control-transfer, allowlist-scope and timelock-execution adapters guard on call shape alone.
+
+Adapters receive the inner calls of executed governance wrappers too. `expand_executed_calls()` keeps each wrapper and splices in its decoded inner calls (`execute`, `executeBatch`, `executeTransaction`, up to two levels deep). Address labels are collected over the same list. Scheduling wrappers are not expanded, because their inner calls run in a later transaction. Before this, a Safe batch registered Flex inside a timelock `executeBatch` and then funded it in a top-level `update_debt`. The V3 adapter never saw the registration and reported the funding call as "REVERTS — inactive strategy". The model then flagged the context as contradicting the simulation. The executing address (the Safe) is labeled as well, so it no longer appears unlabeled in the reference table.
 
 ### 6. LLM Prompt & Completion (`utils/llm/ai_explainer.py`)
 
@@ -582,6 +604,8 @@ utils/llm/
 ├── yearn_v3_context.py      # Yearn V3 adapter: vault state, queue, strategy caps in asset units
 ├── yearn_v3_batch.py        # Yearn V3 _update_debt model: expected amounts through a batch
 ├── control_transfer_context.py # Who gains control: current vs new holder, Safe thresholds, two-step
+├── permission_grant_context.py # Allowlist scope: gated entry points, arbitrary-call forwarders, holder
+├── timelock_execution_context.py # Timelock execute calls: operation ID, delay, scheduled/ready status
 └── README.md                # This file
 
 utils/related_tokens.py      # Token discovery from a contract's own zero-arg address getters
