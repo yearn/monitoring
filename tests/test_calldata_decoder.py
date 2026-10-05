@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from eth_utils import to_checksum_address
+from eth_utils import function_signature_to_4byte_selector, to_checksum_address
 
 from utils.calldata.decoder import (
     DecodedCall,
@@ -213,20 +213,12 @@ class TestResolveSelector(unittest.TestCase):
 
 
 class TestKnownSelectors(unittest.TestCase):
-    """Sanity checks for the known_selectors table."""
+    """Integrity check for the known_selectors table."""
 
-    def test_table_not_empty(self):
-        self.assertGreater(len(KNOWN_SELECTORS), 0)
-
-    def test_all_selectors_are_valid_hex(self):
-        for selector in KNOWN_SELECTORS:
-            self.assertTrue(selector.startswith("0x"), f"Missing 0x prefix: {selector}")
-            self.assertEqual(len(selector), 10, f"Wrong length: {selector}")
-
-    def test_all_signatures_have_parens(self):
+    def test_selectors_match_signatures(self):
+        self.assertTrue(KNOWN_SELECTORS)
         for selector, sig in KNOWN_SELECTORS.items():
-            self.assertIn("(", sig, f"No opening paren in {selector}: {sig}")
-            self.assertIn(")", sig, f"No closing paren in {selector}: {sig}")
+            self.assertEqual(selector, "0x" + function_signature_to_4byte_selector(sig).hex(), sig)
 
 
 # transfer(address,uint256) calldata:

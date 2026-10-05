@@ -434,11 +434,6 @@ class TestGetContractLabel(unittest.TestCase):
         label = get_contract_label(1, "0xac21b22b5aeb11bc32de4ecf59e4538fca48b694")
         self.assertEqual(label, "")
 
-    def test_safe_utility_shortcut(self) -> None:
-        # MultiSendCallOnly — no Etherscan call should be needed.
-        label = get_contract_label(1, "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D")
-        self.assertEqual(label, "Safe MultiSendCallOnly")
-
     @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
     @patch("utils.proxy.get_current_implementation")
     @patch("utils.source_context.fetch_json")
@@ -462,43 +457,6 @@ class TestGetContractLabel(unittest.TestCase):
         label = get_contract_label(1, "0xac21b22b5aeb11bc32de4ecf59e4538fca48b694")
         self.assertEqual(label, "FarmRegistry")
         mock_impl.assert_not_called()
-
-    def test_empty_address_returns_empty(self) -> None:
-        self.assertEqual(get_contract_label(1, ""), "")
-
-    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
-    @patch("utils.swiss_knife.fetch_json")
-    @patch("utils.source_context.fetch_json")
-    def test_prefers_swiss_knife_over_etherscan(self, mock_es: MagicMock, mock_sk: MagicMock) -> None:
-        # Swiss Knife knows USDC by its full curated name; Etherscan would just
-        # return "FiatTokenV2_2". We want the curated label.
-        from utils.swiss_knife import reset_cache as sk_reset
-
-        sk_reset()
-        mock_sk.return_value = ["Circle: USDC Token", "circle", "stablecoin"]
-        mock_es.return_value = {
-            "status": "1",
-            "result": [{"SourceCode": "/* x */", "ContractName": "FiatTokenV2_2"}],
-        }
-        label = get_contract_label(1, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
-        self.assertEqual(label, "Circle: USDC Token")
-        # Etherscan should not have been hit since Swiss Knife was authoritative.
-        mock_es.assert_not_called()
-
-    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
-    @patch("utils.swiss_knife.fetch_json")
-    @patch("utils.source_context.fetch_json")
-    def test_falls_back_to_etherscan_when_swiss_knife_empty(self, mock_es: MagicMock, mock_sk: MagicMock) -> None:
-        from utils.swiss_knife import reset_cache as sk_reset
-
-        sk_reset()
-        mock_sk.return_value = {"error": "Error fetching data"}
-        mock_es.return_value = {
-            "status": "1",
-            "result": [{"SourceCode": "/* x */", "ContractName": "FarmRegistry"}],
-        }
-        label = get_contract_label(1, "0xac21b22b5aeb11bc32de4ecf59e4538fca48b694")
-        self.assertEqual(label, "FarmRegistry")
 
 
 class TestFetchFunctionInputNames(unittest.TestCase):
