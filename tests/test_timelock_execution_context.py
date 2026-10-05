@@ -74,19 +74,17 @@ class TestStatus(unittest.TestCase):
         self.assertIn("ready since 2026-10-02 17:22 UTC (so scheduled no later than 2026-09-25 17:22 UTC)", lines[1])
         self.assertIn("not new proposals", lines[2])
 
-    def test_unscheduled_done_and_early(self) -> None:
-        self.assertIn("NOT SCHEDULED", _context(0).status())
-        self.assertIn("ALREADY EXECUTED", _context(1).status())
-        self.assertIn("NOT READY until 2026-10-02 17:22 UTC", _context(READY_AT, now=READY_AT - 60).status())
-
-    def test_queue_claim_only_for_ready_operations(self) -> None:
+    def test_unscheduled_done_and_early_make_no_queue_claim(self) -> None:
         unscheduled = "\n".join(_context(0).lines())
         early = "\n".join(_context(READY_AT, now=READY_AT - 60).lines())
         done = "\n".join(_context(1).lines())
+        self.assertIn("NOT SCHEDULED", unscheduled)
+        self.assertIn("have NOT gone through the delay", unscheduled)
+        self.assertIn("NOT READY until 2026-10-02 17:22 UTC", early)
+        self.assertIn("The delay has NOT elapsed", early)
+        self.assertIn("ALREADY EXECUTED", done)
         for text in (unscheduled, early, done):
             self.assertNotIn("sat publicly in the timelock queue", text)
-        self.assertIn("have NOT gone through the delay", unscheduled)
-        self.assertIn("The delay has NOT elapsed", early)
 
     def test_report(self) -> None:
         report = format_timelock_execution_report([_context(READY_AT)], 1, {})
@@ -97,7 +95,7 @@ class TestStatus(unittest.TestCase):
 class TestResolve(unittest.TestCase):
     @patch.object(timelock_execution_context, "get_contract_label", return_value="")
     @patch.object(timelock_execution_context, "ChainManager")
-    @patch.object(timelock_execution_context, "_call")
+    @patch.object(timelock_execution_context, "call_view")
     def test_follows_forwarding_executor_to_its_timelock(
         self, mock_call: MagicMock, mock_cm: MagicMock, _label: MagicMock
     ) -> None:
@@ -107,7 +105,7 @@ class TestResolve(unittest.TestCase):
             (TIMELOCK, "getMinDelay()"): WEEK,
             (TIMELOCK, "getTimestamp(bytes32)"): READY_AT,
         }
-        mock_call.side_effect = lambda client, address, signature, args, output: answers.get((address, signature))
+        mock_call.side_effect = lambda client, address, signature, output, args=(): answers.get((address, signature))
         mock_cm.get_client.return_value.eth.get_block.return_value = {"timestamp": READY_AT + 60}
 
         (context,) = resolve_timelock_execution_context("YEARN_MS", 1, [(EXECUTOR, EXECUTE_BATCH)])

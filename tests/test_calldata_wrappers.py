@@ -7,7 +7,7 @@ from eth_abi import encode
 from eth_utils import function_signature_to_4byte_selector
 from eth_utils import to_checksum_address as _cs
 
-from utils.calldata.wrappers import InnerCall, is_wrapper_call, unwrap_calls, unwrap_executed_calls
+from utils.calldata.wrappers import InnerCall, is_wrapper_call, unwrap_calls
 
 ORACLE = _cs("0xcd7f45566bc0e7303fb92a93969bb4d3f6e662bb")
 CUSD = _cs("0xcccc62962d17b8914c62d74ffb843d73b2a3cccc")
@@ -118,23 +118,3 @@ class TestUnwrapCalls(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class TestUnwrapExecutedCalls(unittest.TestCase):
-    """Only execute-type wrappers run their inner calls in the same transaction."""
-
-    def test_execute_batch_inner_calls_run_now(self) -> None:
-        data = execute_batch([ORACLE, CUSD], [upgrade_to_and_call(NEW_ORACLE_IMPL), upgrade_to_and_call(NEW_CUSD_IMPL)])
-        self.assertEqual(unwrap_executed_calls(data), unwrap_calls(data))
-
-    def test_schedule_batch_inner_calls_do_not_run_now(self) -> None:
-        data = encode_call(
-            "scheduleBatch(address[],uint256[],bytes[],bytes32,bytes32,uint256)",
-            ["address[]", "uint256[]", "bytes[]", "bytes32", "bytes32", "uint256"],
-            [[ORACLE], [0], [bytes.fromhex(upgrade_to_and_call(NEW_ORACLE_IMPL)[2:])], ZERO32, ZERO32, 86400],
-        )
-        self.assertEqual(unwrap_executed_calls(data), [])
-
-    def test_non_wrapper(self) -> None:
-        self.assertEqual(unwrap_executed_calls(upgrade_to_and_call(NEW_ORACLE_IMPL)), [])
-        self.assertEqual(unwrap_executed_calls(""), [])

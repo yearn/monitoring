@@ -78,7 +78,7 @@ CHAIN: dict[str, dict[str, object]] = {
 }
 
 
-def _view(client: object, address: str, signature: str, output: str, args: tuple = ()) -> object | None:
+def _call_view(client: object, address: str, signature: str, output: str, args: tuple = ()) -> object | None:
     return CHAIN.get(address, {}).get(signature)
 
 
@@ -104,7 +104,7 @@ REPORT = _call("report", "report()")
 
 @patch.object(yearn_strategy_context, "get_contract_label", side_effect=lambda chain_id, a: LABELS.get(a, ""))
 @patch.object(yearn_strategy_context, "fetch_erc20_metadata", return_value=ERC20Metadata("USDS", 18, "USDS Stablecoin"))
-@patch.object(yearn_strategy_context, "_view", side_effect=_view)
+@patch.object(yearn_strategy_context, "call_view", side_effect=_call_view)
 @patch.object(yearn_strategy_context, "ChainManager")
 class TestYearnStrategyContext(unittest.TestCase):
     def _resolve(self, mock_cm: MagicMock, calls: list[tuple[str, DecodedCall]]) -> list:
@@ -131,7 +131,7 @@ class TestYearnStrategyContext(unittest.TestCase):
         )
         self.assertIn("The performance fee is 0, so the recipient receives nothing", prompt)
         self.assertIn("setProfitMaxUnlockTime: 2d (172800 s) → 0 (instant)", prompt)
-        self.assertIn("6,279.37 shares (5,644.71 shares still locking, 634.66 shares already unlocked)", prompt)
+        self.assertIn("6,279.37 shares (5,644.71 shares still locking, 634.65 shares already unlocked)", prompt)
         self.assertIn("~5,657.01 USDS of not-yet-unlocked profit is credited to holders at once", prompt)
         self.assertIn("(price per share +0.119%)", prompt)
         self.assertIn(f"default trigger → {FIXED_TRIGGER} (StrategyFixedReportTrigger)", prompt)

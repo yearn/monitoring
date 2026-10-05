@@ -25,6 +25,7 @@ from eth_utils import to_checksum_address
 from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
 from utils.erc20_metadata import fetch_erc20_metadata
+from utils.formatting import format_asset_amount
 from utils.llm.report import address_link
 from utils.llm.yearn_v3_batch import DebtMove, VaultBatchState
 from utils.logger import get_logger
@@ -100,7 +101,6 @@ class StrategyState:
     activation: int
     current_debt: int
     max_debt: int
-    in_default_queue: bool
     # Read only for strategies the transaction names; None when unreadable.
     asset: str | None = None
     total_assets: int | None = None
@@ -181,12 +181,7 @@ class YearnV3VaultContext:
         """Render an asset-denominated amount with two truncated decimals."""
         if raw == MAX_UINT256:
             return "unlimited (max uint256)"
-        scale = 10**self.asset_decimals
-        whole, cents = raw // scale, (raw % scale) * 100 // scale
-        if whole == 0 and cents == 0 and raw > 0:
-            return f"<0.01 {self.asset_symbol}"
-        rendered = f"{whole:,}" if cents == 0 else f"{whole:,}.{cents:02d}"
-        return f"{rendered} {self.asset_symbol}"
+        return format_asset_amount(raw, self.asset_decimals, self.asset_symbol)
 
     def share_of_vault(self, raw: int) -> str:
         """Express an asset amount relative to the vault's totalAssets."""
@@ -524,7 +519,6 @@ def _read_vault_context(chain_id: int, vault: str, calls: list[DecodedCall]) -> 
             activation=int(activation),
             current_debt=int(current_debt),
             max_debt=int(max_debt),
-            in_default_queue=address in queue_addresses,
             **details,
         )
 

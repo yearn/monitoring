@@ -15,14 +15,14 @@ scheduled (the call reverts), not ready yet, ready, or already executed.
 """
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
-from eth_abi import decode as abi_decode
 from eth_abi import encode as abi_encode
-from eth_utils import function_signature_to_4byte_selector, keccak, to_checksum_address
+from eth_utils import keccak, to_checksum_address
 
 from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
+from utils.eth_view import call_view
+from utils.formatting import format_duration, format_utc
 from utils.llm.report import address_link
 from utils.logger import get_logger
 from utils.source_context import get_contract_label
@@ -80,10 +80,10 @@ class TimelockExecutionContext:
             return "NOT SCHEDULED on the timelock — this execute call reverts (or its calldata differs from what was scheduled)"
         if self.ready_at == _DONE_TIMESTAMP:
             return "ALREADY EXECUTED — this execute call reverts"
-        ready = _utc(self.ready_at)
+        ready = format_utc(self.ready_at)
         if self.ready_at > self.now:
             return f"scheduled, NOT READY until {ready} — executing earlier reverts"
-        scheduled_by = _utc(self.ready_at - self.min_delay)
+        scheduled_by = format_utc(self.ready_at - self.min_delay)
         return f"scheduled and ready since {ready} (so scheduled no later than {scheduled_by})"
 
     def lines(self) -> list[str]:
@@ -94,7 +94,7 @@ class TimelockExecutionContext:
         calls = "1 call" if self.call_count == 1 else f"{self.call_count} calls"
         lines = [
             f"{self.signature.split('(')[0]} via {route}: releases operation {self.operation_id} ({calls}); "
-            f"timelock min delay {_duration(self.min_delay)}.",
+            f"timelock min delay {format_duration(self.min_delay)}.",
             f"Operation status: {self.status()}.",
         ]
         if self.ready:
@@ -114,41 +114,16 @@ class TimelockExecutionContext:
         return lines
 
 
-def _utc(timestamp: int) -> str:
-    return datetime.fromtimestamp(timestamp, UTC).strftime("%Y-%m-%d %H:%M UTC")
-
-
-def _duration(seconds: int) -> str:
-    days, rest = divmod(seconds, 86400)
-    if days and not rest:
-        return f"{days}d"
-    hours = seconds / 3600
-    return f"{hours:g}h"
-
-
-def _selector(signature: str) -> bytes:
-    return function_signature_to_4byte_selector(signature)
-
-
-def _call(client: Web3Client, address: str, signature: str, args: bytes, output: str) -> object | None:
-    """eth_call one getter; None when it reverts or doesn't decode."""
-    try:
-        raw = client.eth.call({"to": address, "data": "0x" + (_selector(signature) + args).hex()})
-        return abi_decode([output], bytes(raw))[0] if raw else None
-    except Exception:  # noqa: BLE001 - absent getters and reverts are expected
-        return None
-
-
 def _find_timelock(client: Web3Client, target: str) -> tuple[str, int] | None:
     """(timelock, min delay) — the target itself, or the timelock a forwarding executor names."""
-    delay = _call(client, target, "getMinDelay()", b"", "uint256")
+    delay = call_view(client, target, "getMinDelay()", "uint256")
     if isinstance(delay, int):
         return target, delay
     for getter in _TIMELOCK_GETTERS:
-        found = _call(client, target, getter, b"", "address")
+        found = call_view(client, target, getter, "address")
         if isinstance(found, str) and int(found, 16) != 0:
             timelock = to_checksum_address(found)
-            delay = _call(client, timelock, "getMinDelay()", b"", "uint256")
+            delay = call_view(client, timelock, "getMinDelay()", "uint256")
             if isinstance(delay, int):
                 return timelock, delay
     return None
@@ -168,7 +143,7 @@ def _resolve_one(chain_id: int, client: Web3Client, target: str, call: DecodedCa
         return None
     timelock, min_delay = found
     op_id = operation_id(call)
-    ready_at = _call(client, timelock, "getTimestamp(bytes32)", bytes.fromhex(op_id[2:]), "uint256")
+    ready_at = call_view(client, timelock, "getTimestamp(bytes32)", "uint256", (bytes.fromhex(op_id[2:]),))
     if not isinstance(ready_at, int):
         return None
     targets = call.params[0][1]
@@ -236,7 +211,7 @@ def format_timelock_execution_report(
                 [
                     f"**Timelock execution:** `{context.signature.split('(')[0]}` via {route}",
                     f"- **Operation ID:** `{context.operation_id}` ({context.call_count} call(s))",
-                    f"- **Min delay:** {_duration(context.min_delay)}",
+                    f"- **Min delay:** {format_duration(context.min_delay)}",
                     f"- **Status:** {context.status()}",
                 ]
             )

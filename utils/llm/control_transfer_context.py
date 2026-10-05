@@ -24,11 +24,11 @@ It keys on call shape, not protocol, so every governance alert benefits.
 
 from dataclasses import dataclass
 
-from eth_abi import decode as abi_decode
-from eth_utils import function_signature_to_4byte_selector, to_checksum_address
+from eth_utils import to_checksum_address
 
 from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
+from utils.eth_view import call_view
 from utils.llm.abi_exposure import exposes
 from utils.llm.report import address_link
 from utils.logger import get_logger
@@ -220,23 +220,6 @@ class ControlTransferContext:
         return ""
 
 
-def _selector(signature: str) -> str:
-    """0x-prefixed 4-byte selector for a function signature."""
-    return "0x" + function_signature_to_4byte_selector(signature).hex()
-
-
-def _call(client: Web3Client, address: str, signature: str, output: str) -> object | None:
-    """eth_call a no-arg view and decode one output; None when it reverts or doesn't decode."""
-    try:
-        raw = client.eth.call({"to": address, "data": _selector(signature)})
-        if not raw:
-            return None
-        decoded: object = abi_decode([output], bytes(raw))[0]
-        return decoded
-    except Exception:  # noqa: BLE001 - absent getters and reverts are expected
-        return None
-
-
 def _code_hex(client: Web3Client, address: str) -> str:
     """Deployed bytecode as bare lowercase hex ("" for an EOA)."""
     code = client.eth.get_code(address)
@@ -255,8 +238,8 @@ def describe_controller(chain_id: int, client: Web3Client, address: str, hops: i
     if code.startswith(_EIP7702_PREFIX):
         return ControllerInfo(address=address, kind="eip7702", label=label)
 
-    threshold = _call(client, address, "getThreshold()", "uint256")
-    owners = _call(client, address, "getOwners()", "address[]")
+    threshold = call_view(client, address, "getThreshold()", "uint256")
+    owners = call_view(client, address, "getOwners()", "address[]")
     if isinstance(threshold, int) and isinstance(owners, (list, tuple)):
         return ControllerInfo(
             address=address, kind="safe", label=label, threshold=int(threshold), owner_count=len(owners)
@@ -266,7 +249,7 @@ def describe_controller(chain_id: int, client: Web3Client, address: str, hops: i
     controller_getter = ""
     if hops > 0:
         for getter in _CONTROLLER_GETTERS:
-            holder = _call(client, address, f"{getter}()", "address")
+            holder = call_view(client, address, f"{getter}()", "address")
             if isinstance(holder, str) and int(holder, 16) != 0 and holder.lower() != address.lower():
                 controlled_by = describe_controller(chain_id, client, holder, hops - 1)
                 controller_getter = getter
@@ -285,7 +268,7 @@ def describe_controller(chain_id: int, client: Web3Client, address: str, hops: i
 def _current_holder(client: Web3Client, target: str, role: _Role) -> str | None:
     """Address currently holding ``role`` on ``target``, read from its getter."""
     for getter in role.getters:
-        holder = _call(client, target, f"{getter}()", "address")
+        holder = call_view(client, target, f"{getter}()", "address")
         if isinstance(holder, str):
             return holder
     return None
@@ -293,7 +276,7 @@ def _current_holder(client: Web3Client, target: str, role: _Role) -> str | None:
 
 def _has_pending_slot(client: Web3Client, target: str, role: _Role) -> bool:
     """Whether ``target`` exposes a pending slot for ``role``."""
-    return any(_call(client, target, f"{getter}()", "address") is not None for getter in role.pending_getters)
+    return any(call_view(client, target, f"{getter}()", "address") is not None for getter in role.pending_getters)
 
 
 def _slot_key(name: str) -> str:

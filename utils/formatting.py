@@ -1,5 +1,6 @@
 """Common formatting helpers for monitoring scripts."""
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
 
@@ -50,6 +51,30 @@ def format_with_suffix(number: float) -> str:
 def format_usd(number: float) -> str:
     """Format number to readable USD string with K, M, B suffixes."""
     return f"${format_with_suffix(number)}"
+
+
+def format_asset_amount(raw: int, decimals: int, symbol: str) -> str:
+    """Render a raw token amount truncated to two decimals: ``1857483253785268466043`` → ``1,857.48 WETH``.
+
+    Args:
+        raw: Amount in the token's smallest unit.
+        decimals: Token decimals.
+        symbol: Token symbol appended to the amount.
+
+    Returns:
+        The amount with thousands separators, ``<0.01`` for dust.
+    """
+    scale = 10**decimals
+    whole, cents = raw // scale, (raw % scale) * 100 // scale
+    if whole == 0 and cents == 0 and raw > 0:
+        return f"<0.01 {symbol}"
+    rendered = f"{whole:,}" if cents == 0 else f"{whole:,}.{cents:02d}"
+    return f"{rendered} {symbol}"
+
+
+def format_utc(timestamp: int) -> str:
+    """Render a unix timestamp as ``2026-10-02 17:22 UTC``."""
+    return datetime.fromtimestamp(timestamp, UTC).strftime("%Y-%m-%d %H:%M UTC")
 
 
 def format_token_amount(raw: int, decimals: int) -> float:

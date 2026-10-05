@@ -128,6 +128,9 @@ class TestExpandExecutedCalls(unittest.TestCase):
 
     def test_undecoded_calls_are_dropped(self) -> None:
         self.assertEqual(expand_executed_calls(1, [(TARGET, "0x", None)]), [])
+        self.assertEqual(
+            expand_executed_calls(1, [(TARGET, upgrade_to_and_call(TARGET), self.top)]), [(TARGET, self.top)]
+        )
 
 
 if __name__ == "__main__":

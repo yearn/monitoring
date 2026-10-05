@@ -24,15 +24,14 @@ same strategy code is run by Yearn and by third parties.
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 
-from eth_abi import decode as abi_decode
-from eth_abi import encode as abi_encode
-from eth_utils import function_signature_to_4byte_selector, to_checksum_address
+from eth_utils import to_checksum_address
 
 from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
 from utils.erc20_metadata import fetch_erc20_metadata
+from utils.eth_view import call_view
+from utils.formatting import format_asset_amount, format_duration, format_utc
 from utils.llm.report import address_link
 from utils.logger import get_logger
 from utils.source_context import get_contract_label
@@ -50,7 +49,6 @@ STRATEGY_CALLS = frozenset(
         "setKeeper",
         "setOpen",
         "setOpenDeposits",
-        "setAllowed",
         "report",
     }
 )
@@ -62,14 +60,6 @@ ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 # Renders an address: plain text with its label for the prompt, an explorer link for the report.
 Render = Callable[[str], str]
-
-
-@dataclass(frozen=True)
-class TriggerInfo:
-    """A custom report trigger and the minimum gap it enforces between reports, when it has one."""
-
-    address: str
-    min_report_delay: int | None = None
 
 
 @dataclass
@@ -101,10 +91,9 @@ class YearnStrategyContext:
     deposit_gate: str = ""
     # (call target, call) in batch order; a trigger call targets the CommonReportTrigger.
     calls: list[tuple[str, DecodedCall]] = field(default_factory=list)
-    # Reads keyed by address: `allowed(x)` before the batch, and the trigger currently set on each trigger contract.
-    allowed_before: dict[str, bool] = field(default_factory=dict)
+    # Keyed by lowercase address: the trigger each trigger contract has set now, and each new trigger's minReportDelay.
     trigger_before: dict[str, str] = field(default_factory=dict)
-    triggers: dict[str, TriggerInfo] = field(default_factory=dict)
+    report_delays: dict[str, int] = field(default_factory=dict)
     labels: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -118,16 +107,11 @@ class YearnStrategyContext:
 
     def amount(self, raw: int) -> str:
         """Render an asset amount with two truncated decimals."""
-        scale = 10**self.asset_decimals
-        whole, cents = raw // scale, (raw % scale) * 100 // scale
-        if whole == 0 and cents == 0 and raw > 0:
-            return f"<0.01 {self.asset_symbol}"
-        return f"{whole:,}.{cents:02d} {self.asset_symbol}" if cents else f"{whole:,} {self.asset_symbol}"
+        return format_asset_amount(raw, self.asset_decimals, self.asset_symbol)
 
     def shares(self, raw: int) -> str:
         """Render a share amount; strategy shares use the asset's decimals."""
-        scale = 10**self.asset_decimals
-        return f"{raw / scale:,.2f} shares"
+        return format_asset_amount(raw, self.asset_decimals, "shares")
 
     def deposit_gate_text(self, deposits_open: bool | None) -> str:
         """Who may deposit, in words."""
@@ -147,7 +131,7 @@ class YearnStrategyContext:
             f"Settings before this transaction: management {render(self.management)}; keeper {render(self.keeper)}; "
             f"emergencyAdmin {render(self.emergency_admin)}; performanceFee {fee} to "
             f"{render(self.performance_fee_recipient)}; profitMaxUnlockTime {_duration(self.profit_max_unlock_time)}; "
-            f"last report {_utc(self.last_report)} ({_age(self.now - self.last_report)} ago); "
+            f"last report {format_utc(self.last_report)} ({format_duration(self.now - self.last_report)} ago); "
             f"{self.deposit_gate_text(self.deposits_open)}.",
         ]
 
@@ -161,7 +145,6 @@ class YearnStrategyContext:
             self.performance_fee,
         )
         deposits_open = self.deposits_open
-        allowed = dict(self.allowed_before)
         reported = False
         lines: list[str] = []
         for target, call in self.calls:
@@ -197,12 +180,6 @@ class YearnStrategyContext:
                     line += " Withdrawals are unaffected; holders not on `allowed` can no longer add to their position."
                 lines.append(line)
                 deposits_open = value
-            elif name == "setAllowed" and len(call.params) == 2:
-                account = str(call.params[0][1])
-                before = allowed.get(account.lower())
-                was = "unknown" if before is None else str(before).lower()
-                lines.append(f"setAllowed: `allowed({render(account)})` {was} → {str(bool(value)).lower()}.")
-                allowed[account.lower()] = bool(value)
             elif name == "report":
                 timing = (
                     "credited to holders immediately (profitMaxUnlockTime is 0)"
@@ -211,7 +188,7 @@ class YearnStrategyContext:
                 )
                 lines.append(
                     f"report(): harvests and books profit or loss now; profit is {timing}. Previous report "
-                    f"{_utc(self.last_report)}. Token transfers inside it (reward claims, auction kicks, "
+                    f"{format_utc(self.last_report)}. Token transfers inside it (reward claims, auction kicks, "
                     "redeposits into the yield source) are the strategy managing its own position, not payments."
                 )
                 reported = True
@@ -245,54 +222,19 @@ class YearnStrategyContext:
     def _trigger_line(self, trigger_contract: str, trigger: str, render: Render) -> str:
         current = self.trigger_before.get(trigger_contract.lower())
         before = "unknown" if current is None else "default trigger" if int(current, 16) == 0 else render(current)
-        info = self.triggers.get(trigger.lower())
+        delay = self.report_delays.get(trigger.lower())
         line = f"setCustomStrategyTrigger on {render(trigger_contract)}: {before} → {render(trigger)}."
-        if info and info.min_report_delay is not None:
+        if delay is not None:
             line += (
-                f" It lets keepers report only once {_duration(info.min_report_delay)} have passed since lastReport "
-                f"(last report {_age(self.now - self.last_report)} ago)."
+                f" It lets keepers report only once {_duration(delay)} have passed since lastReport "
+                f"(last report {format_duration(self.now - self.last_report)} ago)."
             )
         return line
 
 
 def _duration(seconds: int) -> str:
-    """``345600`` → ``4d (345600 s)``; 0 → ``0 (instant)``."""
-    if seconds == 0:
-        return "0 (instant)"
-    days, rest = divmod(seconds, 86400)
-    if days and not rest:
-        text = f"{days}d"
-    elif seconds >= 3600:
-        text = f"{seconds / 3600:g}h"
-    else:
-        text = f"{seconds}s"
-    return f"{text} ({seconds} s)" if seconds >= 3600 else text
-
-
-def _age(seconds: int) -> str:
-    """Elapsed time, rounded for prose: ``665196`` → ``7d 16h``, ``18420`` → ``5h 7m``."""
-    days, rest = divmod(max(seconds, 0), 86400)
-    hours, rest = divmod(rest, 3600)
-    if days:
-        return f"{days}d {hours}h"
-    return f"{hours}h {rest // 60}m" if hours else f"{rest // 60}m"
-
-
-def _utc(timestamp: int) -> str:
-    return datetime.fromtimestamp(timestamp, UTC).strftime("%Y-%m-%d %H:%M UTC") if timestamp else "never"
-
-
-def _view(client: Web3Client, address: str, signature: str, output: str, args: tuple = ()) -> object | None:
-    """eth_call one getter; None when it reverts, is missing or doesn't decode."""
-    types = signature[signature.index("(") + 1 : -1]
-    try:
-        data = function_signature_to_4byte_selector(signature) + (
-            abi_encode(types.split(","), list(args)) if args else b""
-        )
-        raw = client.eth.call({"to": to_checksum_address(address), "data": "0x" + data.hex()})
-        return abi_decode([output], bytes(raw))[0] if raw else None
-    except Exception:  # noqa: BLE001 - absent getters and reverts are expected
-        return None
+    """A setting in seconds, with the raw value the calldata carries: ``345600`` → ``4d (345600 s)``."""
+    return "0 (instant)" if seconds == 0 else f"{format_duration(seconds)} ({seconds} s)"
 
 
 def _address(value: object) -> str | None:
@@ -301,29 +243,32 @@ def _address(value: object) -> str | None:
 
 def _read_strategy(chain_id: int, client: Web3Client, address: str) -> YearnStrategyContext | None:
     """Read a tokenized strategy's settings; None when ``address`` is not one."""
-    api = _view(client, address, "apiVersion()", "string")
-    management = _address(_view(client, address, "management()", "address"))
-    last_report = _view(client, address, "lastReport()", "uint256")
-    unlock_time = _view(client, address, "profitMaxUnlockTime()", "uint256")
+    api = call_view(client, address, "apiVersion()", "string")
+    management = _address(call_view(client, address, "management()", "address"))
+    last_report = call_view(client, address, "lastReport()", "uint256")
+    unlock_time = call_view(client, address, "profitMaxUnlockTime()", "uint256")
     if not (isinstance(api, str) and api.startswith("3.")) or management is None:
         return None
     if not isinstance(last_report, int) or not isinstance(unlock_time, int):
         return None
 
     def uint(signature: str, *args: object) -> int:
-        value = _view(client, address, signature, "uint256", args)
+        value = call_view(client, address, signature, "uint256", args)
         return value if isinstance(value, int) else 0
 
-    asset = _address(_view(client, address, "asset()", "address"))
+    def account(signature: str) -> str:
+        return _address(call_view(client, address, signature, "address")) or ZERO_ADDRESS
+
+    asset = _address(call_view(client, address, "asset()", "address"))
     meta = fetch_erc20_metadata(chain_id, asset) if asset else None
     deposits_open, gate = None, ""
     for getter in ("openDeposits()", "open()"):
-        value = _view(client, address, getter, "bool")
+        value = call_view(client, address, getter, "bool")
         if isinstance(value, bool):
             deposits_open, gate = value, getter[:-2]
             break
-    fee = _view(client, address, "performanceFee()", "uint16")
-    name = _view(client, address, "name()", "string")
+    fee = call_view(client, address, "performanceFee()", "uint16")
+    name = call_view(client, address, "name()", "string")
     return YearnStrategyContext(
         address=to_checksum_address(address),
         name=name if isinstance(name, str) else address,
@@ -337,12 +282,11 @@ def _read_strategy(chain_id: int, client: Web3Client, address: str) -> YearnStra
         profit_max_unlock_time=unlock_time,
         last_report=last_report,
         performance_fee=fee if isinstance(fee, int) else 0,
-        performance_fee_recipient=_address(_view(client, address, "performanceFeeRecipient()", "address"))
-        or ZERO_ADDRESS,
+        performance_fee_recipient=account("performanceFeeRecipient()"),
         management=management,
-        keeper=_address(_view(client, address, "keeper()", "address")) or ZERO_ADDRESS,
-        emergency_admin=_address(_view(client, address, "emergencyAdmin()", "address")) or ZERO_ADDRESS,
-        is_shutdown=_view(client, address, "isShutdown()", "bool") is True,
+        keeper=account("keeper()"),
+        emergency_admin=account("emergencyAdmin()"),
+        is_shutdown=call_view(client, address, "isShutdown()", "bool") is True,
         now=int(client.eth.get_block("latest")["timestamp"]),
         deposits_open=deposits_open,
         deposit_gate=gate,
@@ -359,22 +303,17 @@ def _strategy_of(target: str, call: DecodedCall) -> str | None:
 
 
 def _complete(chain_id: int, client: Web3Client, context: YearnStrategyContext) -> None:
-    """Read what the calls themselves need: allowlist entries, current and new triggers, and labels."""
+    """Read what the trigger calls need — the current and the new trigger — and label every address."""
     for target, call in context.calls:
-        if call.function_name == "setAllowed" and call.params:
-            account = str(call.params[0][1])
-            value = _view(client, context.address, "allowed(address)", "bool", (account,))
-            if isinstance(value, bool):
-                context.allowed_before[account.lower()] = value
-        elif call.function_name == TRIGGER_CALL and len(call.params) == 2:
-            current = _view(client, target, "customStrategyTrigger(address)", "address", (context.address,))
-            if isinstance(current, str):
-                context.trigger_before[target.lower()] = current
-            trigger = str(call.params[1][1])
-            delay = _view(client, trigger, "minReportDelay()", "uint256")
-            context.triggers[trigger.lower()] = TriggerInfo(
-                address=trigger, min_report_delay=delay if isinstance(delay, int) else None
-            )
+        if call.function_name != TRIGGER_CALL or len(call.params) != 2:
+            continue
+        current = call_view(client, target, "customStrategyTrigger(address)", "address", (context.address,))
+        if isinstance(current, str):
+            context.trigger_before[target.lower()] = current
+        trigger = str(call.params[1][1])
+        delay = call_view(client, trigger, "minReportDelay()", "uint256")
+        if isinstance(delay, int):
+            context.report_delays[trigger.lower()] = delay
     for address in context.addresses:
         label = get_contract_label(chain_id, address)
         if label:

@@ -308,7 +308,7 @@ Strategy setters (`setProfitMaxUnlockTime`, `setEmergencyAdmin`, `setPerformance
 For calls on a target that answers `apiVersion()` 3.x, `management()`, `lastReport()` and `profitMaxUnlockTime()` (V3 vaults have no `management()`), plus `setCustomStrategyTrigger(strategy, trigger)` on a CommonReportTrigger, the adapter does three things:
 
 1. **Reads the settings**: management, keeper, emergency admin, performance fee and its recipient, unlock time, last report, shutdown, and the deposit gate (`openDeposits()` / `open()`).
-2. **Walks the batch in order** and renders each change as old → new: emergency admin, fee recipient (noting a 0% fee pays nothing), performance fee, keeper, the deposit gate, `allowed(x)`, and the current → new custom trigger with the new trigger's `minReportDelay()`. A `report()` says whether its profit unlocks over time or lands at once, using the unlock time set earlier in the batch.
+2. **Walks the batch in order** and renders each change as old → new: emergency admin, fee recipient (noting a 0% fee pays nothing), performance fee, keeper, the deposit gate, and the current → new custom trigger with the new trigger's `minReportDelay()`. A `report()` says whether its profit unlocks over time or lands at once, using the unlock time set earlier in the batch. Setters declared in the strategy's own source, such as `setAllowed`, are left to the generic before-state reader.
 3. **Explains an unlock time of 0** in full. The strategy burns every share it holds for itself, split into still-locking and already-unlocked shares. The not-yet-unlocked profit is credited to holders at once, with the asset amount and the price-per-share change. From then on each report's profit lands instantly, so the adapter also states who may deposit.
 
 ### 5f-4. PendleSwap Upgrade Context (`utils/llm/pendle_context.py`)
@@ -619,6 +619,7 @@ utils/llm/
 ├── timelock_execution_context.py # Timelock execute calls: operation ID, delay, scheduled/ready status
 └── README.md                # This file
 
+utils/eth_view.py            # One raw eth_call view read, None when the getter is missing or reverts
 utils/related_tokens.py      # Token discovery from a contract's own zero-arg address getters
 utils/source_context.py      # Etherscan v2 source fetch + natspec extractor + proxy follow
 utils/verified_contract.py   # Structured verified record: per-file sources, settings, ABI, target

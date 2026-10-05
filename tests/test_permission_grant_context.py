@@ -7,8 +7,6 @@ from utils.calldata.decoder import DecodedCall
 from utils.llm import permission_grant_context
 from utils.llm.control_transfer_context import ControllerInfo
 from utils.llm.permission_grant_context import (
-    _functions,
-    _gated_functions,
     format_permission_grant_prompt,
     format_permission_grant_report,
     resolve_permission_grant_context,
@@ -240,46 +238,6 @@ def _remove_executor() -> DecodedCall:
     return DecodedCall("removeExecutor", "removeExecutor(address)", [("address", OPS_EOA)])
 
 
-class TestGatedFunctions(unittest.TestCase):
-    """Entry points are found through modifiers, helpers and inherited bases."""
-
-    def test_modifier_gated_functions_and_arbitrary_call(self) -> None:
-        gated = _gated_functions(_functions(VERIFIED[RELAYER]), "keepers")
-        self.assertEqual(
-            [(fn.signature, fn.via, fn.arbitrary_call) for fn in gated],
-            [
-                ("harvestStrategy(address)", "modifier onlyKeepers", ""),
-                ("tendStrategy(address)", "modifier onlyKeepers", ""),
-                ("forwardCall(address,bytes)", "modifier onlyKeepers", "call"),
-            ],
-        )
-
-    def test_enumerable_set_checked_through_helper(self) -> None:
-        gated = _gated_functions(_functions(VERIFIED[EXECUTOR]), "_executors")
-        self.assertEqual(
-            [(fn.signature, fn.via) for fn in gated],
-            [
-                (
-                    "executeBatch(address[],uint256[],bytes[],bytes32,bytes32)",
-                    "modifier onlyExecutor (helper isExecutor)",
-                )
-            ],
-        )
-
-    def test_checked_forward_is_restricted_not_arbitrary(self) -> None:
-        (fn,) = _gated_functions(_functions(VERIFIED[HARVESTER]), "keepers")
-        self.assertEqual(fn.arbitrary_call, "")
-        self.assertIn('`require(_target == strategy, "!strategy")`', fn.restricted_by)
-        self.assertIn("`require(bytes4(_data) == IStrategy.report.selector", fn.restricted_by)
-
-    def test_negated_check_is_a_denylist(self) -> None:
-        (fn,) = _gated_functions(_functions(VERIFIED[DENY_VAULT]), "blocked")
-        self.assertEqual((fn.signature, fn.allows), ("withdraw(uint256)", False))
-
-    def test_unrelated_state_gates_nothing(self) -> None:
-        self.assertEqual(_gated_functions(_functions(VERIFIED[RELAYER]), "owner"), [])
-
-
 @patch.object(permission_grant_context, "get_contract_label", side_effect=lambda chain_id, a: VERIFIED[a].contract_name)
 @patch.object(permission_grant_context, "describe_controller", side_effect=lambda chain_id, client, a: HOLDERS[a])
 @patch.object(permission_grant_context, "fetch_verified_contract", side_effect=lambda chain_id, a: VERIFIED.get(a))
@@ -299,24 +257,14 @@ class TestResolve(unittest.TestCase):
         report = format_permission_grant_report([context], 1, {})
         self.assertIn("`forwardCall(address,bytes)` (modifier onlyKeepers) — **arbitrary call**", report)
 
-    def test_executor_removal_lists_members_before_and_after(self, mock_client: MagicMock, *_mocks: MagicMock) -> None:
-        mock_client.return_value.get_contract.return_value.functions.__getitem__.return_value.return_value.call.return_value = [
-            BRAIN,
-            OPS_EOA,
-        ]
-        (context,) = resolve_permission_grant_context("YEARN_MS", 1, [(EXECUTOR, _remove_executor())])
-        lines = context.lines()
-        self.assertIn(f"REVOKES {OPS_EOA} an entry in `_executors`", lines[0])
-        self.assertIn("modifier onlyExecutor (helper isExecutor) gates executeBatch(", lines[1])
-        self.assertNotIn("ARBITRARY CALL", "\n".join(lines))
-        self.assertIn(f"members before: {BRAIN}, {OPS_EOA}; after: {BRAIN}.", lines[-1])
-
     def test_restricted_forward_is_not_reported_as_arbitrary(self, mock_client: MagicMock, *_mocks: MagicMock) -> None:
         call = DecodedCall("setKeeper", "setKeeper(address,bool)", [("address", OPS_EOA), ("bool", True)])
         (context,) = resolve_permission_grant_context("YEARN_MS", 1, [(HARVESTER, call)])
         prompt = format_permission_grant_prompt([context])
         self.assertNotIn("ARBITRARY CALL", prompt)
         self.assertIn("RESTRICTED FORWARD: forward(address,bytes) checks", prompt)
+        self.assertIn('`require(_target == strategy, "!strategy")`', prompt)
+        self.assertIn("`require(bytes4(_data) == IStrategy.report.selector", prompt)
         report = format_permission_grant_report([context], 1, {})
         self.assertNotIn("every permission", report)
         self.assertIn("forwards calls, restricted by", report)
@@ -325,12 +273,15 @@ class TestResolve(unittest.TestCase):
         call = DecodedCall("setBlocked", "setBlocked(address,bool)", [("address", OPS_EOA), ("bool", True)])
         (context,) = resolve_permission_grant_context("YEARN_MS", 1, [(DENY_VAULT, call)])
         self.assertIn(f"BLOCKS {OPS_EOA}", context.lines()[0])
+        self.assertIn("gates withdraw(uint256)", context.lines()[1])
         self.assertIn("a denylist: listed callers are refused", context.lines()[1])
         report = format_permission_grant_report([context], 1, {})
         self.assertIn("**Entry points it closes:**", report)
         self.assertNotIn("opens", report)
 
-    def test_batch_membership_carries_earlier_changes(self, mock_client: MagicMock, *_mocks: MagicMock) -> None:
+    def test_executor_removals_carry_membership_through_the_batch(
+        self, mock_client: MagicMock, *_mocks: MagicMock
+    ) -> None:
         mock_client.return_value.get_contract.return_value.functions.__getitem__.return_value.return_value.call.return_value = [
             BRAIN,
             OPS_EOA,
@@ -339,6 +290,11 @@ class TestResolve(unittest.TestCase):
         first, second = resolve_permission_grant_context(
             "YEARN_MS", 1, [(EXECUTOR, _remove_executor()), (EXECUTOR, remove_brain)]
         )
+        lines = first.lines()
+        self.assertIn(f"REVOKES {OPS_EOA} an entry in `_executors`", lines[0])
+        # onlyExecutor → isExecutor(msg.sender) → _executors.contains, with onlyGovernance from another file.
+        self.assertIn("modifier onlyExecutor (helper isExecutor) gates executeBatch(", lines[1])
+        self.assertNotIn("ARBITRARY CALL", "\n".join(lines))
         self.assertEqual((first.holders_before, first.holders_after()), ((BRAIN, OPS_EOA), (BRAIN,)))
         self.assertEqual((second.holders_before, second.holders_after()), ((BRAIN,), ()))
         self.assertIn("members before: " + BRAIN + "; after: none.", second.lines()[-1])
