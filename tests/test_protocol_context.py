@@ -88,6 +88,7 @@ class TestResolveProtocolContext(unittest.TestCase):
                 "3jane",
                 "pendle",
                 "yearn-v3",
+                "yearn-strategy",
                 "control-transfer",
                 "permission-grant",
                 "timelock-execution",

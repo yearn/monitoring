@@ -301,6 +301,16 @@ A Safe that executes a timelock batch sends the real actions as payloads. Nothin
 
 For OpenZeppelin `execute` / `executeBatch` calls, the adapter finds the timelock. That is the target itself, or the `TIMELOCK()` / `timelock()` that a forwarding executor names. It recomputes the operation ID exactly as `hashOperation` / `hashOperationBatch` does, then reads `getTimestamp` and `getMinDelay`. The status is one of: not scheduled (the call reverts), not ready until a given time, ready since a given time (so scheduled no later than ready − delay), or already executed. Only a ready operation is described as having sat in the queue for the delay. For an unscheduled or not-yet-ready one, the prompt says the delay has not been served. Reviewers can then match the operation ID against the timelock alert sent at scheduling.
 
+### 5f-3c. Yearn Tokenized Strategy Context (`utils/llm/yearn_strategy_context.py`)
+
+Strategy setters (`setProfitMaxUnlockTime`, `setEmergencyAdmin`, `setPerformanceFeeRecipient`, …) live in the shared `TokenizedStrategy` implementation, not in the strategy's own verified source. The generic before-state reader therefore misses most of them. A report on two Grove compounders and a Spark compounder called the Groves' earlier unlock times, admins and fee recipients "not provided". It couldn't say what the 6,279 ysUSDS burned by `setProfitMaxUnlockTime(0)` was, and it missed that every performance fee was already 0.
+
+For calls on a target that answers `apiVersion()` 3.x, `management()`, `lastReport()` and `profitMaxUnlockTime()` (V3 vaults have no `management()`), plus `setCustomStrategyTrigger(strategy, trigger)` on a CommonReportTrigger, the adapter does three things:
+
+1. **Reads the settings**: management, keeper, emergency admin, performance fee and its recipient, unlock time, last report, shutdown, and the deposit gate (`openDeposits()` / `open()`).
+2. **Walks the batch in order** and renders each change as old → new: emergency admin, fee recipient (noting a 0% fee pays nothing), performance fee, keeper, the deposit gate, `allowed(x)`, and the current → new custom trigger with the new trigger's `minReportDelay()`. A `report()` says whether its profit unlocks over time or lands at once, using the unlock time set earlier in the batch.
+3. **Explains an unlock time of 0** in full. The strategy burns every share it holds for itself, split into still-locking and already-unlocked shares. The not-yet-unlocked profit is credited to holders at once, with the asset amount and the price-per-share change. From then on each report's profit lands instantly, so the adapter also states who may deposit.
+
 ### 5f-4. PendleSwap Upgrade Context (`utils/llm/pendle_context.py`)
 
 For Pendle alerts on Ethereum and Arbitrum, direct `upgradeTo` and `upgradeToAndCall`
@@ -328,7 +338,7 @@ verdict is not evidence that collisions are more likely.
 
 ### 5g. Adapter Registry (`utils/llm/protocol_context.py`)
 
-Adapters register in `_ADAPTERS`; `resolve_protocol_context()` fans one call out to all of them and merges the rendered prompt text, report text, introduced addresses, and address labels. Each adapter guards itself, so registration order carries no meaning and one adapter raising is logged and skipped rather than dropping the alert. Most guard on protocol and chain. The Yearn V3 adapter guards on call shape and `apiVersion()`. The control-transfer, allowlist-scope and timelock-execution adapters guard on call shape alone.
+Adapters register in `_ADAPTERS`; `resolve_protocol_context()` fans one call out to all of them and merges the rendered prompt text, report text, introduced addresses, and address labels. Each adapter guards itself, so registration order carries no meaning and one adapter raising is logged and skipped rather than dropping the alert. Most guard on protocol and chain. The Yearn V3 adapter guards on call shape and `apiVersion()`; the tokenized-strategy adapter on call shape and the strategy getters. The control-transfer, allowlist-scope and timelock-execution adapters guard on call shape alone.
 
 Adapters receive the inner calls of executed governance wrappers too. `expand_executed_calls()` keeps each wrapper and splices in its decoded inner calls (`execute`, `executeBatch`, `executeTransaction`, up to two levels deep). Address labels are collected over the same list. Scheduling wrappers are not expanded, because their inner calls run in a later transaction. Before this, a Safe batch registered Flex inside a timelock `executeBatch` and then funded it in a top-level `update_debt`. The V3 adapter never saw the registration and reported the funding call as "REVERTS — inactive strategy". The model then flagged the context as contradicting the simulation. The executing address (the Safe) is labeled as well, so it no longer appears unlabeled in the reference table.
 
@@ -603,6 +613,7 @@ utils/llm/
 ├── threejane_context.py     # 3Jane adapter: hashed config keys/roles, rewards distribution mode
 ├── yearn_v3_context.py      # Yearn V3 adapter: vault state, queue, strategy caps in asset units
 ├── yearn_v3_batch.py        # Yearn V3 _update_debt model: expected amounts through a batch
+├── yearn_strategy_context.py # Yearn tokenized strategies: settings old → new, unlock-time burn, deposit gate
 ├── control_transfer_context.py # Who gains control: current vs new holder, Safe thresholds, two-step
 ├── permission_grant_context.py # Allowlist scope: gated entry points, arbitrary-call forwarders, holder
 ├── timelock_execution_context.py # Timelock execute calls: operation ID, delay, scheduled/ready status

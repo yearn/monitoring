@@ -11,7 +11,8 @@ Adapters are responsible for their own guards: each returns an empty list for
 protocols and chains it does not handle, so registration order carries no
 meaning and adding a protocol is one row in ``_ADAPTERS``. Most guard on the
 alert's protocol; the Yearn V3 adapter guards on call shape and an on-chain
-``apiVersion()`` instead, because the same vault code is governed by Yearn and
+``apiVersion()`` instead (the tokenized-strategy adapter likewise on its
+getters), because the same vault code is governed by Yearn and
 third-party curators alike, and the control-transfer, permission-grant and
 timelock-execution adapters guard on call shape alone, since handing over
 management, opening an allowlist or releasing a timelock operation means the
@@ -62,6 +63,11 @@ from utils.llm.timelock_execution_context import (
     format_timelock_execution_report,
     resolve_timelock_execution_context,
 )
+from utils.llm.yearn_strategy_context import (
+    format_yearn_strategy_prompt,
+    format_yearn_strategy_report,
+    resolve_yearn_strategy_context,
+)
 from utils.llm.yearn_v3_context import (
     format_yearn_v3_prompt,
     format_yearn_v3_report,
@@ -89,6 +95,12 @@ _ADAPTERS: tuple[_Adapter, ...] = (
     _Adapter("3jane", resolve_threejane_context, format_threejane_prompt, format_threejane_report),
     _Adapter("pendle", resolve_pendle_context, format_pendle_prompt, format_pendle_report),
     _Adapter("yearn-v3", resolve_yearn_v3_context, format_yearn_v3_prompt, format_yearn_v3_report),
+    _Adapter(
+        "yearn-strategy",
+        resolve_yearn_strategy_context,
+        format_yearn_strategy_prompt,
+        format_yearn_strategy_report,
+    ),
     _Adapter(
         "control-transfer",
         resolve_control_transfer_context,
