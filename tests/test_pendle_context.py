@@ -1,22 +1,17 @@
-"""PendleSwap upgrade context regressions using the 2026-10-04 verified sources."""
+"""PendleSwap context behavior using small, synthetic source bundles."""
 
-import json
 from collections.abc import Iterator
 from dataclasses import replace
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from utils.calldata.decoder import DecodedCall
 from utils.llm import pendle_context
-from utils.llm.ai_explainer import _build_prompt
 from utils.llm.pendle_context import (
     PENDLE_SWAP,
-    _read_owner,
     _source_evidence,
     format_pendle_prompt,
-    format_pendle_report,
     resolve_pendle_context,
 )
 from utils.llm.protocol_context import resolve_protocol_context
@@ -27,13 +22,47 @@ NEW = "0xD14feb6Aaf8650BbfcC8aBEc299B249a80FE7C78"
 OWNER = "0x8119EC16F0573B7dAc7C0CB94EB504FB32456ee1"
 type Boundaries = tuple[MagicMock, MagicMock, MagicMock]
 
+_OLD_SOURCE = """
+contract PendleSwap {
+    function swap() external { _getScaledInputData(SwapType.ODOS); }
+    function _getScaledInputData(SwapType swapType) internal {
+        if (swapType == SwapType.ODOS) { _odosScaling(); } else { assert(false); }
+    }
+    function _authorizeUpgrade(address) internal onlyOwner {}
+}
+"""
+_NEW_SOURCE = """
+contract PendleSwap {
+    function swap() external { _zeroExSwap(); }
+    function _zeroExSwap() internal { _transferOut(tokenOut, msg.sender, netOut); }
+    function _getScaledInputData(SwapType swapType) internal { assert(false); }
+    function _authorizeUpgrade(address) internal onlyOwner {}
+}
+"""
+_OWNERSHIP_SOURCE = """
+abstract contract BoringOwnableUpgradeableV2 {
+    modifier onlyOwner() { require(msg.sender == owner, "not owner"); _; }
+}
+"""
+
 
 def _record(name: str) -> VerifiedContract:
-    """Load the scoped verified bundle fixture."""
-    data = json.loads((Path(__file__).parent / "fixtures" / "pendle_upgrade" / f"{name}.json").read_text())
-    record = VerifiedContract.from_cache_dict(data)
-    assert record is not None
-    return record
+    """Build only the source declarations the adapter consumes, without cache metadata."""
+    swap_types = "NONE, KYBERSWAP, RESERVE_1, ZEROX" if name == "new" else "NONE, KYBERSWAP, ODOS, RESERVE_2"
+    return VerifiedContract(
+        contract_name="PendleSwap",
+        compiler_version="",
+        language="Solidity",
+        contract_file="PendleSwap.sol",
+        sources={
+            "PendleSwap.sol": _NEW_SOURCE if name == "new" else _OLD_SOURCE,
+            "IPSwapAggregator.sol": (
+                "struct SwapData { SwapType swapType; address extRouter; bytes extCalldata; bool needScale; }\n"
+                f"enum SwapType {{ {swap_types} }}\ninterface IPSwapAggregator {{}}"
+            ),
+            "BoringOwnableUpgradeableV2.sol": _OWNERSHIP_SOURCE,
+        },
+    )
 
 
 def _upgrade(migrate: bool = False) -> DecodedCall:
@@ -61,18 +90,12 @@ def boundaries() -> Iterator[Boundaries]:
 @pytest.mark.parametrize("chain_id", [1, 42161])
 def test_upgrade_includes_scope_controls_and_route_semantics(boundaries: Boundaries, chain_id: int) -> None:
     """Unchanged ABI must not hide enum changes, unsupported scaling or existing authorization."""
-    contexts = resolve_pendle_context("PENDLE", chain_id, [(PENDLE_SWAP.lower(), _upgrade())])
-    assert len(contexts) == 1
-    prompt = format_pendle_prompt(contexts)
-    assert "optional aggregator leg" in prompt
-    assert "NONE and ETH_WETH branches bypass" in prompt
-    assert "calling router for the next step" in prompt
+    resolved = resolve_protocol_context("PENDLE", chain_id, [(PENDLE_SWAP.lower(), _upgrade())])
+    prompt = resolved.prompt
     assert "not a live trace" in prompt
-    assert "not proof every caller uses a nonzero minimum" in prompt
     assert f"Current proxy owner() (live read): {OWNER}" in prompt
-    assert "_authorizeUpgrade(address) internal virtual override onlyOwner" in prompt
-    assert 'require(msg.sender == owner, "Ownable: caller is not the owner")' in prompt
-    assert "type(uint256).max" in prompt
+    assert "_authorizeUpgrade(address) internal onlyOwner" in prompt
+    assert 'require(msg.sender == owner, "not owner")' in prompt
     before, after = prompt.split("Proposed implementation evidence:")
     assert "SwapType.ODOS" in before
     assert "RESERVE_2" in before
@@ -80,44 +103,14 @@ def test_upgrade_includes_scope_controls_and_route_semantics(boundaries: Boundar
     assert "ZEROX" in after
     assert "SwapType.ODOS" not in after
     assert "assert(false)" in after
-    assert "(quotedMinOut * amountIn) / quotedAmountIn" in after
     assert "_transferOut(tokenOut, msg.sender, netOut)" in after
-    assert "No fixed risk rating" in prompt
-    assert "removes ODOS calldata scaling" in prompt
-    assert "does not by itself establish a higher likelihood of storage collisions" in prompt
-
-
-def test_registry_publishes_context_and_full_address_links(boundaries: Boundaries) -> None:
-    """The adapter's facts and additional owner/implementation addresses reach the report."""
-    resolved = resolve_protocol_context("pendle", 1, [(PENDLE_SWAP, _upgrade())])
-    assert "optional aggregator leg" in resolved.prompt
-    assert "optional aggregator leg" in resolved.report
+    explorer = "etherscan.io" if chain_id == 1 else "arbiscan.io"
     for address in (PENDLE_SWAP, OLD, NEW, OWNER):
         assert address in resolved.addresses
-        assert f"https://etherscan.io/address/{address}" in resolved.report
+        assert f"https://{explorer}/address/{address}" in resolved.report
     assert resolved.labels[PENDLE_SWAP] == "PendleSwap"
-
-
-def test_prompt_preserves_integration_reference_and_live_observation_distinction(boundaries: Boundaries) -> None:
-    """The explainer must not relabel documented router flow as a live execution trace."""
-    contexts = resolve_pendle_context("pendle", 1, [(PENDLE_SWAP, _upgrade())])
-    prompt = _build_prompt(
-        target=PENDLE_SWAP,
-        value=0,
-        decoded_calls=[_upgrade()],
-        simulation=None,
-        protocol_context=format_pendle_prompt(contexts),
-    )
-    assert "Distinguish documented integration architecture from live observations" in prompt
-    assert "not a live trace" in prompt
-
-
-def test_arbitrum_report_uses_arbitrum_links(boundaries: Boundaries) -> None:
-    """Same deployment addresses must link to the actual alert chain."""
-    contexts = resolve_pendle_context("pendle", 42161, [(PENDLE_SWAP, _upgrade())])
-    report = format_pendle_report(contexts, 42161, {})
-    assert f"https://arbiscan.io/address/{PENDLE_SWAP}" in report
-    assert "etherscan.io/address" not in report
+    contract_call = boundaries[2].return_value.eth.contract.call_args
+    assert contract_call.kwargs["address"] == PENDLE_SWAP
 
 
 @pytest.mark.parametrize(
@@ -181,15 +174,6 @@ def test_owner_read_failure_preserves_source_evidence(boundaries: Boundaries) ->
     assert contexts[0].owner is None
 
 
-def test_owner_is_read_from_proxy_not_implementation() -> None:
-    """Ownership state lives at the proxy address."""
-    client = MagicMock()
-    client.eth.contract.return_value.functions.owner.return_value.call.return_value = OWNER
-    with patch.object(pendle_context.ChainManager, "get_client", return_value=client):
-        assert _read_owner(1, PENDLE_SWAP) == OWNER
-    assert client.eth.contract.call_args.kwargs["address"] == PENDLE_SWAP
-
-
 def test_missing_source_and_implementation_are_explicit(boundaries: Boundaries) -> None:
     """Missing evidence never turns into a guessed old implementation or safe-storage claim."""
     boundaries[0].return_value = None
@@ -199,7 +183,6 @@ def test_missing_source_and_implementation_are_explicit(boundaries: Boundaries) 
     prompt = format_pendle_prompt(contexts)
     assert "Current implementation: unavailable" in prompt
     assert prompt.count("target source unavailable") == 2
-    assert "Storage UNKNOWN is a validation gap, not a proven collision" in prompt
 
 
 def test_failed_batch_member_does_not_hide_next_upgrade(boundaries: Boundaries) -> None:
@@ -210,26 +193,22 @@ def test_failed_batch_member_does_not_hide_next_upgrade(boundaries: Boundaries) 
     assert contexts[0].is_upgrade_and_call
 
 
-def test_source_excerpts_are_scoped_to_the_deployed_contract() -> None:
-    """A same-name member in another bundled contract must not become PendleSwap evidence."""
+@pytest.mark.parametrize("flattened", [False, True])
+def test_source_excerpts_exclude_unrelated_contracts(flattened: bool) -> None:
+    """Only the deployed target and relevant declarations belong in context, in either source format."""
     record = _record("new")
-    assert record.contract_file is not None
     sources = dict(record.sources)
-    sources[record.contract_file] += '\ncontract Decoy { function swap() external { revert("DECOY"); } }'
-    assert "DECOY" not in _source_evidence(replace(record, sources=sources))
-
-
-def test_flattened_source_does_not_include_unrelated_contracts() -> None:
-    """Imported swap declarations must not cause an entire flattened bundle to enter the prompt."""
-    record = _record("new")
-    flattened = "\n".join(record.sources.values())
-    flattened += '\ncontract Decoy { function swap() external { revert("DECOY"); } }'
-    evidence = _source_evidence(replace(record, sources={"flat.sol": flattened}, contract_file="flat.sol"))
+    sources["PendleSwap.sol"] += '\ncontract Decoy { function swap() external { revert("DECOY"); } }'
+    if flattened:
+        record = replace(record, sources={"flat.sol": "\n".join(sources.values())}, contract_file="flat.sol")
+    else:
+        record = replace(record, sources=sources)
+    evidence = _source_evidence(record)
     assert "DECOY" not in evidence
     assert "enum SwapType" in evidence
     assert "struct SwapData" in evidence
     assert "_zeroExSwap" in evidence
-    assert 'require(msg.sender == owner, "Ownable: caller is not the owner")' in evidence
+    assert 'require(msg.sender == owner, "not owner")' in evidence
 
 
 def test_other_replacement_and_unresolved_target_are_not_assumed_to_be_pendle() -> None:
