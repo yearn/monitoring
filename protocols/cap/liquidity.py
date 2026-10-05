@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
@@ -21,7 +21,8 @@ CUSD_DECIMALS = 18
 MINT_THRESHOLD_PERCENT = Decimal(Config.get_env("CUSD_LARGE_MINT_THRESHOLD_PERCENT", "0.05"))
 CACHE_KEY_LAST_SUPPLY = f"{PROTOCOL}_large_mints_last_supply"
 
-ALERT_THRESHOLD = 15_000_000
+HIGH_LIQUIDITY_THRESHOLD = Decimal("0.10")
+CRITICAL_LIQUIDITY_THRESHOLD = Decimal("0.03")
 
 
 def _to_int(value) -> int:
@@ -48,7 +49,7 @@ def main():
             batch.add(ctoken.functions.fractionalReserveVault(asset).call(block_identifier=block_number))
         vault_addresses = batch.execute()
 
-    # Batch 2: for each asset, get vault maxWithdraw for CUSD owner, token balance, decimals, and symbol
+    # Batch 2: read withdrawable liquidity and total supplied assets at the same block.
     with client.batch_requests() as batch:
         for asset, vault_addr in zip(assets, vault_addresses):
             vault = client.eth.contract(address=vault_addr, abi=load_abi("protocols/cap/abi/YearnV3Vault.json"))
@@ -57,29 +58,54 @@ def main():
             batch.add(token.functions.balanceOf(CUSD).call(block_identifier=block_number))
             batch.add(token.functions.decimals().call(block_identifier=block_number))
             batch.add(token.functions.symbol().call(block_identifier=block_number))
+            batch.add(ctoken.functions.totalSupplies(asset).call(block_identifier=block_number))
         responses = batch.execute()
 
-    # Parse batched results (4 entries per asset)
-    lines = []
-    total_normalized = 0
-    for i in range(0, len(responses), 4):
-        vault_withdrawable = responses[i] or 0
-        direct_balance = responses[i + 1] or 0
-        decimals = responses[i + 2] if responses[i + 2] is not None else 18
-        symbol = responses[i + 3] or "UNKNOWN"
+    # Keep uint256 amounts precise even when other monitors lower the global Decimal precision.
+    with localcontext(prec=100):
+        # Parse batched results (5 entries per asset), valuing normalized backing assets at par.
+        lines = []
+        total_normalized = Decimal(0)
+        total_tvl = Decimal(0)
+        for i in range(0, len(responses), 5):
+            vault_withdrawable = responses[i] or 0
+            direct_balance = responses[i + 1] or 0
+            decimals = responses[i + 2] if responses[i + 2] is not None else 18
+            symbol = responses[i + 3] or "UNKNOWN"
+            total_supplied = responses[i + 4]
+            if total_supplied is None:
+                raise RuntimeError(f"CAP liquidity RPC returned no value for {symbol} totalSupplies")
 
-        total_units = int(vault_withdrawable) + int(direct_balance)
+            total_units = int(vault_withdrawable) + int(direct_balance)
 
-        divisor = 10 ** int(decimals)
-        normalized = total_units / divisor if divisor else 0
-        line = f"{symbol}: {normalized:,.6f}"
-        logger.info("%s", line)
-        total_normalized += normalized
-        lines.append(line)
+            divisor = Decimal(10) ** int(decimals)
+            normalized = Decimal(total_units) / divisor
+            line = f"{symbol}: {normalized:,.6f}"
+            logger.info("%s", line)
+            total_normalized += normalized
+            total_tvl += Decimal(int(total_supplied)) / divisor
+            lines.append(line)
 
-    if total_normalized < ALERT_THRESHOLD:
-        message = "🔻 CAP Withdrawable Liquidity (Mainnet)\n" + "\n".join(lines)
-        send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
+        if total_tvl > 0:
+            liquidity_percent = total_normalized / total_tvl * Decimal(100)
+            logger.info("CAP withdrawable liquidity: %s%% of total TVL %s", liquidity_percent, total_tvl)
+            severity = None
+            if total_normalized < total_tvl * CRITICAL_LIQUIDITY_THRESHOLD:
+                severity = AlertSeverity.CRITICAL
+            elif total_normalized < total_tvl * HIGH_LIQUIDITY_THRESHOLD:
+                severity = AlertSeverity.HIGH
+
+            if severity is not None:
+                message = (
+                    "🔻 CAP Withdrawable Liquidity (Mainnet)\n"
+                    + "\n".join(lines)
+                    + f"\nTotal withdrawable: {total_normalized:,.6f}\n"
+                    f"Total TVL: {total_tvl:,.6f}\n"
+                    f"Withdrawable / TVL: {liquidity_percent:,.2f}%"
+                )
+                send_alert(Alert(severity, message, PROTOCOL))
+        else:
+            logger.warning("CAP total TVL is zero; skipping withdrawable liquidity ratio check")
 
     # --- cUSD Large Mint Monitoring (No Event Scanning) ---
     current_supply_raw = int(ctoken.functions.totalSupply().call(block_identifier=block_number))

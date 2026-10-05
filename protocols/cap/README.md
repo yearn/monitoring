@@ -27,8 +27,8 @@ It monitors withdrawable liquidity for the CAP protocol's cUSD contract [`0xcCcc
 2. **For each asset**, calculates total withdrawable liquidity:
    - Withdrawable amount from the fractional reserve vault (via `maxWithdraw` for the cUSD contract)
    - Direct token balance held by the cUSD contract
-3. **Sums normalized values** across all assets
-4. **Sends Telegram alert** if total withdrawable liquidity falls below [defined threshold](./liquidity.py#L8) telegram alert is sent
+3. **Sums normalized values** across all assets for both withdrawable liquidity and total TVL. TVL is the sum of cUSD's `totalSupplies(asset)` values, including borrowed assets. Both totals value backing assets at par after adjusting for token decimals; all reads are pinned to the same block.
+4. **Sends Telegram alert** when total withdrawable liquidity is **below 10% of total TVL** (high) or **below 3%** (critical). Exactly 10% does not alert; exactly 3% sends high. Alerts include each asset's withdrawable amount, total withdrawable liquidity, total TVL, and the percentage. A zero TVL skips the ratio check.
 5. **RedStone Price Feed for cUSD_FUNDAMENTAL** if the value falls below 99980000, telegram alert is sent. [Tenderly alert](https://dashboard.tenderly.co/yearn/sam/alerts/rules/316f440e-457b-4cfa-a69e-f7f54230bf44)
 
 ## Large Mint Monitoring (No Event Scanning)
