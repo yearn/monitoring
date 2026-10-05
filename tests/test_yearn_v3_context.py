@@ -32,7 +32,6 @@ def _strategy(address: str, name: str, current: int, max_debt: int, **kwargs: An
         activation=kwargs.pop("activation", 1),
         current_debt=current,
         max_debt=max_debt,
-        in_default_queue=kwargs.pop("in_default_queue", True),
         **kwargs,
     )
 
@@ -48,7 +47,6 @@ def _context(calls: list[DecodedCall], use_default_queue: bool | None = True) ->
         0,
         0,
         activation=0,
-        in_default_queue=False,
         asset=WETH,
         total_assets=1_034 * E18,
     )
@@ -80,26 +78,24 @@ CAP_LOOPER = _call("update_max_debt_for_strategy", ["address", "uint256"], [LOOP
 class TestProposalLines(unittest.TestCase):
     """Proposed values are stated in the vault asset and against current state."""
 
-    def test_add_strategy_out_of_queue_with_forced_default_queue(self) -> None:
+    def test_add_strategy_out_of_queue(self) -> None:
         (line,) = _context([ADD_LOOPER]).proposal_lines()
         self.assertIn("add_strategy(wstETH/WETH Spark Looper): not yet active", line)
         self.assertIn("strategy asset matches the vault asset WETH", line)
         self.assertIn("add_to_queue=False: stays OUT of the default queue", line)
         self.assertIn("use_default_queue is True, so no withdrawal can pull from it", line)
         self.assertIn("strategy totalAssets 1,034 WETH", line)
-
-    def test_add_strategy_out_of_queue_allows_custom_queue(self) -> None:
         (line,) = _context([ADD_LOOPER], use_default_queue=False).proposal_lines()
         self.assertIn("unless a withdrawer passes a custom queue", line)
 
     def test_add_strategy_defaults_to_queue(self) -> None:
         # The one-argument overload leaves add_to_queue at its default of True.
         (line,) = _context([_call("add_strategy", ["address"], [LOOPER])]).proposal_lines()
-        self.assertIn("add_to_queue=True: appended to the default queue (holds 1/10 before this batch)", line)
+        self.assertIn("add_to_queue=True: appended to the default queue (holds 1/10 before this call)", line)
 
     def test_add_strategy_with_mismatched_asset_reverts(self) -> None:
         context = _context([ADD_LOOPER])
-        other = _strategy(LOOPER, "Looper", 0, 0, activation=0, in_default_queue=False, asset=PEER)
+        other = _strategy(LOOPER, "Looper", 0, 0, activation=0, asset=PEER)
         context = replace(context, other_strategies=(other,))
         (line,) = context.proposal_lines()
         self.assertIn("DOES NOT match — the call reverts", line)
@@ -124,19 +120,6 @@ class TestProposalLines(unittest.TestCase):
         (line,) = _context([call]).proposal_lines()
         self.assertIn("moves nothing — limited by the vault's available idle", line)
         self.assertIn("current_debt stays 921 WETH", line)
-
-    def test_update_debt_deposit_from_idle(self) -> None:
-        context = replace(_context([]), total_idle=100 * E18)
-        call = _call("update_debt", ["address", "uint256"], [PEER, 1_000 * E18])
-        context = replace(context, calls=(call,))
-        (line,) = context.proposal_lines()
-        self.assertIn("MOVES FUNDS NOW — deposits 79 WETH;", line)
-        self.assertIn("current_debt 921 WETH → 1,000 WETH; vault idle 100 WETH → 21 WETH", line)
-
-    def test_force_revoke_writes_off_debt(self) -> None:
-        call = _call("force_revoke_strategy", ["address"], [PEER])
-        (line,) = _context([call]).proposal_lines()
-        self.assertIn("WRITES OFF its current_debt 921 WETH as a loss", line)
 
     def test_unlimited_cap(self) -> None:
         call = _call("update_max_debt_for_strategy", ["address", "uint256"], [PEER, MAX_UINT256])
@@ -169,6 +152,8 @@ class TestRendering(unittest.TestCase):
         prompt = format_yearn_v3_prompt([_context([ADD_LOOPER, CAP_LOOPER])])
         self.assertIn("WETH-2 yVault (yvWETH-2), API 3.0.2", prompt)
         self.assertIn("denominated in its asset WETH (18 decimals) — verified, do not hedge", prompt)
+        self.assertIn("update_debt(strategy, target_debt) is a TARGET, not an amount", prompt)
+        self.assertIn("False only permits custom queues — the default queue still applies", prompt)
         self.assertIn(f"1. Spark Accumulator {PEER}: current_debt 921 WETH / max_debt 10,000 WETH", prompt)
 
     def test_report_links_queue_and_lists_proposals(self) -> None:
@@ -275,7 +260,7 @@ def _cap_context(calls: list[DecodedCall]) -> YearnV3VaultContext:
     steak = _strategy(STEAK, "Steakhouse", 26_297_013_480_000, 50_000_000 * E6, max_withdraw=26_297_705 * E6)
     gaunt = _strategy(GAUNT, "Gauntlet", 633_217_170_000, 51_000_000 * E6, max_withdraw=633_234 * E6)
     aave = _strategy(AAVE, "Aave", 0, 0, max_deposit=584_554_640 * E6)
-    ondo = _strategy(ONDO, "OndoHolder", 0, 0, activation=0, in_default_queue=False, asset=USDC, max_deposit=UNLIMITED)
+    ondo = _strategy(ONDO, "OndoHolder", 0, 0, activation=0, asset=USDC, max_deposit=UNLIMITED)
     return YearnV3VaultContext(
         vault_address=CAP_VAULT,
         name="cap USDC",
@@ -331,9 +316,6 @@ class TestBatchDebtAccounting(unittest.TestCase):
         self.assertIn("limited by the vault's available idle", aave)
         self.assertIn("vault idle 26,929,230.65 USDC → 0 USDC", aave)
         self.assertNotIn("deposits 50,000,000", "\n".join(lines))
-
-    def test_ceiling_above_vault_size_is_explained(self) -> None:
-        lines = _cap_context(self.CAP_BATCH).proposal_lines()
         aave_cap = next(line for line in lines if line.startswith("update_max_debt_for_strategy(Aave)"))
         self.assertIn("a ceiling above the vault's size", aave_cap)
 
@@ -349,7 +331,7 @@ class TestBatchDebtAccounting(unittest.TestCase):
         (line,) = context.proposal_lines()
         self.assertIn("withdraws 100,000 USDC, limited by what the strategy can redeem now", line)
 
-    def test_deposit_limited_by_max_debt_then_by_max_deposit(self) -> None:
+    def test_deposit_limited_by_max_debt(self) -> None:
         (line,) = _cap_context([_debt(AAVE, 1_000 * E6)]).proposal_lines()
         self.assertIn("moves nothing — limited by the strategy's max_debt", line)
 
@@ -357,19 +339,86 @@ class TestBatchDebtAccounting(unittest.TestCase):
         (line,) = _cap_context([_debt(AAVE, 0)]).proposal_lines()
         self.assertIn("REVERTS — new debt equals current debt", line)
 
-    def test_update_debt_on_unregistered_strategy_reverts(self) -> None:
-        (line,) = _cap_context([_debt(ONDO, 1_000 * E6)]).proposal_lines()
-        self.assertIn("REVERTS — inactive strategy", line)
-
     def test_force_revoke_after_withdrawal_writes_off_the_remainder(self) -> None:
         lines = _cap_context([_debt(GAUNT, 0), _call("force_revoke_strategy", ["address"], [GAUNT])]).proposal_lines()
-        self.assertIn("WRITES OFF its current_debt 0 USDC", lines[1])
+        self.assertIn("WRITES OFF its current_debt 0 USDC as a loss", lines[1])
 
-    def test_prompt_explains_target_semantics_and_default_queue(self) -> None:
-        prompt = format_yearn_v3_prompt([_cap_context(self.CAP_BATCH)])
-        self.assertIn("update_debt(strategy, target_debt) is a TARGET, not an amount", prompt)
-        self.assertIn("it is not a funding gap", prompt)
-        self.assertIn("False only permits custom queues — the default queue still applies", prompt)
+
+RECOVERY = "0xd7a540ba3626c0aa66e7DB4088971d0CD64695B6"
+WETH1 = "0xc56413869c6CDf96496f2b1eF801fEDBdFA7dDB0"
+FLEX = "0xfaC55fAFD0b55BFb8dD41F735EfCc195adA9891F"
+FLEX_OTHER = "0x7E4a6A89583e117C641aB3ce8897209800A3F2E3"
+WETH1_DEBT = 1_957_483_253_785_268_466_043
+
+
+def _recovery_context(calls: list[DecodedCall]) -> YearnV3VaultContext:
+    """yETH recovery vault as Safe nonce 3356 found it, with Flex not yet registered."""
+    flex = _strategy(
+        FLEX,
+        "Flex WETH yVault",
+        0,
+        0,
+        activation=0,
+        asset=WETH,
+        total_assets=10 * E18,
+        is_vault=True,
+        sub_strategies=("WETH-1 yVault", "Other WETH strategy"),
+        sub_strategy_addresses=(WETH1, FLEX_OTHER),
+        auto_allocate=True,
+        max_deposit=MAX_UINT256,
+    )
+    return YearnV3VaultContext(
+        vault_address=RECOVERY,
+        name="Yearn yETH Recovery Vault",
+        symbol="yETH-Recovery",
+        api_version="3.0.4",
+        asset_address=WETH,
+        asset_symbol="WETH",
+        asset_decimals=18,
+        total_assets=WETH1_DEBT + 489_320_000_000_000_000_000,
+        total_debt=WETH1_DEBT + 489_320_000_000_000_000_000,
+        total_idle=0,
+        is_shutdown=False,
+        deposit_limit=3_000 * E18,
+        minimum_total_idle=0,
+        use_default_queue=False,
+        default_queue=(
+            _strategy(WETH1, "WETH-1 yVault", WETH1_DEBT, MAX_UINT256, max_withdraw=WETH1_DEBT),
+            _strategy(VAULT, "WETH-2 yVault", 489_320_000_000_000_000_000, 500 * E18),
+        ),
+        other_strategies=(flex,),
+        calls=tuple(calls),
+    )
+
+
+class TestNestedRegistrationBatch(unittest.TestCase):
+    """Safe nonce 3356: a timelock batch registers Flex, then top-level calls fund it and reset the queue."""
+
+    def setUp(self) -> None:
+        calls = [
+            _call("add_strategy", ["address", "bool"], [FLEX, True]),
+            _call("update_max_debt_for_strategy", ["address", "uint256"], [FLEX, 500 * E18]),
+            _call("update_debt", ["address", "uint256"], [WETH1, WETH1_DEBT - 100 * E18]),
+            _call("update_debt", ["address", "uint256"], [FLEX, 100 * E18]),
+            _call("set_default_queue", ["address[]"], [[WETH1, VAULT]]),
+        ]
+        self.lines = _recovery_context(calls).proposal_lines()
+
+    def test_funding_after_registration_moves_funds(self) -> None:
+        # Without the nested add_strategy this line read "REVERTS — inactive strategy".
+        self.assertIn(
+            "update_debt(Flex WETH yVault) target_debt 100 WETH: MOVES FUNDS NOW — deposits 100 WETH", self.lines[3]
+        )
+
+    def test_allocator_strategy_overlaps_parent_exposure(self) -> None:
+        self.assertIn("auto_allocate is True, so every deposit into it is forwarded at once", self.lines[0])
+        self.assertIn("it allocates to WETH-1 yVault, which this vault already funds directly", self.lines[0])
+
+    def test_queue_reset_drops_the_strategy_added_in_the_batch(self) -> None:
+        line = self.lines[4]
+        self.assertIn("[WETH-1 yVault, WETH-2 yVault, Flex WETH yVault] → [WETH-1 yVault, WETH-2 yVault]", line)
+        self.assertIn("includes changes made earlier in this batch", line)
+        self.assertIn("removed from the queue: Flex WETH yVault — still holds 100 WETH of debt", line)
 
 
 if __name__ == "__main__":

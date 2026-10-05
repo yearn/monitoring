@@ -25,6 +25,7 @@ from eth_utils import to_checksum_address
 from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
 from utils.erc20_metadata import fetch_erc20_metadata
+from utils.formatting import format_asset_amount
 from utils.llm.report import address_link
 from utils.llm.yearn_v3_batch import DebtMove, VaultBatchState
 from utils.logger import get_logger
@@ -80,6 +81,8 @@ _VAULT_ABI = [
     _fn("deposit_limit", ["uint256"]),
     _fn("minimum_total_idle", ["uint256"]),
     _fn("use_default_queue", ["bool"]),
+    # 3.1+: when True, every deposit is pushed straight into the first default-queue strategy.
+    _fn("auto_allocate", ["bool"]),
     _fn("strategies", ["uint256", "uint256", "uint256", "uint256"], ["address"]),
     # ERC-4626 limits, read on a strategy with the vault as owner: what
     # update_debt can actually deposit into / redeem from it.
@@ -98,7 +101,6 @@ class StrategyState:
     activation: int
     current_debt: int
     max_debt: int
-    in_default_queue: bool
     # Read only for strategies the transaction names; None when unreadable.
     asset: str | None = None
     total_assets: int | None = None
@@ -106,6 +108,9 @@ class StrategyState:
     # of the strategies it allocates to.
     is_vault: bool = False
     sub_strategies: tuple[str, ...] = ()
+    sub_strategy_addresses: tuple[str, ...] = ()
+    # The allocator vault forwards deposits to its first queue strategy; None when unreadable.
+    auto_allocate: bool | None = None
     # ERC-4626 limits with the vault as owner, read only for named strategies;
     # None when unreadable. They bound what update_debt can move.
     max_deposit: int | None = None
@@ -176,12 +181,7 @@ class YearnV3VaultContext:
         """Render an asset-denominated amount with two truncated decimals."""
         if raw == MAX_UINT256:
             return "unlimited (max uint256)"
-        scale = 10**self.asset_decimals
-        whole, cents = raw // scale, (raw % scale) * 100 // scale
-        if whole == 0 and cents == 0 and raw > 0:
-            return f"<0.01 {self.asset_symbol}"
-        rendered = f"{whole:,}" if cents == 0 else f"{whole:,}.{cents:02d}"
-        return f"{rendered} {self.asset_symbol}"
+        return format_asset_amount(raw, self.asset_decimals, self.asset_symbol)
 
     def share_of_vault(self, raw: int) -> str:
         """Express an asset amount relative to the vault's totalAssets."""
@@ -216,8 +216,9 @@ class YearnV3VaultContext:
         lines: list[str] = []
         added: set[str] = set()
         state = self.batch_state()
+        queue = [s.address.lower() for s in self.default_queue]
         for call in self.calls:
-            line = self._proposal_line(call, added, state)
+            line = self._proposal_line(call, added, state, queue)
             if line:
                 lines.append(line)
         return lines
@@ -236,8 +237,8 @@ class YearnV3VaultContext:
                 state.strategies[strategy.address.lower()].current_debt = strategy.current_debt
         return state
 
-    def _proposal_line(self, call: DecodedCall, added: set[str], state: VaultBatchState) -> str:
-        """Describe one call against the vault state the earlier calls in the batch leave."""
+    def _proposal_line(self, call: DecodedCall, added: set[str], state: VaultBatchState, queue: list[str]) -> str:
+        """Describe one call against the vault state and default queue the earlier calls leave."""
         params = call.params
         name = call.function_name
         first = params[0][1] if params else None
@@ -258,12 +259,14 @@ class YearnV3VaultContext:
                     f"the vault asset {self.asset_symbol}"
                 )
             if add_to_queue:
-                queue_len = len(self.default_queue)
+                queue_len = len(queue)
                 parts.append(
-                    f"add_to_queue=True: appended to the default queue (holds {queue_len}/{MAX_QUEUE} before this batch)"
+                    f"add_to_queue=True: appended to the default queue (holds {queue_len}/{MAX_QUEUE} before this call)"
                     if queue_len < MAX_QUEUE
                     else f"add_to_queue=True but the default queue is full ({MAX_QUEUE}), so it is NOT appended"
                 )
+                if queue_len < MAX_QUEUE and not strategy.active:
+                    queue.append(strategy.address.lower())
             else:
                 withdrawals = (
                     "use_default_queue is True, so no withdrawal can pull from it — only update_debt recalls funds"
@@ -275,11 +278,7 @@ class YearnV3VaultContext:
                     f"{withdrawals}"
                 )
             if strategy.is_vault:
-                subs = ", ".join(strategy.sub_strategies) or "no strategies"
-                parts.append(
-                    f"the strategy is itself a Yearn V3 vault (totalAssets {self.optional_amount(strategy.total_assets)}"
-                    f"; allocates to: {subs})"
-                )
+                parts.extend(self._allocator_notes(strategy))
             elif strategy.total_assets is not None:
                 parts.append(f"strategy totalAssets {self.amount(strategy.total_assets)}")
             return "; ".join(parts) + "."
@@ -312,6 +311,8 @@ class YearnV3VaultContext:
             running = state.get(strategy.address)
             debt = running.current_debt if running is not None else strategy.current_debt
             state.revoke(strategy.address)
+            if strategy.address.lower() in queue:
+                queue.remove(strategy.address.lower())
             if name == "revoke_strategy":
                 return (
                     f"revoke_strategy({label}): removes it; reverts unless current_debt is 0 (now {self.amount(debt)})."
@@ -334,13 +335,55 @@ class YearnV3VaultContext:
             return f"set_use_default_queue: {self.use_default_queue} → {bool(params[0][1])}."
 
         if name == "set_default_queue" and params and isinstance(first, (list, tuple)):
-            new_queue = [self._name_of(str(a)) for a in first]
-            current_queue = [s.display for s in self.default_queue]
-            removed = [n for n in current_queue if n not in new_queue]
-            line = f"set_default_queue: [{', '.join(current_queue)}] → [{', '.join(new_queue)}]"
-            return line + (f"; removed from the queue: {', '.join(removed)}." if removed else ".")
+            return self._set_queue_line([str(a).lower() for a in first], state, queue)
 
         return ""
+
+    def _allocator_notes(self, strategy: StrategyState) -> list[str]:
+        """What a strategy that is itself a V3 vault does with the debt it receives."""
+        subs = ", ".join(strategy.sub_strategies) or "no strategies"
+        notes = [
+            f"the strategy is itself a Yearn V3 vault (totalAssets {self.optional_amount(strategy.total_assets)}"
+            f"; allocates to: {subs})"
+        ]
+        if strategy.auto_allocate and strategy.sub_strategies:
+            notes.append(
+                f"its auto_allocate is True, so every deposit into it is forwarded at once to its first "
+                f"queue strategy {strategy.sub_strategies[0]}"
+            )
+        shared = [
+            self._name_of(address)
+            for address in strategy.sub_strategy_addresses
+            if (held := self.strategy(address)) is not None and held.active
+        ]
+        if shared:
+            notes.append(
+                f"it allocates to {', '.join(shared)}, which this vault already funds directly — debt routed "
+                "through it is an extra vault layer over the same exposure, not diversification"
+            )
+        return notes
+
+    def _set_queue_line(self, new_queue: list[str], state: VaultBatchState, queue: list[str]) -> str:
+        """Compare the new default queue with the one the earlier calls in the batch leave."""
+        before = [self._name_of(a) for a in queue]
+        after = [self._name_of(a) for a in new_queue]
+        line = f"set_default_queue: [{', '.join(before)}] → [{', '.join(after)}]"
+        if [s.address.lower() for s in self.default_queue] != queue:
+            line += " (the queue before this call includes changes made earlier in this batch)"
+        removed: list[str] = []
+        for address in queue:
+            if address in new_queue:
+                continue
+            running = state.get(address)
+            debt = running.current_debt if running is not None and running.active else 0
+            note = (
+                f" — still holds {self.amount(debt)} of debt; ordinary withdrawals will no longer pull from it"
+                if debt
+                else ""
+            )
+            removed.append(f"{self._name_of(address)}{note}")
+        queue[:] = new_queue
+        return line + (f"; removed from the queue: {'; '.join(removed)}." if removed else ".")
 
     def _update_debt_line(self, label: str, move: DebtMove) -> str:
         """Expected effect of one update_debt, from the running batch state."""
@@ -403,7 +446,9 @@ def _read_strategy_details(client: Any, chain_id: int, address: str, vault: str)
     total_assets = _optional_call(contract.functions.totalAssets())
     sub_queue = _optional_call(contract.functions.get_default_queue())
     is_vault = isinstance(sub_queue, (list, tuple))
-    subs = tuple(_token_name(chain_id, str(a)) or str(a) for a in sub_queue) if is_vault else ()
+    sub_addresses = tuple(to_checksum_address(str(a)) for a in sub_queue) if is_vault else ()
+    subs = tuple(_token_name(chain_id, a) or a for a in sub_addresses)
+    auto_allocate = _optional_call(contract.functions.auto_allocate()) if is_vault else None
     max_deposit = _optional_call(contract.functions.maxDeposit(vault))
     max_redeem = _optional_call(contract.functions.maxRedeem(vault))
     max_withdraw = (
@@ -414,6 +459,8 @@ def _read_strategy_details(client: Any, chain_id: int, address: str, vault: str)
         "total_assets": int(total_assets) if isinstance(total_assets, int) else None,
         "is_vault": is_vault,
         "sub_strategies": subs,
+        "sub_strategy_addresses": sub_addresses,
+        "auto_allocate": auto_allocate if isinstance(auto_allocate, bool) else None,
         "max_deposit": int(max_deposit) if isinstance(max_deposit, int) else None,
         "max_withdraw": int(max_withdraw) if isinstance(max_withdraw, int) else None,
     }
@@ -472,7 +519,6 @@ def _read_vault_context(chain_id: int, vault: str, calls: list[DecodedCall]) -> 
             activation=int(activation),
             current_debt=int(current_debt),
             max_debt=int(max_debt),
-            in_default_queue=address in queue_addresses,
             **details,
         )
 

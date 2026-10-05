@@ -22,7 +22,7 @@ from utils.formatting import format_decimal_amount, normalize_token_amount, pars
 from utils.impl_diff import diff_implementations, format_impl_diff
 from utils.llm import get_llm_provider
 from utils.llm.base import LLMError, LLMProvider
-from utils.llm.protocol_context import resolve_protocol_context
+from utils.llm.protocol_context import expand_executed_calls, resolve_protocol_context
 from utils.llm.report import (
     TOKEN_MOVE_SIGS,
     CallEntry,
@@ -1038,6 +1038,24 @@ def _collect_address_labels(
     return {checksum: label for entry in results if entry for checksum, label in [entry]}
 
 
+def _label_executor(labels: dict[str, str], from_address: str, chain_id: int) -> None:
+    """Label the executing address (e.g. the Safe) when no call argument already did.
+
+    The executor is rarely a call argument, so the report's reference table
+    listed a watched Yearn Safe as unlabeled.
+    """
+    checksum = _checksum_or_none(from_address)
+    if checksum is None or int(checksum, 16) == 0 or checksum in labels:
+        return
+    try:
+        label = get_contract_label(chain_id, checksum)
+    except Exception as e:  # noqa: BLE001 - best-effort enrichment
+        logger.info("Executor label fetch failed for %s: %s", checksum, e)
+        return
+    if label:
+        labels[checksum] = label
+
+
 def _token_label(base: str, meta: ERC20Metadata) -> str:
     """Label a token with its on-chain name when the base label doesn't already carry it.
 
@@ -1931,16 +1949,19 @@ def explain_transaction(
         )
 
     decoded_calls = [decoded]
+    executed_calls = expand_executed_calls(chain_id, [(target, calldata, decoded)])
     proxy_upgrade_info = _get_proxy_upgrade_info(calldata, target, chain_id)
     source_contexts = _collect_source_contexts([(target, decoded)], chain_id)
     state_reads = _collect_state_reads([(target, decoded)], chain_id)
-    address_labels = _collect_address_labels([(target, decoded)], chain_id)
+    label_calls: list[tuple[str, DecodedCall | None]] = [*executed_calls]
+    address_labels = _collect_address_labels(label_calls, chain_id)
+    _label_executor(address_labels, from_address, chain_id)
     param_names = _collect_param_names([(target, decoded)], chain_id)
     safety_notes = _collect_safety_checks([(target, decoded, value)], chain_id)
     roles_by_target = _collect_role_names([(target, decoded)], chain_id)
     token_flows = _collect_token_flows([(target, decoded)], chain_id, address_labels)
     related_tokens = _collect_related_tokens([(target, decoded)], chain_id)
-    protocol_ctx = resolve_protocol_context(protocol, chain_id, [(target, decoded)], address_labels)
+    protocol_ctx = resolve_protocol_context(protocol, chain_id, executed_calls, address_labels)
     for address, context_label in protocol_ctx.labels.items():
         address_labels.setdefault(address, context_label)
 
@@ -2304,6 +2325,8 @@ def explain_batch_transaction(
     decoded_with_target = [(item.target, item.decoded) for item in decoded_items if item.decoded is not None]
     decoded_calls = [item.decoded for item in decoded_items if item.decoded is not None]
     all_targets_for_labels = [(item.target, item.decoded) for item in items]
+    # Inner calls of an executed timelock batch, spliced in after their wrapper.
+    executed_calls = expand_executed_calls(chain_id, [(item.target, item.data, item.decoded) for item in items])
 
     # Deduplicated across items too: a multisend that schedules and then
     # executes the same timelock operation must not diff each upgrade twice.
@@ -2312,7 +2335,8 @@ def explain_batch_transaction(
     )
     proxy_upgrade_info = _format_proxy_upgrades(batch_upgrades, chain_id)
 
-    address_labels = _collect_address_labels(all_targets_for_labels, chain_id)
+    address_labels = _collect_address_labels([*all_targets_for_labels, *executed_calls], chain_id)
+    _label_executor(address_labels, from_address, chain_id)
     decode_statuses = [_decode_status(item.data, item.decoded) for item in items]
     safety_notes = _collect_safety_checks(
         [(item.target, item.decoded, item.value) for item in items],
@@ -2340,7 +2364,7 @@ def explain_batch_transaction(
     roles_by_target = _collect_role_names(decoded_with_target, chain_id)
     token_flows = _collect_token_flows(decoded_with_target, chain_id, address_labels)
     related_tokens = _collect_related_tokens(decoded_with_target, chain_id)
-    protocol_ctx = resolve_protocol_context(protocol, chain_id, decoded_with_target, address_labels)
+    protocol_ctx = resolve_protocol_context(protocol, chain_id, executed_calls, address_labels)
     for address, context_label in protocol_ctx.labels.items():
         address_labels.setdefault(address, context_label)
 

@@ -24,11 +24,11 @@ It keys on call shape, not protocol, so every governance alert benefits.
 
 from dataclasses import dataclass
 
-from eth_abi import decode as abi_decode
-from eth_utils import function_signature_to_4byte_selector, to_checksum_address
+from eth_utils import to_checksum_address
 
 from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
+from utils.eth_view import call_view
 from utils.llm.abi_exposure import exposes
 from utils.llm.report import address_link
 from utils.logger import get_logger
@@ -220,30 +220,13 @@ class ControlTransferContext:
         return ""
 
 
-def _selector(signature: str) -> str:
-    """0x-prefixed 4-byte selector for a function signature."""
-    return "0x" + function_signature_to_4byte_selector(signature).hex()
-
-
-def _call(client: Web3Client, address: str, signature: str, output: str) -> object | None:
-    """eth_call a no-arg view and decode one output; None when it reverts or doesn't decode."""
-    try:
-        raw = client.eth.call({"to": address, "data": _selector(signature)})
-        if not raw:
-            return None
-        decoded: object = abi_decode([output], bytes(raw))[0]
-        return decoded
-    except Exception:  # noqa: BLE001 - absent getters and reverts are expected
-        return None
-
-
 def _code_hex(client: Web3Client, address: str) -> str:
     """Deployed bytecode as bare lowercase hex ("" for an EOA)."""
     code = client.eth.get_code(address)
     return bytes(code).hex().lower()
 
 
-def _describe_controller(chain_id: int, client: Web3Client, address: str, hops: int = 1) -> ControllerInfo:
+def describe_controller(chain_id: int, client: Web3Client, address: str, hops: int = 1) -> ControllerInfo:
     """Classify ``address`` and, for a plain contract, follow its own controller ``hops`` deep."""
     address = to_checksum_address(address)
     if address == ZERO_ADDRESS:
@@ -255,8 +238,8 @@ def _describe_controller(chain_id: int, client: Web3Client, address: str, hops: 
     if code.startswith(_EIP7702_PREFIX):
         return ControllerInfo(address=address, kind="eip7702", label=label)
 
-    threshold = _call(client, address, "getThreshold()", "uint256")
-    owners = _call(client, address, "getOwners()", "address[]")
+    threshold = call_view(client, address, "getThreshold()", "uint256")
+    owners = call_view(client, address, "getOwners()", "address[]")
     if isinstance(threshold, int) and isinstance(owners, (list, tuple)):
         return ControllerInfo(
             address=address, kind="safe", label=label, threshold=int(threshold), owner_count=len(owners)
@@ -266,9 +249,9 @@ def _describe_controller(chain_id: int, client: Web3Client, address: str, hops: 
     controller_getter = ""
     if hops > 0:
         for getter in _CONTROLLER_GETTERS:
-            holder = _call(client, address, f"{getter}()", "address")
+            holder = call_view(client, address, f"{getter}()", "address")
             if isinstance(holder, str) and int(holder, 16) != 0 and holder.lower() != address.lower():
-                controlled_by = _describe_controller(chain_id, client, holder, hops - 1)
+                controlled_by = describe_controller(chain_id, client, holder, hops - 1)
                 controller_getter = getter
                 break
     has_operators = exposes(chain_id, address, {"operators"})
@@ -285,7 +268,7 @@ def _describe_controller(chain_id: int, client: Web3Client, address: str, hops: 
 def _current_holder(client: Web3Client, target: str, role: _Role) -> str | None:
     """Address currently holding ``role`` on ``target``, read from its getter."""
     for getter in role.getters:
-        holder = _call(client, target, f"{getter}()", "address")
+        holder = call_view(client, target, f"{getter}()", "address")
         if isinstance(holder, str):
             return holder
     return None
@@ -293,7 +276,7 @@ def _current_holder(client: Web3Client, target: str, role: _Role) -> str | None:
 
 def _has_pending_slot(client: Web3Client, target: str, role: _Role) -> bool:
     """Whether ``target`` exposes a pending slot for ``role``."""
-    return any(_call(client, target, f"{getter}()", "address") is not None for getter in role.pending_getters)
+    return any(call_view(client, target, f"{getter}()", "address") is not None for getter in role.pending_getters)
 
 
 def _slot_key(name: str) -> str:
@@ -350,7 +333,7 @@ def _resolve_one(chain_id: int, client: Web3Client, target: str, call: DecodedCa
             target_label=get_contract_label(chain_id, target),
             signature=call.signature,
             role="role",
-            proposed=_describe_controller(chain_id, client, grantee),
+            proposed=describe_controller(chain_id, client, grantee),
             role_hash=role_hash,
         )
 
@@ -365,8 +348,8 @@ def _resolve_one(chain_id: int, client: Web3Client, target: str, call: DecodedCa
         target_label=get_contract_label(chain_id, target),
         signature=call.signature,
         role=role.name,
-        proposed=_describe_controller(chain_id, client, new_holder),
-        current=_describe_controller(chain_id, client, current) if current else None,
+        proposed=describe_controller(chain_id, client, new_holder),
+        current=describe_controller(chain_id, client, current) if current else None,
         two_step=_two_step(chain_id, target, call, role, pending_slot),
         pending_slot=pending_slot,
     )
@@ -413,7 +396,7 @@ def format_control_transfer_prompt(contexts: list[ControlTransferContext]) -> st
     return "\n\n".join("\n".join(context.lines()) for context in contexts)
 
 
-def _describe_markdown(info: ControllerInfo, chain_id: int, labels: dict[str, str]) -> str:
+def describe_controller_markdown(info: ControllerInfo, chain_id: int, labels: dict[str, str]) -> str:
     """Markdown twin of ``ControllerInfo.describe`` with explorer links."""
     link = address_link(info.address, chain_id, labels)
     if info.kind == "none":
@@ -426,7 +409,9 @@ def _describe_markdown(info: ControllerInfo, chain_id: int, labels: dict[str, st
         return f"{link} — Safe multisig, **{info.threshold}-of-{info.owner_count}**"
     parts = [f"{link} — contract"]
     if info.controlled_by is not None:
-        parts.append(f"its `{info.controller_getter}()` is {_describe_markdown(info.controlled_by, chain_id, labels)}")
+        parts.append(
+            f"its `{info.controller_getter}()` is {describe_controller_markdown(info.controlled_by, chain_id, labels)}"
+        )
     if info.has_operators:
         parts.append("keeps an **operator whitelist** (approved addresses act through it)")
     return "; ".join(parts)
@@ -446,9 +431,11 @@ def format_control_transfer_report(
         else:
             lines = [f"**`{context.signature}`** on {target} — hands over **{context.role}**"]
         if context.current is not None:
-            lines.append(f"- **Current {context.role}:** {_describe_markdown(context.current, chain_id, labels)}")
+            lines.append(
+                f"- **Current {context.role}:** {describe_controller_markdown(context.current, chain_id, labels)}"
+            )
         who = "Grantee" if context.role_hash else f"Proposed {context.role}"
-        lines.append(f"- **{who}:** {_describe_markdown(context.proposed, chain_id, labels)}")
+        lines.append(f"- **{who}:** {describe_controller_markdown(context.proposed, chain_id, labels)}")
         timing = context.timing_note()
         if timing:
             heading, _, detail = timing.partition(": ")

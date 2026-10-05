@@ -11,16 +11,23 @@ Adapters are responsible for their own guards: each returns an empty list for
 protocols and chains it does not handle, so registration order carries no
 meaning and adding a protocol is one row in ``_ADAPTERS``. Most guard on the
 alert's protocol; the Yearn V3 adapter guards on call shape and an on-chain
-``apiVersion()`` instead, because the same vault code is governed by Yearn and
-third-party curators alike, and the control-transfer adapter guards on call
-shape alone, since handing over management means the same thing everywhere.
+``apiVersion()`` instead (the tokenized-strategy adapter likewise on its
+getters), because the same vault code is governed by Yearn and
+third-party curators alike, and the control-transfer, permission-grant and
+timelock-execution adapters guard on call shape alone, since handing over
+management, opening an allowlist or releasing a timelock operation means the
+same thing everywhere.
+
+Adapters see the inner calls of an executed timelock batch as well as the
+wrapper (see :func:`expand_executed_calls`).
 """
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from utils.calldata.decoder import DecodedCall
+from utils.calldata.decoder import DecodedCall, decode_calldata
+from utils.calldata.wrappers import unwrap_executed_calls
 from utils.llm.control_transfer_context import (
     format_control_transfer_prompt,
     format_control_transfer_report,
@@ -41,10 +48,25 @@ from utils.llm.pendle_context import (
     format_pendle_report,
     resolve_pendle_context,
 )
+from utils.llm.permission_grant_context import (
+    format_permission_grant_prompt,
+    format_permission_grant_report,
+    resolve_permission_grant_context,
+)
 from utils.llm.threejane_context import (
     format_threejane_prompt,
     format_threejane_report,
     resolve_threejane_context,
+)
+from utils.llm.timelock_execution_context import (
+    format_timelock_execution_prompt,
+    format_timelock_execution_report,
+    resolve_timelock_execution_context,
+)
+from utils.llm.yearn_strategy_context import (
+    format_yearn_strategy_prompt,
+    format_yearn_strategy_report,
+    resolve_yearn_strategy_context,
 )
 from utils.llm.yearn_v3_context import (
     format_yearn_v3_prompt,
@@ -52,6 +74,7 @@ from utils.llm.yearn_v3_context import (
     resolve_yearn_v3_context,
 )
 from utils.logger import get_logger
+from utils.proxy import MAX_WRAPPER_DEPTH
 
 logger = get_logger("utils.llm.protocol_context")
 
@@ -73,12 +96,67 @@ _ADAPTERS: tuple[_Adapter, ...] = (
     _Adapter("pendle", resolve_pendle_context, format_pendle_prompt, format_pendle_report),
     _Adapter("yearn-v3", resolve_yearn_v3_context, format_yearn_v3_prompt, format_yearn_v3_report),
     _Adapter(
+        "yearn-strategy",
+        resolve_yearn_strategy_context,
+        format_yearn_strategy_prompt,
+        format_yearn_strategy_report,
+    ),
+    _Adapter(
         "control-transfer",
         resolve_control_transfer_context,
         format_control_transfer_prompt,
         format_control_transfer_report,
     ),
+    _Adapter(
+        "permission-grant",
+        resolve_permission_grant_context,
+        format_permission_grant_prompt,
+        format_permission_grant_report,
+    ),
+    _Adapter(
+        "timelock-execution",
+        resolve_timelock_execution_context,
+        format_timelock_execution_prompt,
+        format_timelock_execution_report,
+    ),
 )
+
+
+def expand_executed_calls(
+    chain_id: int,
+    calls: list[tuple[str, str, DecodedCall | None]],
+) -> list[tuple[str, DecodedCall]]:
+    """Decoded calls in execution order, with the inner calls of executing wrappers spliced in.
+
+    A Safe that runs a timelock ``executeBatch`` sends one call whose payloads
+    are the real actions. Adapters keyed on call shape saw only the wrapper: a
+    batch whose nested ``add_strategy`` registers a strategy that a later
+    top-level ``update_debt`` funds was reported as reverting on an inactive
+    strategy. Each wrapper is kept, followed by its decoded inner calls, so
+    adapters that explain the wrapper itself still see it.
+
+    Args:
+        chain_id: Chain the transaction executes on, for ABI-backed decoding.
+        calls: (target, calldata, decoded call or None) in execution order.
+
+    Returns:
+        (target, decoded call) pairs; undecodable calls are dropped.
+    """
+    expanded: list[tuple[str, DecodedCall]] = []
+
+    def visit(target: str, data: str, decoded: DecodedCall | None, depth: int) -> None:
+        if decoded is not None:
+            expanded.append((target, decoded))
+        if depth >= MAX_WRAPPER_DEPTH:
+            return
+        for inner in unwrap_executed_calls(data):
+            visit(
+                inner.target, inner.data, decode_calldata(inner.data, chain_id=chain_id, target=inner.target), depth + 1
+            )
+
+    for target, data, decoded in calls:
+        visit(target, data, decoded, 0)
+    return expanded
 
 
 @dataclass(frozen=True)
