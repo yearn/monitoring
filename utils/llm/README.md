@@ -125,7 +125,7 @@ Requires `TENDERLY_API_KEY`. Simulation failure is non-blocking — the pipeline
 
 Callers can pass `skip_simulation=True` to bypass Tenderly entirely. Safe multisend batches are simulated whenever that models the real execution. The Safe DELEGATECALLs into a canonical MultiSend/MultiSendCallOnly utility, and the utility sends each inner transaction with `operation == 0` as a plain CALL from the Safe. A batch made only of those is therefore exactly an ordered sequence of calls from the Safe, and it is simulated as one bundle from the Safe address (`is_simulatable_multisend`). Only batches with an inner DELEGATECALL, or with an unknown delegate target, skip simulation, because our plain-CALL simulator would produce a spurious revert for them.
 
-Timelock batches are simulated as one **sequential bundle** (`simulate_bundle`, Tenderly `simulate-bundle`): every call is sent from the executor in batch order, and each sees the state the earlier calls left — the way `executeBatch` runs them. Calls are **never simulated one by one**: out of batch order, a call that depends on an earlier one reverts falsely (`update_max_debt_for_strategy` before its `add_strategy`, or `OutlandFarm.setVault(vault)` before the `Accounting.setOracle` it needs), and an alert once reported exactly those false reverts after the bundle request failed and the code fell back to single-call simulations. Tenderly stops at the first revert; calls after it are marked `not reached`. When the bundle request itself fails, no call is simulated: the call flow says `Batch simulation: unavailable` and the prompt tells the model not to infer success or failure. Failed simulations are omitted from the risk prompt (Tenderly often false-reverts governance calls) but kept as call-flow diagnostics so a reviewer can see them without treating them as a predicted on-chain failure.
+Timelock batches are simulated as one **sequential bundle** (`simulate_bundle`, Tenderly `simulate-bundle`): every call is sent from the executor in batch order, and each sees the state the earlier calls left — the way `executeBatch` runs them. Calls are **never simulated one by one**: out of batch order, a call that depends on an earlier one reverts falsely (`update_max_debt_for_strategy` before its `add_strategy`, or `OutlandFarm.setVault(vault)` before the `Accounting.setOracle` it needs), and an alert once reported exactly those false reverts after the bundle request failed and the code fell back to single-call simulations. Tenderly stops at the first revert; calls after it are marked `not reached`. When the bundle request itself fails, no call is simulated: the call flow says `Batch simulation: unavailable` and the prompt tells the model not to infer success or failure. Failed simulations stay in the call flow as diagnostics. Tenderly names `require` strings but leaves custom errors as raw output, so the explainer decodes `call_trace.output` against the target's verified ABI (`utils/revert_decoder.py`, which also handles `Error(string)` and `Panic`). The call flow then shows `reverted with InvalidOracle(_asset=0x…)` instead of a bare "reverted". A revert that names a specific cause reaches the risk prompt as an **unmet prerequisite**: governance operations execute later than the simulation, so the model is told to assess the transaction once that prerequisite is met, not to call it failing or a no-op. Access-control reverts (the simulator's sender lacks the executor's role) and unnamed reverts are still omitted, because Tenderly false-reverts governance calls that way.
 
 ### 5. Proxy Upgrade Detection & Implementation Diff (`utils/proxy.py`, `utils/impl_diff.py`)
 
@@ -227,12 +227,32 @@ The result is added to the LLM prompt as verified protocol context and rendered 
 Onboarding a chain to Infinifi's cross-chain Outland spans several contracts whose calls carry no reviewable facts on their own. For Infinifi mainnet alerts, the adapter:
 
 1. Names the `FarmRegistry.addFarms` / `removeFarms` farm type from the `FarmTypes` library (`0 PROTOCOL`, `1 LIQUID`, `2 MATURITY`). For added MATURITY farms it reads `duration()` and `perpetual()`. A perpetual farm's `maturity()` is `now + duration`, a rolling notice period rather than a lock-up date; the old note said principal was "locked until maturity".
-2. For `Accounting.setOracle(asset, oracle)`, reads the oracle's `price()` and the asset's decimals and states the whole-token value in the reference unit (`price * 10^decimals / 1e36`, the `IOracle` convention under which USDC is ~1e30).
-3. For `PortalHub.setVault(vault)`, reads the vault's `chainId()` and the hub's registered chains, and says whether the call adds a chain or replaces a live vault.
-4. For connector calls naming a destination chain (`enableChainAsset`, `setCctpDomain`, …), reads `chainConfig(chainId)` and states whether the route can send. An unset peer/gas limit means `sendTokens` reverts until a separate `setConfiguration` — the call that sets the destination-side recipient of bridged funds — executes.
-5. Decodes `Connector.govReceive(chainId, message)` and `PortalHub.processMessage(chainId, message, connector)`. The message layout is `type | chainId | nonce | payload` (`OutlandMsgCodec`). `govReceive` queues a message as if the bridge had delivered it; it is gated by `PROTOCOL_PARAMETERS`, and its natspec asks for a 1-day timelock. The Short Timelock's delay has switched between 1h and 24h, so the adapter reads its current `getMinDelay()`. An assets-update payload is shown against the source chain's `OutlandVault.portalAssetsReport()`, because executing it mints or burns OutlandFarm shares, booking profit or loss on mainnet. The 21/09 and 22/09 alerts injected all-zero assets updates for Base, and their reports could not read them.
+2. For `PortalHub.setVault(vault)`, reads the vault's `chainId()` and the hub's registered chains, and says whether the call adds a chain or replaces a live vault.
+3. For connector calls naming a destination chain (`enableChainAsset`, `setCctpDomain`, …), reads `chainConfig(chainId)` and states whether the route can send. An unset peer/gas limit means `sendTokens` reverts until a separate `setConfiguration` — the call that sets the destination-side recipient of bridged funds — executes.
+4. Decodes `Connector.govReceive(chainId, message)` and `PortalHub.processMessage(chainId, message, connector)`. The message layout is `type | chainId | nonce | payload` (`OutlandMsgCodec`). `govReceive` queues a message as if the bridge had delivered it; it is gated by `PROTOCOL_PARAMETERS`, and its natspec asks for a 1-day timelock. The Short Timelock's delay has switched between 1h and 24h, so the adapter reads its current `getMinDelay()`. An assets-update payload is shown against the source chain's `OutlandVault.portalAssetsReport()`, because executing it mints or burns OutlandFarm shares, booking profit or loss on mainnet. The 21/09 and 22/09 alerts injected all-zero assets updates for Base, and their reports could not read them.
 
 Contracts are identified by the functions their verified ABI exposes (`utils/llm/abi_exposure.py`, following EIP-1967), not by hard-coded addresses. Failures are best-effort and never block the governance alert.
+
+### 5e-3. Infinifi Oracle Context (`utils/llm/infinifi_oracle_context.py`)
+
+For `Accounting.setOracle(asset, oracle)` on Infinifi mainnet alerts, the adapter reads the oracle's `price()` and the asset's decimals. It states the whole-token value in the reference unit (`price * 10^decimals / 1e36`, the `IOracle` convention under which USDC is ~1e30). When the oracle is Infinifi's `ChainlinkOracle` wrapper (it exposes `feed()` and `heartbeat()`), it also reads:
+
+- the feed's verified contract name and `description()`. "ChainlinkOracle" names the AggregatorV3 interface the wrapper reads, not who publishes the price: reUSD's feed is Re Protocol's own `NAVFeedProxy`, "reUSD NAV / USD".
+- the feed's last update and the wrapper's heartbeat. `price()` reverts with `StalePrice` once the feed is older than the heartbeat, so `Accounting.price(asset)` reverts with it.
+
+A report had said both were "not established" when they are one read away.
+
+### 5e-4. Infinifi Farm Context (`utils/llm/infinifi_farm_context.py`)
+
+Farm-configuration calls whose natspec alone was misread. Calls are resolved in batch order, so an earlier `setOracle`, `enableAssets` or `addFarms` in the same alert counts.
+
+- **`SwapFarmV2.setPairConfig(tokenIn, tokenOut, cooldown, slippage)`.** `_slippage` is documented as the "maximum slippage tolerance (in WAD)", but the code enforces `minAmountOut = convert(in, out, amountIn) × slippage`. It is a **minimum-output ratio**: `0.9995e18` allows at most a 0.05% loss against Accounting prices. A report read it as a 99.95% loss allowance and rated the batch HIGH. The adapter states this, along with:
+  - the farm-wide floor `maxSlippage`;
+  - the cooldown in seconds (it is compared with `block.timestamp`, capped by `_MAX_COOLDOWN`);
+  - the current pair configuration;
+  - whether both tokens are supported.
+- **`MultiAssetFarmV2.enableAssets(assets)`.** An asset needs an Accounting oracle, otherwise the call reverts with `InvalidOracle`. When the oracle comes from a separately scheduled `setOracle`, the adapter states the execution-order dependency, and the batch is assessed by its effect once the oracle exists, not as a failed transaction.
+- **`PendleV2FarmV3.setMaturityPTDiscount(factor)`.** The adapter reads `totalReceivedPTs`, `assets()`, `maturity()`, the PT and whether the farm is registered. It states the immediate change in reported assets: none when no PTs are held, otherwise maturity value × (new − old).
 
 ### 5f. 3Jane Governance Context (`utils/llm/threejane_context.py`, `threejane_account_context.py`)
 
@@ -507,17 +527,15 @@ Registers a new type-2 farm in FarmRegistry. …
      - [`0x79e1…971f`](https://etherscan.io/address/0x79e1…)
 ```
 
-The report also ends with a code-generated `## Reference` table after Call Flow:
+The report can end with a code-generated `## Reference` table after Call Flow. It lists only the addresses the rest of the report does not already link: the executor, alert contract, call targets, calldata arguments (nested calldata included) and addresses resolved by protocol adapters, minus any that appear in the body above it. The table is omitted when nothing is left.
 
 ```markdown
-| Address | Label | Role | Description |
-|---|---|---|---|
-| [`0x4B174afbeD7b98BA01F50E36109EEE5e6d327c32`](https://etherscan.io/address/0x4B174afbeD7b98BA01F50E36109EEE5e6d327c32) | Infinifi Shorttimelock | Executor | **Executor:** Execution authority for the governance transaction |
-| [`0x11F6FAb3f4D8635880C3e80cbae8AEF8136D4189`](https://etherscan.io/address/0x11F6FAb3f4D8635880C3e80cbae8AEF8136D4189) | RWAEscrowRateManager | Call target | **Call target:** Receives `setRate(address,uint256)` |
-| [`0xE4C72b4dE5b0F9ACcEA880Ad0b1F944F85A9dAA0`](https://etherscan.io/address/0xE4C72b4dE5b0F9ACcEA880Ad0b1F944F85A9dAA0) | New Silver Series 2 DROP | Protocol context | **Protocol context:** Resolved by the INFINIFI protocol adapter |
+| Address | Label | Role |
+|---|---|---|
+| [`0xE4C72b4dE5b0F9ACcEA880Ad0b1F944F85A9dAA0`](https://etherscan.io/address/0xE4C72b4dE5b0F9ACcEA880Ad0b1F944F85A9dAA0) | New Silver Series 2 DROP | Protocol context |
 ```
 
-The table deduplicates the executor, alert contract, call targets, address-valued calldata arguments, and addresses introduced by protocol adapters. Every description is prefixed with its role so multi-use addresses remain unambiguous. Roles and descriptions come from those deterministic relationships; the LLM does not generate them.
+It used to list every address with a Description column that restated the call flow ("Passed as `_asset` to `setOracle`"). That doubled the report without adding information. The DETAIL prompt likewise asks for limitations once, in a final `### Not verified` list of at most four bullets. It also asks for no standalone address lists and no tables repeating Current State or Protocol Context. A report had spent about 40% of its text on per-paragraph caveats.
 
 **Call Flow is built in Python, not asked of the LLM** — it comes straight from the
 input calls (`CallEntry` per call: original 1-based index, target, signature or
@@ -604,6 +622,8 @@ utils/llm/
 ├── credits.py               # Venice low-balance alert, run at the start of Safe/timelock monitors
 ├── factory.py               # Provider factory with env-based config + singleton
 ├── infinifi_context.py      # Infinifi adapter: escrow → farm, custody, setRate APR, whitelist calls
+├── infinifi_oracle_context.py # Infinifi setOracle: price in reference units, wrapped feed, heartbeat
+├── infinifi_farm_context.py # Infinifi farms: swap-pair min-output ratio, enableAssets oracle, PT discount
 ├── openai_compat.py         # OpenAI-compatible provider (Venice, OpenAI, etc.)
 ├── pendle_context.py        # PendleSwap upgrades: router integration, owner, complete source members
 ├── protocol_context.py      # Registry fanning one call out to every protocol adapter
@@ -635,6 +655,7 @@ utils/storage_scope.py       # Code that can touch proxy storage: inheritance ch
 utils/storage_access.py      # Slot accessors (with bounded root resolution), raw sload/sstore, delegatecall
 utils/namespaced_storage.py  # Non-positional storage: namespaces, roots, gaps and conflicts
 utils/tenderly/simulation.py # Tenderly Simulation API client
+utils/revert_decoder.py      # Revert payload → Error(string) / Panic / custom error from a verified ABI
 utils/calldata/              # Selector resolver + ABI decoder + governance wrapper unwrapping (wrappers.py)
 safe/multisend.py            # Safe multisend inner-call extractor, simulatable check, DELEGATECALL context note
 ```

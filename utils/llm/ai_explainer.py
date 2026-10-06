@@ -44,10 +44,12 @@ from utils.proxy import (
     get_current_implementation,
 )
 from utils.related_tokens import RelatedToken, format_related_tokens_block, resolve_related_tokens
+from utils.revert_decoder import decode_revert
 from utils.risk_anchors import RiskAnchor, format_anchors_block
 from utils.risk_anchors import lookup as lookup_risk_anchor
 from utils.source_context import (
     SourceContext,
+    fetch_abi_entries,
     fetch_function_input_names,
     format_source_context,
     get_contract_label,
@@ -82,6 +84,15 @@ DETAIL: thorough analysis rendered as markdown (it is published as a web page), 
 - State changes and their impact
 - Risk assessment with explicit reasoning
 - Any concerns or notable observations
+
+Keep DETAIL lean:
+- State each limitation once. If something material to the verdict could not be verified
+  from the supplied context, list it under a final `### Not verified` heading (at most 4
+  short bullets). Do not caveat every paragraph, and do not enumerate what the context
+  happened to omit unless it changes the risk.
+- Do not add a standalone list of contracts or addresses (the report's Call Flow and
+  Reference sections already link them), and do not rebuild tables of values the Current
+  State or Protocol Context sections already show — quote the before→after in prose.
 
 Address hyperlink rule (applies to DETAIL only):
 - EVERY address you mention must be a markdown link to the block explorer, never a
@@ -250,7 +261,9 @@ You have already produced this confirmed TLDR for the transaction:
 
 Write ONLY the thorough DETAIL analysis now, as markdown. Cover what each call does and
 why, parameter values and significance, asset/token flow, state changes, and an explicit
-risk rationale. It MUST stay fully consistent with the TLDR above — same magnitudes,
+risk rationale. Keep it lean: put limitations once in a final `### Not verified` list
+(at most 4 bullets, omitted when nothing material is unverified), no standalone address
+lists, no tables that repeat the Current State or Protocol Context sections. It MUST stay fully consistent with the TLDR above — same magnitudes,
 same risk level. Do not contradict its numbers or verdict and do not restate it
 verbatim; expand on the reasoning.
 
@@ -507,17 +520,77 @@ def _simulation_note(
         if independent:
             return f"**Independent simulation:** SUCCESS{gas} (does not prove the batch succeeds atomically)"
         return f"**Simulation:** SUCCESS{gas}"
-    error = sim.error_message or "reverted"
+    error = f"reverted with `{sim.error_message}`" if sim.error_message else "reverted"
+    handling = (
+        "shown to the risk prompt as an unmet prerequisite"
+        if _is_informative_revert(sim)
+        else "omitted from the risk prompt"
+    )
     if sequential:
         return (
             f"**Batch simulation diagnostic:** {error} when run in batch order — not a predicted governance "
-            "failure (omitted from the risk prompt; later calls were not simulated)"
+            f"failure ({handling})"
         )
     independent_note = "independent simulation; " if independent else ""
-    return (
-        f"**Simulation diagnostic:** {error} — not a predicted governance failure "
-        f"({independent_note}omitted from the risk prompt)"
-    )
+    return f"**Simulation diagnostic:** {error} — not a predicted governance failure ({independent_note}{handling})"
+
+
+SIMULATION_PREREQUISITE_NOTE = (
+    "Simulations run against current chain state, while governance operations execute later (after a timelock "
+    "delay or signatures). A revert here usually means a prerequisite outside this transaction is not met yet — a "
+    "separately scheduled operation that has not executed, an unset oracle, a missing role or balance. Assess the "
+    "transaction by what it does once that prerequisite is met: state the dependency, but do not describe the "
+    "transaction as failing or as having no effect, and do not lower the risk for that reason."
+)
+
+
+def _with_revert_reason(sim: SimulationResult | None, target: str, chain_id: int) -> SimulationResult | None:
+    """Name a failed simulation's revert from the target's verified ABI when Tenderly left it unnamed.
+
+    Tenderly decodes ``require`` strings but reports custom errors as raw bytes;
+    the reason ("InvalidOracle(reUSD)") usually explains the revert outright.
+    """
+    if sim is None or sim.success or sim.error_message or not sim.revert_data:
+        return sim
+    abi = list(fetch_abi_entries(chain_id, target) or [])
+    implementation = get_current_implementation(target, chain_id)
+    if implementation and implementation.lower() != target.lower():
+        abi.extend(fetch_abi_entries(chain_id, implementation) or [])
+    reason = decode_revert(sim.revert_data, abi)
+    return replace(sim, error_message=reason) if reason else sim
+
+
+# Reverts that come from the simulator rather than the transaction: Tenderly runs
+# the call from a sender that may not hold the executor's role. These stay out
+# of the prompt, as do bare "reverted" messages that name nothing.
+_ACCESS_REVERT_RE = re.compile(
+    r"unauthori[sz]ed|not[ _]?authori[sz]ed|access[ _]?control|caller is not|not (?:the )?owner|ownable|"
+    r"missing[ _]?role|only[a-z_]*role",
+    re.IGNORECASE,
+)
+_UNNAMED_REVERTS = {"", "reverted", "execution reverted"}
+
+
+def _is_informative_revert(sim: SimulationResult | None) -> bool:
+    """Whether a failed simulation names a cause worth showing the model.
+
+    Only a specific reason qualifies ("InvalidOracle(_asset=0x…)"): it usually
+    names an unmet prerequisite, such as a separately scheduled operation. An
+    access-control revert is the simulator's sender lacking the executor's role,
+    and an unnamed revert explains nothing; both bias the model toward a
+    failure that would not happen.
+    """
+    if sim is None or sim.success:
+        return False
+    reason = sim.error_message.strip()
+    return reason.lower() not in _UNNAMED_REVERTS and not _ACCESS_REVERT_RE.search(reason)
+
+
+def _simulation_diagnostic(sim: SimulationResult | None, call: str) -> str:
+    """Prompt line for an informative simulated revert; "" otherwise."""
+    if sim is None or not _is_informative_revert(sim):
+        return ""
+    return f"{call} reverted in simulation with {sim.error_message}."
 
 
 def _collect_state_reads(
@@ -1277,6 +1350,9 @@ def _format_batch_simulation_section(items: list[_PreparedCall], labels: dict[st
             "Do not infer that any call succeeds or reverts."
         )
     blocks: list[str] = []
+    diagnostics = [
+        line for item in items if (line := _simulation_diagnostic(item.simulation, f"Call {item.index} (batch order)"))
+    ]
     full = 0
     condensed = 0
     for item in items:
@@ -1300,6 +1376,8 @@ def _format_batch_simulation_section(items: list[_PreparedCall], labels: dict[st
             f"{condensed} further successful simulations are shown as token transfers only; "
             "their state changes and events are omitted from this prompt."
         )
+    if diagnostics:
+        blocks.append("\n".join([*diagnostics, SIMULATION_PREREQUISITE_NOTE]))
     return "\n\n".join(blocks)
 
 
@@ -1591,7 +1669,7 @@ def _build_prompt(
             "\n--- Protocol Context (verified source, integration references and live on-chain reads) ---\n"
             "Resolved identities, hashes, decimals, units and current values are VERIFIED facts. "
             "State supplied facts; do not call them unavailable. Distinguish documented integration "
-            "architecture from live observations, and preserve any explicit validation limits.\n" + protocol_context
+            "architecture from live observations.\n" + protocol_context
         )
 
     if source_contexts:
@@ -1967,6 +2045,7 @@ def explain_transaction(
 
     simulation: SimulationResult | None = None
     simulation_for_report: SimulationResult | None = None
+    single_diagnostic = ""
     if not skip_simulation:
         simulation = _with_onchain_symbols(
             simulate_transaction(
@@ -1978,10 +2057,12 @@ def explain_transaction(
             ),
             chain_id,
         )
+        simulation = _with_revert_reason(simulation, target, chain_id)
         simulation_for_report = simulation
         if simulation:
             logger.info("Simulation completed: success=%s gas=%s", simulation.success, simulation.gas_used)
             if not simulation.success:
+                single_diagnostic = _simulation_diagnostic(simulation, "This call")
                 # Tenderly often misreports legitimate governance calls as reverting
                 # (wrong msg.sender, missing storage overrides). Including a failed
                 # sim in the prompt biases the LLM toward "this tx will revert"
@@ -2017,6 +2098,7 @@ def explain_transaction(
         address_links=address_links,
         related_tokens=format_related_tokens_block(related_tokens, address_labels),
         protocol_context=protocol_ctx.prompt,
+        simulation_section=f"{single_diagnostic}\n{SIMULATION_PREREQUISITE_NOTE}" if single_diagnostic else "",
     )
     logger.info("Full AI context for %s:\n%s", target, prompt)
 
@@ -2110,7 +2192,7 @@ def _prepare_batch_items(
             if bundle is None:
                 unsimulated_reason = "bundle_unavailable"
             else:
-                simulation = _with_onchain_symbols(bundle[position], chain_id)
+                simulation = _with_revert_reason(_with_onchain_symbols(bundle[position], chain_id), target, chain_id)
                 if simulation is None:
                     unsimulated_reason = "not_reached"
                 elif not simulation.success:

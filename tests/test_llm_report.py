@@ -354,26 +354,25 @@ class TestReferenceTable(unittest.TestCase):
 
         table = format_reference_table(ctx)
 
-        self.assertIn("| Address | Label | Role | Description |", table)
+        self.assertIn("| Address | Label | Role |", table)
         self.assertIn(f"| [`{TIMELOCK}`](https://etherscan.io/address/{TIMELOCK}) | Infinifi Shorttimelock |", table)
         self.assertIn(
             f"| [`{REGISTRY}`](https://etherscan.io/address/{REGISTRY}) | FarmRegistry | Call target |", table
         )
-        self.assertIn("Receives `addFarms(uint256,address[])`", table)
-        self.assertIn("New Silver 2 Senior | Calldata argument; Protocol context", table)
-        self.assertIn("Passed as `_farms` to `addFarms(uint256,address[])`", table)
-        self.assertIn("New Silver Series 2 DROP | Protocol context", table)
+        self.assertIn("New Silver 2 Senior | Calldata argument; Protocol context |", table)
+        self.assertIn("New Silver Series 2 DROP | Protocol context |", table)
+        self.assertNotIn("Passed as", table)
 
-    def test_deduplicates_repeated_addresses_and_descriptions(self) -> None:
+    def test_deduplicates_repeated_addresses_and_roles(self) -> None:
         call = _add_farms_ctx().entries[0]
         ctx = _add_farms_ctx(entries=[call, call], related_addresses=[REGISTRY])
 
         table = format_reference_table(ctx)
 
         self.assertEqual(table.count(f"| [`{REGISTRY}`](https://etherscan.io/address/{REGISTRY})"), 1)
-        self.assertEqual(table.count("Receives `addFarms(uint256,address[])`"), 1)
+        self.assertIn("| FarmRegistry | Call target; Protocol context |", table)
 
-    def test_keeps_each_description_paired_with_its_role(self) -> None:
+    def test_merges_every_role_of_one_address(self) -> None:
         set_rate = DecodedCall(function_name="setRate", signature="setRate(uint256)", params=[("uint256", 1)])
         pause = DecodedCall(function_name="pause", signature="pause()")
         set_owner = DecodedCall(
@@ -391,10 +390,7 @@ class TestReferenceTable(unittest.TestCase):
 
         row = next(line for line in format_reference_table(ctx).splitlines() if line.startswith(f"| [`{REGISTRY}`]"))
 
-        self.assertIn("| Call target; Calldata argument |", row)
-        self.assertIn("**Call target:** Receives `setRate(uint256)`", row)
-        self.assertIn("**Call target:** Receives `pause()`", row)
-        self.assertIn("**Calldata argument:** Passed as `owner` to `setOwner(address)`", row)
+        self.assertTrue(row.endswith("| Call target; Calldata argument |"))
 
     def test_escapes_dynamic_table_text(self) -> None:
         ctx = _add_farms_ctx(labels={REGISTRY: "Farm | Registry\nMain"})
@@ -407,8 +403,7 @@ class TestReferenceTable(unittest.TestCase):
 
         table = format_reference_table(ctx)
 
-        self.assertIn(f"[`{FARM_CKS}`](https://etherscan.io/address/{FARM_CKS})", table)
-        self.assertIn("to `transfer(address,uint256)`", table)
+        self.assertIn(f"[`{FARM_CKS}`](https://etherscan.io/address/{FARM_CKS}) | — | Calldata argument |", table)
 
     def test_includes_addresses_from_bytes_array_payloads(self) -> None:
         transfer = "0xa9059cbb" + FARM[2:].zfill(64) + f"{1:064x}"
@@ -421,8 +416,7 @@ class TestReferenceTable(unittest.TestCase):
 
         table = format_reference_table(ctx)
 
-        self.assertIn(f"[`{FARM_CKS}`](https://etherscan.io/address/{FARM_CKS})", table)
-        self.assertIn("to `transfer(address,uint256)`", table)
+        self.assertIn(f"[`{FARM_CKS}`](https://etherscan.io/address/{FARM_CKS}) | — | Calldata argument |", table)
 
     def test_includes_addresses_from_tuple_payloads(self) -> None:
         transfer = "0xa9059cbb" + FARM[2:].zfill(64) + f"{1:064x}"
@@ -435,22 +429,35 @@ class TestReferenceTable(unittest.TestCase):
 
         table = format_reference_table(ctx)
 
-        self.assertIn(f"[`{FARM_CKS}`](https://etherscan.io/address/{FARM_CKS})", table)
-        self.assertIn("to `transfer(address,uint256)`", table)
+        self.assertIn(f"[`{FARM_CKS}`](https://etherscan.io/address/{FARM_CKS}) | — | Calldata argument |", table)
 
     def test_empty_without_addresses(self) -> None:
         self.assertEqual(format_reference_table(ReportContext()), "")
 
+    def test_addresses_already_shown_are_skipped(self) -> None:
+        """The call flow links every target and argument; the table must not repeat them."""
+        ctx = _add_farms_ctx(related_addresses=[DROP])
+        table = format_reference_table(ctx, shown=f"see {REGISTRY.lower()} and {FARM_CKS} and {TIMELOCK}")
+        self.assertNotIn(REGISTRY, table)
+        self.assertNotIn(FARM_CKS, table)
+        self.assertIn(DROP, table)
+
+    def test_nothing_left_to_list_omits_the_table(self) -> None:
+        ctx = _add_farms_ctx()
+        self.assertEqual(format_reference_table(ctx, shown=f"{REGISTRY} {FARM_CKS} {TIMELOCK}"), "")
+
 
 class TestBuildReport(unittest.TestCase):
     def test_sections_in_order(self) -> None:
-        report = build_report("Registers a type-2 farm.", "Long analysis.", _add_farms_ctx(), "MEDIUM")
+        # DROP is resolved by protocol context but never linked in the body, so it gets a Reference row.
+        ctx = _add_farms_ctx(related_addresses=[DROP])
+        report = build_report("Registers a type-2 farm.", "Long analysis.", ctx, "MEDIUM")
         self.assertLess(report.index("## Summary"), report.index("## Analysis"))
         self.assertLess(report.index("## Analysis"), report.index("## Call Flow"))
         self.assertLess(report.index("## Call Flow"), report.index("## Reference"))
 
     def test_protocol_context_is_deterministic_section_after_call_flow(self) -> None:
-        ctx = _add_farms_ctx(protocol_context="- **Farm:** New Silver 2 Senior")
+        ctx = _add_farms_ctx(protocol_context="- **Farm:** New Silver 2 Senior", related_addresses=[DROP])
         report = build_report("Updates the rate.", "Long analysis.", ctx, "LOW")
         self.assertIn("## Protocol Context\n\n- **Farm:** New Silver 2 Senior", report)
         self.assertLess(report.index("## Analysis"), report.index("## Call Flow"))
@@ -489,6 +496,10 @@ class TestBuildReport(unittest.TestCase):
 
     def test_empty_without_content(self) -> None:
         self.assertEqual(build_report("", "", _add_farms_ctx(entries=[])), "")
+
+    def test_reference_omitted_when_the_body_links_every_address(self) -> None:
+        report = build_report("Summary.", "Analysis.", _add_farms_ctx())
+        self.assertNotIn("## Reference", report)
 
     def test_call_flow_without_llm_prose(self) -> None:
         report = build_report("", "", _add_farms_ctx())
@@ -625,8 +636,7 @@ class TestUndecodedCallEntries(unittest.TestCase):
             ]
         )
         table = format_reference_table(ctx)
-        self.assertIn(FARM_CKS, table)
-        self.assertIn("undecoded calldata", table)
+        self.assertIn(f"[`{FARM_CKS}`](https://etherscan.io/address/{FARM_CKS}) | — | Call target |", table)
 
     def test_all_unknown_report_has_no_risk_tag(self) -> None:
         ctx = _add_farms_ctx(

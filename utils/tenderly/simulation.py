@@ -53,6 +53,9 @@ class SimulationResult:
     logs: list[dict[str, Any]] = field(default_factory=list)
     error_message: str = ""
     raw_response: dict[str, Any] = field(default_factory=dict)
+    # Raw revert payload (0x-hex) of a failed call, for decoding custom errors
+    # Tenderly leaves unnamed (``error_message`` is empty for those).
+    revert_data: str = ""
 
 
 def _get_simulation_url() -> str:
@@ -191,6 +194,7 @@ def _parse_transaction(tx: dict[str, Any], raw_response: dict[str, Any]) -> Simu
     # Single simulations report gas inside transaction_info; bundle results only on the transaction.
     gas_used = int(tx_info.get("gas_used") or tx.get("gas_used") or 0)
     error_message = "" if success else ((tx_info.get("stack_trace") or [{}])[0].get("error_reason") or "")
+    revert_data = "" if success else str((tx_info.get("call_trace") or {}).get("output") or "")
     return SimulationResult(
         success=success,
         gas_used=gas_used,
@@ -199,6 +203,7 @@ def _parse_transaction(tx: dict[str, Any], raw_response: dict[str, Any]) -> Simu
         logs=tx_info.get("logs", []) or [],
         error_message=error_message,
         raw_response=raw_response,
+        revert_data=revert_data if revert_data.startswith("0x") else "",
     )
 
 

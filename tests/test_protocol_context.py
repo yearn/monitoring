@@ -85,6 +85,8 @@ class TestResolveProtocolContext(unittest.TestCase):
             {
                 "infinifi",
                 "infinifi-outland",
+                "infinifi-oracle",
+                "infinifi-farm",
                 "3jane",
                 "pendle",
                 "yearn-v3",

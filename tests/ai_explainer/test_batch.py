@@ -6,6 +6,10 @@ from unittest.mock import MagicMock, patch
 from utils.calldata.decoder import DecodedCall
 from utils.llm.ai_explainer import (
     MAX_INLINE_UNDECODED_CALLS,
+    _format_batch_simulation_section,
+    _is_informative_revert,
+    _PreparedCall,
+    _with_revert_reason,
     explain_batch_transaction,
     explain_transaction,
 )
@@ -361,7 +365,11 @@ class TestBatchSequentialSimulation(unittest.TestCase):
         self.assertIn("Call 1 (simulated in batch order, first call):", prompt)
         self.assertNotIn("independent simulation", prompt)
         self.assertNotIn("not authorized", prompt)
-        self.assertIn("**Batch simulation diagnostic:** execution reverted: not authorized", result.report)
+        self.assertIn(
+            "**Batch simulation diagnostic:** reverted with `execution reverted: not authorized` when run in batch "
+            "order — not a predicted governance failure (omitted from the risk prompt)",
+            result.report,
+        )
         self.assertIn("**Batch simulation:** not reached — call 2 reverted first in batch order", result.report)
 
     @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
@@ -411,3 +419,52 @@ class TestBatchSequentialSimulation(unittest.TestCase):
         explain_batch_transaction(calls=self.CALLS, chain_id=1, skip_simulation=True, refine=False)
         mock_bundle.assert_not_called()
         mock_simulate.assert_not_called()
+
+
+class TestInformativeSimulationReverts(unittest.TestCase):
+    """A simulated revert that names its cause reaches the prompt as a prerequisite, not a failure."""
+
+    ORACLE_REVERT = "0x1f9360170000000000000000000000005086bf358635b81d8c47c66d1c8b9e567db70c72"
+    ERRORS_ABI = [{"type": "error", "name": "InvalidOracle", "inputs": [{"name": "_asset", "type": "address"}]}]
+
+    @patch("utils.llm.ai_explainer.get_current_implementation", return_value=None)
+    @patch("utils.llm.ai_explainer.fetch_abi_entries")
+    def test_custom_error_is_decoded_from_the_target_abi(self, mock_abi: MagicMock, _impl: MagicMock) -> None:
+        mock_abi.return_value = self.ERRORS_ABI
+        sim = SimulationResult(success=False, revert_data=self.ORACLE_REVERT)
+        decoded = _with_revert_reason(sim, "0x90787c1b99F47EFfEE0db0aB9D4e33CdC3e6bFa7", 1)
+        assert decoded is not None
+        self.assertEqual(decoded.error_message, "InvalidOracle(_asset=0x5086bf358635B81D8C47C66d1C8b9E567Db70c72)")
+
+    @patch("utils.llm.ai_explainer.fetch_abi_entries")
+    def test_named_reason_is_not_overwritten(self, mock_abi: MagicMock) -> None:
+        sim = SimulationResult(success=False, error_message="paused", revert_data=self.ORACLE_REVERT)
+        self.assertIs(_with_revert_reason(sim, "0xT", 1), sim)
+        mock_abi.assert_not_called()
+
+    def test_prerequisite_revert_is_in_the_batch_prompt(self) -> None:
+        items = [
+            _PreparedCall(
+                index=1,
+                target="0xT",
+                data=PAUSE_DATA,
+                value=0,
+                decoded=PAUSE,
+                simulation=SimulationResult(success=False, error_message="InvalidOracle(_asset=0x5086)"),
+                sequential=True,
+            )
+        ]
+        section = _format_batch_simulation_section(items)
+        self.assertIn("Call 1 (batch order) reverted in simulation with InvalidOracle(_asset=0x5086).", section)
+        self.assertIn("do not describe the transaction as failing or as having no effect", section)
+
+    def test_access_and_unnamed_reverts_stay_out(self) -> None:
+        for reason in (
+            "execution reverted: not authorized",
+            "AccessControlUnauthorizedAccount(0x1, 0x2)",
+            "reverted",
+            "",
+        ):
+            with self.subTest(reason=reason):
+                sim = SimulationResult(success=False, error_message=reason)
+                self.assertFalse(_is_informative_revert(sim))

@@ -38,6 +38,18 @@ class TestSimulationStatus(unittest.TestCase):
                 self.assertIs(result.success, expected)
                 self.assertEqual(result.error_message, "" if expected else "execution reverted")
 
+    def test_failed_call_keeps_its_raw_revert_data(self) -> None:
+        """Tenderly names require strings but leaves custom errors as raw output; keep it for decoding."""
+        output = "0x1f9360170000000000000000000000005086bf358635b81d8c47c66d1c8b9e567db70c72"
+        tx = {"status": False, "transaction_info": {"call_trace": {"output": output}, "stack_trace": [{}]}}
+        result = _parse_transaction(tx, raw_response={})
+        self.assertEqual(result.revert_data, output)
+        self.assertEqual(result.error_message, "")
+
+    def test_successful_call_has_no_revert_data(self) -> None:
+        tx = {"status": True, "transaction_info": {"call_trace": {"output": "0x01"}}}
+        self.assertEqual(_parse_transaction(tx, raw_response={}).revert_data, "")
+
     def test_missing_status_is_not_success(self) -> None:
         result = _parse_transaction({}, raw_response={})
         self.assertIs(result.success, False)
