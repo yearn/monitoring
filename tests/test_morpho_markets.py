@@ -464,6 +464,15 @@ class TestMorphoCollateralLiquidity(unittest.TestCase):
             check_low_liquidity(self._v2_vault(0, self._market(90_000, 4_999)))
             send.assert_called_once()
 
+    def test_v2_low_liquidity_alerts_on_adapter_position_despite_ample_market_cash(self) -> None:
+        # The adapter can only pull its own 4% position even though the market holds
+        # 10x the vault in free cash; market cash alone must not suppress the alert.
+        with patch("protocols.morpho.markets_v2.send_alert") as send:
+            check_low_liquidity(self._v2_vault(0, self._market(4_000, 1_000_000)))
+
+        send.assert_called_once()
+        self.assertIn("$4,000.00 (4.0% of $100,000.00)", send.call_args.args[0].message)
+
     def test_v2_low_liquidity_alert_names_liquidity_adapter_market(self) -> None:
         vault = self._v2_vault(1_000, self._market(90_000, 2_000))
 
