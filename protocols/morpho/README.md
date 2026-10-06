@@ -51,7 +51,7 @@ Bad debt is fetched from the Morpho GraphQL API. Each market is checked for bad 
 
 ### Liquidity
 
-The standard check alerts when immediately withdrawable vault liquidity falls below the shared threshold in [risk.py](./risk.py). YV-collateral strategy vaults use the market-aware coverage check below instead of the standard percentage threshold.
+The standard check alerts when immediately withdrawable vault liquidity falls below a share of vault assets set in [risk.py](./risk.py): 1% for V1 (`LIQUIDITY_THRESHOLD`) and 5% for V2 (`V2_LIQUIDITY_THRESHOLD`). V2 is stricter because a Vault V2 serves withdrawals only from idle assets plus its single **liquidity adapter**: `withdraw` deallocates from the adapter's market (`liquidityData`), not from every allocation, so withdrawable liquidity is `idle + min(adapter supply, market cash)` in that one market. The API's `liquidityUsd` reports exactly this value (checked against on-chain reads). V2 alerts also show the idle/adapter split and the liquidity market's available cash and utilization. A vault with no liquidity adapter set can only pay out idle assets. YV-collateral strategy vaults use the market-aware coverage check below instead of the standard percentage threshold.
 
 #### YV Collateral Vault Liquidity Monitoring
 
@@ -61,7 +61,7 @@ For vaults that are used as collateral in Yearn v3 strategies (YV collateral vau
 
 **Thresholds:**
 
-- **Regular vaults:** Defined by `LIQUIDITY_THRESHOLD` in [risk.py](./risk.py) and shared by V1 and V2.
+- **Regular vaults:** `LIQUIDITY_THRESHOLD` (V1, 1%) and `V2_LIQUIDITY_THRESHOLD` (V2, 5%) in [risk.py](./risk.py).
 - **YV collateral vaults:** Require enough combined withdrawable liquidity to cover collateral at risk in direct YV-collateral Morpho markets, plus a liquidation buffer (`YV_COLLATERAL_*` constants in [markets.py](./markets.py)). Price shock is selected from market LLTV: 2% for LLTV >= 86%, 15% for LLTV <= 77%, otherwise 10%.
 
 **Logic:** For each asset group (e.g., all USDC vaults at one chain), the system:
@@ -141,7 +141,7 @@ If any market's allocation exceeds its adjusted threshold, an alert is triggered
 Morpho's [Vault V2](https://github.com/morpho-org/vault-v2) replaces the v1 single-vault timelock with a **per-function timelock** keyed by arbitrary calldata, plus a richer adapter system. Yearn-curated v2 vaults are monitored separately:
 
 - [`governance_v2.py`](./governance_v2.py) — daily, pulls a per-vault governance **snapshot** from Morpho's GraphQL API (`vaultV2s.pendingConfigs` + `owner` / `curator` / `sentinels` / `allocators` / `adapters`) and diffs it against the persisted cache. Mirrors v1's pull-based approach (`pendingTimelock` / `pendingGuardian` / `pendingCap`) so RPC usage stays bounded. Alerts on: new pending timelocked operations, executed or revoked operations, owner / curator changes, sentinel / allocator / adapter set changes.
-- [`markets_v2.py`](./markets_v2.py) — hourly, GraphQL-only (no RPC): one `vaultV2s` query loads TVL, liquidity, and `MorphoMarketV1` adapter positions for every configured vault, then one `markets` query per chain loads state/bad debt. Applies the shared [risk.py](./risk.py) policy using each position's `supplyAssetsUsd`, and checks withdrawable `liquidityUsd` against the shared 1% threshold. V2 vaults used by YV-collateral strategies skip the individual liquidity threshold because `markets.py` performs the combined collateral-at-risk coverage check. Non-`MorphoMarketV1` adapters fail the run (configured vaults are market-adapter only).
+- [`markets_v2.py`](./markets_v2.py) — hourly, GraphQL-only (no RPC): one `vaultV2s` query loads TVL, liquidity, and `MorphoMarketV1` adapter positions for every configured vault, then one `markets` query per chain loads state/bad debt. Applies the shared [risk.py](./risk.py) policy using each position's `supplyAssetsUsd`, and checks withdrawable `liquidityUsd` (idle plus liquidity adapter market) against the 5% V2 threshold. V2 vaults used by YV-collateral strategies skip the individual liquidity threshold because `markets.py` performs the combined collateral-at-risk coverage check. Non-`MorphoMarketV1` adapters fail the run (configured vaults are market-adapter only).
 - [`v2_decoders.py`](./v2_decoders.py) — selector→signature map and decoders for every v2 timelocked function (and the three `idData` tag prefixes used by `increaseAbsoluteCap`/`increaseRelativeCap`). Absolute caps are denominated in the *vault's* asset whatever id they are keyed by, so the decoder takes the vault's asset decimals/symbol; `type(uint128).max` renders as `unlimited`.
 
 ### Grouped alerts
