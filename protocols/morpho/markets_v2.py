@@ -5,10 +5,11 @@ liquidity, ``MorphoMarketV1`` adapter positions), then batches market state /
 bad debt per chain. No RPC.
 
 Applies the shared [risk.py](./risk.py) policy against each market's
-``supplyAssetsUsd``. Normal Vault V2 liquidity uses the API's immediately
-withdrawable ``liquidityUsd`` (idle assets plus what the liquidity adapter can
-pull from its market) against ``V2_LIQUIDITY_THRESHOLD``; YV-collateral strategy
-vaults use the combined v1/v2 coverage check in ``markets.py`` instead.
+``supplyAssetsUsd``. Withdrawable liquidity is derived from the vault's active
+liquidity adapter: idle assets plus the vault's position in the adapter's market,
+capped by that market's free cash, checked against ``V2_LIQUIDITY_THRESHOLD`` for
+every monitored vault (YV-collateral vaults also get the combined v1/v2 coverage
+check in ``markets.py``).
 """
 
 from dataclasses import dataclass, field
@@ -30,7 +31,6 @@ from protocols.morpho._shared import (
 from protocols.morpho.config import (
     VAULTS_V2_BY_CHAIN,
     get_vault_query_config,
-    is_collateral_vault,
 )
 from protocols.morpho.risk import (
     MAX_RISK_THRESHOLDS,
@@ -59,6 +59,12 @@ class LiquidityMarket:
     label: str
     available_usd: float
     utilization: float
+    vault_supply_usd: float
+
+    @property
+    def withdrawable_usd(self) -> float:
+        """Vault supply the adapter can pull now: capped by the market's free cash."""
+        return min(self.vault_supply_usd, self.available_usd)
 
 
 @dataclass
@@ -72,12 +78,17 @@ class V2Vault:
     asset_symbol: str
     risk_level: int
     total_assets_usd: float = 0.0
-    liquidity_usd: float = 0.0
     idle_assets_usd: float = 0.0
     liquidity_adapter: Optional[str] = None
     liquidity_market: Optional[LiquidityMarket] = None
     # market_id (lowercase) -> vault supply USD from MorphoMarketV1Adapter positions
     market_allocations_usd: Dict[str, float] = field(default_factory=dict)
+
+    @property
+    def liquidity_usd(self) -> float:
+        """Immediately withdrawable assets: idle first, then the liquidity adapter's market."""
+        adapter_usd = self.liquidity_market.withdrawable_usd if self.liquidity_market else 0.0
+        return self.idle_assets_usd + adapter_usd
 
 
 @dataclass(frozen=True)
@@ -103,7 +114,6 @@ query VaultV2State($addresses: [String!]!) {{
       chain {{ id }}
       asset {{ address symbol }}
       totalAssetsUsd
-      liquidityUsd
       idleAssetsUsd
       liquidityAdapter {{ address }}
       liquidityData {{
@@ -179,10 +189,9 @@ def discover_v2_vaults_by_chain() -> Dict[Chain, List[V2Vault]]:
                 asset_symbol=item["asset"]["symbol"],
                 risk_level=config.risk_level,
                 total_assets_usd=float(item.get("totalAssetsUsd") or 0),
-                liquidity_usd=float(item.get("liquidityUsd") or 0),
                 idle_assets_usd=float(item.get("idleAssetsUsd") or 0),
                 liquidity_adapter=(item.get("liquidityAdapter") or {}).get("address"),
-                liquidity_market=_parse_liquidity_market(item, chain),
+                liquidity_market=_parse_liquidity_market(item, config.name, chain),
                 market_allocations_usd=_parse_market_allocations(item, config.name, chain),
             )
         )
@@ -192,12 +201,35 @@ def discover_v2_vaults_by_chain() -> Dict[Chain, List[V2Vault]]:
     return result
 
 
-def _parse_liquidity_market(item: Dict[str, Any], chain: Chain) -> Optional[LiquidityMarket]:
-    """Return the market behind the liquidity adapter, or None if unset/unrecognized."""
+def _parse_liquidity_market(item: Dict[str, Any], vault_name: str, chain: Chain) -> Optional[LiquidityMarket]:
+    """Resolve the active liquidity adapter's market and the vault's position in it.
+
+    Returns None when no liquidity adapter is set (only idle assets are withdrawable).
+    Raises if an adapter is set but its market or adapter positions cannot be resolved,
+    since treating unknown liquidity as zero would page on a data gap.
+    """
+    adapter_address = ((item.get("liquidityAdapter") or {}).get("address") or "").lower()
+    if not adapter_address:
+        return None
+
     market = (item.get("liquidityData") or {}).get("market")
     if not market:
-        return None
+        raise MorphoV2MonitoringError(
+            f"Vault V2 {vault_name} on {chain.name} liquidity adapter {adapter_address} has no recognized market"
+        )
+    adapters = (item.get("adapters") or {}).get("items") or []
+    adapter = next((a for a in adapters if (a.get("address") or "").lower() == adapter_address), None)
+    if adapter is None:
+        raise MorphoV2MonitoringError(
+            f"Vault V2 {vault_name} on {chain.name} liquidity adapter {adapter_address} missing from adapters"
+        )
+
     market_id = market["marketId"]
+    vault_supply_usd = sum(
+        float((position.get("state") or {}).get("supplyAssetsUsd") or 0)
+        for position in (adapter.get("positions") or {}).get("items") or []
+        if ((position.get("market") or {}).get("marketId") or "").lower() == market_id.lower()
+    )
     loan = (market.get("loanAsset") or {}).get("symbol") or "?"
     coll = (market.get("collateralAsset") or {}).get("symbol") or "idle"
     state = market.get("state") or {}
@@ -205,6 +237,7 @@ def _parse_liquidity_market(item: Dict[str, Any], chain: Chain) -> Optional[Liqu
         label=f"[{coll}/{loan}]({get_market_url(market_id, chain)})",
         available_usd=float(state.get("liquidityAssetsUsd") or 0),
         utilization=float(state.get("utilization") or 0),
+        vault_supply_usd=vault_supply_usd,
     )
 
 
@@ -376,16 +409,14 @@ def analyze_v2_vault(vault: V2Vault, metrics: Dict[str, MarketMetrics]) -> None:
         return
 
     score_market_allocations(vault, metrics)
-
-    if not is_collateral_vault(vault.address, vault.chain, version=2):
-        check_low_liquidity(vault)
+    check_low_liquidity(vault)
 
 
 def check_low_liquidity(vault: V2Vault) -> None:
-    """Alert when a non-collateral Vault V2 has less than 5% withdrawable liquidity.
+    """Alert when a Vault V2 has less than 5% of its assets withdrawable.
 
     Vault V2 serves withdrawals from idle assets first, then deallocates only through
-    its liquidity adapter, so ``liquidityUsd`` is capped by that adapter's market cash.
+    its liquidity adapter, so withdrawable liquidity is capped by that adapter's market cash.
     """
     if not is_low_liquidity(vault.total_assets_usd, vault.liquidity_usd, V2_LIQUIDITY_THRESHOLD):
         return
@@ -406,19 +437,17 @@ def check_low_liquidity(vault: V2Vault) -> None:
 
 def _format_liquidity_source(vault: V2Vault) -> str:
     """Explain where withdrawable liquidity comes from so the bottleneck is visible."""
-    adapter_usd = max(vault.liquidity_usd - vault.idle_assets_usd, 0.0)
+    market = vault.liquidity_market
+    adapter_usd = market.withdrawable_usd if market else 0.0
     lines = f"💵 Idle: ${vault.idle_assets_usd:,.2f} | via liquidity adapter: ${adapter_usd:,.2f}\n"
-    if vault.liquidity_adapter is None:
+    if vault.liquidity_adapter is None or market is None:
         return lines + "🔌 No liquidity adapter set: only idle assets are withdrawable\n"
 
     adapter_url = f"{vault.chain.explorer_url}/address/{vault.liquidity_adapter}"
-    lines += f"🔌 Liquidity adapter: [{vault.liquidity_adapter}]({adapter_url})\n"
-    market = vault.liquidity_market
-    if market is None:
-        return lines + "🏦 Liquidity market: unknown to Morpho API\n"
     return lines + (
-        f"🏦 Liquidity market: {market.label}: ${market.available_usd:,.2f} available, "
-        f"{market.utilization:.1%} utilized\n"
+        f"🔌 Liquidity adapter: [{vault.liquidity_adapter}]({adapter_url})\n"
+        f"🏦 Liquidity market: {market.label}: vault supply ${market.vault_supply_usd:,.2f}, "
+        f"market cash ${market.available_usd:,.2f} ({market.utilization:.1%} utilized)\n"
     )
 
 
