@@ -274,6 +274,9 @@ class ExposureAssessment:
 
 BAD_DEBT_RATIO = 0.005
 LIQUIDITY_THRESHOLD = 0.01
+# Vault V2 withdrawals are served only from idle assets plus the single liquidity adapter
+# market, so a thinner buffer is riskier than on V1 (which walks the whole withdraw queue).
+V2_LIQUIDITY_THRESHOLD = 0.05
 MIN_VAULT_ASSETS_USD = 10_000
 
 
@@ -337,8 +340,12 @@ def is_bad_debt_excessive(bad_debt_usd: float, borrow_assets_usd: float) -> bool
     return calculate_bad_debt_ratio(bad_debt_usd, borrow_assets_usd) > BAD_DEBT_RATIO
 
 
-def is_low_liquidity(total_assets_usd: float, liquidity_usd: float) -> bool:
-    """Return whether a material vault has less than the configured liquid share."""
+def is_low_liquidity(
+    total_assets_usd: float,
+    liquidity_usd: float,
+    threshold: float = LIQUIDITY_THRESHOLD,
+) -> bool:
+    """Return whether a material vault has less than ``threshold`` of its assets liquid."""
     if total_assets_usd < MIN_VAULT_ASSETS_USD:
         return False
-    return liquidity_usd / total_assets_usd < LIQUIDITY_THRESHOLD
+    return liquidity_usd / total_assets_usd < threshold

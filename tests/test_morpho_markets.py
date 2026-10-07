@@ -27,8 +27,11 @@ from protocols.morpho.markets import (
     get_yv_collateral_liquidity_by_asset,
 )
 from protocols.morpho.markets_v2 import (
+    LiquidityMarket,
     V2Vault,
+    _parse_liquidity_market,
     _parse_market_allocations,
+    analyze_v2_vault,
     check_low_liquidity,
     discover_v2_vaults_by_chain,
     main,
@@ -420,8 +423,11 @@ class TestMorphoCollateralLiquidity(unittest.TestCase):
 
         self.assertEqual(liquidity, 100_000)
 
-    def test_v2_low_liquidity_alert_uses_graphql_liquidity(self) -> None:
-        vault = V2Vault(
+    ADAPTER = "0x" + "33" * 20
+
+    @staticmethod
+    def _v2_vault(idle_usd: float = 0, market: LiquidityMarket | None = None) -> V2Vault:
+        return V2Vault(
             name="Example",
             address="0x" + "11" * 20,
             chain=Chain.MAINNET,
@@ -429,15 +435,129 @@ class TestMorphoCollateralLiquidity(unittest.TestCase):
             asset_symbol="USDC",
             risk_level=1,
             total_assets_usd=100_000,
-            liquidity_usd=500,
+            idle_assets_usd=idle_usd,
+            liquidity_adapter=TestMorphoCollateralLiquidity.ADAPTER if market else None,
+            liquidity_market=market,
         )
+
+    @staticmethod
+    def _market(vault_supply_usd: float, available_usd: float) -> LiquidityMarket:
+        return LiquidityMarket(
+            label="[WETH/USDC](url)",
+            available_usd=available_usd,
+            utilization=0.98,
+            vault_supply_usd=vault_supply_usd,
+        )
+
+    def test_v2_liquidity_is_idle_plus_adapter_supply_capped_by_market_cash(self) -> None:
+        # Market cash is the bottleneck.
+        self.assertEqual(self._v2_vault(1_000, self._market(90_000, 2_000)).liquidity_usd, 3_000)
+        # The vault's own position in the liquidity market is the bottleneck.
+        self.assertEqual(self._v2_vault(0, self._market(4_000, 1_000_000)).liquidity_usd, 4_000)
+        # No liquidity adapter: only idle assets.
+        self.assertEqual(self._v2_vault(700).liquidity_usd, 700)
+
+    def test_v2_low_liquidity_threshold_is_five_percent(self) -> None:
+        with patch("protocols.morpho.markets_v2.send_alert") as send:
+            check_low_liquidity(self._v2_vault(0, self._market(90_000, 5_000)))
+            send.assert_not_called()
+            check_low_liquidity(self._v2_vault(0, self._market(90_000, 4_999)))
+            send.assert_called_once()
+
+    def test_v2_low_liquidity_alerts_on_adapter_position_despite_ample_market_cash(self) -> None:
+        # The adapter can only pull its own 4% position even though the market holds
+        # 10x the vault in free cash; market cash alone must not suppress the alert.
+        with patch("protocols.morpho.markets_v2.send_alert") as send:
+            check_low_liquidity(self._v2_vault(0, self._market(4_000, 1_000_000)))
+
+        send.assert_called_once()
+        self.assertIn("$4,000.00 (4.0% of $100,000.00)", send.call_args.args[0].message)
+
+    def test_v2_low_liquidity_alert_names_liquidity_adapter_market(self) -> None:
+        vault = self._v2_vault(1_000, self._market(90_000, 2_000))
 
         with patch("protocols.morpho.markets_v2.send_alert") as send:
             check_low_liquidity(vault)
 
-        alert = send.call_args.args[0]
-        self.assertIn("$500.00", alert.message)
-        self.assertIn("0.5%", alert.message)
+        message = send.call_args.args[0].message
+        self.assertIn("$3,000.00 (3.0% of $100,000.00)", message)
+        self.assertIn("Min threshold: 5.0%", message)
+        self.assertIn("Idle: $1,000.00 | via liquidity adapter: $2,000.00", message)
+        self.assertIn(f"https://etherscan.io/address/{self.ADAPTER}", message)
+        self.assertIn("[WETH/USDC](url): vault supply $90,000.00, market cash $2,000.00 (98.0% utilized)", message)
+
+    def test_v2_low_liquidity_alert_flags_missing_liquidity_adapter(self) -> None:
+        with patch("protocols.morpho.markets_v2.send_alert") as send:
+            check_low_liquidity(self._v2_vault(1_000))
+
+        self.assertIn("No liquidity adapter set", send.call_args.args[0].message)
+
+    def test_collateral_v2_vaults_get_low_liquidity_check(self) -> None:
+        collateral_vault = next(v for v in VAULTS_V2_BY_CHAIN[Chain.KATANA] if v.collateral_asset)
+        vault = self._v2_vault(0, self._market(90_000, 1_000))
+        vault.address = collateral_vault.address
+        vault.chain = Chain.KATANA
+
+        with (
+            patch("protocols.morpho.markets_v2.score_market_allocations"),
+            patch("protocols.morpho.markets_v2.send_alert") as send,
+        ):
+            analyze_v2_vault(vault, {})
+
+        send.assert_called_once()
+
+    @staticmethod
+    def _liquidity_item(adapter_address: str, market_id: str) -> dict[str, Any]:
+        return {
+            "liquidityAdapter": {"address": adapter_address},
+            "liquidityData": {
+                "market": {
+                    "marketId": market_id,
+                    "loanAsset": {"symbol": "USDC"},
+                    "collateralAsset": {"symbol": "cbBTC"},
+                    "state": {"liquidityAssetsUsd": 1_234.5, "utilization": 0.9},
+                }
+            },
+            "adapters": {
+                "items": [
+                    {
+                        "address": adapter_address,
+                        "type": "MorphoMarketV1",
+                        "positions": {
+                            "items": [
+                                {"market": {"marketId": market_id.upper()}, "state": {"supplyAssetsUsd": 50_000}},
+                                {"market": {"marketId": "0x" + "ef" * 32}, "state": {"supplyAssetsUsd": 9_999}},
+                            ]
+                        },
+                    }
+                ]
+            },
+        }
+
+    def test_parse_liquidity_market_uses_active_adapter_position(self) -> None:
+        market_id = "0x" + "cd" * 32
+        item = self._liquidity_item(self.ADAPTER, market_id)
+
+        market = _parse_liquidity_market(item, "Example", Chain.MAINNET)
+
+        assert market is not None
+        self.assertTrue(market.label.startswith("[cbBTC/USDC]("))
+        self.assertIn(market_id, market.label)
+        self.assertEqual(market.available_usd, 1_234.5)
+        self.assertEqual(market.vault_supply_usd, 50_000)
+        self.assertEqual(market.withdrawable_usd, 1_234.5)
+
+    def test_parse_liquidity_market_without_adapter_returns_none(self) -> None:
+        self.assertIsNone(_parse_liquidity_market({"liquidityAdapter": None}, "Example", Chain.MAINNET))
+
+    def test_parse_liquidity_market_fails_on_unresolvable_adapter(self) -> None:
+        item = self._liquidity_item(self.ADAPTER, "0x" + "cd" * 32)
+        unknown_market = {**item, "liquidityData": None}
+        missing_adapter = {**item, "adapters": {"items": []}}
+
+        for broken in (unknown_market, missing_adapter):
+            with self.assertRaises(MorphoV2MonitoringError):
+                _parse_liquidity_market(broken, "Example", Chain.MAINNET)
 
     def test_zero_asset_group_is_retained_for_collateral_risk_check(self) -> None:
         v1_vaults = [
