@@ -63,8 +63,8 @@ def test_protocols_route(monkeypatch, tmp_path):
                 name="hourly",
                 cron="5 * * * *",
                 tasks=[
-                    Task(name="aave", script="protocols/aave/main.py"),
-                    Task(name="aave-proposals", script="protocols/aave/proposals.py"),
+                    Task(name="compound", script="protocols/compound/main.py"),
+                    Task(name="compound-proposals", script="protocols/compound/proposals.py"),
                     Task(name="lido-steth", script="protocols/lido/steth/main.py"),
                     Task(name="prune-alerts", script="utils/prune_alerts.py"),
                     Task(name="off", script="protocols/off/main.py", enabled=False),
@@ -90,18 +90,18 @@ def test_protocols_route(monkeypatch, tmp_path):
     assert body == {
         "data": [
             {
-                "name": "aave",
+                "name": "compound",
                 "tasks": [
                     {
-                        "name": "aave",
-                        "script": "protocols/aave/main.py",
+                        "name": "compound",
+                        "script": "protocols/compound/main.py",
                         "args": {},
                         "profile": "hourly",
                         "cron": "5 * * * *",
                     },
                     {
-                        "name": "aave-proposals",
-                        "script": "protocols/aave/proposals.py",
+                        "name": "compound-proposals",
+                        "script": "protocols/compound/proposals.py",
                         "args": {},
                         "profile": "hourly",
                         "cron": "5 * * * *",

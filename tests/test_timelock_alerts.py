@@ -208,6 +208,26 @@ class TestOperationIdLine(unittest.TestCase):
         self.assertNotIn("Operation ID", msg)
         self.assertNotIn("``", msg)
 
+    def test_aave_governance_link_uses_proposal_id(self, _mock_ai: object) -> None:
+        """Aave alerts link directly to the queued proposal, including proposal zero."""
+        for proposal_id in ("525", "42", "0", 0):
+            with self.subTest(proposal_id=proposal_id):
+                event = _make_event("Aave", operationId=proposal_id)
+                msg = build_alert_message([event], TIMELOCK_INFO)
+                self.assertIn(f"🆔 Proposal: {proposal_id}\n", msg)
+                self.assertIn(
+                    "🔗 Governance: [Aave Governance]"
+                    f"(https://app.aave.com/governance/v3/proposal/?proposalId={proposal_id})",
+                    msg,
+                )
+
+    def test_aave_missing_id_omits_governance_link(self, _mock_ai: object) -> None:
+        """An absent proposal ID must not produce a broken governance link."""
+        for proposal_id in (None, ""):
+            with self.subTest(proposal_id=proposal_id):
+                msg = build_alert_message([_make_event("Aave", operationId=proposal_id)], TIMELOCK_INFO)
+                self.assertNotIn("app.aave.com", msg)
+
 
 class TestMapleProposalUnwrap(unittest.TestCase):
     """Maple ProposalScheduled has no target/data; recover them from the source tx."""

@@ -116,13 +116,12 @@ The alert format varies by timelock type:
 ```
 ⏰ TIMELOCK: New Operation Scheduled
 🅿️ Protocol: AAVE
-📋 Timelock: Aave Timelock
+📋 Aave Governance V3: 0x9AEE0B04504CeF83A65AC3f0e838D0593BCb2BC7
 🔗 Chain: Mainnet
-📌 Type: Aave
-📝 Event: ProposalQueued
 ✅ Votes For: 12345
 ❌ Votes Against: 6789
-🆔 Proposal ID: 42
+🆔 Proposal: 42
+🔗 Governance: [Aave Governance](https://app.aave.com/governance/v3/proposal/?proposalId=42)
 🔗 Tx: https://etherscan.io/tx/0x...
 ```
 

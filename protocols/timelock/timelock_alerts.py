@@ -30,6 +30,7 @@ load_dotenv()
 ENVIO_GRAPHQL_URL = os.getenv("ENVIO_GRAPHQL_URL")
 DEFAULT_LOG_LEVEL = os.getenv("TIMELOCK_ALERTS_LOG_LEVEL", "INFO")
 CACHE_KEY = "TIMELOCK_LAST_TS"
+AAVE_GOVERNANCE_PROPOSAL_URL = "https://app.aave.com/governance/v3/proposal/?proposalId="
 
 # YEARN_TIMELOCK alerts are also mirrored to this internal-only chat, in lockstep
 # with the public topic. Configure its credentials with
@@ -91,9 +92,8 @@ TIMELOCK_LIST: list[TimelockConfig] = [
 # Lookup by (lowercase address, chain_id) to support same address on multiple chains
 TIMELOCKS: dict[tuple[str, int], TimelockConfig] = {(t.address, t.chain_id): t for t in TIMELOCK_LIST}
 
-# Protocols whose governance proposals are already monitored (and human-described)
-# by a dedicated script (e.g. aave/proposals.py, compound/proposals.py). For these,
-# the AI summary on the timelock execution is redundant, so we skip it.
+# Aave alerts link directly to governance proposal details. Other protocols below
+# have dedicated governance monitoring, so their AI summaries are redundant.
 SKIP_AI_SUMMARY_PROTOCOLS: frozenset[str] = frozenset({"AAVE", "COMP", "LIDO", "FLUID"})
 
 _logger = get_logger("timelock_alerts")
@@ -471,7 +471,10 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
             call_lines.append(f"✅ Votes For: {votes_for}")
         if votes_against is not None:
             call_lines.append(f"❌ Votes Against: {votes_against}")
-        call_lines.append(f"🆔 Proposal: {first.get('operationId') or ''}")
+        proposal_id = operation_id if operation_id is not None else ""
+        call_lines.append(f"🆔 Proposal: {proposal_id}")
+        if proposal_id != "":
+            call_lines.append(f"🔗 Governance: [Aave Governance]({AAVE_GOVERNANCE_PROPOSAL_URL}{proposal_id})")
 
     elif timelock_type == "Lido":
         creator = first.get("creator")
