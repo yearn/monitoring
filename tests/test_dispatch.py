@@ -96,19 +96,11 @@ class TestDispatch(unittest.TestCase):
         self.assertEqual(mock_post.call_args[0][0], "http://localhost:9000/webhook/emergency")
 
     @patch("utils.dispatch.requests.post")
-    def test_dispatch_skips_low_severity(self, mock_post):
+    def test_dispatch_skips_low_and_medium_severity(self, mock_post):
         from utils.dispatch import dispatch_emergency_withdrawal
 
-        alert = Alert(severity=AlertSeverity.LOW, message="info", protocol="infinifi")
-        dispatch_emergency_withdrawal(alert)
-        mock_post.assert_not_called()
-
-    @patch("utils.dispatch.requests.post")
-    def test_dispatch_skips_medium_severity(self, mock_post):
-        from utils.dispatch import dispatch_emergency_withdrawal
-
-        alert = Alert(severity=AlertSeverity.MEDIUM, message="warn", protocol="infinifi")
-        dispatch_emergency_withdrawal(alert)
+        for severity in (AlertSeverity.LOW, AlertSeverity.MEDIUM):
+            dispatch_emergency_withdrawal(Alert(severity=severity, message="m", protocol="infinifi"))
         mock_post.assert_not_called()
 
     @patch("utils.dispatch.requests.post")

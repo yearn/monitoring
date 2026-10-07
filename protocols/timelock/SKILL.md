@@ -117,14 +117,16 @@ The indexer must be deployed and indexing events before the monitoring script ca
 
 **Repository**: [yearn/monitoring-scripts-py](https://github.com/yearn/monitoring-scripts-py)
 
-### 3.1 — Add `TimelockConfig` entry in `timelock/timelock_alerts.py`
+### 3.1 — Add `TimelockConfig` entry in `protocols/timelock/timelock_alerts.py`
 
 ```python
 (TimelockConfig("0xlowercase_address", chain_id, "PROTOCOL", "Human Label"),)
 ```
 
 - Address **must be lowercase**
-- Protocol name is used for Telegram routing (`TELEGRAM_CHAT_ID_{PROTOCOL}`)
+- `chain_id` must match the network in the Envio config; a new chain must also exist in `utils/chains.py` (`Chain` enum and `EXPLORER_URLS`)
+- Protocol name is used for Telegram routing (`TELEGRAM_CHAT_ID_{PROTOCOL}`, optional `TELEGRAM_BOT_TOKEN_{PROTOCOL}`, falling back to `TELEGRAM_BOT_TOKEN_DEFAULT`)
+- If the routing key is not a website page key, map it in `ALERT_HISTORY_PROTOCOLS`; `tests/test_alert_protocol_keys.py` fails otherwise
 
 ### 3.2 — Handle delay format (only for new contract types)
 
@@ -151,8 +153,7 @@ elif timelock_type in ("TimelockController", "Compound", "Puffer", "NewProtocol"
 
 ### 3.4 — Update documentation
 
-- Add the new timelock to the table in `timelock/README.md`
-- Update the `timelockType` list in the schema fields section
+- For a new contract type, update the `timelockType` list in the schema fields section of `protocols/timelock/README.md`
 - If using a new protocol, add `TELEGRAM_CHAT_ID_{PROTOCOL}` to the monitoring env file (`/etc/monitoring/.env` on the VPS) and document it in `.env.example`
 
 ## Deployment Order
@@ -166,7 +167,7 @@ elif timelock_type in ("TimelockController", "Compound", "Puffer", "NewProtocol"
 After both are deployed, run manually to verify:
 
 ```bash
-uv run timelock/timelock_alerts.py --no-cache --since-seconds 604800 --log-level DEBUG
+uv run protocols/timelock/timelock_alerts.py --no-cache --since-seconds 604800 --log-level DEBUG
 ```
 
 This looks back 7 days to catch any recent events from the new timelock.

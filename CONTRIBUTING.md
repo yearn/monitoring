@@ -33,13 +33,13 @@ Shared utilities live in `utils/`:
 
 | Module | Purpose |
 |---|---|
-| `utils/logging.py` | Structured logging via `get_logger(name)` |
+| `utils/logger.py` | Structured logging via `get_logger(name)` |
 | `utils/telegram.py` | Telegram alert delivery |
-| `utils/cache.py` | File-based key:value persistence |
+| `utils/cache.py` | Key:value state persistence between runs (SQLite-backed) |
 | `utils/web3_wrapper.py` | Web3 connection management (`ChainManager`) |
 | `utils/config.py` | Environment config (`Config`) |
 | `utils/formatting.py` | Number formatting helpers (`format_usd`, `format_token_amount`) |
-| `utils/http.py` | HTTP request helper (`fetch_json`) |
+| `utils/http_client.py` | HTTP helpers with retries (`fetch_json`, `request_with_retry`) |
 | `utils/chains.py` | Chain enum and explorer URLs |
 | `utils/abi.py` | ABI loader |
 | `utils/gauntlet.py` | Gauntlet risk parameter helpers |
@@ -141,7 +141,7 @@ with client.batch_requests() as batch:
 
 ### Caching
 
-Use `utils/cache.py` for persisting state between runs (e.g. last processed timestamp or proposal ID):
+Use `utils/cache.py` for persisting state between runs (e.g. last processed timestamp or proposal ID). Values live in SQLite at `$CACHE_DIR/monitoring.db`; the filename argument is only used as a namespace:
 
 ```python
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file

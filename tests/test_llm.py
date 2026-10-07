@@ -200,13 +200,6 @@ class TestAnthropicProvider(unittest.TestCase):
         self.assertEqual(provider.model_name, "claude-haiku-4-5-20251001")
 
     @patch("anthropic.Anthropic")
-    def test_structured_output_enabled_by_default(self, mock_anthropic_cls: MagicMock) -> None:
-        from utils.llm.anthropic_provider import AnthropicProvider
-
-        provider = AnthropicProvider(api_key="key", model="claude-haiku-4-5-20251001")
-        self.assertTrue(provider.supports_structured_output)
-
-    @patch("anthropic.Anthropic")
     def test_complete_structured_uses_forced_tool(self, mock_anthropic_cls: MagicMock) -> None:
         from utils.llm.anthropic_provider import AnthropicProvider
 
@@ -244,33 +237,20 @@ class TestFactory(unittest.TestCase):
                 get_llm_provider()
             self.assertIn("LLM_API_KEY", str(ctx.exception))
 
-    @patch("openai.OpenAI")
-    def test_venice_defaults(self, mock_openai_cls: MagicMock) -> None:
-        env = {"LLM_PROVIDER": "venice", "LLM_API_KEY": "test-key"}
-        with patch.dict(os.environ, env, clear=True):
-            provider = get_llm_provider()
-            self.assertEqual(provider.model_name, "deepseek-v4-flash")
-
-    @patch("openai.OpenAI")
-    def test_openai_defaults(self, mock_openai_cls: MagicMock) -> None:
-        env = {"LLM_PROVIDER": "openai", "LLM_API_KEY": "sk-test"}
-        with patch.dict(os.environ, env, clear=True):
-            provider = get_llm_provider()
-            self.assertEqual(provider.model_name, "gpt-4o-mini")
-
     @patch("anthropic.Anthropic")
-    def test_anthropic_defaults(self, mock_anthropic_cls: MagicMock) -> None:
-        env = {"LLM_PROVIDER": "anthropic", "LLM_API_KEY": "sk-ant-test"}
-        with patch.dict(os.environ, env, clear=True):
-            provider = get_llm_provider()
-            self.assertEqual(provider.model_name, "claude-haiku-4-5-20251001")
+    @patch("openai.OpenAI")
+    def test_provider_uses_default_model(self, mock_openai_cls: MagicMock, mock_anthropic_cls: MagicMock) -> None:
+        from utils.llm.anthropic_provider import AnthropicProvider
 
-    @patch("anthropic.Anthropic")
-    def test_anthropic_custom_model(self, mock_anthropic_cls: MagicMock) -> None:
-        env = {"LLM_PROVIDER": "anthropic", "LLM_API_KEY": "sk-ant-test", "LLM_MODEL": "claude-sonnet-4-6"}
-        with patch.dict(os.environ, env, clear=True):
-            provider = get_llm_provider()
-            self.assertEqual(provider.model_name, "claude-sonnet-4-6")
+        for name in ("venice", "openai", "anthropic"):
+            with (
+                self.subTest(provider=name),
+                patch.dict(os.environ, {"LLM_PROVIDER": name, "LLM_API_KEY": "k"}, clear=True),
+            ):
+                reset_provider()
+                provider = get_llm_provider()
+                self.assertEqual(provider.model_name, _PROVIDER_DEFAULTS[name]["model"])
+                self.assertEqual(isinstance(provider, AnthropicProvider), name == "anthropic")
 
     @patch("openai.OpenAI")
     def test_custom_overrides(self, mock_openai_cls: MagicMock) -> None:

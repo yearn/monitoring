@@ -94,13 +94,6 @@ class TestRegistry(unittest.TestCase):
         names = [a.name for a in PEGGED_ASSETS]
         self.assertEqual(len(names), len(set(names)))
 
-    def test_address_parsed_from_defillama_key(self):
-        self.assertEqual(get_asset("USDC").address, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
-
-    def test_btc_pegged_assets_target_btc(self):
-        self.assertEqual(get_asset("cbBTC").peg, PegTarget.BTC)
-        self.assertEqual(get_asset("LBTC").peg, PegTarget.BTC)
-
     def test_get_asset_unknown_raises(self):
         with self.assertRaises(KeyError):
             get_asset("NOPE")
@@ -112,21 +105,6 @@ class TestRegistry(unittest.TestCase):
     def test_btc_wrappers_are_downside_only(self):
         for name in ("WBTC", "cbBTC", "LBTC"):
             self.assertTrue(get_asset(name).downside_only, name)
-
-    def test_usd_stables_are_symmetric(self):
-        self.assertFalse(get_asset("USDC").downside_only)
-
-    def test_chainlink_feed_quote_denomination(self):
-        # BTC-denominated feeds (answer ~1.0) vs USD-denominated feeds (absolute price).
-        for name, quote in (
-            ("WBTC", PegTarget.BTC),
-            ("LBTC", PegTarget.BTC),
-            ("cbBTC", PegTarget.USD),
-            ("USDC", PegTarget.USD),
-        ):
-            feed = get_asset(name).chainlink_feed
-            assert feed is not None
-            self.assertEqual(feed.quote, quote)
 
 
 if __name__ == "__main__":

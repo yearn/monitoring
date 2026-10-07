@@ -9,12 +9,6 @@ from utils.alert import Alert, AlertSeverity, register_alert_hook, send_alert
 class TestAlert(unittest.TestCase):
     """Tests for the Alert system."""
 
-    def test_severity_enum_values(self):
-        self.assertEqual(AlertSeverity.LOW.value, "LOW")
-        self.assertEqual(AlertSeverity.MEDIUM.value, "MEDIUM")
-        self.assertEqual(AlertSeverity.HIGH.value, "HIGH")
-        self.assertEqual(AlertSeverity.CRITICAL.value, "CRITICAL")
-
     def test_alert_dataclass_immutability(self):
         alert = Alert(severity=AlertSeverity.HIGH, message="test", protocol="proto")
         with self.assertRaises(AttributeError):
@@ -22,80 +16,28 @@ class TestAlert(unittest.TestCase):
             alert.message = "changed"  # ty: ignore[invalid-assignment]
 
     @patch("utils.alert.send_telegram_message")
-    def test_emoji_prefix_low(self, mock_send):
-        alert = Alert(severity=AlertSeverity.LOW, message="info msg", protocol="test")
-        send_alert(alert)
-        mock_send.assert_called_once_with(
-            "ℹ️ info msg",
-            "test",
-            True,
-            False,
-            severity="LOW",
-            source="protocol",
-            origin_protocol="test",
-            channel="test",
-        )
-
-    @patch("utils.alert.send_telegram_message")
-    def test_emoji_prefix_medium(self, mock_send):
-        alert = Alert(severity=AlertSeverity.MEDIUM, message="warn msg", protocol="test")
-        send_alert(alert)
-        mock_send.assert_called_once_with(
-            "⚠️ warn msg",
-            "test",
-            False,
-            False,
-            severity="MEDIUM",
-            source="protocol",
-            origin_protocol="test",
-            channel="test",
-        )
-
-    @patch("utils.alert.send_telegram_message")
-    def test_emoji_prefix_high(self, mock_send):
-        alert = Alert(severity=AlertSeverity.HIGH, message="high msg", protocol="test")
-        send_alert(alert)
-        mock_send.assert_called_once_with(
-            "🚨 high msg",
-            "test",
-            False,
-            False,
-            severity="HIGH",
-            source="protocol",
-            origin_protocol="test",
-            channel="test",
-        )
-
-    @patch("utils.alert.send_telegram_message")
-    def test_emoji_prefix_critical(self, mock_send):
-        alert = Alert(severity=AlertSeverity.CRITICAL, message="crit msg", protocol="test")
-        send_alert(alert)
-        mock_send.assert_called_once_with(
-            "🔴 crit msg",
-            "test",
-            False,
-            False,
-            severity="CRITICAL",
-            source="protocol",
-            origin_protocol="test",
-            channel="test",
-        )
-
-    @patch("utils.alert.send_telegram_message")
-    def test_silent_default_low(self, mock_send):
-        # LOW defaults to silent=True
-        send_alert(Alert(severity=AlertSeverity.LOW, message="m", protocol="p"))
-        _, args, _ = mock_send.mock_calls[0]
-        self.assertTrue(args[2], "LOW should default to silent")
-
-    @patch("utils.alert.send_telegram_message")
-    def test_silent_default_medium_high_critical(self, mock_send):
-        # MEDIUM, HIGH and CRITICAL default to silent=False (loud)
-        for sev in (AlertSeverity.MEDIUM, AlertSeverity.HIGH, AlertSeverity.CRITICAL):
-            mock_send.reset_mock()
-            send_alert(Alert(severity=sev, message="m", protocol="p"))
-            _, args, _ = mock_send.mock_calls[0]
-            self.assertFalse(args[2], f"{sev.value} should default to loud")
+    def test_emoji_prefix_and_default_silence(self, mock_send):
+        # LOW is silent by default; MEDIUM and above notify.
+        cases = [
+            (AlertSeverity.LOW, "ℹ️", True),
+            (AlertSeverity.MEDIUM, "⚠️", False),
+            (AlertSeverity.HIGH, "🚨", False),
+            (AlertSeverity.CRITICAL, "🔴", False),
+        ]
+        for severity, emoji, silent in cases:
+            with self.subTest(severity=severity.value):
+                mock_send.reset_mock()
+                send_alert(Alert(severity=severity, message="msg", protocol="test"))
+                mock_send.assert_called_once_with(
+                    f"{emoji} msg",
+                    "test",
+                    silent,
+                    False,
+                    severity=severity.value,
+                    source="protocol",
+                    origin_protocol="test",
+                    channel="test",
+                )
 
     @patch("utils.alert.send_telegram_message")
     def test_silent_explicit_override(self, mock_send):

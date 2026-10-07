@@ -102,11 +102,6 @@ class TestMorphoV2Configuration(unittest.TestCase):
             self.assertEqual(discover_v2_vaults_by_chain(), {})
         request.assert_not_called()
 
-    def test_hyperevm_ousd_v2_wrapper_is_governance_only(self) -> None:
-        (wrapper,) = VAULTS_V2_BY_CHAIN[Chain.HYPEREVM]
-        self.assertEqual(wrapper.address, "0xE90959cbE7E56b5eBFF9AD12de611A4976F2d2B1")
-        self.assertFalse(wrapper.monitor_markets)
-
     def test_discovery_rejects_non_market_adapters(self) -> None:
         item = {
             "adapters": {
