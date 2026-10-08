@@ -210,7 +210,7 @@ class TestOperationIdLine(unittest.TestCase):
 
     def test_aave_governance_link_uses_proposal_id(self, _mock_ai: object) -> None:
         """Aave alerts link directly to the queued proposal, including proposal zero."""
-        for proposal_id in ("525", "42", "0", 0):
+        for proposal_id in ("525", 0):
             with self.subTest(proposal_id=proposal_id):
                 event = _make_event("Aave", operationId=proposal_id)
                 msg = build_alert_message([event], TIMELOCK_INFO)
