@@ -452,34 +452,34 @@ class TestMorphoCollateralLiquidity(unittest.TestCase):
         # No liquidity adapter: only idle assets.
         self.assertEqual(self._v2_vault(700).liquidity_usd, 700)
 
-    def test_v2_low_liquidity_threshold_is_five_percent(self) -> None:
+    def test_v2_low_liquidity_threshold_is_two_percent(self) -> None:
         with patch("protocols.morpho.markets_v2.send_alert") as send:
-            check_low_liquidity(self._v2_vault(0, self._market(90_000, 5_000)))
+            check_low_liquidity(self._v2_vault(0, self._market(90_000, 2_000)))
             send.assert_not_called()
-            check_low_liquidity(self._v2_vault(0, self._market(90_000, 4_999)))
+            check_low_liquidity(self._v2_vault(0, self._market(90_000, 1_999)))
             send.assert_called_once()
 
     def test_v2_low_liquidity_alerts_on_adapter_position_despite_ample_market_cash(self) -> None:
-        # The adapter can only pull its own 4% position even though the market holds
-        # 10x the vault in free cash; market cash alone must not suppress the alert.
+        # The adapter can only pull its own 1% position even though the market holds
+        # 100x the vault in free cash; market cash alone must not suppress the alert.
         with patch("protocols.morpho.markets_v2.send_alert") as send:
-            check_low_liquidity(self._v2_vault(0, self._market(4_000, 1_000_000)))
+            check_low_liquidity(self._v2_vault(0, self._market(1_000, 1_000_000)))
 
         send.assert_called_once()
-        self.assertIn("$4,000.00 (4.0% of $100,000.00)", send.call_args.args[0].message)
+        self.assertIn("$1,000.00 (1.0% of $100,000.00)", send.call_args.args[0].message)
 
     def test_v2_low_liquidity_alert_names_liquidity_adapter_market(self) -> None:
-        vault = self._v2_vault(1_000, self._market(90_000, 2_000))
+        vault = self._v2_vault(1_000, self._market(90_000, 900))
 
         with patch("protocols.morpho.markets_v2.send_alert") as send:
             check_low_liquidity(vault)
 
         message = send.call_args.args[0].message
-        self.assertIn("$3,000.00 (3.0% of $100,000.00)", message)
-        self.assertIn("Min threshold: 5.0%", message)
-        self.assertIn("Idle: $1,000.00 | via liquidity adapter: $2,000.00", message)
+        self.assertIn("$1,900.00 (1.9% of $100,000.00)", message)
+        self.assertIn("Min threshold: 2.0%", message)
+        self.assertIn("Idle: $1,000.00 | via liquidity adapter: $900.00", message)
         self.assertIn(f"https://etherscan.io/address/{self.ADAPTER}", message)
-        self.assertIn("[WETH/USDC](url): vault supply $90,000.00, market cash $2,000.00 (98.0% utilized)", message)
+        self.assertIn("[WETH/USDC](url): vault supply $90,000.00, market cash $900.00 (98.0% utilized)", message)
 
     def test_v2_low_liquidity_alert_flags_missing_liquidity_adapter(self) -> None:
         with patch("protocols.morpho.markets_v2.send_alert") as send:

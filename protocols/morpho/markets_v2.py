@@ -413,7 +413,7 @@ def analyze_v2_vault(vault: V2Vault, metrics: Dict[str, MarketMetrics]) -> None:
 
 
 def check_low_liquidity(vault: V2Vault) -> None:
-    """Alert when a Vault V2 has less than 5% of its assets withdrawable.
+    """Alert when a Vault V2 has less than 2% of its assets withdrawable.
 
     Vault V2 serves withdrawals from idle assets first, then deallocates only through
     its liquidity adapter, so withdrawable liquidity is capped by that adapter's market cash.
