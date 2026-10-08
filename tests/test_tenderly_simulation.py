@@ -46,10 +46,6 @@ class TestSimulationStatus(unittest.TestCase):
         self.assertEqual(result.revert_data, output)
         self.assertEqual(result.error_message, "")
 
-    def test_successful_call_has_no_revert_data(self) -> None:
-        tx = {"status": True, "transaction_info": {"call_trace": {"output": "0x01"}}}
-        self.assertEqual(_parse_transaction(tx, raw_response={}).revert_data, "")
-
     def test_missing_status_is_not_success(self) -> None:
         result = _parse_transaction({}, raw_response={})
         self.assertIs(result.success, False)

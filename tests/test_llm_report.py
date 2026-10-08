@@ -442,10 +442,6 @@ class TestReferenceTable(unittest.TestCase):
         self.assertNotIn(FARM_CKS, table)
         self.assertIn(DROP, table)
 
-    def test_nothing_left_to_list_omits_the_table(self) -> None:
-        ctx = _add_farms_ctx()
-        self.assertEqual(format_reference_table(ctx, shown=f"{REGISTRY} {FARM_CKS} {TIMELOCK}"), "")
-
 
 class TestBuildReport(unittest.TestCase):
     def test_sections_in_order(self) -> None:

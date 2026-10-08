@@ -85,10 +85,6 @@ class TestOracleAssignment(unittest.TestCase):
         self.assertIn(f'It reads feed {FEED} (NAVFeedProxy, description "reUSD NAV / USD")', prompt)
         self.assertIn("last update 12.4h before this read", prompt)
         self.assertIn("price() reverts (StalePrice) once the feed is older than the heartbeat of 48h", prompt)
-
-    def test_wrapper_name_is_not_read_as_the_feed_operator(self) -> None:
-        (context,) = _resolve()
-        prompt = format_infinifi_oracle_prompt([context])
         self.assertIn("The wrapper's name refers to the AggregatorV3 interface it reads", prompt)
 
     def test_report_lists_the_feed(self) -> None:

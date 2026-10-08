@@ -429,21 +429,16 @@ class TestInformativeSimulationReverts(unittest.TestCase):
 
     @patch("utils.llm.ai_explainer.get_current_implementation", return_value=None)
     @patch("utils.llm.ai_explainer.fetch_abi_entries")
-    def test_custom_error_is_decoded_from_the_target_abi(self, mock_abi: MagicMock, _impl: MagicMock) -> None:
+    def test_unnamed_revert_is_decoded_from_the_target_abi(self, mock_abi: MagicMock, _impl: MagicMock) -> None:
         mock_abi.return_value = self.ERRORS_ABI
-        sim = SimulationResult(success=False, revert_data=self.ORACLE_REVERT)
-        decoded = _with_revert_reason(sim, "0x90787c1b99F47EFfEE0db0aB9D4e33CdC3e6bFa7", 1)
-        assert decoded is not None
-        self.assertEqual(decoded.error_message, "InvalidOracle(_asset=0x5086bf358635B81D8C47C66d1C8b9E567Db70c72)")
-
-    @patch("utils.llm.ai_explainer.get_current_implementation", return_value=None)
-    @patch("utils.llm.ai_explainer.fetch_abi_entries")
-    def test_generic_reason_is_replaced_by_decoded_error(self, mock_abi: MagicMock, _impl: MagicMock) -> None:
-        mock_abi.return_value = self.ERRORS_ABI
-        sim = SimulationResult(success=False, error_message="execution reverted", revert_data=self.ORACLE_REVERT)
-        decoded = _with_revert_reason(sim, "0x90787c1b99F47EFfEE0db0aB9D4e33CdC3e6bFa7", 1)
-        assert decoded is not None
-        self.assertEqual(decoded.error_message, "InvalidOracle(_asset=0x5086bf358635B81D8C47C66d1C8b9E567Db70c72)")
+        for reason in ("", "execution reverted"):
+            with self.subTest(reason=reason):
+                sim = SimulationResult(success=False, error_message=reason, revert_data=self.ORACLE_REVERT)
+                decoded = _with_revert_reason(sim, "0x90787c1b99F47EFfEE0db0aB9D4e33CdC3e6bFa7", 1)
+                assert decoded is not None
+                self.assertEqual(
+                    decoded.error_message, "InvalidOracle(_asset=0x5086bf358635B81D8C47C66d1C8b9E567Db70c72)"
+                )
 
     @patch("utils.llm.ai_explainer.fetch_abi_entries")
     def test_named_reason_is_not_overwritten(self, mock_abi: MagicMock) -> None:
