@@ -179,11 +179,11 @@ class ReportContext:
 
 @dataclass
 class _ReferenceEntry:
-    """One address and its accumulated deterministic report usages."""
+    """One address and the roles it plays in the transaction."""
 
     address: str
     label: str
-    usages: list[tuple[str, str]] = field(default_factory=list)
+    roles: list[str] = field(default_factory=list)
 
 
 def checksum_or_none(addr: object) -> str | None:
@@ -476,22 +476,14 @@ def _reference_label(ctx: ReportContext, address: str) -> str:
     return ctx.labels.get(address, "")
 
 
-def _add_reference(
-    entries: dict[str, _ReferenceEntry],
-    ctx: ReportContext,
-    raw_address: str,
-    role: str,
-    description: str,
-) -> None:
-    """Add or enrich one checksummed reference entry."""
+def _add_reference(entries: dict[str, _ReferenceEntry], ctx: ReportContext, raw_address: str, role: str) -> None:
+    """Add one checksummed reference entry, or record another role for it."""
     address = checksum_or_none(raw_address)
     if address is None or address == ZERO_ADDRESS:
         return
-    key = address.lower()
-    entry = entries.setdefault(key, _ReferenceEntry(address, _reference_label(ctx, address)))
-    usage = (role, description)
-    if usage not in entry.usages:
-        entry.usages.append(usage)
+    entry = entries.setdefault(address.lower(), _ReferenceEntry(address, _reference_label(ctx, address)))
+    if role not in entry.roles:
+        entry.roles.append(role)
 
 
 def _table_cell(value: str) -> str:
@@ -517,70 +509,56 @@ def _iter_inner_calldata(type_str: str, value: object) -> Iterator[DecodedCall]:
             yield inner
 
 
-def _iter_reference_arguments(
-    call: DecodedCall,
-    param_names: list[str] | None,
-    depth: int = 0,
-) -> Iterator[tuple[str, str]]:
-    """Yield address arguments and factual descriptions, including nested calldata."""
-    for index, (type_str, value) in enumerate(call.params):
-        name = param_names[index] if param_names is not None and index < len(param_names) else ""
-        parameter = f"`{name}`" if name else f"argument {index + 1}"
-        description = f"Passed as {parameter} to `{call.signature}`"
-        for address in iter_address_values(type_str, value):
-            yield address, description
+def _iter_reference_arguments(call: DecodedCall, depth: int = 0) -> Iterator[str]:
+    """Yield address arguments, including those inside nested calldata."""
+    for type_str, value in call.params:
+        yield from iter_address_values(type_str, value)
         if depth < MAX_BYTES_RECURSION_DEPTH:
             for inner in _iter_inner_calldata(type_str, value):
-                yield from _iter_reference_arguments(inner, None, depth + 1)
+                yield from _iter_reference_arguments(inner, depth + 1)
 
 
-def format_reference_table(ctx: ReportContext) -> str:
-    """Render addresses used by the transaction as a deterministic table."""
+def format_reference_table(ctx: ReportContext, shown: str = "") -> str:
+    """Render the addresses the rest of the report does not already link, as a deterministic table.
+
+    Every call target and address argument is already linked and labelled in
+    the Call Flow, so repeating them — with a Description column restating the
+    call flow ("Passed as `_asset` to `setOracle`") — doubled the report for no
+    information. Only addresses absent from ``shown`` (the report body) get a
+    row; an empty table is omitted.
+
+    Args:
+        ctx: Report context.
+        shown: Markdown already in the report; addresses found in it are skipped.
+    """
     references: dict[str, _ReferenceEntry] = {}
-    _add_reference(references, ctx, ctx.from_address, "Executor", "Execution authority for the governance transaction")
+    _add_reference(references, ctx, ctx.from_address, "Executor")
 
     label_address = checksum_or_none(ctx.label_address)
     sender = checksum_or_none(ctx.from_address)
     if label_address is not None and label_address != sender:
-        _add_reference(references, ctx, label_address, "Alert contract", "Contract named in the report header")
+        _add_reference(references, ctx, label_address, "Alert contract")
 
     for entry in ctx.entries:
-        if entry.call is None:
-            received = (
-                "undecoded calldata"
-                if entry.decode_status != "empty_calldata"
-                else "empty calldata (no function selector)"
-            )
-            _add_reference(references, ctx, entry.target, "Call target", f"Receives {received}")
-            continue
-        _add_reference(
-            references,
-            ctx,
-            entry.target,
-            "Call target",
-            f"Receives `{entry.call.signature}`",
-        )
-        for address, description in _iter_reference_arguments(entry.call, entry.param_names):
-            _add_reference(references, ctx, address, "Calldata argument", description)
+        _add_reference(references, ctx, entry.target, "Call target")
+        if entry.call is not None:
+            for address in _iter_reference_arguments(entry.call):
+                _add_reference(references, ctx, address, "Calldata argument")
 
-    context_description = (
-        f"Resolved by the {ctx.protocol} protocol adapter" if ctx.protocol else "Resolved by protocol context"
-    )
     for address in ctx.related_addresses:
-        _add_reference(references, ctx, address, "Protocol context", context_description)
+        _add_reference(references, ctx, address, "Protocol context")
 
-    if not references:
+    shown_lower = shown.lower()
+    rows = [reference for reference in references.values() if reference.address.lower() not in shown_lower]
+    if not rows:
         return ""
 
-    lines = ["| Address | Label | Role | Description |", "|---|---|---|---|"]
-    for reference in references.values():
+    lines = ["| Address | Label | Role |", "|---|---|---|"]
+    for reference in rows:
         address = address_link(reference.address, ctx.chain_id)
         label = _table_cell(reference.label) or "—"
-        roles = _table_cell("; ".join(dict.fromkeys(role for role, _description in reference.usages)))
-        descriptions = "<br>".join(
-            f"**{_table_cell(role)}:** {_table_cell(description)}" for role, description in reference.usages
-        )
-        lines.append(f"| {address} | {label} | {roles} | {descriptions} |")
+        roles = _table_cell("; ".join(reference.roles))
+        lines.append(f"| {address} | {label} | {roles} |")
     return "\n".join(lines)
 
 
@@ -674,7 +652,7 @@ def build_report(summary: str, detail: str, ctx: ReportContext, risk_tag: str = 
         sections.append(f"## Safety Checks\n\n{notes}")
     if ctx.protocol_context:
         sections.append(f"## Protocol Context\n\n{ctx.protocol_context}")
-    reference = format_reference_table(ctx)
+    reference = format_reference_table(ctx, shown="\n\n".join(sections))
     if reference:
         sections.append(f"## Reference\n\n{reference}")
     return "\n\n".join(sections)

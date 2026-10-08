@@ -4,14 +4,12 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from utils.calldata.decoder import DecodedCall
-from utils.erc20_metadata import ERC20Metadata
 from utils.llm import abi_exposure, infinifi_outland_context
 from utils.llm.infinifi_outland_context import (
     ZERO_ADDRESS,
     ConnectorRouteContext,
     FarmTypeContext,
     HubVaultContext,
-    OracleAssignmentContext,
     OutlandMessageContext,
     RouteConfig,
     format_outland_prompt,
@@ -41,7 +39,6 @@ def _client(batch_results: list[list[object]], single_call: object = None) -> Ma
     client = MagicMock()
     client.execute_batch.side_effect = batch_results
     client.get_contract.return_value.functions.getVault.return_value.call.return_value = single_call
-    client.get_contract.return_value.functions.price.return_value.call.return_value = single_call
     return client
 
 
@@ -55,7 +52,7 @@ class TestGuards(unittest.TestCase):
         self.assertEqual(resolve_outland_context("infinifi", 8453, [(REGISTRY, call)]), [])
 
     def test_resolution_failure_does_not_raise(self) -> None:
-        call = _call("setOracle", ("address", VAULT), ("address", ORACLE))
+        call = _call("setVault", ("address", VAULT))
         with patch.object(infinifi_outland_context, "exposes", side_effect=RuntimeError("etherscan down")):
             self.assertEqual(resolve_outland_context("infinifi", 1, [(ACCOUNTING, call)]), [])
 
@@ -90,30 +87,6 @@ class TestFarmType(unittest.TestCase):
     def test_unknown_farm_type_is_flagged(self) -> None:
         context = FarmTypeContext(REGISTRY, "addFarms", 7, (FARM,))
         self.assertIn("FarmTypes.UNKNOWN — not a FarmTypes constant", format_outland_prompt([context]))
-
-
-class TestOracle(unittest.TestCase):
-    def test_price_is_scaled_by_asset_decimals(self) -> None:
-        call = _call("setOracle", ("address", VAULT), ("address", ORACLE))
-        with (
-            patch.object(infinifi_outland_context, "exposes", return_value=True),
-            patch.object(infinifi_outland_context, "fetch_erc20_metadata", return_value=ERC20Metadata("OV-143", 18)),
-            patch.object(infinifi_outland_context.ChainManager, "get_client", return_value=_client([], 10**18)),
-        ):
-            contexts = resolve_outland_context("infinifi", 1, [(ACCOUNTING, call)])
-        self.assertEqual(contexts, [OracleAssignmentContext(ACCOUNTING, VAULT, "OV-143", 18, ORACLE, 10**18)])
-        self.assertIn("one whole OV-143 is valued at 1 reference units", format_outland_prompt(contexts))
-
-    def test_usdc_scale_reads_as_parity(self) -> None:
-        # IOracle convention: a 6-decimal stable at parity is quoted at 1e30.
-        context = OracleAssignmentContext(ACCOUNTING, USDC, "USDC", 6, ORACLE, 10**30)
-        self.assertIn("= `1` reference units", format_outland_report([context], 1, {}))
-
-    def test_removing_an_oracle_is_not_priced(self) -> None:
-        call = _call("setOracle", ("address", VAULT), ("address", ZERO_ADDRESS))
-        with patch.object(infinifi_outland_context, "exposes") as probe:
-            self.assertEqual(resolve_outland_context("infinifi", 1, [(ACCOUNTING, call)]), [])
-        probe.assert_not_called()
 
 
 class TestHubVault(unittest.TestCase):

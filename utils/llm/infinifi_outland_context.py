@@ -4,8 +4,6 @@ Onboarding a chain to Infinifi's Outland spans several contracts, and each call
 arrives at the LLM without the facts that make it reviewable:
 
 - ``FarmRegistry.addFarms(type, farms)`` names the farm type by number only.
-- ``Accounting.setOracle(asset, oracle)`` carries the oracle address, not the
-  price it reports or what that price means for the asset's decimals.
 - ``PortalHub.setVault(vault)`` keys vaults by the vault's own ``chainId()``, so
   the calldata cannot say whether it adds a chain or replaces a live vault.
 - Connector calls (``enableChainAsset``, ``setCctpDomain``) do not show whether
@@ -29,7 +27,6 @@ from eth_utils import to_checksum_address
 
 from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
-from utils.erc20_metadata import fetch_erc20_metadata
 from utils.llm.abi_exposure import exposes
 from utils.llm.report import address_link
 from utils.logger import get_logger
@@ -59,10 +56,6 @@ FARM_TYPES: dict[int, tuple[str, str]] = {
 _MESSAGE_TYPES = {0: "MESSAGE (assets update)", 1: "TRANSFER", 2: "KEY_VALUE", 3: "TOKEN_BRIDGE"}
 _HEADER_SIZE = 96
 
-# IOracle.price() scale: a whole token's value in the reference unit is
-# price * 10**decimals / 1e36 (USDC is quoted at ~1e30 for a 1:1 price).
-_ORACLE_PRICE_SCALE = Decimal(10) ** 36
-
 _CONNECTOR_CHAIN_CALLS = {"enableChainAsset", "disableChainAsset", "setCctpDomain", "setConfiguration"}
 
 _ADDRESS_OUT = [{"name": "", "type": "address"}]
@@ -86,7 +79,6 @@ _VAULT_REPORT_ABI = [
     }
 ]
 
-_ORACLE_ABI = [{"name": "price", "type": "function", "stateMutability": "view", "inputs": [], "outputs": _UINT_OUT}]
 _VAULT_ABI = [{"name": "chainId", "type": "function", "stateMutability": "view", "inputs": [], "outputs": _UINT_OUT}]
 _HUB_ABI = [
     {
@@ -157,31 +149,6 @@ class FarmTypeContext:
     @property
     def type_note(self) -> str:
         return FARM_TYPES.get(self.farm_type, ("", "not a FarmTypes constant"))[1]
-
-
-@dataclass(frozen=True)
-class OracleAssignmentContext:
-    """The price an oracle reports for the asset it is being assigned to."""
-
-    accounting: str
-    asset: str
-    asset_symbol: str
-    asset_decimals: int
-    oracle: str
-    price_raw: int
-
-    @property
-    def addresses(self) -> list[str]:
-        return [self.asset, self.oracle]
-
-    @property
-    def labels(self) -> dict[str, str]:
-        return {}
-
-    @property
-    def unit_price(self) -> Decimal:
-        """Reference-unit value of one whole asset token (1 = parity with USDC)."""
-        return Decimal(self.price_raw) * (Decimal(10) ** self.asset_decimals) / _ORACLE_PRICE_SCALE
 
 
 @dataclass(frozen=True)
@@ -349,9 +316,7 @@ def _decode_message(data: bytes) -> tuple[int, int, int, tuple[object, ...]] | N
     return message_type, chain, nonce, payload
 
 
-OutlandContext = (
-    FarmTypeContext | OracleAssignmentContext | HubVaultContext | ConnectorRouteContext | OutlandMessageContext
-)
+OutlandContext = FarmTypeContext | HubVaultContext | ConnectorRouteContext | OutlandMessageContext
 
 
 def _uint_param(call: DecodedCall, position: int) -> int | None:
@@ -455,30 +420,6 @@ def _message_context(chain_id: int, target: str, call: DecodedCall) -> OutlandMe
     )
 
 
-def _oracle_context(chain_id: int, target: str, call: DecodedCall) -> OracleAssignmentContext | None:
-    """Read the price a newly assigned oracle reports and scale it by the asset's decimals."""
-    if call.function_name != "setOracle":
-        return None
-    asset, oracle = _address_param(call, 0), _address_param(call, 1)
-    if asset is None or oracle is None or oracle == ZERO_ADDRESS:
-        return None
-    if not exposes(chain_id, target, {"setOracle", "oracle", "price"}):
-        return None
-    metadata = fetch_erc20_metadata(chain_id, asset)
-    if metadata is None:
-        return None
-    client = ChainManager.get_client(Chain.from_chain_id(chain_id))
-    price = client.get_contract(oracle, _ORACLE_ABI).functions.price().call()
-    return OracleAssignmentContext(
-        accounting=target,
-        asset=asset,
-        asset_symbol=metadata.symbol,
-        asset_decimals=metadata.decimals,
-        oracle=oracle,
-        price_raw=int(price),
-    )
-
-
 def _hub_vault_context(chain_id: int, target: str, call: DecodedCall) -> HubVaultContext | None:
     """Read which chains a PortalHub has vaults for, and what this setVault replaces."""
     if call.function_name != "setVault":
@@ -576,7 +517,6 @@ def resolve_outland_context(
                 farm_type = _farm_type_context(target, call)
                 resolved = (
                     (_with_maturity_terms(chain_id, farm_type) if farm_type else None)
-                    or _oracle_context(chain_id, target, call)
                     or _hub_vault_context(chain_id, target, call)
                     or _message_context(chain_id, target, call)
                 )
@@ -590,11 +530,6 @@ def resolve_outland_context(
         except Exception as error:  # noqa: BLE001 - enrichment must never block an alert
             logger.info("Outland connector context failed for %s: %s", target, error)
     return contexts
-
-
-def _format_unit_price(context: OracleAssignmentContext) -> str:
-    """Whole-token price in the reference unit, e.g. ``1`` or ``0.9985``."""
-    return f"{context.unit_price.normalize():f}"
 
 
 def _route_status(context: ConnectorRouteContext) -> str:
@@ -645,13 +580,6 @@ def format_outland_prompt(contexts: list[OutlandContext]) -> str:
             lines.extend(f"  {line}" for line in context.terms_lines())
         elif isinstance(context, OutlandMessageContext):
             lines.append(context.describe())
-        elif isinstance(context, OracleAssignmentContext):
-            lines.append(
-                f"Oracle {context.oracle} assigned to {context.asset} ({context.asset_symbol}, "
-                f"{context.asset_decimals} decimals) reports price() = {context.price_raw}, i.e. one whole "
-                f"{context.asset_symbol} is valued at {_format_unit_price(context)} reference units "
-                "(IOracle scale: price * 10^decimals / 1e36; USDC is ~1)"
-            )
         elif isinstance(context, HubVaultContext):
             lines.append(_hub_vault_line(context))
         else:
@@ -671,12 +599,6 @@ def format_outland_report(contexts: list[OutlandContext], chain_id: int, labels:
             lines.extend(f"  - {line}" for line in context.terms_lines())
         elif isinstance(context, OutlandMessageContext):
             lines.append(f"- **Cross-chain message (`{context.function_name}`):** {context.describe()}")
-        elif isinstance(context, OracleAssignmentContext):
-            lines.append(
-                f"- **Oracle price:** {address_link(context.oracle, chain_id, labels)} reports `{context.price_raw}` "
-                f"→ one whole `{context.asset_symbol}` = `{_format_unit_price(context)}` reference units "
-                "(USDC ≈ 1)"
-            )
         elif isinstance(context, HubVaultContext):
             registered = ", ".join(f"`{chain}`" for chain in context.registered_chain_ids) or "none"
             effect = (

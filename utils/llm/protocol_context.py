@@ -38,6 +38,16 @@ from utils.llm.infinifi_context import (
     format_infinifi_report,
     resolve_infinifi_context,
 )
+from utils.llm.infinifi_farm_context import (
+    format_infinifi_farm_prompt,
+    format_infinifi_farm_report,
+    resolve_infinifi_farm_context,
+)
+from utils.llm.infinifi_oracle_context import (
+    format_infinifi_oracle_prompt,
+    format_infinifi_oracle_report,
+    resolve_infinifi_oracle_context,
+)
 from utils.llm.infinifi_outland_context import (
     format_outland_prompt,
     format_outland_report,
@@ -92,6 +102,18 @@ class _Adapter:
 _ADAPTERS: tuple[_Adapter, ...] = (
     _Adapter("infinifi", resolve_infinifi_context, format_infinifi_prompt, format_infinifi_report),
     _Adapter("infinifi-outland", resolve_outland_context, format_outland_prompt, format_outland_report),
+    _Adapter(
+        "infinifi-oracle",
+        resolve_infinifi_oracle_context,
+        format_infinifi_oracle_prompt,
+        format_infinifi_oracle_report,
+    ),
+    _Adapter(
+        "infinifi-farm",
+        resolve_infinifi_farm_context,
+        format_infinifi_farm_prompt,
+        format_infinifi_farm_report,
+    ),
     _Adapter("3jane", resolve_threejane_context, format_threejane_prompt, format_threejane_report),
     _Adapter("pendle", resolve_pendle_context, format_pendle_prompt, format_pendle_report),
     _Adapter("yearn-v3", resolve_yearn_v3_context, format_yearn_v3_prompt, format_yearn_v3_report),
