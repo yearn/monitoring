@@ -521,11 +521,7 @@ def _simulation_note(
             return f"**Independent simulation:** SUCCESS{gas} (does not prove the batch succeeds atomically)"
         return f"**Simulation:** SUCCESS{gas}"
     error = f"reverted with `{sim.error_message}`" if sim.error_message else "reverted"
-    handling = (
-        "shown to the risk prompt as an unmet prerequisite"
-        if _is_informative_revert(sim)
-        else "omitted from the risk prompt"
-    )
+    handling = "shown to the risk prompt" if _is_informative_revert(sim) else "omitted from the risk prompt"
     if sequential:
         return (
             f"**Batch simulation diagnostic:** {error} when run in batch order — not a predicted governance "
@@ -537,20 +533,23 @@ def _simulation_note(
 
 SIMULATION_PREREQUISITE_NOTE = (
     "Simulations run against current chain state, while governance operations execute later (after a timelock "
-    "delay or signatures). A revert here usually means a prerequisite outside this transaction is not met yet — a "
-    "separately scheduled operation that has not executed, an unset oracle, a missing role or balance. Assess the "
-    "transaction by what it does once that prerequisite is met: state the dependency, but do not describe the "
-    "transaction as failing or as having no effect, and do not lower the risk for that reason."
+    "delay or signatures). A revert here often means a prerequisite outside this transaction is not met yet — a "
+    "separately scheduled operation that has not executed, an unset oracle, a missing role or balance. Judge the "
+    "revert's cause. If it is such a prerequisite, state the dependency and assess the transaction by what it does "
+    "once the prerequisite is met; do not describe it as failing or as having no effect. If the revert points to "
+    "this transaction's own arguments (an out-of-bounds parameter, an asset no scheduled operation enables), report "
+    "it as a likely execution failure. Either way, do not lower the risk for that reason."
 )
 
 
 def _with_revert_reason(sim: SimulationResult | None, target: str, chain_id: int) -> SimulationResult | None:
     """Name a failed simulation's revert from the target's verified ABI when Tenderly left it unnamed.
 
-    Tenderly decodes ``require`` strings but reports custom errors as raw bytes;
-    the reason ("InvalidOracle(reUSD)") usually explains the revert outright.
+    Tenderly decodes ``require`` strings but reports custom errors as raw bytes,
+    sometimes behind a generic "execution reverted"; the reason
+    ("InvalidOracle(reUSD)") usually explains the revert outright.
     """
-    if sim is None or sim.success or sim.error_message or not sim.revert_data:
+    if sim is None or sim.success or not sim.revert_data or sim.error_message.strip().lower() not in _UNNAMED_REVERTS:
         return sim
     abi = list(fetch_abi_entries(chain_id, target) or [])
     implementation = get_current_implementation(target, chain_id)
@@ -574,8 +573,9 @@ _UNNAMED_REVERTS = {"", "reverted", "execution reverted"}
 def _is_informative_revert(sim: SimulationResult | None) -> bool:
     """Whether a failed simulation names a cause worth showing the model.
 
-    Only a specific reason qualifies ("InvalidOracle(_asset=0x…)"): it usually
-    names an unmet prerequisite, such as a separately scheduled operation. An
+    Only a specific reason qualifies ("InvalidOracle(_asset=0x…)"): it often
+    names an unmet prerequisite, such as a separately scheduled operation, or
+    else a bad argument; the prompt note has the model tell the two apart. An
     access-control revert is the simulator's sender lacking the executor's role,
     and an unnamed revert explains nothing; both bias the model toward a
     failure that would not happen.

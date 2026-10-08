@@ -436,6 +436,15 @@ class TestInformativeSimulationReverts(unittest.TestCase):
         assert decoded is not None
         self.assertEqual(decoded.error_message, "InvalidOracle(_asset=0x5086bf358635B81D8C47C66d1C8b9E567Db70c72)")
 
+    @patch("utils.llm.ai_explainer.get_current_implementation", return_value=None)
+    @patch("utils.llm.ai_explainer.fetch_abi_entries")
+    def test_generic_reason_is_replaced_by_decoded_error(self, mock_abi: MagicMock, _impl: MagicMock) -> None:
+        mock_abi.return_value = self.ERRORS_ABI
+        sim = SimulationResult(success=False, error_message="execution reverted", revert_data=self.ORACLE_REVERT)
+        decoded = _with_revert_reason(sim, "0x90787c1b99F47EFfEE0db0aB9D4e33CdC3e6bFa7", 1)
+        assert decoded is not None
+        self.assertEqual(decoded.error_message, "InvalidOracle(_asset=0x5086bf358635B81D8C47C66d1C8b9E567Db70c72)")
+
     @patch("utils.llm.ai_explainer.fetch_abi_entries")
     def test_named_reason_is_not_overwritten(self, mock_abi: MagicMock) -> None:
         sim = SimulationResult(success=False, error_message="paused", revert_data=self.ORACLE_REVERT)
@@ -456,7 +465,8 @@ class TestInformativeSimulationReverts(unittest.TestCase):
         ]
         section = _format_batch_simulation_section(items)
         self.assertIn("Call 1 (batch order) reverted in simulation with InvalidOracle(_asset=0x5086).", section)
-        self.assertIn("do not describe the transaction as failing or as having no effect", section)
+        self.assertIn("do not describe it as failing or as having no effect", section)
+        self.assertIn("report it as a likely execution failure", section)
 
     def test_access_and_unnamed_reverts_stay_out(self) -> None:
         for reason in (
