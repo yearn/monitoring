@@ -273,10 +273,10 @@ class ExposureAssessment:
 
 
 BAD_DEBT_RATIO = 0.005
-LIQUIDITY_THRESHOLD = 0.01
+LIQUIDITY_THRESHOLD = 0.02
 # Vault V2 withdrawals are served only from idle assets plus the single liquidity adapter
-# market, so a thinner buffer is riskier than on V1 (which walks the whole withdraw queue).
-V2_LIQUIDITY_THRESHOLD = 0.05
+# market, so it cannot walk the whole withdraw queue like V1.
+V2_LIQUIDITY_THRESHOLD = 0.02
 MIN_VAULT_ASSETS_USD = 10_000
 
 

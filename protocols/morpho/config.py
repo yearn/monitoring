@@ -76,8 +76,9 @@ VAULTS_V2_BY_CHAIN: dict[Chain, tuple[VaultConfig, ...]] = {
         VaultConfig("Yearn USDC", "0xaA8d9E2aBa210639cE6C7cE21385e7c673ACa6f3", 1),
         VaultConfig("Yearn OG WETH V2", "0xbe518068EB6135117207256F8C9aFf81B4382DB1", 1),
         VaultConfig("Yearn OG USDC", "0xB885F6d448dA7E2C642Ec31190B629E40E87B069", 3),
-        VaultConfig("Sentora RLUSD Main", "0x6dC58a0FdfC8D694e571DC59B9A52EEEa780E6bf", 2),
-        VaultConfig("Sentora PaypalUSD Main", "0xb576765fB15505433aF24FEe2c0325895C559FB2", 2),
+        # Disabled: Sentora vaults are no longer monitored. Addresses kept for re-enabling.
+        # VaultConfig("Sentora RLUSD Main", "0x6dC58a0FdfC8D694e571DC59B9A52EEEa780E6bf", 2),
+        # VaultConfig("Sentora PaypalUSD Main", "0xb576765fB15505433aF24FEe2c0325895C559FB2", 2),
         VaultConfig("Steakhouse Confidential Prime USDC", "0xbEEF00A59B577423653A1526c7009bdE103F542B", 1),
     ),
     Chain.BASE: (

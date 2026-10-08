@@ -51,13 +51,13 @@ Bad debt is fetched from the Morpho GraphQL API. Each market is checked for bad 
 
 ### Liquidity
 
-The standard check alerts when immediately withdrawable vault liquidity falls below a share of vault assets set in [risk.py](./risk.py): 1% for V1 (`LIQUIDITY_THRESHOLD`) and 5% for V2 (`V2_LIQUIDITY_THRESHOLD`).
+The standard check alerts when immediately withdrawable vault liquidity falls below a share of vault assets set in [risk.py](./risk.py): 2% for both V1 (`LIQUIDITY_THRESHOLD`) and V2 (`V2_LIQUIDITY_THRESHOLD`).
 
 **V2 liquidity adapter check.** A Vault V2 serves withdrawals only from idle assets plus its single **liquidity adapter**: `withdraw` deallocates from the adapter's market (`liquidityData`), not from every allocation. `markets_v2.py` therefore:
 
 1. Fetches the vault's active `liquidityAdapter` and its market (`liquidityData`).
 2. Takes the vault's position in that market from the adapter's positions and caps it by the market's free cash: `idle + min(adapter supply, market cash)`.
-3. Alerts when that is below 5% of vault total assets.
+3. Alerts when that is below 2% of vault total assets.
 
 This applies to every monitored V2 vault, including YV-collateral strategy vaults (which additionally get the coverage check below). The computed value matches the API's `liquidityUsd` and on-chain reads. Alerts show the idle/adapter split, the adapter, and the liquidity market's vault supply, cash and utilization. A vault with no liquidity adapter can only pay out idle assets. An adapter whose market or positions cannot be resolved fails the run instead of being treated as zero liquidity.
 
@@ -71,7 +71,7 @@ For vaults that are used as collateral in Yearn v3 strategies (YV collateral vau
 
 **Thresholds:**
 
-- **Regular vaults:** `LIQUIDITY_THRESHOLD` (V1, 1%) and `V2_LIQUIDITY_THRESHOLD` (V2, 5%; also applied to YV-collateral V2 vaults) in [risk.py](./risk.py).
+- **Regular vaults:** `LIQUIDITY_THRESHOLD` (V1, 2%) and `V2_LIQUIDITY_THRESHOLD` (V2, 2%; also applied to YV-collateral V2 vaults) in [risk.py](./risk.py).
 - **YV collateral vaults:** Require enough combined withdrawable liquidity to cover collateral at risk in direct YV-collateral Morpho markets, plus a liquidation buffer (`YV_COLLATERAL_*` constants in [markets.py](./markets.py)). Price shock is selected from market LLTV: 2% for LLTV >= 86%, 15% for LLTV <= 77%, otherwise 10%.
 
 **Logic:** For each asset group (e.g., all USDC vaults at one chain), the system:

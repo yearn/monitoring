@@ -24,11 +24,11 @@ protocols:
       - protocols/3jane/main.py
     monitors:
       - name: "Price Per Share"
-        description: "USD3 PPS decrease (any drop vs cached prior, CRITICAL) and sUSD3 PPS decrease (HIGH)"
+        description: "USD3 and sUSD3 PPS decrease"
       - name: "TVL"
         description: "Absolute TVL change >=15% for USD3 or sUSD3 using a baseline no older than 3 hours"
       - name: "USD3 Protection"
-        description: "Combined OC and equivalent junior buffer: <111% OC / <9.91% buffer (HIGH), or <106% OC / <5.66% buffer (CRITICAL); re-armed after a monitoring gap >3 hours"
+        description: "Combined OC and equivalent junior buffer: <111% OC / <9.91% buffer, or <106% OC / <5.66% buffer; re-armed after a monitoring gap >3 hours"
       - name: "Insurance Fund Outflow"
         description: "waUSDC outflow >=$50k since prior run"
       - name: "Withdraw Liquidity"
@@ -44,9 +44,9 @@ protocols:
       - name: "Borrower Default Watch"
         description: "Envio-backed MorphoCredit borrower watch using live ProtocolConfig timing; MEDIUM alerts when unpaid obligations become delinquent after grace or reach default"
       - name: "Proof of Solvency"
-        description: "Accountable collateral ratio <95% (CRITICAL) or <99% (HIGH)"
+        description: "Accountable collateral ratio <95% or <99%"
       - name: "Proof of Solvency Freshness"
-        description: "MEDIUM when the Accountable report or a source exceeds its freshness limit (1h for 15-minute cadence, 8.5d for weekly) or a required source is missing or malformed; HIGH on first unavailable run, CRITICAL on the second consecutive miss"
+        description: "MEDIUM when the Accountable report or a source exceeds its freshness limit or a required source is missing or malformed; HIGH on first unavailable run, CRITICAL on the second consecutive miss"
       - name: "Timelock"
         description: "CallScheduled events from 24h and 7-day TimelockControllers via Envio"
 
@@ -110,7 +110,7 @@ protocols:
       - name: "Borrow/Supply Ratio"
         description: "Borrow/supply ratio >95%"
       - name: "Bad Debt"
-        description: "Negative reserves (getReserves() < 0)"
+        description: "Negative reserves"
       - name: "Unknown Collateral"
         description: "Collateral assets not mapped in SUPPLY_ASSETS_DICT"
       - name: "Governance Proposals"
@@ -126,7 +126,7 @@ protocols:
       - protocols/ethena/ethena.py
     monitors:
       - name: "USDe Backing Ratio"
-        description: "(collateral + reserve fund) / supply < 1.0 (CRITICAL) or < 1.005 (HIGH) via Ethena transparency API"
+        description: "(collateral + reserve fund) / supply < 1.0 or < 1.005 via Ethena transparency API"
       - name: "On-Chain Supply Consistency"
         description: "Ethena API USDe supply vs on-chain totalSupply() differs by > 0.5%"
       - name: "Data Freshness"
@@ -182,13 +182,13 @@ protocols:
       - name: "Large iUSD Mints"
         description: "totalSupply delta >5% vs a cached prior no older than 3 hours"
       - name: "Farm Allocation Shift"
-        description: "Farm allocation ratio change >30% vs prior run (farms <1% of TVL excluded)"
+        description: "Farm allocation ratio change >30% vs prior run"
       - name: "Farm Activation"
         description: "Farm previously at 0 ratio moves above 3% of TVL"
       - name: "Junior TVL Coverage"
         description: "Junior TVL <50% of risky farm exposure; re-armed after a monitoring gap >3 hours"
       - name: "L2 Vault Reports"
-        description: "Per-chain L2 vault (OutlandVault) value falls >50% (and >$10k) since the last stored reading, differs >25% (and >$10k) from the API's L2 farm value, or no assets update for >48h while holding >$10k"
+        description: "Per-chain L2 vault value falls >50% since the last stored reading, differs >25% from the API's L2 farm value, or no assets update for >48h while holding >$10k"
       - name: "Timelock"
         description: "Longtimelock and Shorttimelock events via Envio"
 
@@ -234,9 +234,9 @@ protocols:
       - protocols/maker/proposals.py
     monitors:
       - name: "Executive Proposals"
-        description: "New scheduled (not cast) executive proposals from Sky governance portal API"
+        description: "New scheduled executive proposals from Sky governance portal API"
       - name: "DSPause / Timelock"
-        description: "Tenderly alert on plot() in DSPause (16-hour execution delay)"
+        description: "Tenderly alert on plot() in DSPause"
       - name: "PSM USDC Balance"
         description: "Tenderly alert when PSM USDC balance < 2B"
 
@@ -253,7 +253,7 @@ protocols:
       - name: "TVL"
         description: "Absolute TVL change >=15% per pool using a baseline no older than 3 hours"
       - name: "Unrealized Losses"
-        description: "Any non-zero on-chain unrealized losses (syrupUSDC); >=0.5% of pool assets via subgraph (all pools)"
+        description: "Any non-zero on-chain unrealized losses; >=0.5% of pool assets via subgraph"
       - name: "Withdrawal Queue"
         description: "Pending exit value >1% of TVL per pool"
       - name: "Pool Liquidity"
@@ -288,7 +288,7 @@ protocols:
       - name: "Vault Risk Levels"
         description: "Weighted total risk score vs vault threshold"
       - name: "Low Liquidity"
-        description: "V1 vault liquidity <1%; V2 vault liquidity (idle + liquidity adapter market position, capped by market cash) <5%, incl. YV-collateral vaults; combined v1/v2 YV-collateral unwind liquidity vs collateral at risk (unwind alerts go to the internal curation chat)"
+        description: "V1 and V2 vault liquidity <2%, incl. YV-collateral vaults; combined v1/v2 YV-collateral unwind liquidity vs collateral at risk"
       - name: "V1 Governance"
         description: "Pending supply caps, market removals, timelock changes, guardian changes"
       - name: "V2 Governance"
@@ -319,7 +319,7 @@ protocols:
       - protocols/rtoken/monitor_rtoken.py
     monitors:
       - name: "Collateral Coverage"
-        description: "basketsNeeded / totalSupply < 105% on Mainnet; <103% on Base (bsdETH disabled)"
+        description: "basketsNeeded / totalSupply < 105% on Mainnet; <103% on Base"
       - name: "StRSR Exchange Rate"
         description: "StRSR exchange rate falls below initial cached value"
       - name: "Redemption Available"
@@ -351,7 +351,7 @@ protocols:
       - name: "Bad Debt"
         description: "Positions with riskFactor > 1"
       - name: "Timelock"
-        description: "Contract monitoring (2-day minimum delay)"
+        description: "Contract monitoring"
       - name: "Safe Multisig"
         description: "3/6 multisig monitoring on Mainnet, Optimism, and Arbitrum"
 
@@ -366,9 +366,9 @@ protocols:
       - name: "Utilization"
         description: "SparkLend mainnet market utilization above 99%"
       - name: "Governance Proposals"
-        description: "New open proposals in Snapshot space sparkfi.eth (Spark governance portal)"
+        description: "New open proposals in Snapshot space sparkfi.eth"
       - name: "DSPause / Timelock"
-        description: "Tenderly alert on plot() in DSPause covering Spark spells (16-hour execution delay via Sky governance)"
+        description: "Tenderly alert on plot() in DSPause covering Spark spells"
 
   stables:
     display_name: "Stablecoins"
@@ -379,7 +379,7 @@ protocols:
       - protocols/stables/oracles.py
     monitors:
       - name: "Stablecoin Prices"
-        description: "Depeg alerts via DeFiLlama (USDe/sUSDe/iUSD/syrupUSDC/syrupUSDT/USTB thresholds)"
+        description: "Depeg alerts via DeFiLlama"
       - name: "Oracle Health"
         description: "Chainlink staleness, round health, peg deviation, oracle-market divergence; rate-oracle monotonicity/delta"
 
@@ -418,7 +418,7 @@ protocols:
       - name: "Timelock Events"
         description: "CallScheduled/ProposalQueued/QueueTransaction/StartVote/ProposalScheduled events across monitored timelocks via Envio; TimelockController/Compound alerts show the full operation ID"
       - name: "Stale Ready Operations"
-        description: "Daily: TimelockController operations ready >7 days but neither executed nor cancelled (state read on-chain via getTimestamp); one silent alert per operation showing the timelock, operation ID, readiness date, call details, and schedule transaction link, with an omitted-call count when details exceed the message budget"
+        description: "Daily: TimelockController operations ready >7 days but neither executed nor cancelled; one silent alert per operation showing the timelock, operation ID, readiness date, call details, and schedule transaction link, with an omitted-call count when details exceed the message budget"
 
   unibtc:
     display_name: "Bedrock uniBTC"
@@ -429,21 +429,21 @@ protocols:
       - protocols/unibtc/main.py
     monitors:
       - name: "Unexpected Minting"
-        description: "uniBTC totalSupply delta +5 in ~1h (CRITICAL) or +5 in ~24h (HIGH); no event scanning"
+        description: "uniBTC totalSupply delta +5 in ~1h or +5 in ~24h; no event scanning"
       - name: "Reserve Gate"
         description: "Any change to Vault adequacyRatio, chainlinkReserveFeeder, uniBTCSupplyFeeder, or feederHeartbeat"
       - name: "Vault or Router Paused"
         description: "Vault outOfService()/paused() or live DelayRedeemRouter paused() is true"
       - name: "Proof of Reserves"
-        description: "Chainlink PoR / Bedrock API supply <100% (CRITICAL) or <101% (HIGH); skipped when the API response is stale, missing a major chain, inconsistent with its own per-chain sum, or disagrees with on-chain Ethereum supply"
+        description: "Chainlink PoR / Bedrock API supply <100% or <101%; skipped when the API response is stale, missing a major chain, inconsistent with its own per-chain sum, or disagrees with on-chain Ethereum supply"
       - name: "PoR Staleness"
         description: "Chainlink PoR updatedAt older than the Vault feederHeartbeat, capped at 86,400s"
       - name: "Supply Feeder"
-        description: "Feeder totalTokenSupply() is 0 (CRITICAL); feeder differs from validated Bedrock API supply by >2%, naming the matching chain (HIGH)"
+        description: "Feeder totalTokenSupply() is 0; feeder differs from validated Bedrock API supply by >2%, naming the matching chain"
       - name: "Redemptions Underfunded"
         description: "Uncleared WBTC router debt exceeds Vault WBTC for >24h and is growing"
       - name: "Peg"
-        description: "DeFiLlama uniBTC/USD divided by Ethereum WBTC/USD < 0.985 WBTC per uniBTC (HIGH) or < 0.97 (CRITICAL)"
+        description: "DeFiLlama uniBTC/USD divided by Ethereum WBTC/USD < 0.985 WBTC per uniBTC or < 0.97"
       - name: "Safe Multisigs"
         description: "uniBTC ops Safe and Bedrock admin Safe queues"
 
@@ -502,10 +502,10 @@ protocols:
         description: "All configured lender-borrower strategies: collateral and borrow-token prices plus LTV/liquidation risk every 30m; lender and borrow APR availability, 24h net spread, and debt coverage every 6h; alerts go to the internal Yearn maintenance chat"
         severity: "MEDIUM"
       - name: "Strategy Keeper Gas"
-        description: "Native gas balance of every wallet that keeps a funded Yearn looper or lender-borrower strategy running (resolved from keeper() through LooperKeeper/yHaaS/TKS relayer contracts); alerts the internal Yearn maintenance chat below $10 on mainnet or $2 on Base/Katana"
+        description: "Native gas balance of every wallet that keeps a funded Yearn looper or lender-borrower strategy running; alerts the internal Yearn maintenance chat below $10 on mainnet or $2 on Base/Katana"
         severity: "MEDIUM"
       - name: "Large Flows"
-        description: "Deposit/withdrawal flows >=$500k USD on mainnet, >=$200k on L2s (Base, Arbitrum, Katana); 10% of vault totalSupply fallback for unpriced tokens"
+        description: "Deposit/withdrawal flows >=$500k USD on mainnet, >=$200k on L2s; 10% of vault totalSupply fallback for unpriced tokens"
       - name: "Small Parent Vault Flows"
         description: "Deposits and withdrawals with a raw ERC-4626 assets value below 10,000 for non-retired Yearn v3 parent vaults; aggregated into one Telegram message per run and routed to the internal Yearn maintenance chat"
       - name: "Timelock Delay"
@@ -513,4 +513,4 @@ protocols:
       - name: "Timelock Events"
         description: "Yearn TimelockController events via Envio"
       - name: "Safe Multisigs"
-        description: "Yearn multisig queues (yChad, Strategist, SAM, Curation) and unexpected-proposer escalation"
+        description: "Yearn multisig queues and unexpected-proposer escalation"
