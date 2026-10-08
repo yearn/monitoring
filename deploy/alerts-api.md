@@ -115,13 +115,6 @@ Example response:
           "args": {},
           "profile": "hourly",
           "cron": "5 * * * *"
-        },
-        {
-          "name": "aave-proposals",
-          "script": "protocols/aave/proposals.py",
-          "args": {},
-          "profile": "hourly",
-          "cron": "5 * * * *"
         }
       ]
     }

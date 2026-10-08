@@ -56,14 +56,11 @@ protocols:
     cadence: "Hourly"
     tasks:
       - protocols/aave/main.py
-      - protocols/aave/proposals.py
     monitors:
       - name: "Market Utilization"
         description: "Utilization rate >99% on Mainnet for 2+ consecutive checks"
-      - name: "Governance Proposals"
-        description: "Queued proposals via Aave governance cache API"
       - name: "Timelock"
-        description: "Aave Governance V3 events via Envio timelock monitor"
+        description: "Aave Governance V3 events via Envio timelock monitor with proposal links"
       - name: "Safe Multisigs"
         description: "Protocol Guardian and Governance Guardian Safe queues"
 
