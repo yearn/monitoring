@@ -1,4 +1,5 @@
 from decimal import Decimal
+from math import isfinite
 
 from web3 import Web3
 
@@ -26,7 +27,7 @@ logger = get_logger(PROTOCOL)
 IUSD_ADDRESS = Web3.to_checksum_address("0x48f9e38f3070AD8945DFEae3FA70987722E3D89c")
 IUSD_DECIMALS = 18
 
-LIQUID_RESERVES_THRESHOLD = 8_000_000
+LIQUID_RESERVES_THRESHOLD_PERCENT = 0.10
 BACKING_PER_IUSD_MIN = 0.999
 MINT_THRESHOLD_PERCENT = Decimal(Config.get_env("IUSD_LARGE_MINT_THRESHOLD_PERCENT", "0.05"))
 REDEMPTION_TO_LIQUID_RATIO_MAX = 0.8
@@ -87,6 +88,29 @@ def _format_iusd_units(raw_value: int) -> Decimal:
     return Decimal(raw_value) / (Decimal(10) ** IUSD_DECIMALS)
 
 
+def check_liquid_reserves(liquid_reserves: float, total_backing: float) -> None:
+    """Check the live TVL-based threshold, deduping until recovery or a monitoring gap."""
+    if not isfinite(liquid_reserves) or liquid_reserves < 0 or not isfinite(total_backing) or total_backing <= 0:
+        logger.warning("Skipping liquid reserves check: valid reserves and positive TVL are required")
+        return
+
+    threshold = total_backing * LIQUID_RESERVES_THRESHOLD_PERCENT
+    cache_key = f"{PROTOCOL}_liquid_reserves_breach"
+    if liquid_reserves < threshold:
+        send_breach_alert_once(
+            cache_key=cache_key,
+            alert_message=(
+                "📉 *Infinifi Liquid Reserves Alert*\n\n"
+                f"Reserves below {LIQUID_RESERVES_THRESHOLD_PERCENT:.0%} of TVL (${threshold:,.2f}).\n"
+                f"Current: ${liquid_reserves:,.2f}\n"
+                f"Total backing: ${total_backing:,.2f}\n"
+                f"Liquid ratio: {liquid_reserves / total_backing:.2%}"
+            ),
+        )
+    else:
+        clear_breach_state(cache_key)
+
+
 def main():
     client = ChainManager.get_client(Chain.MAINNET)
     erc20_abi = load_abi("common-abi/ERC20.json")
@@ -104,6 +128,7 @@ def main():
 
         # --- 2. Fetch API Data ---
         liquid_reserves = 0
+        liquid_reserves_available = False
         total_backing = 0
         pending_redemptions = 0
         reserve_ratio = 0
@@ -125,7 +150,8 @@ def main():
 
             if asset_stats:
                 if "totalLiquidAssetNormalized" in asset_stats:
-                    liquid_reserves = to_float(asset_stats["totalLiquidAssetNormalized"])
+                    liquid_reserves = to_float(asset_stats["totalLiquidAssetNormalized"], default=float("nan"))
+                    liquid_reserves_available = isfinite(liquid_reserves) and liquid_reserves >= 0
 
                 if "totalTVLAssetNormalized" in asset_stats:
                     total_backing = to_float(asset_stats["totalTVLAssetNormalized"])
@@ -216,36 +242,8 @@ def main():
         write_last_value_with_timestamp_to_file(cache_filename, cache_key_large_mints, iusd_supply_raw)
 
         # Alert 1: Low Liquid Reserves
-        if liquid_reserves > 0:
-            cache_key_reserves = f"{PROTOCOL}_liquid_reserves"
-            last_reserves = float(get_last_value_for_key_from_file(cache_filename, cache_key_reserves))
-
-            if last_reserves > 0 and cache_key_is_stale(
-                cache_filename, cache_key_reserves, HOURLY_CACHE_STALE_AFTER_SECONDS
-            ):
-                logger.info(
-                    "Liquid reserves cache timestamp is missing, invalid, or older than %sh; "
-                    "re-arming crossing detection",
-                    HOURLY_CACHE_STALE_AFTER_SECONDS // 3600,
-                )
-                last_reserves = LIQUID_RESERVES_THRESHOLD
-
-            if (
-                last_reserves != 0
-                and liquid_reserves < LIQUID_RESERVES_THRESHOLD
-                and last_reserves >= LIQUID_RESERVES_THRESHOLD
-            ):
-                msg = (
-                    "📉 *Infinifi Liquid Reserves Alert*\n\n"
-                    f"Reserves dropped below ${LIQUID_RESERVES_THRESHOLD:,.0f}.\n"
-                    f"Previous: ${last_reserves:,.2f}\n"
-                    f"Current: ${liquid_reserves:,.2f}\n"
-                    f"Total backing: ${total_backing:,.2f}\n"
-                    f"Liquid ratio: {reserve_ratio:.2%}"
-                )
-                send_alert(Alert(AlertSeverity.HIGH, msg, PROTOCOL))
-
-            write_last_value_with_timestamp_to_file(cache_filename, cache_key_reserves, liquid_reserves)
+        if liquid_reserves_available:
+            check_liquid_reserves(liquid_reserves, total_backing)
 
         # Alert 2 and Alert 3 intentionally disabled:
         # reserveRatio and illiquidTargetRatio have been persistently violated since inception,

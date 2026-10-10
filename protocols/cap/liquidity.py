@@ -96,12 +96,17 @@ def main():
                 severity = AlertSeverity.HIGH
 
             if severity is not None:
+                threshold_percent = (
+                    CRITICAL_LIQUIDITY_THRESHOLD if severity == AlertSeverity.CRITICAL else HIGH_LIQUIDITY_THRESHOLD
+                )
+                alert_threshold = total_tvl * threshold_percent
                 message = (
                     "🔻 CAP Withdrawable Liquidity (Mainnet)\n"
                     + "\n".join(lines)
                     + f"\nTotal withdrawable: {total_normalized:,.6f}\n"
                     f"Total TVL: {total_tvl:,.6f}\n"
-                    f"Withdrawable / TVL: {liquidity_percent:,.2f}%"
+                    f"Withdrawable / TVL: {liquidity_percent:,.2f}%\n"
+                    f"Threshold: {threshold_percent:.0%} of TVL ({alert_threshold:,.6f})"
                 )
                 send_alert(Alert(severity, message, PROTOCOL))
         else:

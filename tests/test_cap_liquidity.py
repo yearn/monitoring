@@ -102,6 +102,9 @@ def test_liquidity_severity_boundaries(
 
     assert [alert.severity for alert in alerts] == ([] if expected_severity is None else [expected_severity])
     assert all(alert.protocol == "cap" for alert in alerts)
+    if expected_severity is not None:
+        threshold = "3% of TVL (3.000000)" if expected_severity == AlertSeverity.CRITICAL else "10% of TVL (10.000000)"
+        assert f"Threshold: {threshold}" in alerts[0].message
 
 
 def test_liquidity_aggregates_assets_with_different_decimals_at_one_block(monkeypatch: pytest.MonkeyPatch) -> None:
