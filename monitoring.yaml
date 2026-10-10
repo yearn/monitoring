@@ -87,7 +87,7 @@ protocols:
       - name: "stcUSD Assets Per Share"
         description: "Critical alert if convertToAssets(1 stcUSD) decreases"
       - name: "Withdrawable Liquidity"
-        description: "Total withdrawable liquidity across cUSD assets < $15M"
+        description: "Total withdrawable / same-block total supplied backing TVL <10% (HIGH) or <3% (CRITICAL)"
       - name: "Large cUSD Mints"
         description: "totalSupply delta >5% vs a cached prior no older than 36 hours"
       - name: "Timelock"
@@ -174,7 +174,7 @@ protocols:
       - protocols/infinifi/l2_vaults.py
     monitors:
       - name: "Liquid Reserves"
-        description: "Liquid reserves < $8M; crossing detection re-armed after a monitoring gap >3 hours"
+        description: "Liquid reserves <10% of live API TVL; breach alerts deduped until recovery or a monitoring gap >3 hours"
       - name: "Backing Per iUSD"
         description: "API totalTVL / block-pinned iUSD supply < 0.999; supply block included in alerts"
       - name: "Redemption Pressure"

@@ -12,7 +12,7 @@ This folder contains monitoring scripts for the Infinifi protocol.
 
 ## Alerts
 
-- **Liquid Reserves**: A Telegram alert is triggered if liquid reserves drop below $8M.
+- **Liquid Reserves**: A Telegram alert is triggered if liquid reserves are below **10% of live TVL**, using API `totalTVLAssetNormalized`. The threshold recalculates every run; TVL growth alone can trigger a breach. Valid zero reserves trigger an alert; missing or invalid reserves or TVL do not update breach state. The alert includes TVL, liquidity ratio, and the calculated threshold.
 - **Reserve Ratio Breach**: Alert if liquid ratio falls below protocol `reserveRatio` target.
 - **Illiquid Ratio Breach**: Alert if illiquid ratio rises above protocol `illiquidTargetRatio`.
 - **Backing Per iUSD**: Alert if API `totalTVL / iUSD supply` drops below `0.999`. The supply is pinned to and reported with an Ethereum block. The API does not expose a block identifier to this monitor, so this cross-source comparison cannot be atomic.
@@ -62,7 +62,7 @@ It compares cached `totalSupply` deltas and alerts when the increase is above:
 ## Cache Freshness
 
 Hourly delta baselines expire after 3 hours and initialize from the next valid observation. Breach-dedupe state and
-liquid-reserve crossing detection are re-armed after the same monitoring gap. PPS-style loss baselines are not affected.
+liquid-reserve breach detection are re-armed after the same monitoring gap. A reserve breach alerts on the first valid observation, then dedupes until recovery or a monitoring gap. PPS-style loss baselines are not affected.
 
 ### Emergency dispatch
 
