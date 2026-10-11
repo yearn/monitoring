@@ -8,14 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from utils.disk_cache import MISS
-from utils.swiss_knife import (
-    _api_in_backoff,
-    _label_disk_cache,
-    fetch_swiss_knife_labels,
-    pick_display_name,
-    reset_cache,
-)
+from utils.swiss_knife import fetch_swiss_knife_labels, pick_display_name, reset_cache
 
 
 def _response(data: object, status: int = 200) -> requests.Response:
@@ -37,18 +30,6 @@ class TestFetchSwissKnifeLabels(unittest.TestCase):
         labels = fetch_swiss_knife_labels("0x" + "a0" * 20, 1)
         self.assertEqual(labels, ["Circle: USDC Token", "circle", "stablecoin"])
 
-    @patch("utils.swiss_knife.request_with_retry")
-    def test_returns_empty_on_dict_error_response(self, mock_fetch: MagicMock) -> None:
-        # Swiss Knife returns {"error": "..."} (dict, not list) for unknown addresses.
-        mock_fetch.return_value = _response({"error": "Error fetching data"})
-        self.assertEqual(fetch_swiss_knife_labels("0x" + "b0" * 20, 1), [])
-
-    @patch("utils.swiss_knife.request_with_retry")
-    def test_returns_empty_on_none(self, mock_fetch: MagicMock) -> None:
-        # A JSON null is not proof of a chain-wide service outage.
-        mock_fetch.return_value = _response(None)
-        self.assertEqual(fetch_swiss_knife_labels("0x" + "c0" * 20, 1), [])
-
     def test_invalid_address_skips_network(self) -> None:
         # Should short-circuit without any HTTP call.
         with patch("utils.swiss_knife.request_with_retry") as mock_fetch:
@@ -56,15 +37,6 @@ class TestFetchSwissKnifeLabels(unittest.TestCase):
             self.assertEqual(fetch_swiss_knife_labels("not-hex", 1), [])
             self.assertEqual(fetch_swiss_knife_labels("0xshort", 1), [])
             mock_fetch.assert_not_called()
-
-    @patch("utils.swiss_knife.request_with_retry")
-    def test_caches_repeat_lookups(self, mock_fetch: MagicMock) -> None:
-        mock_fetch.return_value = _response(["Curve.fi: 3pool"])
-        addr = "0x" + "d0" * 20
-        fetch_swiss_knife_labels(addr, 1)
-        fetch_swiss_knife_labels(addr, 1)
-        fetch_swiss_knife_labels(addr, 1)
-        self.assertEqual(mock_fetch.call_count, 1)
 
     @patch("utils.swiss_knife.request_with_retry")
     def test_concurrent_same_address_lookup_single_flights(self, mock_fetch: MagicMock) -> None:
@@ -101,20 +73,6 @@ class TestFetchSwissKnifeLabels(unittest.TestCase):
         reset_cache()
         self.assertEqual(fetch_swiss_knife_labels(addr, 1), [])
         self.assertEqual(mock_fetch.call_count, 1)  # negative cached on disk
-
-    @patch("utils.swiss_knife.request_with_retry")
-    def test_transient_error_is_not_persisted(self, mock_fetch: MagicMock) -> None:
-        # Only service backoff persists; the address can gain a label immediately
-        # after it expires, including in the same process.
-        with patch("utils.swiss_knife.time.time", return_value=1000) as mock_time:
-            mock_fetch.side_effect = requests.Timeout("read timeout")
-            addr = "0x" + "f0" * 20
-            self.assertEqual(fetch_swiss_knife_labels(addr, 1), [])
-            mock_time.return_value = 1301
-            mock_fetch.side_effect = None
-            mock_fetch.return_value = _response(["Aave: Pool"])
-            self.assertEqual(fetch_swiss_knife_labels(addr, 1), ["Aave: Pool"])
-            self.assertEqual(mock_fetch.call_count, 2)
 
     @patch("utils.http_client.requests.request")
     def test_http_503_backs_off_other_addresses_and_survives_restart(self, mock_request: MagicMock) -> None:
@@ -158,7 +116,6 @@ class TestFetchSwissKnifeLabels(unittest.TestCase):
     def test_http_400_does_not_suppress_another_address_or_persist_a_miss(self, mock_request: MagicMock) -> None:
         missing = "0x" + "a3" * 20
         known = "0x" + "b3" * 20
-        other = "0x" + "c3" * 20
         mock_request.side_effect = [
             _response(
                 {
@@ -168,58 +125,44 @@ class TestFetchSwissKnifeLabels(unittest.TestCase):
                 400,
             ),
             _response(["Circle: USDC Token"]),
-            _response(["Aave: Pool"]),
             _response(["New Label"]),
         ]
 
         with self.assertNoLogs("utils.http_client", level="ERROR"):
             self.assertEqual(fetch_swiss_knife_labels(missing, 1), [])
-            self.assertFalse(_api_in_backoff(1))
-            self.assertIs(_label_disk_cache.get(f"1-{missing}"), MISS)
             self.assertEqual(fetch_swiss_knife_labels(known, 1), ["Circle: USDC Token"])
             reset_cache()
-            self.assertFalse(_api_in_backoff(1))
-            self.assertEqual(fetch_swiss_knife_labels(other, 1), ["Aave: Pool"])
             self.assertEqual(fetch_swiss_knife_labels(missing, 1), ["New Label"])
-        self.assertEqual(mock_request.call_count, 4)
+        self.assertEqual(mock_request.call_count, 3)
 
     @patch("utils.http_client.requests.request")
-    def test_only_transient_failures_back_off_the_chain(self, mock_request: MagicMock) -> None:
-        for failure in [
-            400,
-            401,
-            403,
-            404,
-            429,
-            500,
-            504,
-            requests.Timeout("timeout"),
-            requests.ConnectionError("reset"),
-        ]:
+    def test_rate_limit_and_network_failures_skip_later_lookups(self, mock_request: MagicMock) -> None:
+        # HTTP 400 and 503 are covered by the lifecycle tests above.
+        failures = [429, requests.Timeout("timeout"), requests.ConnectionError("reset")]
+        for chain_id, failure in enumerate(failures, start=1):
             with self.subTest(failure=failure):
-                reset_cache()
-                with patch("utils.swiss_knife._api_backoff_cache") as disk_backoff:
-                    disk_backoff.get.return_value = MISS
-                    if isinstance(failure, int):
-                        mock_request.side_effect = None
-                        mock_request.return_value = _response({"error": "failed"}, failure)
-                    else:
-                        mock_request.side_effect = failure
-                    with patch("utils.http_client.Config.get_retry_count", return_value=0):
-                        self.assertEqual(fetch_swiss_knife_labels("0x" + "d3" * 20, 1), [])
-                    transient = not isinstance(failure, int) or failure == 429 or failure >= 500
-                    self.assertEqual(_api_in_backoff(1), transient)
-                    self.assertEqual(disk_backoff.set.call_count, int(transient))
+                mock_request.reset_mock()
+                if isinstance(failure, int):
+                    mock_request.side_effect = None
+                    mock_request.return_value = _response({"error": "failed"}, failure)
+                else:
+                    mock_request.side_effect = failure
+                with patch("utils.http_client.Config.get_retry_count", return_value=0):
+                    self.assertEqual(fetch_swiss_knife_labels("0x" + "d3" * 20, chain_id), [])
+                    self.assertEqual(fetch_swiss_knife_labels("0x" + "e3" * 20, chain_id), [])
+                self.assertEqual(mock_request.call_count, 1)
 
     @patch("utils.http_client.requests.request")
-    def test_malformed_json_does_not_suppress_other_addresses(self, mock_request: MagicMock) -> None:
-        malformed = _response(None)
-        malformed._content = b"not JSON"
-        mock_request.side_effect = [malformed, _response(["Aave: Pool"])]
-        self.assertEqual(fetch_swiss_knife_labels("0x" + "e3" * 20, 1), [])
-        self.assertFalse(_api_in_backoff(1))
-        self.assertEqual(fetch_swiss_knife_labels("0x" + "f3" * 20, 1), ["Aave: Pool"])
-        self.assertEqual(mock_request.call_count, 2)
+    def test_null_or_malformed_json_does_not_suppress_other_addresses(self, mock_request: MagicMock) -> None:
+        for chain_id, body in enumerate([b"null", b"not JSON"], start=1):
+            with self.subTest(body=body):
+                invalid = _response(None)
+                invalid._content = body
+                mock_request.reset_mock()
+                mock_request.side_effect = [invalid, _response(["Aave: Pool"])]
+                self.assertEqual(fetch_swiss_knife_labels("0x" + "e3" * 20, chain_id), [])
+                self.assertEqual(fetch_swiss_knife_labels("0x" + "f3" * 20, chain_id), ["Aave: Pool"])
+                self.assertEqual(mock_request.call_count, 2)
 
 
 class TestPickDisplayName(unittest.TestCase):

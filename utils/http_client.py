@@ -85,18 +85,15 @@ def fetch_json(
     url: str,
     method: str = "get",
     timeout: int | None = None,
-    log_errors: bool = True,
     **kwargs: Any,
 ) -> dict | None:
     """Fetch JSON from a URL with retry and error handling.
 
-    Returns the parsed JSON dict on success, or None on failure. Disable
-    ``log_errors`` when the caller reports its own failure.
+    Returns the parsed JSON dict on success, or None on failure.
     """
     try:
-        resp = request_with_retry(method, url, timeout=timeout, log_errors=log_errors, **kwargs)
+        resp = request_with_retry(method, url, timeout=timeout, **kwargs)
         return resp.json()
     except Exception as e:
-        if log_errors:
-            logger.error("Request failed for %s: %s", url, e)
+        logger.error("Request failed for %s: %s", url, e)
         return None
