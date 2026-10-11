@@ -5,6 +5,8 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
+import requests
+
 from utils.swiss_knife import fetch_swiss_knife_labels, pick_display_name, reset_cache
 
 
@@ -85,14 +87,57 @@ class TestFetchSwissKnifeLabels(unittest.TestCase):
 
     @patch("utils.swiss_knife.fetch_json")
     def test_transient_error_is_not_persisted(self, mock_fetch: MagicMock) -> None:
-        # fetch_json -> None is a network/HTTP failure, not "no labels"; never persist.
-        mock_fetch.return_value = None
-        addr = "0x" + "f0" * 20
-        self.assertEqual(fetch_swiss_knife_labels(addr, 1), [])
-        reset_cache()
+        # Only service backoff persists; the address can gain a label immediately
+        # after it expires, including in the same process.
+        with patch("utils.swiss_knife.time.time", return_value=1000) as mock_time:
+            mock_fetch.return_value = None
+            addr = "0x" + "f0" * 20
+            self.assertEqual(fetch_swiss_knife_labels(addr, 1), [])
+            mock_time.return_value = 1301
+            mock_fetch.return_value = ["Aave: Pool"]
+            self.assertEqual(fetch_swiss_knife_labels(addr, 1), ["Aave: Pool"])
+            self.assertEqual(mock_fetch.call_count, 2)
+
+    @patch("utils.http_client.requests.request")
+    def test_http_400_backs_off_other_addresses_and_survives_restart(self, mock_request: MagicMock) -> None:
+        response = requests.Response()
+        response.status_code = 400
+        response.url = "https://swiss-knife.xyz/api/labels/unknown"
+        response._content = (
+            b'{"error":"Error fetching data","walletLabelsError":{"message":"Request failed with status code 404"}}'
+        )
+        mock_request.return_value = response
+
+        with (
+            patch("utils.swiss_knife.time.time", return_value=1000) as mock_time,
+            self.assertNoLogs("utils.http_client", level="ERROR"),
+            self.assertLogs("utils.swiss_knife", level="WARNING") as logs,
+        ):
+            self.assertEqual(fetch_swiss_knife_labels("0x" + "a1" * 20, 1), [])
+            self.assertEqual(fetch_swiss_knife_labels("0x" + "b1" * 20, 1), [])
+            reset_cache()
+            self.assertEqual(fetch_swiss_knife_labels("0x" + "c1" * 20, 1), [])
+            self.assertEqual(mock_request.call_count, 1)
+            self.assertEqual(len(logs.output), 1)
+
+            mock_time.return_value = 1301
+            response.status_code = 200
+            response._content = b'["Aave: Pool"]'
+            self.assertEqual(fetch_swiss_knife_labels("0x" + "a1" * 20, 1), ["Aave: Pool"])
+            self.assertEqual(mock_request.call_count, 2)
+
+    @patch("utils.swiss_knife.fetch_json")
+    def test_backoff_keeps_cached_labels_and_other_chains_available(self, mock_fetch: MagicMock) -> None:
+        cached_address = "0x" + "a2" * 20
         mock_fetch.return_value = ["Aave: Pool"]
-        self.assertEqual(fetch_swiss_knife_labels(addr, 1), ["Aave: Pool"])
-        self.assertEqual(mock_fetch.call_count, 2)
+        fetch_swiss_knife_labels(cached_address, 1)
+        mock_fetch.return_value = None
+        fetch_swiss_knife_labels("0x" + "b2" * 20, 1)
+        reset_cache()
+        self.assertEqual(fetch_swiss_knife_labels(cached_address, 1), ["Aave: Pool"])
+        mock_fetch.return_value = ["Arbitrum: Pool"]
+        self.assertEqual(fetch_swiss_knife_labels("0x" + "c2" * 20, 42161), ["Arbitrum: Pool"])
+        self.assertEqual(mock_fetch.call_count, 3)
 
 
 class TestPickDisplayName(unittest.TestCase):

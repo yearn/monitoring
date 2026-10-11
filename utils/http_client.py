@@ -17,6 +17,7 @@ def request_with_retry(
     retries: int | None = None,
     backoff_factor: float | None = None,
     timeout: int | None = None,
+    log_errors: bool = True,
     **kwargs: Any,
 ) -> requests.Response:
     """Make an HTTP request with exponential backoff retry on transient errors.
@@ -30,6 +31,7 @@ def request_with_retry(
         retries: Number of retry attempts. Defaults to Config.get_retry_count().
         backoff_factor: Multiplier for exponential backoff. Defaults to Config.get_backoff_factor().
         timeout: Request timeout in seconds. Defaults to Config.get_request_timeout().
+        log_errors: Log terminal failures. Disable when the caller reports its own failure.
         **kwargs: Additional arguments passed to requests.request().
 
     Returns:
@@ -54,7 +56,8 @@ def request_with_retry(
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code if e.response is not None else None
             if status_code is not None and status_code < 500 and status_code != 429:
-                logger.error("HTTP %s for %s: %s", status_code, url, e.response.text[:200])
+                if log_errors:
+                    logger.error("HTTP %s for %s: %s", status_code, url, e.response.text[:200])
                 raise  # Do not retry permanent client errors.
             last_exception = e
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
@@ -72,7 +75,8 @@ def request_with_retry(
             )
             time.sleep(wait_time)
 
-    logger.error("Request to %s failed after %d attempts: %s", url, retries + 1, last_exception)
+    if log_errors:
+        logger.error("Request to %s failed after %d attempts: %s", url, retries + 1, last_exception)
     # Failed attempts record an exception; preserve the existing invalid-budget behavior.
     raise last_exception  # ty: ignore[invalid-raise]
 
@@ -81,15 +85,18 @@ def fetch_json(
     url: str,
     method: str = "get",
     timeout: int | None = None,
+    log_errors: bool = True,
     **kwargs: Any,
 ) -> dict | None:
     """Fetch JSON from a URL with retry and error handling.
 
-    Returns the parsed JSON dict on success, or None on failure.
+    Returns the parsed JSON dict on success, or None on failure. Disable
+    ``log_errors`` when the caller reports its own failure.
     """
     try:
-        resp = request_with_retry(method, url, timeout=timeout, **kwargs)
+        resp = request_with_retry(method, url, timeout=timeout, log_errors=log_errors, **kwargs)
         return resp.json()
     except Exception as e:
-        logger.error("Request failed for %s: %s", url, e)
+        if log_errors:
+            logger.error("Request failed for %s: %s", url, e)
         return None

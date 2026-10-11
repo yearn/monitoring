@@ -10,6 +10,7 @@ of a bare address.
 
 import os
 import threading
+import time
 
 from utils.disk_cache import DiskCache
 from utils.http_client import fetch_json
@@ -19,6 +20,7 @@ logger = get_logger("utils.swiss_knife")
 
 _API_URL = "https://swiss-knife.xyz/api/labels"
 _REQUEST_TIMEOUT_S = 5
+_API_BACKOFF_S = 300
 
 # Per-process cache: (chain_id, address_lower) -> labels (possibly empty).
 # Backed by the on-disk cache below so labels survive across cron runs.
@@ -27,6 +29,7 @@ _label_cache_hits = 0
 _label_cache_misses = 0
 _label_cache_lock = threading.RLock()
 _label_key_locks: dict[tuple[int, str], threading.Lock] = {}
+_api_backoff_until: dict[int, float] = {}
 
 # On-disk layer keyed by "chain_id-address". Labels are tiny and effectively stable, so a
 # found label never expires; an empty result (no curated label) gets the short negative TTL
@@ -36,6 +39,37 @@ _label_disk_cache = DiskCache(
     namespace="label-cache",
     max_entries=int(os.getenv("LABEL_CACHE_MAX_ENTRIES", "50000")),
 )
+_api_backoff_cache = DiskCache(namespace="label-api-backoff", max_entries=100)
+
+
+def _api_in_backoff(chain_id: int) -> bool:
+    """Skip unavailable label services briefly, including across cron runs."""
+    now = time.time()
+    with _label_cache_lock:
+        if _api_backoff_until.get(chain_id, 0) > now:
+            return True
+    retry_after = _api_backoff_cache.get(str(chain_id))
+    if isinstance(retry_after, (int, float)) and retry_after > now:
+        with _label_cache_lock:
+            _api_backoff_until[chain_id] = retry_after
+        return True
+    return False
+
+
+def _back_off_api(chain_id: int) -> None:
+    """Report an optional dependency outage once and permit a later recovery."""
+    now = time.time()
+    with _label_cache_lock:
+        if _api_backoff_until.get(chain_id, 0) > now:
+            return
+        retry_after = now + _API_BACKOFF_S
+        _api_backoff_until[chain_id] = retry_after
+    _api_backoff_cache.set(str(chain_id), retry_after, ttl=_API_BACKOFF_S)
+    logger.warning(
+        "Swiss Knife labels unavailable on chain %s; skipping uncached lookups for %ss (other label sources remain active)",
+        chain_id,
+        _API_BACKOFF_S,
+    )
 
 
 def _disk_key(chain_id: int, address: str) -> str:
@@ -101,27 +135,33 @@ def fetch_swiss_knife_labels(address: str, chain_id: int) -> list[str]:
             return cached_labels
         _record_cache_event("disk", False, cache_key)
 
+        if _api_in_backoff(chain_id):
+            return []
+
         url = f"{_API_URL}/{address}"
-        data = fetch_json(url, params={"chainId": chain_id}, timeout=_REQUEST_TIMEOUT_S)
+        data = fetch_json(url, params={"chainId": chain_id}, timeout=_REQUEST_TIMEOUT_S, log_errors=False)
+        if data is None:
+            # The API can return HTTP 400 with an upstream 404 even for known
+            # tokens. This is an outage, not proof that this address has no label.
+            _back_off_api(chain_id)
+            return []
 
         # Swiss Knife returns a JSON array directly. fetch_json's type hint is
         # `dict | None` but it returns whatever `resp.json()` parses to. A non-None
         # body is a real 200 response — either a label array or a `{"error": ...}`
         # dict for unknown addresses, both of which we persist (the dict as an empty
-        # negative). `None` means an HTTP/network error, which we leave unpersisted so
-        # a transient blip is not cached as "no labels".
-        got_response = data is not None
+        # negative). HTTP/network failures above only set a short service backoff;
+        # they never become address-level negatives in either cache.
         labels: list[str] = []
         if isinstance(data, list):
             labels = [s for s in data if isinstance(s, str) and s]
 
         with _label_cache_lock:
             _label_cache[cache_key] = labels
-        if got_response:
-            if labels:
-                _label_disk_cache.set_positive(disk_key, labels)
-            else:
-                _label_disk_cache.set_negative(disk_key, [])
+        if labels:
+            _label_disk_cache.set_positive(disk_key, labels)
+        else:
+            _label_disk_cache.set_negative(disk_key, [])
         return labels
 
 
@@ -149,5 +189,6 @@ def reset_cache() -> None:
     with _label_cache_lock:
         _label_cache.clear()
         _label_key_locks.clear()
+        _api_backoff_until.clear()
         _label_cache_hits = 0
         _label_cache_misses = 0
