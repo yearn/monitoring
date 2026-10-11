@@ -81,7 +81,7 @@ Verified source/ABI lookups and Swiss Knife labels are cached under `CACHE_DIR` 
 - `source-cache-v2/`: Etherscan verified record — per-file sources, compiler settings, ABI and resolved compilation target. The version is part of the namespace because positive entries never expire; a shape change must not read records written by an older version.
 - `sourcify-layout-v1/`: Sourcify compiler storage layouts. Misses use the negative TTL, since Sourcify coverage grows over time.
 - `label-cache/`: Swiss Knife address labels.
-- `label-api-backoff/`: five-minute per-chain backoff after Swiss Knife HTTP/network or JSON failures. Cached labels and other label sources still work during an outage; failures never become address-level negative entries.
+- `label-api-backoff/`: five-minute per-chain backoff after exhausted Swiss Knife HTTP 429/5xx responses, timeouts, or connection failures. Other 4xx responses and malformed JSON affect only the requested address. Cached labels and other label sources still work during an outage; failures never become address-level negative entries.
 
 Positive entries do not expire because verified source and curated labels are effectively stable for a given address. Negative entries use a short TTL so a newly verified contract or newly labeled address is picked up later. Tunables:
 

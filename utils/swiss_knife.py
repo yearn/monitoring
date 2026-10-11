@@ -12,8 +12,10 @@ import os
 import threading
 import time
 
+import requests
+
 from utils.disk_cache import DiskCache
-from utils.http_client import fetch_json
+from utils.http_client import request_with_retry
 from utils.logger import get_logger
 
 logger = get_logger("utils.swiss_knife")
@@ -139,19 +141,36 @@ def fetch_swiss_knife_labels(address: str, chain_id: int) -> list[str]:
             return []
 
         url = f"{_API_URL}/{address}"
-        data = fetch_json(url, params={"chainId": chain_id}, timeout=_REQUEST_TIMEOUT_S, log_errors=False)
-        if data is None:
-            # The API can return HTTP 400 with an upstream 404 even for known
-            # tokens. This is an outage, not proof that this address has no label.
+        try:
+            response = request_with_retry(
+                "get", url, params={"chainId": chain_id}, timeout=_REQUEST_TIMEOUT_S, log_errors=False
+            )
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status == 429 or (status is not None and status >= 500):
+                _back_off_api(chain_id)
+            else:
+                # A 400 wrapping an upstream 404 may be specific to this address.
+                # It neither proves a chain-wide outage nor a permanent label miss.
+                logger.debug("Swiss Knife lookup failed for %s:%s: %s", chain_id, address, exc)
+            return []
+        except requests.ConnectionError, requests.Timeout:
             _back_off_api(chain_id)
             return []
+        except requests.RequestException as exc:
+            logger.debug("Swiss Knife lookup failed for %s:%s: %s", chain_id, address, exc)
+            return []
 
-        # Swiss Knife returns a JSON array directly. fetch_json's type hint is
-        # `dict | None` but it returns whatever `resp.json()` parses to. A non-None
-        # body is a real 200 response — either a label array or a `{"error": ...}`
-        # dict for unknown addresses, both of which we persist (the dict as an empty
-        # negative). HTTP/network failures above only set a short service backoff;
-        # they never become address-level negatives in either cache.
+        try:
+            data = response.json()
+        except ValueError as exc:
+            logger.debug("Swiss Knife returned invalid JSON for %s:%s: %s", chain_id, address, exc)
+            return []
+        if data is None:
+            return []
+
+        # Successful label arrays and empty responses retain their normal caches.
+        # Failed requests above never become address-level negative entries.
         labels: list[str] = []
         if isinstance(data, list):
             labels = [s for s in data if isinstance(s, str) and s]
