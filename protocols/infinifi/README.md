@@ -44,12 +44,14 @@ Each `OutlandVault` on mainnet mirrors infiniFi's deposits on one L2 (`PortalHub
 
 `l2_vaults.py` sends MEDIUM alerts when:
 
-- **Value drop**: a vault's value falls by more than `INFINIFI_L2_VAULT_DROP_THRESHOLD` (default `0.5`) since the last stored reading, including a fall to 0, and the fall is at least `INFINIFI_L2_VAULT_MIN_VALUE` (default `10000`) USD. Check assets updates and token transfers before treating a fall as a loss.
+- **Booked loss**: an executed `PortalUpdate` reduces the vault's farm-share value by more than `INFINIFI_L2_VAULT_DROP_THRESHOLD` (default `0.5`), including a fall to 0, and the loss is at least `INFINIFI_L2_VAULT_MIN_VALUE` (default `10000`) USD. Each event's `oldAssets` and `newAssets` values determine the loss. Transfers that only move liquidity do not trigger this alert, even if an assets update executes between readings.
 - **Stale report**: a vault holding at least the minimum value has had no assets update for `INFINIFI_L2_VAULT_STALE_HOURS` (default `48`). Base normally reports every 6–22h.
 
 This monitor reads only mainnet contracts. The API mismatch check was removed because outbound bridge transfers raise the mirrored L2 value before the assets reach L2 farms. On October 12, 2026, an $800,000 transfer produced a mismatch while CCTP awaited Ethereum finality. The API matched live Monad accounting before settlement and lagged after the funds arrived. Replacing the API with L2 RPC reads would still produce a temporary gap during settlement. A reliable cross-chain comparison would need to reconcile transfers in flight and snapshot timing. The reserves and allocation monitor in `main.py` still uses the API.
 
-The drop baseline never expires, so a write-down during a monitoring gap is still compared against the last value seen; only alert dedupe uses the 3h fresh window. The baseline is keyed by vault address. A planned migration that points the hub at a new vault starts a fresh baseline instead of alerting on the old one.
+These checks detect booked losses and stale reporting. They do not independently validate L2 backing, detect inflated assets updates, or track whether an outbound bridge transfer completes.
+
+All vault reads and event cursors use finalized Ethereum blocks. On the first run for a vault, the monitor initializes a cursor at the current finalized block without replaying historical losses. Later runs scan every `PortalUpdate` since that cursor in bounded block ranges. Cursors never expire, so monitoring gaps and a loss followed by recovery between runs do not hide a booked loss. The cursor advances only after event reads and loss alerts succeed. Alert dedupe for stale reports uses the 3h fresh window. Cursors are keyed by vault address, so a planned vault migration starts fresh.
 
 ## Large Mint Monitoring (No Event Scanning)
 

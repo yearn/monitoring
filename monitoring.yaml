@@ -189,8 +189,9 @@ protocols:
         description: "Junior TVL <50% of risky farm exposure; re-armed after a monitoring gap >3 hours"
       - name: "L2 Vault Reports"
         description: >-
-          Mainnet vault value drop >50% with at least $10k difference, or assets update
-          stale >48h with at least $10k value. Token transfers can also change the value.
+          Finalized assets update books a farm-share value loss >50% and at least $10k,
+          or assets update stale >48h with at least $10k mirrored value. Liquidity
+          transfers alone do not trigger loss alerts.
       - name: "Timelock"
         description: "Longtimelock and Shorttimelock events via Envio"
 
