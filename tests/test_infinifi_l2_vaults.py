@@ -1,4 +1,5 @@
 import unittest
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -7,9 +8,7 @@ from protocols.infinifi.l2_vaults import (
     VaultReport,
     check_report,
     drop_message,
-    fetch_l2_farm_values,
     fetch_reports,
-    mismatch_message,
     stale_message,
 )
 
@@ -59,101 +58,6 @@ class TestStaleMessage(unittest.TestCase):
         self.assertIsNone(stale_message(_report("14.00", hours_ago=500, chain_id=143), NOW))
 
 
-class TestMismatchMessage(unittest.TestCase):
-    def test_injected_zero_against_funded_l2_alerts(self) -> None:
-        text = mismatch_message(_report("0"), Decimal("76371.81"))
-        assert text is not None
-        self.assertIn("Booked on mainnet: $0.00", text)
-        self.assertIn("On the L2 per infiniFi's API: $76,371.81", text)
-        self.assertIn("(100.0%)", text)
-
-    def test_report_lag_is_quiet(self) -> None:
-        # 02/10: mainnet 76,368.80 vs API 76,371.81.
-        self.assertIsNone(mismatch_message(_report("76368.80"), Decimal("76371.81")))
-
-    def test_dust_difference_is_quiet(self) -> None:
-        self.assertIsNone(mismatch_message(_report("14.00", chain_id=143), Decimal("23.01")))
-
-    def test_overstated_mainnet_alerts(self) -> None:
-        self.assertIsNotNone(mismatch_message(_report("100000"), Decimal("50000")))
-
-    def test_five_percent_threshold_and_absolute_minimum(self) -> None:
-        cases = [
-            ("1000000", "960000", False),
-            ("200000", "190000", False),
-            ("200000", "189999", True),
-            ("189999", "200000", True),
-            ("100000", "94000", False),
-            ("100000", "90000", True),
-        ]
-        for booked, l2_value, should_alert in cases:
-            with self.subTest(booked=booked, l2_value=l2_value):
-                self.assertEqual(
-                    mismatch_message(_report(booked), Decimal(l2_value)) is not None,
-                    should_alert,
-                )
-
-
-class TestFetchL2FarmValues(unittest.TestCase):
-    @patch.object(l2_vaults, "fetch_json")
-    def test_monad_maturity_assets_clear_the_reported_mismatch(self, fetch: MagicMock) -> None:
-        fetch.return_value = {
-            "data": {
-                "farms": [
-                    {
-                        "chain": "MONAD",
-                        "isL2LiquidityFarm": True,
-                        "assetsNormalized": "15076.279995",
-                    },
-                    {
-                        "chain": "MONAD",
-                        "isL2LiquidityFarm": False,
-                        "assetsNormalized": "220015.312797",
-                    },
-                ]
-            }
-        }
-
-        values = fetch_l2_farm_values()
-
-        assert values is not None
-        self.assertEqual(values[143], Decimal("235091.592792"))
-        self.assertIsNone(mismatch_message(_report("235033.709146", chain_id=143), values[143]))
-
-    @patch.object(l2_vaults, "fetch_json")
-    def test_chain_membership_does_not_depend_on_liquidity_flag(self, fetch: MagicMock) -> None:
-        fetch.return_value = {
-            "data": {
-                "farms": [
-                    {"chain": "BASE", "assetsNormalized": "20000"},
-                    {"chain": "MONAD", "isL2LiquidityFarm": False, "assetsNormalized": "30000"},
-                    {"chain": "MAINNET", "isL2LiquidityFarm": True, "assetsNormalized": "500000"},
-                ]
-            }
-        }
-
-        self.assertEqual(fetch_l2_farm_values(), {8453: Decimal("20000"), 143: Decimal("30000")})
-
-    @patch.object(l2_vaults, "fetch_json")
-    def test_sums_l2_farms_per_chain(self, fetch: MagicMock) -> None:
-        fetch.return_value = {
-            "data": {
-                "farms": [
-                    {"chain": "MAINNET", "isL2LiquidityFarm": False, "assetsNormalized": 2_000_000},
-                    {"chain": "BASE", "isL2LiquidityFarm": True, "assetsNormalized": 76371.813053},
-                    {"chain": "BASE", "isL2LiquidityFarm": True, "assetsNormalized": 10},
-                    {"chain": "MONAD", "isL2LiquidityFarm": True, "assetsNormalized": 23.006463},
-                    {"chain": "NEWCHAIN", "isL2LiquidityFarm": True, "assetsNormalized": 5},
-                ]
-            }
-        }
-        self.assertEqual(fetch_l2_farm_values(), {8453: Decimal("76381.813053"), 143: Decimal("23.006463")})
-
-    @patch.object(l2_vaults, "fetch_json", return_value=None)
-    def test_api_failure_skips_comparison(self, _fetch: MagicMock) -> None:
-        self.assertIsNone(fetch_l2_farm_values())
-
-
 class _Cache:
     """In-memory stand-in for utils.cache with the real freshness rule."""
 
@@ -182,7 +86,7 @@ class TestCheckReport(unittest.TestCase):
     VALUE_KEY = f"infinifi_l2_vault_value_{VAULT.lower()}"
     STALE_KEY = f"infinifi_l2_vault_stale_{VAULT.lower()}"
 
-    def _run(self, cache: _Cache, report: VaultReport, l2_value: Decimal | None = None) -> MagicMock:
+    def _run(self, cache: _Cache, report: VaultReport) -> MagicMock:
         with (
             patch.object(l2_vaults, "cache_timestamp_key", side_effect=lambda key: f"{key}_timestamp"),
             patch.object(l2_vaults, "get_last_value_for_key_from_file", side_effect=cache.last),
@@ -190,7 +94,7 @@ class TestCheckReport(unittest.TestCase):
             patch.object(l2_vaults, "write_last_value_with_timestamp_to_file", side_effect=cache.write),
             patch.object(l2_vaults, "send_alert") as send,
         ):
-            check_report(report, NOW, l2_value)
+            check_report(report, NOW)
         return send
 
     def test_drop_alerts_and_updates_baseline(self) -> None:
@@ -224,10 +128,14 @@ class TestCheckReport(unittest.TestCase):
         send = self._run(_Cache(NOW), _report("0"))
         send.assert_not_called()
 
-    def test_mismatch_alerts_with_l2_value(self) -> None:
-        send = self._run(_Cache(NOW), _report("0"), Decimal("76371.81"))
-        send.assert_called_once()
-        self.assertIn("L2 Vault Mismatch", send.call_args.args[0].message)
+    def test_outbound_transfer_increase_does_not_alert(self) -> None:
+        cache = _Cache(NOW)
+        cache.set(self.VALUE_KEY, "235033.709146", HOUR)
+
+        send = self._run(cache, _report("1035033.709146", hours_ago=44, chain_id=143))
+
+        send.assert_not_called()
+        self.assertEqual(cache.values[self.VALUE_KEY], "1035033.709146")
 
     def test_stale_alert_is_sent_once(self) -> None:
         cache = _Cache(NOW)
@@ -243,6 +151,39 @@ class TestCheckReport(unittest.TestCase):
         send = self._run(cache, _report("76368.80", hours_ago=60))
         send.assert_called_once()
         self.assertIn("Report Stale", send.call_args.args[0].message)
+
+
+class TestMain(unittest.TestCase):
+    @patch.object(l2_vaults.ChainManager, "get_client")
+    @patch("utils.http_client.request_with_retry")
+    def test_outbound_transfer_uses_mainnet_without_an_api_comparison(
+        self, http_request: MagicMock, get_client: MagicMock
+    ) -> None:
+        functions = get_client.return_value.get_contract.return_value.functions
+        functions.getVaultChainIds.return_value.call.return_value = [143]
+        functions.getVault.return_value.call.return_value = VAULT
+        functions.portalAssetsReport.return_value.call.return_value = (
+            1_035_033_709_146 * 10**12,
+            0,
+            0,
+            NOW - 44 * HOUR,
+        )
+        cache = _Cache(NOW)
+        cache.set(f"infinifi_l2_vault_value_{VAULT.lower()}", "235033.709146", HOUR)
+
+        with (
+            patch.object(l2_vaults, "datetime") as clock,
+            patch.object(l2_vaults, "cache_timestamp_key", side_effect=lambda key: f"{key}_timestamp"),
+            patch.object(l2_vaults, "get_last_value_for_key_from_file", side_effect=cache.last),
+            patch.object(l2_vaults, "get_fresh_last_value_for_key_from_file", side_effect=cache.fresh),
+            patch.object(l2_vaults, "write_last_value_with_timestamp_to_file", side_effect=cache.write),
+            patch.object(l2_vaults, "send_alert") as send,
+        ):
+            clock.now.return_value = datetime.fromtimestamp(NOW, UTC)
+            l2_vaults.main()
+
+        http_request.assert_not_called()
+        send.assert_not_called()
 
 
 class TestFetchReports(unittest.TestCase):
