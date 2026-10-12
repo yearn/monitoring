@@ -1,5 +1,9 @@
 # Known bugs
 
+- **Infinifi L2 mismatch includes outbound transfers awaiting settlement:** Moving
+  liquidity out of the mainnet vault raises its mirrored L2 value before the assets
+  reach L2 farms, so the comparison can alert while CCTP confirmations are pending.
+
 - **Resolved — Infinifi L2 mismatch excludes maturity farms:** The `isL2LiquidityFarm`
   filter omitted Monad's August USDC maturity farm despite its inclusion in on-chain
   accounting; the comparison now sums all API farms on each supported L2.
