@@ -1,11 +1,13 @@
 """Watch the value each infiniFi L2 vault (OutlandVault) reports for its chain.
 
 An OutlandVault on mainnet mirrors infiniFi's deposits on one L2. Its value
-(``portalAssetsReport().totalAssetsValue``) only changes when an assets-update
-message is executed, and executing one mints or burns the vault's farm shares,
-booking the change as profit or loss on mainnet. Messages normally arrive over
-the bridge, but governance can inject any message with ``Connector.govReceive``:
-on 23/09/2026 an injected all-zero update wrote the old Base vault down to 0.
+(``portalAssetsReport().totalAssetsValue``) is the vault's farm shares minus its
+current local liquidity. Assets updates reconcile the farm shares and can book
+profit or loss; token transfers also change the reported value as local
+liquidity moves. Only assets updates refresh ``lastPortalUpdate``. Messages
+normally arrive over the bridge, but governance can inject any message with
+``Connector.govReceive``: on 23/09/2026 an injected all-zero update wrote the old
+Base vault down to 0.
 
 For every chain the PortalHub lists, this script alerts (MEDIUM) when:
 
@@ -14,10 +16,10 @@ For every chain the PortalHub lists, this script alerts (MEDIUM) when:
   0, and the fall is at least ``INFINIFI_L2_VAULT_MIN_VALUE`` USD (default 10,000);
 - the vault has not received a report for ``INFINIFI_L2_VAULT_STALE_HOURS``
   (default 48h) while it holds at least the minimum value;
-- the value mainnet has booked differs from what infiniFi's API shows on the L2
-  (its ``isL2LiquidityFarm`` farms for that chain) by more than
-  ``INFINIFI_L2_VAULT_MISMATCH_THRESHOLD`` (default 25%) and the minimum value.
-  This catches a wrong or injected report directly, without waiting for a drop.
+- the mirrored value on mainnet differs from what infiniFi's API shows on the L2
+  (all farms for that chain, including maturity farms) by more than
+  ``INFINIFI_L2_VAULT_MISMATCH_THRESHOLD`` (default 5%) and at least the minimum
+  value. Snapshot timing and token transfers can also cause a mismatch.
 
 The baseline is keyed by vault address, so a planned migration, where the hub
 is pointed at a new vault, starts a fresh baseline and does not alert.
@@ -53,7 +55,7 @@ EXPLORER = "https://etherscan.io/address"
 DROP_THRESHOLD = Decimal(Config.get_env("INFINIFI_L2_VAULT_DROP_THRESHOLD", "0.5") or "0.5")
 MIN_VALUE = Decimal(Config.get_env("INFINIFI_L2_VAULT_MIN_VALUE", "10000") or "10000")
 STALE_HOURS = Config.get_env_int("INFINIFI_L2_VAULT_STALE_HOURS", 48)
-MISMATCH_THRESHOLD = Decimal(Config.get_env("INFINIFI_L2_VAULT_MISMATCH_THRESHOLD", "0.25") or "0.25")
+MISMATCH_THRESHOLD = Decimal(Config.get_env("INFINIFI_L2_VAULT_MISMATCH_THRESHOLD", "0.05") or "0.05")
 
 API_URL = "https://api.infinifi.xyz/api/protocol/data"
 # The API names farm chains; Monad is not in utils.chains.Chain.
@@ -125,7 +127,7 @@ def fetch_reports(client: Web3Client) -> list[VaultReport]:
 
 
 def fetch_l2_farm_values() -> dict[int, Decimal] | None:
-    """USD in infiniFi's L2 farms per chain id, from its API, or None when the API is unavailable."""
+    """Sum all API farm values on each supported L2, or None when the API is unavailable."""
     response = fetch_json(API_URL, timeout=10)
     farms = (response or {}).get("data", {}).get("farms")
     if not isinstance(farms, list):
@@ -133,11 +135,11 @@ def fetch_l2_farm_values() -> dict[int, Decimal] | None:
         return None
     values: dict[int, Decimal] = {}
     for farm in farms:
-        if not farm.get("isL2LiquidityFarm"):
-            continue
-        chain_id = API_CHAIN_IDS.get(str(farm.get("chain", "")).upper())
+        chain = str(farm.get("chain", "")).upper()
+        chain_id = API_CHAIN_IDS.get(chain)
         if chain_id is None:
-            logger.warning("infiniFi API L2 farm %s on unknown chain %s", farm.get("name"), farm.get("chain"))
+            if farm.get("isL2LiquidityFarm") and chain != "MAINNET":
+                logger.warning("infiniFi API L2 farm %s on unknown chain %s", farm.get("name"), farm.get("chain"))
             continue
         values[chain_id] = values.get(chain_id, Decimal(0)) + Decimal(str(farm.get("assetsNormalized", 0)))
     return values
@@ -156,8 +158,8 @@ def mismatch_message(report: VaultReport, l2_value: Decimal) -> str | None:
         f"Booked on mainnet: ${report.value:,.2f} (last assets update {_time(report.last_update)})\n"
         f"On the L2 per infiniFi's API: ${l2_value:,.2f}\n"
         f"Difference: ${difference:,.2f} ({abs(difference) / larger:.1%})\n\n"
-        "Mainnet's figure changes only through executed assets updates, including ones injected with "
-        "govReceive. Check the latest update against the L2."
+        "The L2 total includes liquid and maturity farms. Check assets updates, token transfers and "
+        "snapshot timing. Governance can also inject updates with govReceive."
     )
 
 
@@ -174,8 +176,8 @@ def drop_message(report: VaultReport, previous: Decimal, previous_at: int = 0) -
         f"Reported value: ${previous:,.2f} → ${report.value:,.2f} (−{fall / previous:.1%})\n"
         f"{previous_line}"
         f"Last assets update: {_time(report.last_update)}\n\n"
-        "An executed assets update burned the vault's farm shares, booking the fall as a loss on mainnet. "
-        "Check whether it came over the bridge or through govReceive."
+        "The mirrored L2 value fell. Assets updates and token transfers affecting mainnet vault liquidity "
+        "can change this value. Check both before treating the fall as a loss."
     )
 
 

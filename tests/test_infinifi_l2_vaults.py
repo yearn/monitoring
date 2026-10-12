@@ -77,8 +77,63 @@ class TestMismatchMessage(unittest.TestCase):
     def test_overstated_mainnet_alerts(self) -> None:
         self.assertIsNotNone(mismatch_message(_report("100000"), Decimal("50000")))
 
+    def test_five_percent_threshold_and_absolute_minimum(self) -> None:
+        cases = [
+            ("1000000", "960000", False),
+            ("200000", "190000", False),
+            ("200000", "189999", True),
+            ("189999", "200000", True),
+            ("100000", "94000", False),
+            ("100000", "90000", True),
+        ]
+        for booked, l2_value, should_alert in cases:
+            with self.subTest(booked=booked, l2_value=l2_value):
+                self.assertEqual(
+                    mismatch_message(_report(booked), Decimal(l2_value)) is not None,
+                    should_alert,
+                )
+
 
 class TestFetchL2FarmValues(unittest.TestCase):
+    @patch.object(l2_vaults, "fetch_json")
+    def test_monad_maturity_assets_clear_the_reported_mismatch(self, fetch: MagicMock) -> None:
+        fetch.return_value = {
+            "data": {
+                "farms": [
+                    {
+                        "chain": "MONAD",
+                        "isL2LiquidityFarm": True,
+                        "assetsNormalized": "15076.279995",
+                    },
+                    {
+                        "chain": "MONAD",
+                        "isL2LiquidityFarm": False,
+                        "assetsNormalized": "220015.312797",
+                    },
+                ]
+            }
+        }
+
+        values = fetch_l2_farm_values()
+
+        assert values is not None
+        self.assertEqual(values[143], Decimal("235091.592792"))
+        self.assertIsNone(mismatch_message(_report("235033.709146", chain_id=143), values[143]))
+
+    @patch.object(l2_vaults, "fetch_json")
+    def test_chain_membership_does_not_depend_on_liquidity_flag(self, fetch: MagicMock) -> None:
+        fetch.return_value = {
+            "data": {
+                "farms": [
+                    {"chain": "BASE", "assetsNormalized": "20000"},
+                    {"chain": "MONAD", "isL2LiquidityFarm": False, "assetsNormalized": "30000"},
+                    {"chain": "MAINNET", "isL2LiquidityFarm": True, "assetsNormalized": "500000"},
+                ]
+            }
+        }
+
+        self.assertEqual(fetch_l2_farm_values(), {8453: Decimal("20000"), 143: Decimal("30000")})
+
     @patch.object(l2_vaults, "fetch_json")
     def test_sums_l2_farms_per_chain(self, fetch: MagicMock) -> None:
         fetch.return_value = {
@@ -154,6 +209,16 @@ class TestCheckReport(unittest.TestCase):
         send = self._run(cache, _report("0"))
         send.assert_called_once()
         self.assertIn("Previous reading:", send.call_args.args[0].message)
+
+    def test_drop_without_a_recent_assets_update_mentions_token_transfers(self) -> None:
+        cache = _Cache(NOW)
+        cache.set(self.VALUE_KEY, "100000", HOUR)
+
+        send = self._run(cache, _report("40000", hours_ago=2))
+
+        send.assert_called_once()
+        self.assertIn("token transfers", send.call_args.args[0].message)
+        self.assertIn("before treating the fall as a loss", send.call_args.args[0].message)
 
     def test_first_run_does_not_alert(self) -> None:
         send = self._run(_Cache(NOW), _report("0"))

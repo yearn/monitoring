@@ -40,14 +40,14 @@ it does not establish the recoverable value of any individual RWA position.
 
 ## L2 Vault Reports
 
-Each `OutlandVault` on mainnet mirrors infiniFi's deposits on one L2 (`PortalHub.getVaultChainIds()` / `getVault(chainId)`). Its value, `portalAssetsReport().totalAssetsValue`, changes only when an assets-update message executes, which mints or burns the vault's farm shares and books the change as profit or loss on mainnet. Messages normally arrive over the bridge, but governance can inject any message with `Connector.govReceive`. On 23/09/2026 an injected all-zero update wrote the old Base vault down to 0.
+Each `OutlandVault` on mainnet mirrors infiniFi's deposits on one L2 (`PortalHub.getVaultChainIds()` / `getVault(chainId)`). Its value, `portalAssetsReport().totalAssetsValue`, is the vault's farm shares minus its current local liquidity. Assets updates reconcile the farm shares and can book profit or loss; token transfers also change the reported value as local liquidity moves. Only assets updates refresh `lastPortalUpdate`. Messages normally arrive over the bridge, but governance can inject any message with `Connector.govReceive`. On 23/09/2026 an injected all-zero update wrote the old Base vault down to 0.
 
 `l2_vaults.py` sends MEDIUM alerts when:
 
-- **Value drop**: a vault's value falls by more than `INFINIFI_L2_VAULT_DROP_THRESHOLD` (default `0.5`) since the last stored reading, including a fall to 0, and the fall is at least `INFINIFI_L2_VAULT_MIN_VALUE` (default `10000`) USD.
+- **Value drop**: a vault's value falls by more than `INFINIFI_L2_VAULT_DROP_THRESHOLD` (default `0.5`) since the last stored reading, including a fall to 0, and the fall is at least `INFINIFI_L2_VAULT_MIN_VALUE` (default `10000`) USD. Check assets updates and token transfers before treating a fall as a loss.
 - **Stale report**: a vault holding at least the minimum value has had no assets update for `INFINIFI_L2_VAULT_STALE_HOURS` (default `48`). Base normally reports every 6–22h.
 
-- **Mismatch with the L2**: the value mainnet has booked differs from what infiniFi's API shows on that L2 (the `isL2LiquidityFarm` farms in `/api/protocol/data`, the same response `main.py` uses for allocations) by more than `INFINIFI_L2_VAULT_MISMATCH_THRESHOLD` (default `0.25`) and the minimum value. This catches a wrong or injected report directly. If the API is down, only the on-chain checks run.
+- **Mismatch with the L2**: the mirrored value on mainnet differs from the sum of all API farms on that L2, including maturity farms, in `/api/protocol/data` (the same response `main.py` uses for allocations). The difference must exceed `INFINIFI_L2_VAULT_MISMATCH_THRESHOLD` (default `0.05`, or 5%) of the larger value and be at least `INFINIFI_L2_VAULT_MIN_VALUE` (default `10000`) USD. Farm membership is determined by chain, not the `isL2LiquidityFarm` flag, which excludes maturity farms. Mainnet farms are excluded to avoid counting L1 mirrors. The API and mainnet snapshots are not atomic; token transfers and snapshot timing can cause temporary mismatches. If the API is down, only the on-chain checks run.
 
 The drop baseline never expires, so a write-down during a monitoring gap is still compared against the last value seen; only alert dedupe uses the 3h fresh window. The baseline is keyed by vault address. A planned migration that points the hub at a new vault starts a fresh baseline instead of alerting on the old one.
 
