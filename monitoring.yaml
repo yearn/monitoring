@@ -174,11 +174,11 @@ protocols:
       - protocols/infinifi/l2_vaults.py
     monitors:
       - name: "Liquid Reserves"
-        description: "Liquid reserves <10% of live API TVL; breach alerts deduped until recovery or a monitoring gap >3 hours"
+        description: "Liquid reserves < max(10% of live API TVL, $4M) (HIGH) or <3% of TVL (CRITICAL); each severity deduped until recovery or a monitoring gap >3 hours"
       - name: "Backing Per iUSD"
         description: "API totalTVL / block-pinned iUSD supply < 0.999; supply block included in alerts"
       - name: "Redemption Pressure"
-        description: "Pending redemptions / liquid reserves >80%; re-armed after a monitoring gap >3 hours"
+        description: "Pending redemptions / liquid reserves >80% (any pending with zero reserves); re-armed after a monitoring gap >3 hours"
       - name: "Large iUSD Mints"
         description: "totalSupply delta >5% vs a cached prior no older than 3 hours"
       - name: "Farm Allocation Shift"

@@ -28,6 +28,8 @@ IUSD_ADDRESS = Web3.to_checksum_address("0x48f9e38f3070AD8945DFEae3FA70987722E3D
 IUSD_DECIMALS = 18
 
 LIQUID_RESERVES_THRESHOLD_PERCENT = 0.10
+LIQUID_RESERVES_FLOOR_USD = 4_000_000
+LIQUID_RESERVES_CRITICAL_THRESHOLD_PERCENT = 0.03
 BACKING_PER_IUSD_MIN = 0.999
 MINT_THRESHOLD_PERCENT = Decimal(Config.get_env("IUSD_LARGE_MINT_THRESHOLD_PERCENT", "0.05"))
 REDEMPTION_TO_LIQUID_RATIO_MAX = 0.8
@@ -66,9 +68,23 @@ def fetch_api_data():
 
 def to_float(value, default=0.0):
     try:
-        return float(value)
+        number = float(value)
     except TypeError, ValueError:
         return default
+    return number if isfinite(number) else default
+
+
+def parse_amount(value: object) -> float | None:
+    """Parse a finite, non-negative API amount.
+
+    Args:
+        value: Raw API value.
+
+    Returns:
+        The amount, or None when it is missing or invalid.
+    """
+    amount = to_float(value, default=float("nan"))
+    return amount if isfinite(amount) and amount >= 0 else None
 
 
 def send_breach_alert_once(cache_key, alert_message, severity=AlertSeverity.HIGH):
@@ -89,26 +105,46 @@ def _format_iusd_units(raw_value: int) -> Decimal:
 
 
 def check_liquid_reserves(liquid_reserves: float, total_backing: float) -> None:
-    """Check the live TVL-based threshold, deduping until recovery or a monitoring gap."""
-    if not isfinite(liquid_reserves) or liquid_reserves < 0 or not isfinite(total_backing) or total_backing <= 0:
-        logger.warning("Skipping liquid reserves check: valid reserves and positive TVL are required")
-        return
+    """Alert when liquid reserves fall below the TVL-based threshold, escalating to critical.
 
-    threshold = total_backing * LIQUID_RESERVES_THRESHOLD_PERCENT
-    cache_key = f"{PROTOCOL}_liquid_reserves_breach"
-    if liquid_reserves < threshold:
-        send_breach_alert_once(
-            cache_key=cache_key,
-            alert_message=(
-                "📉 *Infinifi Liquid Reserves Alert*\n\n"
-                f"Reserves below {LIQUID_RESERVES_THRESHOLD_PERCENT:.0%} of TVL (${threshold:,.2f}).\n"
-                f"Current: ${liquid_reserves:,.2f}\n"
-                f"Total backing: ${total_backing:,.2f}\n"
-                f"Liquid ratio: {liquid_reserves / total_backing:.2%}"
-            ),
+    HIGH fires below the greater of 10% of TVL and the $4M floor; CRITICAL fires below 3% of TVL.
+    Without a positive TVL only the floor applies. Each severity alerts once, re-arming after
+    recovery to a lower level or a monitoring gap.
+
+    Args:
+        liquid_reserves: Valid, non-negative liquid reserves in USD.
+        total_backing: API TVL in USD, or 0 when unavailable.
+    """
+    high_threshold = max(total_backing * LIQUID_RESERVES_THRESHOLD_PERCENT, LIQUID_RESERVES_FLOOR_USD)
+    critical_threshold = total_backing * LIQUID_RESERVES_CRITICAL_THRESHOLD_PERCENT
+
+    if liquid_reserves < critical_threshold:
+        level, severity = 2, AlertSeverity.CRITICAL
+        title = "🚨 *Infinifi Liquid Reserves Critical*"
+        threshold_line = f"{LIQUID_RESERVES_CRITICAL_THRESHOLD_PERCENT:.0%} of TVL (${critical_threshold:,.2f})"
+    elif liquid_reserves < high_threshold:
+        level, severity = 1, AlertSeverity.HIGH
+        title = "📉 *Infinifi Liquid Reserves Alert*"
+        threshold_line = (
+            f"greater of {LIQUID_RESERVES_THRESHOLD_PERCENT:.0%} of TVL and ${LIQUID_RESERVES_FLOOR_USD:,.0f} floor "
+            f"(${high_threshold:,.2f})"
         )
     else:
-        clear_breach_state(cache_key)
+        level, severity, title, threshold_line = 0, None, "", ""
+
+    cache_key = f"{PROTOCOL}_liquid_reserves_breach"
+    last_level = int(
+        get_fresh_last_value_for_key_from_file(cache_filename, cache_key, HOURLY_CACHE_STALE_AFTER_SECONDS)
+    )
+    if severity is not None and level > last_level:
+        backing_lines = (
+            f"Total backing: ${total_backing:,.2f}\nLiquid ratio: {liquid_reserves / total_backing:.2%}"
+            if total_backing > 0
+            else "Total backing: unavailable"
+        )
+        message = f"{title}\n\nReserves below {threshold_line}.\nCurrent: ${liquid_reserves:,.2f}\n{backing_lines}"
+        send_alert(Alert(severity, message, PROTOCOL))
+    write_last_value_with_timestamp_to_file(cache_filename, cache_key, level)
 
 
 def main():
@@ -127,12 +163,9 @@ def main():
         iusd_supply = iusd_supply_raw / (10**IUSD_DECIMALS)
 
         # --- 2. Fetch API Data ---
-        liquid_reserves = 0
-        liquid_reserves_available = False
-        total_backing = 0
+        liquid_reserves: float | None = None
+        total_backing = 0.0
         pending_redemptions = 0
-        reserve_ratio = 0
-        illiquid_ratio = 0
         junior_tvl = 0
         farms = []
         # target_reserve_ratio = 0
@@ -149,19 +182,11 @@ def main():
             asset_stats = stats.get("asset")
 
             if asset_stats:
-                if "totalLiquidAssetNormalized" in asset_stats:
-                    liquid_reserves = to_float(asset_stats["totalLiquidAssetNormalized"], default=float("nan"))
-                    liquid_reserves_available = isfinite(liquid_reserves) and liquid_reserves >= 0
-
-                if "totalTVLAssetNormalized" in asset_stats:
-                    total_backing = to_float(asset_stats["totalTVLAssetNormalized"])
+                liquid_reserves = parse_amount(asset_stats.get("totalLiquidAssetNormalized"))
+                total_backing = parse_amount(asset_stats.get("totalTVLAssetNormalized")) or 0.0
 
                 if "pendingRedemptionsAssetNormalized" in asset_stats:
                     pending_redemptions = to_float(asset_stats["pendingRedemptionsAssetNormalized"])
-
-            if total_backing > 0:
-                reserve_ratio = liquid_reserves / total_backing
-                illiquid_ratio = 1 - reserve_ratio
 
             receipt_stats = stats.get("receipt")
             if receipt_stats and "totalLockedNormalized" in receipt_stats:
@@ -179,22 +204,25 @@ def main():
             supply_block_number,
         )
 
-        if liquid_reserves > 0:
+        if liquid_reserves is not None:
             logger.info("Liquid Reserves: $%s", f"{liquid_reserves:,.2f}")
         else:
             logger.info("Liquid Reserves: [Data Not Available]")
 
         if total_backing > 0:
             logger.info("Total Backing:   $%s", f"{total_backing:,.2f}")
+        else:
+            logger.info("Total Backing:   [Data Not Available]")
+
+        if liquid_reserves is not None and total_backing > 0:
             # Calculate strategy assets implied if not fetched directly
             implied_strategies = total_backing - liquid_reserves
             if implied_strategies > 0:
                 logger.info("Implied Strategy Assets: $%s", f"{implied_strategies:,.2f}")
-        else:
-            logger.info("Total Backing:   [Data Not Available]")
-
-        if total_backing > 0:
-            logger.info("Liquid Ratio:    %.2f%%\nIlliquid Ratio:  %.2f%%", reserve_ratio * 100, illiquid_ratio * 100)
+            reserve_ratio = liquid_reserves / total_backing
+            logger.info(
+                "Liquid Ratio:    %.2f%%\nIlliquid Ratio:  %.2f%%", reserve_ratio * 100, (1 - reserve_ratio) * 100
+            )
 
         if pending_redemptions > 0:
             logger.info("Pending Redeems: $%s", f"{pending_redemptions:,.2f}")
@@ -242,7 +270,15 @@ def main():
         write_last_value_with_timestamp_to_file(cache_filename, cache_key_large_mints, iusd_supply_raw)
 
         # Alert 1: Low Liquid Reserves
-        if liquid_reserves_available:
+        if liquid_reserves is None:
+            send_error_message("Infinifi API liquid reserves missing or invalid; reserve check skipped", PROTOCOL)
+        else:
+            if total_backing <= 0:
+                send_error_message(
+                    "Infinifi API TVL missing or invalid; reserve check limited to "
+                    f"${LIQUID_RESERVES_FLOOR_USD:,.0f} floor",
+                    PROTOCOL,
+                )
             check_liquid_reserves(liquid_reserves, total_backing)
 
         # Alert 2 and Alert 3 intentionally disabled:
@@ -290,15 +326,20 @@ def main():
                 clear_breach_state(cache_key_backing)
 
         # Alert 5: Pending redemptions too high relative to liquid reserves
-        if liquid_reserves > 0 and pending_redemptions >= 0:
+        if liquid_reserves is not None and pending_redemptions >= 0:
             cache_key_redemption = f"{PROTOCOL}_redemption_pressure_breach"
-            redemption_to_liquid = pending_redemptions / liquid_reserves
+            if liquid_reserves > 0:
+                redemption_to_liquid = pending_redemptions / liquid_reserves
+                ratio_display = f"{redemption_to_liquid:.2%}"
+            else:
+                redemption_to_liquid = float("inf") if pending_redemptions > 0 else 0.0
+                ratio_display = "unbounded (no liquid reserves)"
             if redemption_to_liquid > REDEMPTION_TO_LIQUID_RATIO_MAX:
                 send_breach_alert_once(
                     cache_key=cache_key_redemption,
                     alert_message=(
                         "⚠️ *Infinifi Redemption Pressure Alert*\n\n"
-                        f"Pending/Liquid ratio is {redemption_to_liquid:.2%}, above {REDEMPTION_TO_LIQUID_RATIO_MAX:.0%}.\n"
+                        f"Pending/Liquid ratio is {ratio_display}, above {REDEMPTION_TO_LIQUID_RATIO_MAX:.0%}.\n"
                         f"Pending redemptions: ${pending_redemptions:,.2f}\nLiquid reserves: ${liquid_reserves:,.2f}"
                     ),
                 )

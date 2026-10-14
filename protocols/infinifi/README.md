@@ -12,11 +12,11 @@ This folder contains monitoring scripts for the Infinifi protocol.
 
 ## Alerts
 
-- **Liquid Reserves**: A Telegram alert is triggered if liquid reserves are below **10% of live TVL**, using API `totalTVLAssetNormalized`. The threshold recalculates every run; TVL growth alone can trigger a breach. Valid zero reserves trigger an alert; missing or invalid reserves or TVL do not update breach state. The alert includes TVL, liquidity ratio, and the calculated threshold.
+- **Liquid Reserves**: HIGH alert if liquid reserves are below the greater of **10% of live TVL** (API `totalTVLAssetNormalized`) and a **$4M floor**; CRITICAL alert below **3% of TVL**. Thresholds recalculate every run, so TVL growth alone can trigger a breach. Valid zero reserves alert. If TVL is missing or invalid, only the $4M floor applies; if reserves are missing or invalid, the check is skipped. Both cases are reported to the errors channel.
 - **Reserve Ratio Breach**: Alert if liquid ratio falls below protocol `reserveRatio` target.
 - **Illiquid Ratio Breach**: Alert if illiquid ratio rises above protocol `illiquidTargetRatio`.
 - **Backing Per iUSD**: Alert if API `totalTVL / iUSD supply` drops below `0.999`. The supply is pinned to and reported with an Ethereum block. The API does not expose a block identifier to this monitor, so this cross-source comparison cannot be atomic.
-- **Redemption Pressure**: Alert if `pending redemptions / liquid reserves` exceeds `80%`.
+- **Redemption Pressure**: Alert if `pending redemptions / liquid reserves` exceeds `80%`, including any pending redemptions while liquid reserves are zero.
 - **Farm Allocation Shift**: Alert if any farm allocation ratio (`farm assets / total TVL`) changes by more than `FARM_RATIO_CHANGE_ALERT_THRESHOLD` versus cached ratio. Farms below 1% of total TVL are excluded.
 - **Farm Activation**: Alert if a farm previously at `0` cached ratio moves above `FARM_RATIO_ACTIVATION_ALERT_THRESHOLD` of total TVL.
 - **Junior TVL Below Risky Exposure**: Alert if junior TVL (locked iUSD) covers less than 50% of risky farm TVL. Risky farms are all farms NOT in the `SAFE_FARM_IDENTIFIERS` whitelist.
@@ -62,7 +62,7 @@ It compares cached `totalSupply` deltas and alerts when the increase is above:
 ## Cache Freshness
 
 Hourly delta baselines expire after 3 hours and initialize from the next valid observation. Breach-dedupe state and
-liquid-reserve breach detection are re-armed after the same monitoring gap. A reserve breach alerts on the first valid observation, then dedupes until recovery or a monitoring gap. PPS-style loss baselines are not affected.
+liquid-reserve breach detection are re-armed after the same monitoring gap. Each reserve severity alerts once, then dedupes until reserves recover to a lower severity or a monitoring gap; a drop from HIGH to CRITICAL alerts again. PPS-style loss baselines are not affected.
 
 ### Emergency dispatch
 
