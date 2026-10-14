@@ -31,6 +31,7 @@ ENVIO_GRAPHQL_URL = os.getenv("ENVIO_GRAPHQL_URL")
 DEFAULT_LOG_LEVEL = os.getenv("TIMELOCK_ALERTS_LOG_LEVEL", "INFO")
 CACHE_KEY = "TIMELOCK_LAST_TS"
 AAVE_GOVERNANCE_PROPOSAL_URL = "https://app.aave.com/governance/v3/proposal/?proposalId="
+LIDO_GOVERNANCE_VOTE_URL = "https://dao.lido.fi/vote/"
 
 # YEARN_TIMELOCK alerts are also mirrored to this internal-only chat, in lockstep
 # with the public topic. Configure its credentials with
@@ -443,7 +444,7 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
     # underscore in "YEARN_TIMELOCK" was opening an italic that never
     # closed, breaking the whole message with Telegram 400.
     header_lines: list[str] = [
-        "⏰ *TIMELOCK: New Operation Scheduled*",
+        "🗳️ *New Governance Vote*" if timelock_type == "Lido" else "⏰ *TIMELOCK: New Operation Scheduled*",
         f"🅿️ Protocol: {escape_markdown(timelock_info.protocol)}",
         _format_address(first["timelockAddress"], explorer, f"📋 {escape_markdown(timelock_info.label)}: "),
         f"🔗 Chain: {chain_name}",
@@ -477,13 +478,16 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
             call_lines.append(f"🔗 Governance: [Aave Governance]({AAVE_GOVERNANCE_PROPOSAL_URL}{proposal_id})")
 
     elif timelock_type == "Lido":
+        vote_id = operation_id if operation_id is not None else ""
+        header_lines.append(f"🆔 Vote: {vote_id}")
+        if vote_id != "":
+            header_lines.append(f"🔗 Governance: [Lido Vote #{vote_id}]({LIDO_GOVERNANCE_VOTE_URL}{vote_id})")
         creator = first.get("creator")
         if creator:
             call_lines.append(_format_address(creator, explorer, "👤 Creator: "))
         metadata = first.get("metadata")
         if metadata:
             call_lines.append(f"📄 Metadata: {metadata}")
-        call_lines.append(f"🆔 Vote: {first.get('operationId') or ''}")
 
     elif timelock_type == "Maple":
         call_lines.append(f"🆔 Proposal: {first.get('operationId') or ''}")

@@ -205,7 +205,7 @@ protocols:
       - name: "stETH/ETH Exchange Rate"
         description: "Curve stETH/ETH pool rate deviates >0.1% from Lido validator rate"
       - name: "Timelock"
-        description: "Lido Timelock StartVote events via Envio"
+        description: "Lido StartVote events via Envio with direct governance vote links"
       - name: "Safe Multisigs"
         description: "Emergency Brakes Safe queue"
 

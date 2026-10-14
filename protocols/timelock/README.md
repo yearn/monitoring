@@ -127,17 +127,18 @@ The alert format varies by timelock type:
 
 **Lido:**
 ```
-⏰ TIMELOCK: New Operation Scheduled
+🗳️ New Governance Vote
 🅿️ Protocol: LIDO
-📋 Timelock: Lido DAO
+📋 Lido Timelock: 0x2e59A20f205bB85a89C53f1936454680651E618e
 🔗 Chain: Mainnet
-📌 Type: Lido
-📝 Event: StartVote
-👤 Creator: 0x1234...
+🆔 Vote: 206
+🔗 Governance: [Lido Vote #206](https://dao.lido.fi/vote/206)
+👤 Creator: 0xf73a1260d222f447210581DDf212D915c09a3249
 📄 Metadata: ipfs://...
-🆔 Vote ID: 123
 🔗 Tx: https://etherscan.io/tx/0x...
 ```
+
+Lido `StartVote` events announce a new governance vote. The vote ID and governance link remain visible if long metadata is truncated to fit Telegram's message limit.
 
 TimelockController and Compound alerts show the full operation ID in inline code, in the same `Operation ID` format as the stale-operation alert, so you can match the two and copy the ID into TimelockController's `getTimestamp(id)` or `cancel(id)`. For Compound it is the `queuedTransactions` hash.
 

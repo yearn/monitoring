@@ -228,6 +228,35 @@ class TestOperationIdLine(unittest.TestCase):
                 msg = build_alert_message([_make_event("Aave", operationId=proposal_id)], TIMELOCK_INFO)
                 self.assertNotIn("app.aave.com", msg)
 
+    def test_lido_vote_heading_and_link(self, _mock_ai: object) -> None:
+        """Lido vote alerts link to the vote and retain the proposal metadata."""
+        metadata = "Omnibus vote: activate 0x02 CSM"
+        for vote_id in ("206", 0):
+            with self.subTest(vote_id=vote_id):
+                event = _make_event("Lido", operationId=vote_id, metadata=metadata)
+                msg = build_alert_message([event], TIMELOCK_INFO)
+                self.assertIn("New Governance Vote", msg)
+                self.assertNotIn("New Operation Scheduled", msg)
+                self.assertIn(f"🆔 Vote: {vote_id}\n", msg)
+                self.assertIn(f"(https://dao.lido.fi/vote/{vote_id})", msg)
+                self.assertIn(metadata, msg)
+
+    def test_lido_missing_id_omits_governance_link(self, _mock_ai: object) -> None:
+        """An absent Lido vote ID must not produce a broken governance link."""
+        for vote_id in (None, ""):
+            with self.subTest(vote_id=vote_id):
+                msg = build_alert_message([_make_event("Lido", operationId=vote_id)], TIMELOCK_INFO)
+                self.assertNotIn("dao.lido.fi/vote/", msg)
+
+    def test_lido_vote_link_survives_metadata_truncation(self, _mock_ai: object) -> None:
+        """Long proposal descriptions must not hide the vote link."""
+        event = _make_event("Lido", operationId="206", metadata="x" * MAX_MESSAGE_LENGTH)
+        msg = build_alert_message([event], TIMELOCK_INFO)
+        self.assertLessEqual(len(msg), MAX_MESSAGE_LENGTH)
+        self.assertIn("truncated", msg)
+        self.assertIn("🆔 Vote: 206\n", msg)
+        self.assertIn("(https://dao.lido.fi/vote/206)", msg)
+
 
 class TestMapleProposalUnwrap(unittest.TestCase):
     """Maple ProposalScheduled has no target/data; recover them from the source tx."""
