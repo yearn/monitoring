@@ -14,7 +14,7 @@ Monitor the Safe multisig for [Emergency Brakes functions](https://docs.lido.fi/
 
 - Emergency Brakes: Ethereum used to disable deposits & withdrawals for wstETH bridging to other chains (Arbitrum, Optimism, Base, Scroll, Mantle, ZKSync, Binance Smart Chain, Mode) in case of an emergency on Ethereum mainnet or the counterpart chain, and can pause Easy Track pipeline.
 
-[Internal timelock monitoring](../timelock/README.md) runs hourly for `StartVote` events on the [Lido voting contract](https://etherscan.io/address/0x2e59a20f205bb85a89c53f1936454680651e618e) on Mainnet. Alerts use the heading "New Governance Vote" and include a direct [governance vote link](https://dao.lido.fi/vote/206), the vote ID, creator, metadata, and transaction link. The vote ID and governance link remain visible when long metadata is truncated.
+[Internal timelock monitoring](../timelock/README.md) runs hourly for `StartVote` events on the [Lido voting contract](https://etherscan.io/address/0x2e59a20f205bb85a89c53f1936454680651e618e) on Mainnet. Alerts use the heading "New Governance Vote" and include a direct [governance vote link](https://dao.lido.fi/vote/206), the vote ID, creator, metadata, and transaction link. Metadata is escaped as literal text and shortened to a preview when necessary. The vote ID and governance link remain visible, and both are omitted if the ID is missing.
 
 Not monitoring [Easy track voting](https://docs.lido.fi/guides/easy-track-guide/) because it cannot trigger crucial changes. Responsible only for:
 

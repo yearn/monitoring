@@ -127,18 +127,18 @@ The alert format varies by timelock type:
 
 **Lido:**
 ```
-🗳️ New Governance Vote
+🗳️ *New Governance Vote*
 🅿️ Protocol: LIDO
-📋 Lido Timelock: 0x2e59A20f205bB85a89C53f1936454680651E618e
+📋 Lido Aragon Voting: [0x2e59a20f205bb85a89c53f1936454680651e618e](https://etherscan.io/address/0x2e59a20f205bb85a89c53f1936454680651e618e)
 🔗 Chain: Mainnet
 🆔 Vote: 206
 🔗 Governance: [Lido Vote #206](https://dao.lido.fi/vote/206)
-👤 Creator: 0xf73a1260d222f447210581DDf212D915c09a3249
-📄 Metadata: ipfs://...
-🔗 Tx: https://etherscan.io/tx/0x...
+👤 Creator: [0xf73a1260d222f447210581ddf212d915c09a3249](https://etherscan.io/address/0xf73a1260d222f447210581ddf212d915c09a3249)
+📄 Metadata: Omnibus vote: activate 0x02 CSM
+🔗 Tx: [0x4950850f9e617242ec701d73e61861797cf8002711dfa14f93102b6a29f177bc](https://etherscan.io/tx/0x4950850f9e617242ec701d73e61861797cf8002711dfa14f93102b6a29f177bc)
 ```
 
-Lido `StartVote` events announce a new governance vote. The vote ID and governance link remain visible if long metadata is truncated to fit Telegram's message limit.
+Lido `StartVote` events announce a new governance vote. Metadata is escaped as literal text and shortened to a preview with a truncation marker to fit Telegram's message limit. The vote ID and governance link remain visible and are omitted together if the ID is missing.
 
 TimelockController and Compound alerts show the full operation ID in inline code, in the same `Operation ID` format as the stale-operation alert, so you can match the two and copy the ID into TimelockController's `getTimestamp(id)` or `cancel(id)`. For Compound it is the `queuedTransactions` hash.
 
