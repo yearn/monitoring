@@ -16,6 +16,7 @@ import requests
 from dotenv import load_dotenv
 
 from protocols.yearn.kong import fetch_kong_parent_vaults
+from protocols.yearn.small_parent_flows_config import IGNORED_TRANSACTION_SENDERS
 from utils import store
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import EXPLORER_URLS, Chain
@@ -530,8 +531,15 @@ def process_event(
     if not is_small_flow(raw_assets, threshold_raw):
         return False
 
-    amount = format_units(raw_assets, int(vault["asset_decimals"]))
     chain_id = int(event["chainId"])
+    transaction_from = (event.get("transactionFrom") or "").lower()
+    if transaction_from in IGNORED_TRANSACTION_SENDERS.get(chain_id, ()):
+        logger.info(
+            "Skipping small flow from excluded transaction initiator %s on chain %s", transaction_from, chain_id
+        )
+        return False
+
+    amount = format_units(raw_assets, int(vault["asset_decimals"]))
     chain = Chain.from_chain_id(chain_id)
     record = SmallFlowRecord(
         chain_name=chain.network_name,

@@ -90,7 +90,9 @@ Optional flags:
 
 ## Small Parent Vault Flows
 
-The script `yearn/alert_small_parent_flows.py` alerts on every deposit or withdrawal whose raw ERC-4626 `assets` value is strictly between 0 and 10,000 for an active Yearn v3 parent vault. The comparison happens before decimal normalization: 10,000 raw units equals 0.01 USDC, 0.0001 WBTC, or 0.00000000000001 WETH.
+The script `yearn/alert_small_parent_flows.py` alerts on deposits and withdrawals whose raw ERC-4626 `assets` value is strictly between 0 and 10,000 for an active Yearn v3 parent vault, except configured transaction initiators. The comparison happens before decimal normalization: 10,000 raw units equals 0.01 USDC, 0.0001 WBTC, or 0.00000000000001 WETH.
+
+**Initiator exclusions:** `small_parent_flows_config.py` contains chain-scoped, lowercase transaction initiators to ignore. On Katana, [0xe9312419edc29E7784AC2F5AA2Fd2ac0f38fF2Af](https://katanascan.com/address/0xe9312419edc29E7784AC2F5AA2Fd2ac0f38fF2Af) is excluded from both small-deposit and small-withdrawal alerts. Matching uses Envio's `transactionFrom`, case-insensitively, not the event sender, owner, or receiver. Missing initiators are not excluded. Skipped events still advance the cursor, do not count toward aggregate limits, and do not generate an empty summary. This does not affect other chains or other monitors.
 
 ### Data Sources
 

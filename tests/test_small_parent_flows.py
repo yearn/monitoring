@@ -124,6 +124,95 @@ def test_process_event_raises_without_alert_sender() -> None:
         monitor.process_event(make_event(), {"0xparent": VAULT}, 10_000)
 
 
+@pytest.mark.parametrize("flow_type", ["deposit", "withdrawal"])
+@pytest.mark.parametrize(
+    "initiator",
+    ["0xe9312419edc29e7784ac2f5aa2fd2ac0f38ff2af", "0xe9312419edc29E7784AC2F5AA2Fd2ac0f38fF2Af"],
+)
+def test_process_event_excludes_katana_initiator(flow_type: str, initiator: str) -> None:
+    """Excluded initiators do not consume aggregate capacity or emit summaries."""
+    alerts: list[Alert] = []
+    aggregator = monitor.FlowAggregator(max_flows=1, sender=alerts.append)
+    event = make_event(flow_type=flow_type, chain_id=Chain.KATANA.chain_id)
+    event["transactionFrom"] = initiator
+
+    assert not monitor.process_event(event, {"0xparent": VAULT}, 10_000, aggregator)
+    aggregator.send_summary()
+
+    assert aggregator.total == 0
+    assert aggregator.truncated == 0
+    assert alerts == []
+
+
+def test_process_event_exclusion_is_chain_scoped() -> None:
+    """The same address remains monitored outside Katana."""
+    event = make_event(chain_id=Chain.MAINNET.chain_id)
+    event["transactionFrom"] = "0xe9312419edc29E7784AC2F5AA2Fd2ac0f38fF2Af"
+    records: list[monitor.SmallFlowRecord] = []
+
+    assert monitor.process_event(event, {"0xparent": VAULT}, 10_000, records.append)
+    assert len(records) == 1
+
+
+@pytest.mark.parametrize("initiator", [None, "", "0xOtherInitiator"])
+def test_process_event_does_not_exclude_other_participants(initiator: str | None) -> None:
+    """An excluded sender/owner/receiver is not enough to suppress another initiator."""
+    event = make_event(flow_type="withdrawal", chain_id=Chain.KATANA.chain_id)
+    event["transactionFrom"] = initiator
+    for field in ("sender", "owner", "receiver"):
+        event[field] = "0xe9312419edc29E7784AC2F5AA2Fd2ac0f38fF2Af"
+    records: list[monitor.SmallFlowRecord] = []
+
+    assert monitor.process_event(event, {"0xparent": VAULT}, 10_000, records.append)
+    assert len(records) == 1
+
+
+@pytest.mark.parametrize("flow_type", ["deposit", "withdrawal"])
+def test_monitor_flow_type_advances_past_excluded_events(monkeypatch: pytest.MonkeyPatch, flow_type: str) -> None:
+    """Excluded events advance the cursor without preventing later flows from alerting."""
+    chain_id = Chain.KATANA.chain_id
+    first = make_event(flow_type=flow_type, chain_id=chain_id)
+    first["transactionFrom"] = "0xe9312419edc29E7784AC2F5AA2Fd2ac0f38fF2Af"
+    second = make_event(flow_type=flow_type, chain_id=chain_id, block_number=101)
+    third = {**first, "blockNumber": 102}
+    pages = iter([[first], [second], [third], []])
+    pending_cursors: dict[tuple[int, str], monitor.EventCursor] = {}
+    records: list[monitor.SmallFlowRecord] = []
+    cursors: list[monitor.EventCursor] = []
+    monkeypatch.setattr(monitor, "load_cursor", lambda *_args: monitor.EventCursor(99, 0, 1_700_000_000))
+
+    def fake_load(
+        _flow_type: str,
+        _chain_id: int,
+        _addresses: list[str],
+        cursor: monitor.EventCursor,
+        _since_ts: int,
+        _limit: int,
+    ) -> list[dict]:
+        """Return consecutive pages while recording the requested cursors."""
+        cursors.append(cursor)
+        return next(pages)
+
+    monkeypatch.setattr(monitor, "load_events", fake_load)
+    result = monitor.monitor_flow_type(
+        chain_id,
+        flow_type,
+        ["0xParent"],
+        {"0xparent": VAULT},
+        10_000,
+        lookback_seconds=7200,
+        page_size=1,
+        pending_cursors=pending_cursors,
+        alert_sender=records.append,
+    )
+
+    assert result == (3, 1)
+    assert len(records) == 1
+    assert records[0].block_number == 101
+    assert [cursor.block_number for cursor in cursors] == [99, 100, 101, 102]
+    assert pending_cursors[(chain_id, flow_type)] == monitor.cursor_from_event(third)
+
+
 def test_load_events_selects_envio_entity_and_receiver(monkeypatch) -> None:
     queries = []
 
