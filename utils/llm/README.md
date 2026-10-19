@@ -633,10 +633,6 @@ defaults to the executing timelock/Safe (`from_address`). Safe multisend batches
 label the *utility* contract instead, so `_explain_safe_tx()` passes the outer
 target as `label_address` in that path.
 
-Callers can add header rows through `report_metadata` (`ReportContext.metadata`),
-rendered after **Chain**. Safe alerts add the Safe, its nonce and the `safeTxHash`
-linked to the Safe app transaction, so signers can match the hash on their device.
-
 ## Configuration
 
 All configuration is via environment variables:

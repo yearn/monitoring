@@ -433,35 +433,6 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         mock_batch.assert_called_once()
         return mock_batch.call_args.kwargs
 
-    def test_report_header_identifies_the_safe_tx(self):
-        safe = "0x16388463d60FFE0661Cf7F1f31a7D658aC790ff7"
-        tx_hash = "0x614f7c3ec4b1d839fe35f78acca32f49da8bfcaf2ff8b33d3a408ed145b523b5"
-        tx = {**self._multisend_tx([0]), "nonce": 3372, "safeTxHash": tx_hash}
-        safe_main = self._import_safe_main()
-        with patch.object(safe_main, "explain_batch_transaction", return_value=None) as mock_batch:
-            safe_main._explain_safe_tx(
-                tx=tx,
-                target=tx["to"],
-                hex_data="0x8d80ff0a",
-                chain_id=1,
-                protocol="YEARN_MS",
-                safe_address=safe,
-                additional_info="Strategist Multisig",
-                network_name="mainnet",
-            )
-        self.assertEqual(
-            mock_batch.call_args.kwargs["report_metadata"],
-            [
-                ("Safe", f"[`{safe}`](https://etherscan.io/address/{safe}) (Strategist Multisig)"),
-                ("Nonce", "3372"),
-                (
-                    "Safe tx hash",
-                    f"[`{tx_hash}`](https://app.safe.global/transactions/tx?safe=eth:{safe}"
-                    f"&id=multisig_{safe}_{tx_hash})",
-                ),
-            ],
-        )
-
     def test_all_call_multisend_is_simulated_as_a_bundle(self):
         """MultiSend inner CALLs run from the Safe, so a bundle from the Safe is the real execution."""
         kwargs = self._explain_multisend(self._multisend_tx([0, 0, 0]))

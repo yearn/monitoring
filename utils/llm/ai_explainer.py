@@ -2077,7 +2077,6 @@ def explain_transaction(
     refine: bool = True,
     description: str = "",
     label_address: str = "",
-    report_metadata: list[tuple[str, str]] | None = None,
 ) -> Explanation | None:
     """Generate an AI explanation for a governance transaction.
 
@@ -2110,8 +2109,6 @@ def explain_transaction(
             Contract header. Defaults to ``from_address`` — pass it explicitly
             when the label describes something else (e.g. a Safe multisend
             utility rather than the Safe itself).
-        report_metadata: Extra (name, markdown value) rows for the report header,
-            e.g. a Safe transaction's nonce and safeTxHash for signers to match.
 
     Returns:
         Explanation with summary and detail, or None on failure.
@@ -2148,7 +2145,6 @@ def explain_transaction(
             context_note=context_note,
             description=description,
             safety_notes=safety_notes,
-            report_metadata=report_metadata,
         )
 
     decoded_calls = [decoded]
@@ -2248,7 +2244,6 @@ def explain_transaction(
         label=label,
         from_address=from_address,
         label_address=label_address or from_address,
-        metadata=list(report_metadata or []),
         protocol_context=protocol_ctx.report,
         related_addresses=protocol_ctx.addresses,
         state_read_notes=state_reads.report_text(chain_id, address_labels),
@@ -2446,7 +2441,6 @@ def _deterministic_undecoded_explanation(
     context_note: str = "",
     description: str = "",
     safety_notes: list[str] | None = None,
-    report_metadata: list[tuple[str, str]] | None = None,
 ) -> Explanation:
     """Build summary + report for an all-unknown batch without any LLM calls."""
     report_ctx = ReportContext(
@@ -2465,7 +2459,6 @@ def _deterministic_undecoded_explanation(
         label=label,
         from_address=from_address,
         label_address=label_address or from_address,
-        metadata=list(report_metadata or []),
         context_note=context_note,
         description=description,
         safety_notes=safety_notes or [],
@@ -2493,7 +2486,6 @@ def explain_batch_transaction(
     refine: bool = True,
     description: str = "",
     label_address: str = "",
-    report_metadata: list[tuple[str, str]] | None = None,
 ) -> Explanation | None:
     """Generate an AI explanation for a batch/multicall governance transaction.
 
@@ -2518,8 +2510,6 @@ def explain_batch_transaction(
             Contract header. Defaults to ``from_address`` — pass it explicitly
             when the label describes something else (e.g. a Safe multisend
             utility rather than the Safe itself).
-        report_metadata: Extra (name, markdown value) rows for the report header,
-            e.g. a Safe transaction's nonce and safeTxHash for signers to match.
 
     Returns:
         Explanation with summary and detail, or None on failure.
@@ -2569,7 +2559,6 @@ def explain_batch_transaction(
             context_note=context_note,
             description=description,
             safety_notes=safety_notes,
-            report_metadata=report_metadata,
         )
 
     source_contexts = _collect_source_contexts(decoded_with_target, chain_id)
@@ -2640,7 +2629,6 @@ def explain_batch_transaction(
         label=label,
         from_address=from_address,
         label_address=label_address or from_address,
-        metadata=list(report_metadata or []),
         protocol_context=protocol_ctx.report,
         related_addresses=protocol_ctx.addresses,
         state_read_notes=state_reads.report_text(chain_id, address_labels),
