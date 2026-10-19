@@ -19,6 +19,12 @@ the earlier calls leave:
 
 Amounts are expectations from pre-transaction state: realized withdrawals can
 differ by strategy losses or rounding, which the vault accounts for on-chain.
+
+A strategy can itself be a V3 vault that the same batch also manages. Moving
+debt into or out of it changes that vault's own state: a deposit lands in its
+idle (or, with ``auto_allocate``, in its first queue strategy), and a redemption
+is served from its idle, then from its default queue in order. ``receive`` and
+``redeem`` apply that side, so a later call on the inner vault sees it.
 """
 
 from dataclasses import dataclass, field
@@ -61,6 +67,8 @@ class VaultBatchState:
     minimum_total_idle: int
     shutdown: bool
     strategies: dict[str, StrategyDebt] = field(default_factory=dict)
+    # The move the latest update_debt made, so a caller can pass it on to an inner vault.
+    last_move: DebtMove | None = None
 
     def get(self, address: str) -> StrategyDebt | None:
         return self.strategies.get(address.lower())
@@ -81,6 +89,50 @@ class VaultBatchState:
 
     def update_debt(self, address: str, target: int) -> DebtMove:
         """Apply one ``update_debt`` to the running state, mirroring the vault."""
+        self.last_move = self._update_debt(address, target)
+        return self.last_move
+
+    def receive(self, amount: int, auto_allocate_to: str | None = None) -> tuple[int, int] | None:
+        """Take a deposit from a parent vault; returns the auto-allocated strategy's (before, after) debt, if any."""
+        strategy = self.get(auto_allocate_to) if auto_allocate_to else None
+        if strategy is None or not strategy.active:
+            self.idle += amount
+            return None
+        before = strategy.current_debt
+        strategy.current_debt += amount
+        return before, strategy.current_debt
+
+    def redeem(self, amount: int, queue: list[str]) -> tuple[int, list[tuple[str, int, int]], int]:
+        """Serve a parent vault's redemption: idle first, then the default queue in order.
+
+        Returns:
+            (taken from idle, [(strategy, debt before, debt after)], amount no strategy could supply).
+        """
+        from_idle = min(self.idle, amount)
+        self.idle -= from_idle
+        remaining = amount - from_idle
+        pulls: list[tuple[str, int, int]] = []
+        for address in queue:
+            if remaining == 0:
+                break
+            strategy = self.get(address)
+            if strategy is None or not strategy.active or strategy.current_debt == 0:
+                continue
+            available = strategy.current_debt
+            if strategy.max_withdraw is not None:
+                available = min(available, strategy.max_withdraw)
+            taken = min(available, remaining)
+            if taken == 0:
+                continue
+            before = strategy.current_debt
+            strategy.current_debt -= taken
+            if strategy.max_withdraw is not None:
+                strategy.max_withdraw -= taken
+            remaining -= taken
+            pulls.append((address, before, strategy.current_debt))
+        return from_idle, pulls, remaining
+
+    def _update_debt(self, address: str, target: int) -> DebtMove:
         strategy = self.get(address)
         if strategy is None or not strategy.active:
             return DebtMove(target, 0, 0, self.idle, self.idle, reverts="inactive strategy")

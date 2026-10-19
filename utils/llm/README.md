@@ -288,6 +288,16 @@ It then states each proposed value in the vault asset against that state, in bat
 
 `update_debt(strategy, target_debt)` is a **target, not an amount**. `utils/llm/yearn_v3_batch.py` mirrors the vault's `_update_debt` over a running copy of the vault state, so each call's expected amount reflects what the earlier calls in the batch left. Withdrawals keep `minimum_total_idle` and are capped by what the strategy can redeem. On deposits, the target is capped by `max_debt` and the amount by the strategy's `maxDeposit` and by idle above `minimum_total_idle`. The model also covers shutdown, the "new debt equals current debt" revert and inactive strategies. Each line gives the amount moved, what limited it, and the vault's idle before → after. Previously the line printed `target − current_debt` and the pre-batch idle. A Cap batch that withdrew 26.9M USDC from two Morpho strategies and set Aave's target to 50M was then reported as "deposits 50,000,000 USDC; idle now 0 USDC", and the model flagged a funding gap that cannot exist; the vault deposits the 26.93M it holds. The default queue is tracked through the batch too: `add_strategy(…, true)` appends to it and a revoke removes from it. A later `set_default_queue` is therefore compared against the queue as the batch left it, and any strategy it drops that still holds debt is named with that debt. Yearn's yETH recovery batch (Strategist Safe nonce 3356) registered and funded Flex WETH with 100 WETH, then restored the original queue, leaving Flex funded but out of default withdrawals. The semantics line also spells out `use_default_queue`: `False` only permits custom withdrawal queues, and ordinary withdrawals still use the default queue. A report had called a queue reorder inert because the flag was false. The system prompt treats a unit the Protocol Context states as verified, so the model normalizes `max_debt` without hedging. Failures are best-effort and never block the governance alert.
 
+**DebtAllocator calls.** Debt is usually moved through a `DebtAllocator`, so its `update_debt(vault, strategy, target_debt)` is read as the vault's own `update_debt(strategy, target_debt)`. The allocator call is keeper-gated, forwards with its `maxDebtUpdateLoss`, and runs `process_report` first for a zero target. The context states the allocator and its `maxDebtUpdateLoss`. Before this, a Strategist Safe rebalance made entirely of allocator calls (nonce 3373) got no vault context at all.
+
+**Vaults that hold one another.** A batch can move debt between vaults where one is the other's strategy. In nonce 3373, yvWETH-2 redeemed 270 WETH from yvWETH-1 and moved it into a looper; yvWETH-1 then withdrew 270 WETH from that looper back into Yearn OG WETH. Calls are therefore walked in one global batch order across every vault (`walk_batch`), and each flow is also applied to the inner vault:
+- a deposit lands in the inner vault's idle, or with `auto_allocate` in its first queue strategy;
+- a redemption is served from the inner vault's idle, then from its default queue in order, capped by what each strategy can return now (these limits are read for every queue strategy of a vault that another vault redeems from).
+
+The inner vault's later calls then start from that state. In nonce 3373, yvWETH-1's stETH Accumulator could return nothing, so the redemption drew Yearn OG WETH from 677.20 to 407.20, and call 4 refilled it to 677.20, not 947.20. A held vault the batch never calls is read only for its side of the flow and gets no section of its own. Two further lines:
+- A deposit into a strategy outside the default queue says the funds are off the withdrawal path.
+- A vault that holds another vault shows its look-through exposure before → after: direct debt plus a pro-rata share of each held vault's strategies. The report had called nonce 3373 a shift "from indirect to direct exposure"; yvWETH-2's looper exposure actually went from 70.53 to 294.60 WETH (4.7% → 19.7%).
+
 ### 5f-3. Control Transfer Context (`utils/llm/control_transfer_context.py`)
 
 A call such as `set_management(0xac7D…)` names the new controller by address only. Whether that address is a 6-of-9 multisig, a contract run by a 2-of-4 multisig, or a single key decides how serious the change is. A report once called moving a Funding Distributor from Yearn's 6-of-9 Safe to an Executor contract (managed by a 2-of-4 Safe, with an operator whitelist) just a "pending management handover".
@@ -660,8 +670,8 @@ utils/llm/
 ├── threejane_abi.py         # 3Jane checked-in ABIs + verified-ABI probes (proxy-aware)
 ├── threejane_account_context.py # 3Jane LCC bounces and USD3 supply-cap exemptions
 ├── threejane_context.py     # 3Jane adapter: hashed config keys/roles, rewards distribution mode
-├── yearn_v3_context.py      # Yearn V3 adapter: vault state, queue, strategy caps in asset units
-├── yearn_v3_batch.py        # Yearn V3 _update_debt model: expected amounts through a batch
+├── yearn_v3_context.py      # Yearn V3 adapter: vault state, queue, caps, DebtAllocator calls, look-through exposure
+├── yearn_v3_batch.py        # Yearn V3 _update_debt model: expected amounts through a batch, flows into inner vaults
 ├── yearn_strategy_context.py # Yearn tokenized strategies: settings old → new, unlock-time burn, deposit gate
 ├── yearn_auction_context.py # Yearn Auctions: floor vs market, pending lots, kick size, idle proceeds
 ├── control_transfer_context.py # Who gains control: current vs new holder, Safe thresholds, two-step

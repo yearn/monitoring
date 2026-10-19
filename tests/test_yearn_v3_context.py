@@ -180,11 +180,12 @@ class TestResolve(unittest.TestCase):
 
     @patch.object(yearn_v3_context, "_read_vault_context")
     def test_groups_calls_per_vault_for_any_protocol(self, mock_read: MagicMock) -> None:
-        sentinel = MagicMock()
-        mock_read.return_value = sentinel
+        mock_read.return_value = _context([ADD_LOOPER, CAP_LOOPER])
         calls = [(VAULT, ADD_LOOPER), (VAULT, CAP_LOOPER)]
-        self.assertEqual(resolve_yearn_v3_context("some-curator", 1, calls), [sentinel])
-        mock_read.assert_called_once_with(1, VAULT, [ADD_LOOPER, CAP_LOOPER])
+        (context,) = resolve_yearn_v3_context("some-curator", 1, calls)
+        self.assertEqual(context.calls, (ADD_LOOPER, CAP_LOOPER))
+        self.assertEqual(len(context.proposal_lines()), 2)
+        mock_read.assert_called_once_with(1, VAULT, [ADD_LOOPER, CAP_LOOPER], queue_limits=False)
 
     @patch.object(yearn_v3_context, "_read_vault_context", side_effect=RuntimeError("rpc down"))
     def test_read_failure_is_swallowed(self, _mock_read: MagicMock) -> None:
@@ -423,3 +424,151 @@ class TestNestedRegistrationBatch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Strategist Safe nonce 3373: DebtAllocator moves 270 WETH of yvWETH-2 out of yvWETH-1 into the
+# looper, and yvWETH-1 out of the looper back into Yearn OG WETH. Values read at block 26226811.
+V1 = "0xc56413869c6CDf96496f2b1eF801fEDBdFA7dDB0"
+ALLOCATOR = "0x1e9eB053228B1156831759401dE0E115356b8671"
+ACCUMULATOR = "0x470e0e048F85CFD72EEf325895e02c8D297E7435"
+OG = "0xE89371eAaAC6D46d4C3ED23453241987916224FC"
+LENDER = "0xfca3F21D60d5bC8B4C5c35F169bb5B6402510151"
+
+
+def _rebalance_contexts() -> tuple[YearnV3VaultContext, YearnV3VaultContext]:
+    weth2 = YearnV3VaultContext(
+        vault_address=VAULT,
+        name="WETH-2 yVault",
+        symbol="yvWETH-2",
+        api_version="3.0.2",
+        asset_address=WETH,
+        asset_symbol="WETH",
+        asset_decimals=18,
+        total_assets=1_495_585768981717542054,
+        total_debt=1_483_196658087246109032,
+        total_idle=12_389110894471433022,
+        is_shutdown=False,
+        deposit_limit=10_000 * E18,
+        minimum_total_idle=0,
+        use_default_queue=True,
+        default_queue=(
+            _strategy(V1, "WETH-1 yVault", 494_694679813225820365, 10_000 * E18, is_vault=True),
+            _strategy(PEER, "Spark Accumulator", 924_295390144208494863, 10_000 * E18),
+        ),
+        other_strategies=(_strategy(LOOPER, "wstETH/WETH Spark Looper", 0, 10_000 * E18),),
+    )
+    weth1 = YearnV3VaultContext(
+        vault_address=V1,
+        name="WETH-1 yVault",
+        symbol="yvWETH-1",
+        api_version="3.0.2",
+        asset_address=WETH,
+        asset_symbol="WETH",
+        asset_decimals=18,
+        total_assets=7_265_460440364952807140,
+        total_debt=7_265_460440364952807140,
+        total_idle=0,
+        is_shutdown=False,
+        deposit_limit=15_000 * E18,
+        minimum_total_idle=0,
+        use_default_queue=True,
+        default_queue=(
+            _strategy(ACCUMULATOR, "stETH Accumulator", 2_776_208949987395502646, 10_000 * E18, max_withdraw=0),
+            _strategy(OG, "Yearn OG WETH", 677_207527446752661835, 15_000 * E18, max_withdraw=677_341 * E18),
+            _strategy(LENDER, "Spark WETH Lender", 2_776_107432337629790263, 15_000 * E18),
+        ),
+        other_strategies=(_strategy(LOOPER, "wstETH/WETH Spark Looper", 1_035_936530593174852396, 2_000 * E18),),
+    )
+    return weth2, weth1
+
+
+def _allocator_call(vault: str, strategy: str, target: int) -> DecodedCall:
+    return _call("update_debt", ["address", "address", "uint256"], [vault, strategy, target])
+
+
+REBALANCE = [
+    (ALLOCATOR, _allocator_call(VAULT, V1, 224_694679813225820365)),
+    (ALLOCATOR, _allocator_call(VAULT, LOOPER, 270 * E18)),
+    (ALLOCATOR, _allocator_call(V1, LOOPER, 765_936530593174852396)),
+    (ALLOCATOR, _allocator_call(V1, OG, 15_000 * E18)),
+]
+
+
+class TestDebtAllocatorRebalance(unittest.TestCase):
+    def setUp(self) -> None:
+        weth2, weth1 = _rebalance_contexts()
+        reads = {VAULT: weth2, V1: weth1}
+        patches = [
+            patch.object(
+                yearn_v3_context,
+                "_read_vault_context",
+                side_effect=lambda _chain, vault, calls, queue_limits=False: replace(reads[vault], calls=tuple(calls)),
+            ),
+            patch.object(yearn_v3_context, "_allocator_losses", return_value={ALLOCATOR: 1}),
+        ]
+        self.mock_read = patches[0].start()
+        self.addCleanup(patches[0].stop)
+        patches[1].start()
+        self.addCleanup(patches[1].stop)
+        self.weth2, self.weth1 = resolve_yearn_v3_context("YEARN_MS", 1, REBALANCE)
+
+    def test_allocator_calls_are_read_as_the_vaults_own(self) -> None:
+        self.assertEqual([c.function_name for c in self.weth2.calls], ["update_debt", "update_debt"])
+        self.assertEqual(self.weth2.calls[0].params, [("address", V1), ("uint256", 224_694679813225820365)])
+        prompt = format_yearn_v3_prompt([self.weth2])
+        self.assertIn(f"come through DebtAllocator {ALLOCATOR}", prompt)
+        self.assertIn("maxDebtUpdateLoss = 1 bps (0.01%)", prompt)
+
+    def test_redemption_from_the_inner_vault_drains_its_queue_before_its_own_calls(self) -> None:
+        redeem, looper, og = self.weth1.proposal_lines()
+        # The accumulator can return nothing now, so the redemption falls through to Yearn OG WETH.
+        self.assertIn("WETH-2 yVault (yvWETH-2) redeems 270 WETH from this vault", redeem)
+        self.assertIn("Yearn OG WETH current_debt 677.20 WETH → 407.20 WETH", redeem)
+        self.assertNotIn("stETH Accumulator", redeem)
+        self.assertIn("current_debt 1,035.93 WETH → 765.93 WETH", looper)
+        # Call 4 refills OG from where call 1 left it, not from the pre-batch debt.
+        self.assertIn("deposits 270 WETH", og)
+        self.assertIn("current_debt 407.20 WETH → 677.20 WETH", og)
+
+    def test_deposit_outside_the_default_queue_is_flagged(self) -> None:
+        _, looper = self.weth2.proposal_lines()
+        self.assertIn("not in the default queue", looper)
+        self.assertIn("270 WETH, 18.1% of vault totalAssets", looper)
+        self.assertIn("ordinary withdrawals cannot pull it", looper)
+
+    def test_look_through_exposure(self) -> None:
+        (line,) = self.weth2.exposure_lines
+        self.assertIn("pro-rata share of WETH-1 yVault (yvWETH-1)", line)
+        self.assertIn("wstETH/WETH Spark Looper 70.53 WETH (4.7%) → 294.60 WETH (19.7%)", line)
+        self.assertIn("stETH Accumulator 189.02 WETH (12.6%) → 89.17 WETH (6.0%)", line)
+        self.assertIn("Yearn OG WETH 46.11 WETH (3.1%) → 21.75 WETH (1.5%)", line)
+        self.assertEqual(self.weth1.exposure_lines, ())
+        report = format_yearn_v3_report([self.weth2], 1, {})
+        self.assertIn("- Look-through exposure of WETH-2 yVault", report)
+
+    def test_inner_vault_is_read_with_queue_limits(self) -> None:
+        reads = self.mock_read.call_args_list
+        self.assertEqual({c.args[1]: c.kwargs["queue_limits"] for c in reads}, {VAULT: False, V1: True})
+
+
+class TestInnerVaultOnlyHeld(unittest.TestCase):
+    """A vault the batch only moves debt through is read for its side, but not reported on its own."""
+
+    def test_support_vault_feeds_exposure_without_a_section(self) -> None:
+        weth2, weth1 = _rebalance_contexts()
+        reads = {VAULT: weth2, V1: weth1}
+
+        def read(_chain: int, vault: str, calls: list[DecodedCall], queue_limits: bool = False) -> YearnV3VaultContext:
+            return replace(reads[vault], calls=tuple(calls))
+
+        with (
+            patch.object(yearn_v3_context, "_read_vault_context", side_effect=read) as mock_read,
+            patch.object(yearn_v3_context, "_allocator_losses", return_value={ALLOCATOR: 1}),
+        ):
+            contexts = resolve_yearn_v3_context("YEARN_MS", 1, REBALANCE[:2])
+        self.assertEqual([c.vault_address for c in contexts], [VAULT])
+        mock_read.assert_any_call(1, V1, [], queue_limits=True)
+        (line,) = contexts[0].exposure_lines
+        # Without calls 3-4, yvWETH-1 keeps its looper debt and OG stays drained by the redemption.
+        self.assertIn("wstETH/WETH Spark Looper 70.53 WETH (4.7%) → 303.27 WETH (20.3%)", line)
+        self.assertIn("Yearn OG WETH 46.11 WETH (3.1%) → 13.07 WETH (0.9%)", line)

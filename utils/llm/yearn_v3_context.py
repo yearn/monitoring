@@ -15,9 +15,19 @@ Every V3 vault is an EIP-1167 clone of a verified Vyper implementation, and
 the same vault code is governed by Yearn and by third-party curators alike, so
 this adapter keys on the call shape and an on-chain ``apiVersion()`` of 3.x
 rather than on the alert's protocol or a hard-coded address list.
+
+Debt is usually moved through a ``DebtAllocator``, whose
+``update_debt(vault, strategy, target_debt)`` forwards to the vault; those calls
+are read as the vault's own. A batch can move debt between vaults that hold one
+another — yvWETH-2 redeeming from yvWETH-1, which pulls from its own queue — so
+every vault is walked in one global batch order, each flow is applied to the
+inner vault too, and an allocator's look-through exposure is shown before →
+after. Without that, a report called moving 270 WETH from yvWETH-1 into a
+looper a shift "from indirect to direct exposure", when yvWETH-2's looper
+exposure went from 70 to 295 WETH.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from eth_utils import to_checksum_address
@@ -25,6 +35,7 @@ from eth_utils import to_checksum_address
 from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
 from utils.erc20_metadata import fetch_erc20_metadata
+from utils.eth_view import call_view
 from utils.formatting import format_asset_amount
 from utils.llm.report import address_link
 from utils.llm.yearn_v3_batch import DebtMove, VaultBatchState
@@ -52,6 +63,10 @@ VAULT_CALLS = frozenset(
         "set_minimum_total_idle",
     }
 )
+# DebtAllocator.update_debt(vault, strategy, target_debt): keeper-gated, forwards to vault.update_debt.
+ALLOCATOR_UPDATE_DEBT = "update_debt(address,address,uint256)"
+# Look-through exposure lists at most this many strategies.
+MAX_EXPOSURE_LINES = 8
 
 
 def _fn(name: str, outputs: list[str], inputs: list[str] | None = None) -> dict:
@@ -149,6 +164,13 @@ class YearnV3VaultContext:
     # Strategies the calls name that are not in the default queue.
     other_strategies: tuple[StrategyState, ...]
     calls: tuple[DecodedCall, ...] = field(default_factory=tuple)
+    # 3.1+: deposits go straight to the first default-queue strategy; None when unreadable.
+    auto_allocate: bool | None = None
+    # DebtAllocators the update_debt calls come through, with their maxDebtUpdateLoss (bps; None if unread).
+    debt_allocators: tuple[tuple[str, int | None], ...] = ()
+    # Set by the resolver's global batch walk; None renders this vault's calls on their own.
+    walked_lines: tuple[str, ...] | None = None
+    exposure_lines: tuple[str, ...] = ()
 
     @property
     def addresses(self) -> list[str]:
@@ -213,6 +235,8 @@ class YearnV3VaultContext:
 
     def proposal_lines(self) -> list[str]:
         """One line per call, in batch order, each against the state the earlier calls leave."""
+        if self.walked_lines is not None:
+            return list(self.walked_lines)
         lines: list[str] = []
         added: set[str] = set()
         state = self.batch_state()
@@ -305,7 +329,8 @@ class YearnV3VaultContext:
             return "; ".join(parts) + "."
 
         if name == "update_debt" and strategy and len(params) > 1:
-            return self._update_debt_line(label, state.update_debt(strategy.address, int(params[1][1])))
+            move = state.update_debt(strategy.address, int(params[1][1]))
+            return self._update_debt_line(label, move, strategy.address.lower() in queue)
 
         if name in ("revoke_strategy", "force_revoke_strategy") and strategy:
             running = state.get(strategy.address)
@@ -385,7 +410,7 @@ class YearnV3VaultContext:
         queue[:] = new_queue
         return line + (f"; removed from the queue: {'; '.join(removed)}." if removed else ".")
 
-    def _update_debt_line(self, label: str, move: DebtMove) -> str:
+    def _update_debt_line(self, label: str, move: DebtMove, in_queue: bool = True) -> str:
         """Expected effect of one update_debt, from the running batch state."""
         target = "max (allocate all available)" if move.target == MAX_UINT256 else self.amount(move.target)
         head = f"update_debt({label}) target_debt {target}"
@@ -397,11 +422,56 @@ class YearnV3VaultContext:
 
         direction = "deposits" if move.moved > 0 else "withdraws"
         limit = f", limited by {move.limited_by}" if move.limited_by else ""
-        return (
+        line = (
             f"{head}: MOVES FUNDS NOW — {direction} {self.amount(abs(move.moved))}{limit}; "
             f"current_debt {self.amount(move.debt_before)} → {self.amount(move.debt_after)}; "
             f"vault idle {self.amount(move.idle_before)} → {self.amount(move.idle_after)} (expected)."
         )
+        if move.moved > 0 and not in_queue:
+            reach = (
+                "use_default_queue is True, so ordinary withdrawals cannot pull it — only update_debt recalls it"
+                if self.use_default_queue
+                else "ordinary withdrawals cannot pull it unless a withdrawer passes a custom queue"
+            )
+            line += (
+                f" The strategy is not in the default queue: its debt after this call "
+                f"({self.amount(move.debt_after)}, {self.share_of_vault(move.debt_after)}) is outside the "
+                f"withdrawal path — {reach}."
+            )
+        return line
+
+    def inflow_line(self, parent: str, amount: int, state: VaultBatchState, queue: list[str]) -> str:
+        """This vault's side of a parent vault's deposit into it, applied to ``state``."""
+        idle_before = state.idle
+        first = queue[0] if self.auto_allocate and queue else None
+        allocated = state.receive(amount, first)
+        head = (
+            f"{parent} deposits {self.amount(amount)} into this vault (through its update_debt earlier in this batch)"
+        )
+        if allocated is not None and first is not None:
+            return (
+                f"{head}: auto_allocate forwards it to {self._name_of(first)} — current_debt "
+                f"{self.amount(allocated[0])} → {self.amount(allocated[1])}."
+            )
+        return f"{head}: vault idle {self.amount(idle_before)} → {self.amount(state.idle)}."
+
+    def outflow_line(self, parent: str, amount: int, state: VaultBatchState, queue: list[str]) -> str:
+        """This vault's side of a parent vault's redemption from it, applied to ``state``."""
+        from_idle, pulls, short = state.redeem(amount, queue)
+        sources = [f"idle {self.amount(from_idle)}"] if from_idle else []
+        sources.extend(
+            f"{self._name_of(address)} current_debt {self.amount(before)} → {self.amount(after)}"
+            for address, before, after in pulls
+        )
+        line = (
+            f"{parent} redeems {self.amount(amount)} from this vault (through its update_debt earlier in this batch): "
+        )
+        line += (
+            "served, in default-queue order, from " + "; ".join(sources) if sources else "no queue strategy serves it"
+        )
+        if short:
+            line += f"; {self.amount(short)} could not be traced to a queue strategy with redeemable funds"
+        return line + "."
 
     def optional_amount(self, raw: int | None) -> str:
         """Render an amount that may not have been readable on this vault version."""
@@ -466,8 +536,24 @@ def _read_strategy_details(client: Any, chain_id: int, address: str, vault: str)
     }
 
 
-def _read_vault_context(chain_id: int, vault: str, calls: list[DecodedCall]) -> YearnV3VaultContext | None:
-    """Read a V3 vault's state and the strategies its calls touch; None if not a V3 vault."""
+def _read_withdraw_limit(client: Any, address: str, vault: str) -> int | None:
+    """``convertToAssets(maxRedeem(vault))`` on a strategy: what the vault can pull from it now."""
+    contract = client.get_contract(address, _VAULT_ABI)
+    max_redeem = _optional_call(contract.functions.maxRedeem(vault))
+    if not isinstance(max_redeem, int):
+        return None
+    assets = _optional_call(contract.functions.convertToAssets(max_redeem))
+    return int(assets) if isinstance(assets, int) else None
+
+
+def _read_vault_context(
+    chain_id: int, vault: str, calls: list[DecodedCall], queue_limits: bool = False
+) -> YearnV3VaultContext | None:
+    """Read a V3 vault's state and the strategies its calls touch; None if not a V3 vault.
+
+    ``queue_limits`` also reads what every default-queue strategy can return now,
+    for a vault that a parent vault in the same batch redeems from.
+    """
     client = ChainManager.get_client(Chain.from_chain_id(chain_id))
     contract = client.get_contract(vault, _VAULT_ABI)
     try:
@@ -512,7 +598,11 @@ def _read_vault_context(chain_id: int, vault: str, calls: list[DecodedCall]) -> 
     named_set = set(named)
     states: dict[str, StrategyState] = {}
     for address, (activation, _last_report, current_debt, max_debt) in zip(everyone, params):
-        details = _read_strategy_details(client, chain_id, address, vault) if address in named_set else {}
+        details: dict[str, Any] = (
+            _read_strategy_details(client, chain_id, address, vault) if address in named_set else {}
+        )
+        if queue_limits and not details:
+            details = {"max_withdraw": _read_withdraw_limit(client, address, vault)}
         states[address] = StrategyState(
             address=address,
             name=_token_name(chain_id, address),
@@ -525,6 +615,7 @@ def _read_vault_context(chain_id: int, vault: str, calls: list[DecodedCall]) -> 
     deposit_limit = _optional_call(contract.functions.deposit_limit())
     minimum_total_idle = _optional_call(contract.functions.minimum_total_idle())
     use_default_queue = _optional_call(contract.functions.use_default_queue())
+    auto_allocate = _optional_call(contract.functions.auto_allocate())
     return YearnV3VaultContext(
         vault_address=vault,
         name=str(name),
@@ -543,7 +634,142 @@ def _read_vault_context(chain_id: int, vault: str, calls: list[DecodedCall]) -> 
         default_queue=tuple(states[a] for a in queue_addresses),
         other_strategies=tuple(states[a] for a in others),
         calls=tuple(calls),
+        auto_allocate=auto_allocate if isinstance(auto_allocate, bool) else None,
     )
+
+
+def _as_vault_call(target: str, call: DecodedCall) -> tuple[str, DecodedCall, str | None] | None:
+    """(vault, vault-shaped call, DebtAllocator or None) for a call this adapter explains, else None."""
+    if call.signature == ALLOCATOR_UPDATE_DEBT and len(call.params) == 3:
+        vault = call.params[0][1]
+        if not isinstance(vault, str):
+            return None
+        forwarded = DecodedCall("update_debt", "update_debt(address,uint256)", list(call.params[1:]))
+        return to_checksum_address(vault), forwarded, to_checksum_address(target)
+    if call.function_name in VAULT_CALLS:
+        return to_checksum_address(target), call, None
+    return None
+
+
+@dataclass
+class _Run:
+    """One vault's running state during the global batch walk."""
+
+    state: VaultBatchState
+    queue: list[str]
+    added: set[str] = field(default_factory=set)
+    # Net assets parent vaults moved into (positive) or out of (negative) this vault.
+    inflow: int = 0
+
+
+def walk_batch(
+    contexts: dict[str, YearnV3VaultContext], ordered: list[tuple[str, DecodedCall]]
+) -> tuple[dict[str, list[str]], dict[str, _Run]]:
+    """Describe every call in global batch order, passing flows between vaults that hold one another.
+
+    Args:
+        contexts: Vault contexts keyed by lowercase address, including vaults no call targets
+            but that a called vault holds as a strategy.
+        ordered: (vault, vault-shaped call) in execution order.
+
+    Returns:
+        Lines per vault (lowercase address) and each vault's final running state.
+    """
+    runs = {
+        key: _Run(context.batch_state(), [s.address.lower() for s in context.default_queue])
+        for key, context in contexts.items()
+    }
+    lines: dict[str, list[str]] = {key: [] for key in contexts}
+    for vault, call in ordered:
+        key = vault.lower()
+        context, run = contexts.get(key), runs.get(key)
+        if context is None or run is None:
+            continue
+        run.state.last_move = None
+        line = context._proposal_line(call, run.added, run.state, run.queue)
+        if line:
+            lines[key].append(line)
+        move = run.state.last_move
+        inner_key = str(call.params[0][1]).lower() if call.params else ""
+        inner, inner_run = contexts.get(inner_key), runs.get(inner_key)
+        if move is None or move.moved == 0 or inner is None or inner_run is None:
+            continue
+        parent = f"{context.name} ({context.symbol})"
+        inner_run.inflow += move.moved
+        if move.moved > 0:
+            lines[inner_key].append(inner.inflow_line(parent, move.moved, inner_run.state, inner_run.queue))
+        else:
+            lines[inner_key].append(inner.outflow_line(parent, -move.moved, inner_run.state, inner_run.queue))
+    return lines, runs
+
+
+def _strategy_debts(context: YearnV3VaultContext, run: _Run | None) -> dict[str, int]:
+    """Current debt per strategy (lowercase address): after the batch when ``run`` is given."""
+    debts: dict[str, int] = {}
+    for strategy in (*context.default_queue, *context.other_strategies):
+        key = strategy.address.lower()
+        running = run.state.get(key) if run is not None else None
+        debts[key] = running.current_debt if running is not None else strategy.current_debt
+    return debts
+
+
+def _exposure(
+    context: YearnV3VaultContext,
+    contexts: dict[str, YearnV3VaultContext],
+    runs: dict[str, _Run] | None,
+) -> dict[str, int]:
+    """Assets per underlying strategy: direct debt plus a pro-rata share of each allocator vault held."""
+    exposure: dict[str, int] = {}
+    own = _strategy_debts(context, runs.get(context.vault_address.lower()) if runs else None)
+    for key, debt in own.items():
+        inner = contexts.get(key)
+        if inner is None:
+            exposure[key] = exposure.get(key, 0) + debt
+            continue
+        run = runs.get(key) if runs else None
+        inner_total = inner.total_assets + (run.inflow if run else 0)
+        if inner_total <= 0:
+            continue
+        for sub, sub_debt in _strategy_debts(inner, run).items():
+            exposure[sub] = exposure.get(sub, 0) + debt * sub_debt // inner_total
+    return exposure
+
+
+def exposure_lines(
+    context: YearnV3VaultContext, contexts: dict[str, YearnV3VaultContext], runs: dict[str, _Run]
+) -> list[str]:
+    """Look-through exposure before → after, when the vault holds another vault the batch touches."""
+    held = [
+        contexts[s.address.lower()]
+        for s in (*context.default_queue, *context.other_strategies)
+        if s.address.lower() in contexts and s.address.lower() != context.vault_address.lower()
+    ]
+    if not held:
+        return []
+    before, after = _exposure(context, contexts, None), _exposure(context, contexts, runs)
+    names: dict[str, str] = {}
+    for vault in (context, *held):
+        names.update({s.address.lower(): s.display for s in (*vault.default_queue, *vault.other_strategies)})
+    rows = sorted(
+        (key for key in {*before, *after} if before.get(key, 0) != after.get(key, 0)),
+        key=lambda key: abs(after.get(key, 0) - before.get(key, 0)),
+        reverse=True,
+    )[:MAX_EXPOSURE_LINES]
+    if not rows:
+        return []
+    through = ", ".join(f"{v.name} ({v.symbol})" for v in held)
+
+    def cell(raw: int) -> str:
+        share = raw / context.total_assets * 100 if context.total_assets else 0.0
+        return f"{context.amount(raw)} ({share:.1f}%)"
+
+    entries = [f"{names.get(key, key)} {cell(before.get(key, 0))} → {cell(after.get(key, 0))}" for key in rows]
+    return [
+        f"Look-through exposure of {context.name} ({context.symbol}) — direct debt plus its pro-rata share of "
+        f"{through}, before → after this batch, as a share of its totalAssets (changed strategies only): "
+        + "; ".join(entries)
+        + "."
+    ]
 
 
 def resolve_yearn_v3_context(
@@ -551,37 +777,100 @@ def resolve_yearn_v3_context(
     chain_id: int,
     targets_and_calls: list[tuple[str, DecodedCall]],
 ) -> list[YearnV3VaultContext]:
-    """Resolve Yearn V3 vault context for every vault targeted by a strategy-management call.
+    """Resolve Yearn V3 vault context for every vault a strategy-management call targets.
 
+    Calls on the vault and ``DebtAllocator.update_debt(vault, …)`` both count.
     ``protocol`` is unused: the same vault code is governed by many parties, so
     the adapter is selected by call shape and confirmed by ``apiVersion()``.
     """
     del protocol
+    ordered: list[tuple[str, DecodedCall]] = []
     calls_by_vault: dict[str, list[DecodedCall]] = {}
+    allocators: dict[str, dict[str, None]] = {}
     for target, call in targets_and_calls:
-        if call.function_name not in VAULT_CALLS:
-            continue
         try:
-            checksum = to_checksum_address(target)
+            mapped = _as_vault_call(target, call)
         except ValueError:
             continue
-        calls_by_vault.setdefault(checksum, []).append(call)
+        if mapped is None:
+            continue
+        vault, vault_call, allocator = mapped
+        ordered.append((vault, vault_call))
+        calls_by_vault.setdefault(vault, []).append(vault_call)
+        if allocator:
+            allocators.setdefault(vault, {})[allocator] = None
+    if not calls_by_vault:
+        return []
 
-    contexts: list[YearnV3VaultContext] = []
+    named = {a.lower() for _, call in ordered for a in _strategy_addresses(call)}
+    contexts: dict[str, YearnV3VaultContext] = {}
     for vault, calls in calls_by_vault.items():
         try:
-            context = _read_vault_context(chain_id, vault, calls)
+            context = _read_vault_context(chain_id, vault, calls, queue_limits=vault.lower() in named)
         except Exception as error:  # noqa: BLE001 - enrichment must never block an alert
             logger.info("Yearn V3 context resolution failed for %s: %s", vault, error)
             continue
         if context is not None:
-            contexts.append(context)
-    return contexts
+            contexts[vault.lower()] = context
+    if not contexts:
+        return []
+
+    # Vaults a called vault moves debt into or out of, read so their side of the flow is shown.
+    support: dict[str, YearnV3VaultContext] = {}
+    for context in list(contexts.values()):
+        for strategy in (*context.default_queue, *context.other_strategies):
+            key = strategy.address.lower()
+            if strategy.is_vault and key in named and key not in contexts and key not in support:
+                try:
+                    inner = _read_vault_context(chain_id, strategy.address, [], queue_limits=True)
+                except Exception as error:  # noqa: BLE001 - enrichment must never block an alert
+                    logger.info("Yearn V3 inner vault read failed for %s: %s", strategy.address, error)
+                    continue
+                if inner is not None:
+                    support[key] = inner
+
+    everything = {**contexts, **support}
+    lines, runs = walk_batch(everything, ordered)
+    losses = _allocator_losses(chain_id, {a for found in allocators.values() for a in found})
+    return [
+        replace(
+            context,
+            walked_lines=tuple(lines[key]),
+            exposure_lines=tuple(exposure_lines(context, everything, runs)),
+            debt_allocators=tuple((a, losses.get(a)) for a in allocators.get(context.vault_address, {})),
+        )
+        for key, context in contexts.items()
+    ]
+
+
+def _allocator_losses(chain_id: int, allocators: set[str]) -> dict[str, int | None]:
+    """``maxDebtUpdateLoss()`` (bps) of each DebtAllocator; None when unreadable."""
+    if not allocators:
+        return {}
+    client = ChainManager.get_client(Chain.from_chain_id(chain_id))
+    losses: dict[str, int | None] = {}
+    for allocator in sorted(allocators):
+        value = call_view(client, allocator, "maxDebtUpdateLoss()", "uint256")
+        losses[allocator] = value if isinstance(value, int) else None
+    return losses
 
 
 def _queue_line(context: YearnV3VaultContext, strategy: StrategyState) -> str:
     """One default-queue entry for the prompt: name, address, debt and cap."""
     return f"{strategy.display} {strategy.address}: current_debt {context.amount(strategy.current_debt)} / max_debt {context.amount(strategy.max_debt)}"
+
+
+def _allocator_lines(context: YearnV3VaultContext, render: Any) -> list[str]:
+    """How the DebtAllocator(s) the calls go through reach the vault."""
+    lines = []
+    for allocator, loss in context.debt_allocators:
+        loss_text = f"{loss} bps ({loss / 100:g}%)" if loss is not None else "unreadable"
+        lines.append(
+            f"update_debt calls on this vault come through DebtAllocator {render(allocator)}: keeper-gated, it "
+            f"forwards to vault.update_debt(strategy, target_debt, maxDebtUpdateLoss = {loss_text}) and first runs "
+            "process_report when the target is 0."
+        )
+    return lines
 
 
 def format_yearn_v3_prompt(contexts: list[YearnV3VaultContext]) -> str:
@@ -595,10 +884,12 @@ def format_yearn_v3_prompt(contexts: list[YearnV3VaultContext]) -> str:
             f"State now: totalAssets {context.amount(context.total_assets)} (debt {context.amount(context.total_debt)}, "
             f"idle {context.amount(context.total_idle)}); deposit_limit {context.optional_amount(context.deposit_limit)}; "
             f"use_default_queue {context.use_default_queue}; shutdown {str(context.is_shutdown).lower()}",
+            *_allocator_lines(context, lambda a: a),
             f"Default queue ({len(context.default_queue)}/{MAX_QUEUE}):",
             *(f"  {i}. {_queue_line(context, s)}" for i, s in enumerate(context.default_queue, start=1)),
-            "Proposed by this transaction (in batch order):",
+            "Proposed by this transaction (in batch order, across every vault in it):",
             *(f"  - {line}" for line in context.proposal_lines()),
+            *context.exposure_lines,
         ]
         sections.append("\n".join(lines))
     return "\n\n".join(sections)
@@ -626,8 +917,10 @@ def format_yearn_v3_report(
             f"`{context.amount(s.max_debt)}`"
             for i, s in enumerate(context.default_queue, start=1)
         )
+        lines.extend(f"- {line}" for line in _allocator_lines(context, lambda a: address_link(a, chain_id, labels)))
         lines.append("- **Proposed:**")
         lines.extend(f"  - {line}" for line in context.proposal_lines())
+        lines.extend(f"- {line}" for line in context.exposure_lines)
         lines.append(
             "- _Units: `max_debt`, `target_debt`, `deposit_limit` and `minimum_total_idle` are in the vault asset. "
             "Funds move only via `update_debt`._"
