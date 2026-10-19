@@ -373,7 +373,7 @@ Each lot is carried through the batch, not just the settings:
 - **`disable` / `enable`:** `disable` deletes the lot's state, as `delete auctions[_from]` does on-chain. A live lot then stops blocking setters, and a later kick of that token reverts (`not enabled`). `enable` of an enabled token reverts (`already enabled`).
 - **Out-of-range setter values** (Auction 1.0.5: `startingPrice ≤ 1e9`, decay outside 1–9,999 bps, step duration outside 0–auction length, zero receiver) are described as reverting and leave the settings unchanged. The timing math also guards against a zero or 100% decay on other versions.
 - **Kicks:** a kick resets the lot to the kicked size. The kick's floor proceeds, opening price and time to the floor use the settings in force at that call.
-- **`setAuction`:** routes the strategy's later calls to the new auction, or drops them if it is not a readable Auction. The strategy's held and claimable balances carry from one auction to the next, in the order of its calls, so `kickAuction` → `setAuction` → `kickAuction` doesn't sell the same tokens twice.
+- **`setAuction`:** routes the strategy's later calls to the new auction, or drops them if it is not a readable Auction. The strategy's held and claimable balances and its `minAmountToSell` thresholds carry from one auction to the next, in the order of its calls. So `kickAuction` → `setAuction` → `kickAuction` doesn't sell the same tokens twice, and a threshold raised before the switch still gates the new auction.
 
 Direct Auction calls take their subject from the first argument; `disable(address,uint256)` appends an index. The strategy's idle want is stated neutrally: a sold lot is one possible source only when the auction pays the strategy.
 

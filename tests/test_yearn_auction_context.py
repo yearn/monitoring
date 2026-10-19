@@ -344,6 +344,16 @@ class TestSecondReviewRound(unittest.TestCase):
         self.assertNotIn("284,291.94", second)
         self.assertIn("does not kick GROVE — the strategy's balance after claiming (≈ 0 GROVE)", second)
 
+    def test_min_amount_set_before_set_auction_still_gates(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        raise_gate = _call(
+            "setMinAmountToSell", "setMinAmountToSell(address,uint256)", ("address", GROVE), ("uint256", 500_000 * E18)
+        )
+        switch = _call("setAuction", "setAuction(address)", ("address", SMALL_AUCTION))
+        _, new = self._resolve(mock_cm, [(BIG, raise_gate), (BIG, switch), (BIG, REPORT)])
+        (report,) = new.proposal_lines(str)
+        # The strategy's threshold, raised before the switch, still applies to the new auction.
+        self.assertIn("does not exceed minAmountToSell 500,000 GROVE", report)
+
     def test_disabling_a_live_lot_lets_setters_through(self, mock_cm: MagicMock, *_: MagicMock) -> None:
         calls = [
             (BIG, REPORT),

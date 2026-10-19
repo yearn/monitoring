@@ -167,9 +167,9 @@ class YearnAuctionContext:
     strategy_idle_want: int | None = None
     calls: list[AuctionCall] = field(default_factory=list)
     labels: dict[str, str] = field(default_factory=dict)
-    # Strategy balances (held, claimable) per token as earlier auctions in the batch left them,
-    # e.g. before a `setAuction` moved the strategy's later calls here.
-    carried: dict[str, tuple[int | None, int | None]] = field(default_factory=dict)
+    # Strategy-side state per token (held, claimable, minAmountToSell) as earlier auctions in the
+    # batch left it, e.g. before a `setAuction` moved the strategy's later calls here.
+    carried: dict[str, tuple[int | None, int | None, int | None]] = field(default_factory=dict)
 
     @property
     def addresses(self) -> list[str]:
@@ -296,7 +296,7 @@ class YearnAuctionContext:
         for lot in self.lots:
             run = _LotRun.of(lot)
             if lot.token.lower() in self.carried:
-                run.held, run.claimable = self.carried[lot.token.lower()]
+                run.held, run.claimable, run.min_amount = self.carried[lot.token.lower()]
             runs[lot.token.lower()] = run
         lines: list[str] = []
         for entry in self.calls:
@@ -874,7 +874,7 @@ def resolve_yearn_auction_context(
 
 
 def _carry_strategy_holdings(contexts: list[YearnAuctionContext]) -> None:
-    """Pass each strategy's held and claimable balances from one auction's calls to the next.
+    """Pass each strategy's held and claimable balances and its kick thresholds from one auction to the next.
 
     Every auction context reads the strategy's balances before the transaction. After
     ``kickAuction`` → ``setAuction`` → ``kickAuction``, the second auction would sell
@@ -886,7 +886,7 @@ def _carry_strategy_holdings(contexts: list[YearnAuctionContext]) -> None:
         strategy = (context.strategy or "").lower()
         return min((e.order for e in context.calls if e.target.lower() == strategy), default=math.inf)
 
-    holdings: dict[tuple[str, str], tuple[int | None, int | None]] = {}
+    holdings: dict[tuple[str, str], tuple[int | None, int | None, int | None]] = {}
     for context in sorted(contexts, key=first_strategy_call):
         if not context.strategy:
             continue
@@ -902,7 +902,7 @@ def _carry_strategy_holdings(contexts: list[YearnAuctionContext]) -> None:
             logger.info("Yearn auction replay failed for %s: %s", context.address, error)
             continue
         for token, run in runs.items():
-            holdings[(strategy, token)] = (run.held, run.claimable)
+            holdings[(strategy, token)] = (run.held, run.claimable, run.min_amount)
 
 
 def format_yearn_auction_prompt(contexts: list[YearnAuctionContext]) -> str:
