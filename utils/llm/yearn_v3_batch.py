@@ -22,12 +22,16 @@ differ by strategy losses or rounding, which the vault accounts for on-chain.
 
 A strategy can itself be a V3 vault that the same batch also manages. Moving
 debt into or out of it changes that vault's own state: a deposit lands in its
-idle (or, with ``auto_allocate``, in its first queue strategy), and a redemption
+idle — and with ``auto_allocate`` the vault then runs ``_update_debt(first queue
+strategy, max)``, which moves all idle above ``minimum_total_idle`` within the
+strategy's ``max_debt`` and ``maxDeposit``, not just the new deposit — and a redemption
 is served from its idle, then from its default queue in order. ``receive`` and
 ``redeem`` apply that side, so a later call on the inner vault sees it.
 """
 
 from dataclasses import dataclass, field
+
+MAX_UINT256 = 2**256 - 1
 
 
 @dataclass
@@ -104,15 +108,18 @@ class VaultBatchState:
         self.last_move = self._update_debt(address, target)
         return self.last_move
 
-    def receive(self, amount: int, auto_allocate_to: str | None = None) -> tuple[int, int] | None:
-        """Take a deposit from a parent vault; returns the auto-allocated strategy's (before, after) debt, if any."""
+    def receive(self, amount: int, auto_allocate_to: str | None = None) -> DebtMove | None:
+        """Take a deposit from a parent vault, mirroring the vault's ``_deposit``.
+
+        The assets land in idle; with ``auto_allocate`` the vault then calls
+        ``_update_debt(first_queue_strategy, max_uint256)``, which this applies
+        with every deposit limit. Returns that move, or None without auto_allocate.
+        """
+        self.idle += amount
         strategy = self.get(auto_allocate_to) if auto_allocate_to else None
-        if strategy is None or not strategy.active:
-            self.idle += amount
+        if strategy is None or not strategy.active or self.shutdown or auto_allocate_to is None:
             return None
-        before = strategy.current_debt
-        strategy.credit(amount)
-        return before, strategy.current_debt
+        return self._update_debt(auto_allocate_to, MAX_UINT256)
 
     def redeem(self, amount: int, queue: list[str]) -> tuple[int, list[tuple[str, int, int]], int]:
         """Serve a parent vault's redemption: idle first, then the default queue in order.

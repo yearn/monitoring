@@ -789,25 +789,25 @@ def _collect_source_contexts(
 ) -> list[SourceContext]:
     """Fetch source context for each (target, decoded_call) pair, best-effort.
 
-    Deduplicates by (target, function_name) then fans out the Etherscan
-    lookups in parallel. Silent on failure so a missing Etherscan key or
-    unverified contract never blocks an explanation.
+    Deduplicates by (target, signature) — overloads differ in what they run —
+    then fans out the Etherscan lookups in parallel. Silent on failure so a
+    missing Etherscan key or unverified contract never blocks an explanation.
     """
     seen: set[tuple[str, str]] = set()
-    unique: list[tuple[str, str]] = []
+    unique: list[tuple[str, str, str]] = []
     for target, decoded in targets_and_calls:
         if not target or not decoded.function_name:
             continue
-        key = (target.lower(), decoded.function_name)
+        key = (target.lower(), decoded.signature or decoded.function_name)
         if key in seen:
             continue
         seen.add(key)
-        unique.append((target, decoded.function_name))
+        unique.append((target, decoded.function_name, decoded.signature))
 
-    def fetch(item: tuple[str, str]) -> SourceContext | None:
-        target, fname = item
+    def fetch(item: tuple[str, str, str]) -> SourceContext | None:
+        target, fname, signature = item
         try:
-            return get_source_context(chain_id, target, fname)
+            return get_source_context(chain_id, target, fname, signature or None)
         except Exception as e:  # noqa: BLE001
             logger.info("Source context fetch failed for %s.%s: %s", target, fname, e)
             return None

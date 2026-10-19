@@ -598,7 +598,9 @@ class TestInnerVaultOnlyHeld(unittest.TestCase):
         reads = {VAULT: weth2, V1: weth1}
 
         def read(_chain: int, vault: str, calls: list[DecodedCall], queue_limits: bool = False) -> YearnV3VaultContext:
-            return replace(reads[vault], calls=tuple(calls))
+            # A read with no calls names no strategies, so only the default queue is known — as on-chain.
+            others = reads[vault].other_strategies if calls else ()
+            return replace(reads[vault], calls=tuple(calls), other_strategies=others)
 
         with (
             patch.object(yearn_v3_context, "_read_vault_context", side_effect=read) as mock_read,
@@ -609,6 +611,59 @@ class TestInnerVaultOnlyHeld(unittest.TestCase):
         self.assertEqual([c.vault_address for c in contexts], [VAULT])
         mock_read.assert_any_call(1, V1, [], queue_limits=True)
         (line,) = [line for line in contexts[0].outcome_lines if line.startswith("Look-through")]
-        # Without calls 3-4, yvWETH-1 keeps its looper debt and OG stays drained by the redemption.
-        self.assertIn("wstETH/WETH Spark Looper 70.53 WETH (4.7%) → 303.27 WETH (20.3%)", line)
+        # yvWETH-1's off-queue looper is unknown to a support read: it is shown as an explicit bucket
+        # (and qualified), not dropped. Without calls 3-4 OG stays drained by the redemption.
+        self.assertIn("wstETH/WETH Spark Looper 0 WETH (0.0%) → 270 WETH (18.1%)", line)
+        self.assertIn(
+            "WETH-1 yVault holdings outside its default queue and this batch 70.53 WETH (4.7%) → 33.27 WETH (2.2%)",
+            line,
+        )
         self.assertIn("Yearn OG WETH 46.11 WETH (3.1%) → 13.07 WETH (0.9%)", line)
+        self.assertIn("WETH-1 yVault holds 1,035.93 WETH in strategies outside its default queue", line)
+
+
+class TestInnerVaultLiquidityChanges(unittest.TestCase):
+    """A parent's redemption is capped by what the inner vault can still pay after earlier calls."""
+
+    INNER = "0x00000000000000000000000000000000000000A1"
+    OFF_QUEUE = "0x00000000000000000000000000000000000000B2"
+
+    def _contexts(self) -> dict[str, YearnV3VaultContext]:
+        parent = replace(
+            _context([]),
+            total_idle=0,
+            default_queue=(
+                _strategy(self.INNER, "Inner Vault", 100 * E18, 1_000 * E18, is_vault=True, max_withdraw=100 * E18),
+            ),
+            other_strategies=(),
+        )
+        inner = replace(
+            _context([]),
+            vault_address=self.INNER,
+            name="Inner Vault",
+            symbol="yvINNER",
+            total_assets=100 * E18,
+            total_debt=0,
+            total_idle=100 * E18,
+            default_queue=(),
+            other_strategies=(_strategy(self.OFF_QUEUE, "Off-queue Strategy", 0, 1_000 * E18),),
+        )
+        return {VAULT.lower(): parent, self.INNER.lower(): inner}
+
+    def test_redemption_after_inner_idle_moves_off_queue_is_not_paid(self) -> None:
+        ordered = [
+            (self.INNER, _call("update_debt", ["address", "uint256"], [self.OFF_QUEUE, 100 * E18])),
+            (VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 0])),
+        ]
+        lines, runs = yearn_v3_context.walk_batch(self._contexts(), ordered)
+        (withdraw,) = lines[VAULT.lower()]
+        self.assertIn("moves nothing — limited by what the strategy can redeem now", withdraw)
+        self.assertEqual(runs[VAULT.lower()].state.idle, 0)
+        # The inner vault's only line is its own deposit: no phantom redemption is applied to it.
+        self.assertEqual(len(lines[self.INNER.lower()]), 1)
+
+    def test_redemption_before_the_move_is_paid_from_idle(self) -> None:
+        ordered = [(VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 0]))]
+        lines, runs = yearn_v3_context.walk_batch(self._contexts(), ordered)
+        self.assertIn("withdraws 100 WETH", lines[VAULT.lower()][0])
+        self.assertIn("served, in default-queue order, from idle 100 WETH", lines[self.INNER.lower()][0])

@@ -10,6 +10,7 @@ from utils.llm.ai_explainer import (
     MAX_PROMPT_SIMULATIONS,
     SYSTEM_INSTRUCTIONS,
     _build_prompt,
+    _collect_source_contexts,
     _sole_token_by_target,
     explain_batch_transaction,
     explain_transaction,
@@ -118,6 +119,23 @@ class TestBuildPromptWithSourceContext(unittest.TestCase):
         )
         self.assertIn("--- Stated Intent (proposal description) ---", result)
         self.assertIn("migration window", result)
+
+
+class TestSourceContextOverloads(unittest.TestCase):
+    """Each decoded overload gets its own source lookup, keyed and selected by signature."""
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    def test_overloads_are_fetched_separately_with_their_signature(self, mock_get: MagicMock) -> None:
+        auction = "0xF3318007c41539b691b49D3e898560AB5BB966A3"
+        short = DecodedCall("take", "take(address)", [("address", auction)])
+        full = DecodedCall(
+            "take",
+            "take(address,uint256,address,bytes)",
+            [("address", auction), ("uint256", 1), ("address", auction), ("bytes", b"")],
+        )
+        _collect_source_contexts([(auction, short), (auction, full), (auction, short)], 1)
+        signatures = sorted(call.args[3] for call in mock_get.call_args_list)
+        self.assertEqual(signatures, ["take(address)", "take(address,uint256,address,bytes)"])
 
 
 class TestBatchParamConstants(unittest.TestCase):

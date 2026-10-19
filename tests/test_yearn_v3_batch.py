@@ -83,12 +83,34 @@ class TestParentVaultFlows(unittest.TestCase):
     def test_auto_allocated_deposit_stays_redeemable(self) -> None:
         state = _state(idle=0)
         state.add_strategy("0xA", max_deposit=500, max_withdraw=100)
+        state.set_max_debt("0xA", 1_000)
         state.strategies["0xa"].current_debt = 100
-        self.assertEqual(state.receive(50, "0xA"), (100, 150))
+        move = state.receive(50, "0xA")
+        assert move is not None
+        self.assertEqual((move.debt_before, move.debt_after, state.idle), (100, 150, 0))
         strategy = state.strategies["0xa"]
         self.assertEqual((strategy.max_withdraw, strategy.max_deposit), (150, 450))
         # A later redemption in the same batch can take the deposit back out.
         self.assertEqual(state.redeem(150, ["0xa"]), (0, [("0xa", 150, 0)], 0))
+
+    def test_auto_allocation_respects_the_vault_deposit_limits(self) -> None:
+        # Debt 90 under a 100 ceiling, deposit room 5: the vault allocates 5 and keeps 45 idle.
+        state = _state(idle=0)
+        state.add_strategy("0xA", max_deposit=5, max_withdraw=None)
+        state.set_max_debt("0xA", 100)
+        state.strategies["0xa"].current_debt = 90
+        move = state.receive(50, "0xA")
+        assert move is not None
+        self.assertEqual((move.debt_after, state.idle), (95, 45))
+        self.assertIn("maxDeposit", move.limited_by)
+
+    def test_auto_allocation_sweeps_idle_above_the_minimum(self) -> None:
+        state = _state(idle=30, minimum=10)
+        state.add_strategy("0xA", None, None)
+        state.set_max_debt("0xA", 1_000)
+        move = state.receive(50, "0xA")
+        assert move is not None
+        self.assertEqual((move.moved, state.idle), (70, 10))
 
     def test_deposit_without_auto_allocate_lands_in_idle(self) -> None:
         state = _state(idle=10)

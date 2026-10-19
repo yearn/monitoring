@@ -200,6 +200,72 @@ class TestFunctionBody(unittest.TestCase):
         self.assertEqual(body, "return self._update_debt(strategy, target_debt, max_loss)")
 
 
+# Shape of the verified Auction 1.0.5: overloads that differ in what they run.
+OVERLOADED_SOURCE = """
+contract Auction {
+    /// @notice Take the full lot and send it to the caller.
+    function take(address _from) external virtual returns (uint256) {
+        return _take(_from, type(uint256).max, msg.sender, new bytes(0));
+    }
+
+    /// @notice Take up to `_maxAmount`, sent to `_receiver`, with a callback.
+    function take(address _from, uint256 _maxAmount, address _receiver, bytes calldata _data)
+        external
+        virtual
+        returns (uint256)
+    {
+        return _take(_from, _maxAmount, _receiver, _data);
+    }
+
+    function sweep(IERC20 _token, uint _amount) external onlyGovernance {
+        _token.safeTransfer(msg.sender, _amount);
+    }
+}
+
+contract Base {
+    function settle(address _from) external virtual {
+        kicked[_from] = 0;
+    }
+}
+
+contract Derived is Base {
+    function settle(address _from) external override {
+        require(balance(_from) == 0, "!empty");
+        kicked[_from] = 0;
+    }
+}
+"""
+
+
+class TestOverloads(unittest.TestCase):
+    """The body is shown as what executes, so it must be the overload the call decodes to."""
+
+    def test_body_follows_the_decoded_signature(self) -> None:
+        full = extract_short_function_body(OVERLOADED_SOURCE, "take", "take(address,uint256,address,bytes)")
+        self.assertEqual(full, "return _take(_from, _maxAmount, _receiver, _data);")
+        short = extract_short_function_body(OVERLOADED_SOURCE, "take", "take(address)")
+        self.assertIn("type(uint256).max, msg.sender", short)
+
+    def test_snippet_shows_the_matching_declaration(self) -> None:
+        snippet = _extract_function_snippet(OVERLOADED_SOURCE, "take", "take(address,uint256,address,bytes)")
+        self.assertIn("Take up to `_maxAmount`", snippet)
+        self.assertNotIn("Take the full lot", snippet)
+
+    def test_overloads_without_a_signature_show_no_body(self) -> None:
+        self.assertEqual(extract_short_function_body(OVERLOADED_SOURCE, "take"), "")
+        ctx = _build_context("Auction", OVERLOADED_SOURCE, "take")
+        assert ctx is not None
+        self.assertEqual(ctx.function_body, "")
+
+    def test_a_base_and_an_override_with_different_bodies_show_no_body(self) -> None:
+        self.assertEqual(extract_short_function_body(OVERLOADED_SOURCE, "settle", "settle(address)"), "")
+
+    def test_interface_and_alias_types_match_their_abi_encoding(self) -> None:
+        body = extract_short_function_body(OVERLOADED_SOURCE, "sweep", "sweep(address,uint256)")
+        self.assertEqual(body, "_token.safeTransfer(msg.sender, _amount);")
+        self.assertEqual(extract_short_function_body(OVERLOADED_SOURCE, "sweep", "sweep(address,address)"), "")
+
+
 class TestExtractFunctionBody(unittest.TestCase):
     def test_extracts_body(self) -> None:
         body = _extract_function_body(INFINIFI_FARM_SOURCE, "setMaxSlippage")

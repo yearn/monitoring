@@ -90,10 +90,37 @@ class Lot:
     min_amount_to_sell: int | None = None
     # Market price of one token in want, from DeFiLlama USD prices.
     market_price: Decimal | None = None
+    # auctions(token).initialAvailable: the size of the last kicked lot; None when unreadable.
+    initial_available: int | None = None
 
     def amount(self, raw: int) -> str:
         """Render a token amount."""
         return format_asset_amount(raw, self.decimals, self.symbol)
+
+
+@dataclass
+class _LotRun:
+    """A lot as the calls so far leave it: balances, the strategy's gate and the current kick."""
+
+    in_auction: int
+    held: int | None
+    claimable: int | None
+    min_amount: int | None
+    kicked: int
+    initial_available: int | None
+    kicked_in_batch: bool = False
+
+    @classmethod
+    def of(cls, lot: Lot) -> "_LotRun":
+        """The lot before the transaction."""
+        return cls(
+            lot.in_auction,
+            lot.strategy_held,
+            lot.claimable,
+            lot.min_amount_to_sell,
+            lot.kicked,
+            lot.initial_available,
+        )
 
 
 @dataclass
@@ -227,21 +254,26 @@ class YearnAuctionContext:
         return line
 
     def _idle_line(self) -> str:
+        """The strategy's idle want, stated without guessing where it came from."""
         idle = self.strategy_idle_want or 0
         line = (
-            f"The strategy holds {format_asset_amount(idle, self.want_decimals, self.want_symbol)} idle — sale "
-            "proceeds the auction paid it as receiver, not yet deployed."
+            f"The strategy holds {format_asset_amount(idle, self.want_decimals, self.want_symbol)} idle (not deployed)."
         )
+        if self.strategy and self.receiver.lower() == self.strategy.lower():
+            line += (
+                " This auction pays sale proceeds to the strategy, so a sold lot is one possible source; the balance "
+                "alone does not show where it came from."
+            )
         if self.strategy_total_assets:
             share = idle / self.strategy_total_assets * 100
             line += (
-                f" A report() counts them in totalAssets: if they arrived after the last report (lots sell after the "
-                f"report that kicked them), that is {share:.3f}% of totalAssets booked as profit."
+                " A report() counts it in totalAssets, and whatever arrived after the last report is booked as profit "
+                f"(all of it would be {share:.3f}% of totalAssets)."
             )
         return line
 
     def proposal_lines(self, render: Render) -> list[str]:
-        """Each call in batch order; settings and lots carry forward so later calls see earlier ones."""
+        """Each call in batch order; settings and every lot carry forward so later calls see earlier ones."""
         settings: dict[str, object] = {
             "minimumPrice": self.minimum_price,
             "startingPrice": self.starting_price,
@@ -249,18 +281,18 @@ class YearnAuctionContext:
             "stepDuration": self.step_duration,
             "receiver": self.receiver,
         }
-        kicked: set[str] = set()
+        runs = {lot.token.lower(): _LotRun.of(lot) for lot in self.lots}
         lines: list[str] = []
         for entry in self.calls:
             name = entry.call.function_name
             if entry.kind == "kick":
-                lines.extend(self._kick_lines(entry, settings, kicked))
+                lines.extend(self._kick_lines(entry, settings, runs))
             elif entry.kind == "min_amount":
-                lines.append(self._min_amount_line(entry))
+                lines.append(self._min_amount_line(entry, runs))
             elif entry.kind == "set_auction":
                 lines.append(
-                    f"{name}: the strategy's auction {render(self.address)} → {render(str(entry.value))}. Rewards "
-                    "kicked after this sell through the new auction, whose settings are not shown here."
+                    f"{name}: the strategy's auction {render(self.address)} → {render(str(entry.value))}. Its later "
+                    "calls in this batch use the new auction and are described with it, if it is a readable Auction."
                 )
             elif entry.function in AUCTION_SETTERS:
                 via = (
@@ -268,8 +300,11 @@ class YearnAuctionContext:
                     if entry.kind == "forward"
                     else entry.function
                 )
-                lines.append(f"{via}: {self._setting_change(entry.function, settings, entry.value, render)}")
+                live_before = {token: self._is_live(token, runs[token], settings) for token in runs}
+                line = f"{via}: {self._setting_change(entry.function, settings, entry.value, render)}"
+                line += self._live_guard(live_before)
                 settings[AUCTION_SETTERS[entry.function]] = entry.value
+                lines.append(line + self._revival_note(live_before, runs, settings))
             elif entry.function in ("enable", "disable"):
                 lot = self.lot_for(entry.value)
                 token = lot.symbol if lot else render(str(entry.value))
@@ -277,14 +312,72 @@ class YearnAuctionContext:
                 lines.append(f"{name}: the auction {verb} {token}.")
             elif entry.function == "sweep":
                 lot = self.lot_for(entry.value)
-                held = f" ({lot.amount(lot.in_auction)})" if lot else ""
+                run = runs.get(lot.token.lower()) if lot else None
+                held = f" ({lot.amount(run.in_auction)})" if lot and run else ""
                 lines.append(
                     f"sweep: sends the auction's entire balance of {lot.symbol if lot else render(str(entry.value))}"
                     f"{held} to the caller (governance) — those tokens leave the sale."
                 )
+                if run is not None:
+                    run.in_auction = 0
             elif entry.function == "setGovernanceOnlyKick":
                 lines.append(f"setGovernanceOnlyKick: {self.governance_only_kick} → {entry.value}.")
         return lines
+
+    def _is_live(self, token: str, run: _LotRun, settings: dict[str, object]) -> bool:
+        """Whether a lot is live under the running settings, mirroring ``Auction._price``.
+
+        Pricing setters apply to a lot already kicked: lowering the floor can revive a
+        lot whose decayed price had fallen below the old one. Evaluated at the time the
+        state was read; falls back to the on-chain ``isActive`` when a setting is unknown.
+        """
+        lot = self.lot_for(token)
+        if lot is None or not run.kicked:
+            return False
+        start, floor = settings["startingPrice"], settings["minimumPrice"]
+        decay, step = settings["stepDecayRate"], settings["stepDuration"]
+        if not (
+            isinstance(start, int)
+            and isinstance(floor, int)
+            and isinstance(decay, int)
+            and isinstance(step, int)
+            and step
+            and self.auction_length
+            and run.initial_available
+        ):
+            return run.kicked_in_batch or lot.active
+        elapsed = 0 if run.kicked_in_batch else self.now - run.kicked
+        if elapsed > self.auction_length:
+            return False
+        per_token = start * WAD / (run.initial_available * 10 ** (18 - lot.decimals))
+        price = per_token * (1 - decay / 10_000) ** (elapsed // step)
+        return price > 0 and price >= floor
+
+    def _live_guard(self, live: dict[str, bool]) -> str:
+        """A note when a lot is live while a pricing or receiver setter runs, which the verified Auction rejects."""
+        if not any(live.values()):
+            return ""
+        symbols = ", ".join(lot.symbol for lot in self.lots if live.get(lot.token.lower()))
+        if self.version == "1.0.5":
+            return (
+                f" A {symbols} lot is live at this point, and Auction 1.0.5 rejects this setter while any lot is live "
+                "(`active auction`), so the call reverts."
+            )
+        return f" A {symbols} lot is live at this point; this Auction version may reject setters while one is."
+
+    def _revival_note(self, live_before: dict[str, bool], runs: dict[str, _LotRun], settings: dict[str, object]) -> str:
+        """Lots the new settings bring back to life: their decayed price is above the floor now in force."""
+        notes = []
+        for token, run in runs.items():
+            lot = self.lot_for(token)
+            if lot is None or live_before.get(token) or not self._is_live(token, run, settings):
+                continue
+            notes.append(
+                f" This revives the {lot.symbol} lot kicked {format_utc(run.kicked)}: its decayed price is above the "
+                f"settings now in force, so it is live again — a strategy report() later in this batch does not kick a "
+                f"new {lot.symbol} lot while it holds {lot.amount(run.in_auction)}."
+            )
+        return "".join(notes)
 
     def _setting_change(self, function: str, settings: dict[str, object], value: object, render: Render) -> str:
         """``setting old → new`` for an Auction setter, with the floor placed against the market."""
@@ -308,8 +401,8 @@ class YearnAuctionContext:
                 line += (
                     f" Against the market (1 {lot.symbol} ≈ {_sig(lot.market_price)} {self.want_symbol}) the floor "
                     f"moves from {_versus(normalize(old or 0, 18), lot.market_price)} to "
-                    f"{_versus(normalize(value, 18), lot.market_price)}. Takers do not buy above market, so a floor above it "
-                    "leaves lots unsold; below it, the gap is the most a sale can give away."
+                    f"{_versus(normalize(value, 18), lot.market_price)}. Takers do not buy above market, so a floor "
+                    "above it leaves lots unsold; below it, the gap is the most a sale can give away."
                 )
             return line
         if setting == "startingPrice":
@@ -319,39 +412,56 @@ class YearnAuctionContext:
             return f"stepDecayRate {old} → {value} bps per step."
         return f"stepDuration {format_duration(old) if old else 'unknown'} → {format_duration(value)}."
 
-    def _kick_lines(self, entry: AuctionCall, settings: dict[str, object], kicked: set[str]) -> list[str]:
+    def _kick_lines(self, entry: AuctionCall, settings: dict[str, object], runs: dict[str, _LotRun]) -> list[str]:
+        """A kick, direct or inside a strategy report, against the lots and settings the earlier calls leave."""
         name = entry.call.function_name
-        lots = [self.lot_for(entry.value)] if entry.value is not None else self.lots
+        tokens = [str(entry.value).lower()] if entry.value is not None else [lot.token.lower() for lot in self.lots]
+        from_strategy = entry.target.lower() != self.address.lower()
         lines: list[str] = []
-        floor = settings["minimumPrice"]
-        for lot in lots:
-            if lot is None:
+        for token in tokens:
+            lot, run = self.lot_for(token), runs.get(token)
+            if lot is None or run is None:
                 continue
-            if lot.token in kicked:
-                lines.append(f"{name}: the {lot.symbol} lot was kicked earlier in this batch and is still live.")
+            claim_known = run.held is not None and run.claimable is not None
+            balance = (run.held or 0) + (run.claimable or 0) if from_strategy else 0
+            if self._is_live(token, run, settings) and (run.in_auction or not from_strategy):
+                state = "kicked earlier in this batch and still live" if run.kicked_in_batch else "live"
+                if not from_strategy:
+                    lines.append(f"{name}: REVERTS — the {lot.symbol} lot is {state} (`too soon`).")
+                    continue
+                line = f"{name}: the {lot.symbol} lot is {state}, so the strategy does not kick a new one"
+                if claim_known:
+                    line += f"; the ≈ {lot.amount(balance)} it holds after claiming stays in the strategy"
+                    run.held, run.claimable = balance, 0
+                lines.append(line + ".")
                 continue
-            if lot.active:
-                lines.append(f"{name}: a {lot.symbol} lot is live, so no new {lot.symbol} lot is kicked.")
+            if from_strategy and run.min_amount is not None and claim_known and balance <= run.min_amount:
+                lines.append(
+                    f"{name}: does not kick {lot.symbol} — the strategy's balance after claiming (≈ "
+                    f"{lot.amount(balance)}) does not exceed minAmountToSell {lot.amount(run.min_amount)}; the "
+                    "claimed rewards stay in the strategy."
+                )
+                run.held, run.claimable = balance, 0
                 continue
-            kicked.add(lot.token)
-            from_strategy = entry.target.lower() != self.address.lower()
-            held = (lot.strategy_held or 0) if from_strategy else 0
-            claimable = (lot.claimable or 0) if from_strategy else 0
-            size = lot.in_auction + held + claimable
-            parts = [f"{lot.amount(lot.in_auction)} already in the auction"]
+            size = run.in_auction + balance
+            if size == 0:
+                lines.append(
+                    f"{name}: REVERTS — nothing to kick: the auction holds no {lot.symbol} (`nothing to kick`)."
+                    if not from_strategy
+                    else f"{name}: no {lot.symbol} to kick — neither the auction nor the strategy holds any."
+                )
+                continue
+            parts = [f"{lot.amount(run.in_auction)} already in the auction"]
             if from_strategy:
-                parts.append(f"{lot.amount(held)} the strategy holds")
-                if lot.claimable is not None:
-                    parts.append(f"{lot.amount(claimable)} it claims")
+                parts.append(f"{lot.amount(run.held or 0)} the strategy holds")
+                if run.claimable is not None:
+                    parts.append(f"{lot.amount(run.claimable)} it claims")
             gate = ""
-            if from_strategy and lot.min_amount_to_sell is not None:
+            if from_strategy and run.min_amount is not None and not claim_known:
                 gate = (
                     f" The strategy kicks only if its own {lot.symbol} balance after claiming exceeds "
-                    f"{lot.amount(lot.min_amount_to_sell)}"
+                    f"{lot.amount(run.min_amount)}."
                 )
-                if lot.claimable is not None and held + claimable <= lot.min_amount_to_sell:
-                    gate += f" — ≈ {lot.amount(held + claimable)} now, so it likely does not kick"
-                gate += "."
             verb = (
                 f"kicks the {lot.symbol} auction"
                 if entry.confirmed
@@ -363,6 +473,7 @@ class YearnAuctionContext:
                 f"{lot.amount(size)} ({' + '.join(parts)}; rewards keep accruing until execution, and the "
                 f"AuctionKicked event's `available` is the exact lot).{gate}"
             )
+            floor = settings["minimumPrice"]
             if isinstance(floor, int) and floor:
                 proceeds = normalize(size, lot.decimals) * normalize(floor, 18)
                 line += (
@@ -370,40 +481,58 @@ class YearnAuctionContext:
                     f"{self.want_amount(proceeds)}"
                 )
                 if lot.market_price is not None:
-                    line += f"; at market it is worth ≈ {self.want_amount(normalize(size, lot.decimals) * lot.market_price)}"
+                    worth = normalize(size, lot.decimals) * lot.market_price
+                    line += f"; at market it is worth ≈ {self.want_amount(worth)}"
                 line += "."
-            line += self._time_to_floor(size, lot, floor)
+            line += self._time_to_floor(size, lot, settings)
             lines.append(line)
+            run.in_auction, run.kicked, run.initial_available, run.kicked_in_batch = size, self.now, size, True
+            if from_strategy:
+                run.held = 0 if run.held is not None else None
+                run.claimable = 0 if run.claimable is not None else None
         return lines
 
-    def _time_to_floor(self, size: int, lot: Lot, floor: object) -> str:
-        """How long the decay takes to reach the floor for a lot of ``size`` tokens, or ""."""
-        if not (isinstance(floor, int) and floor and size and self.step_decay_rate and self.step_duration):
+    def _time_to_floor(self, size: int, lot: Lot, settings: dict[str, object]) -> str:
+        """How long the decay takes to reach the floor for a lot of ``size`` tokens, under the running settings."""
+        start, floor = settings["startingPrice"], settings["minimumPrice"]
+        decay, step = settings["stepDecayRate"], settings["stepDuration"]
+        if not (
+            isinstance(start, int)
+            and isinstance(floor, int)
+            and isinstance(decay, int)
+            and isinstance(step, int)
+            and floor
+            and size
+            and decay
+            and step
+        ):
             return ""
-        start = normalize(self.starting_price, 18) / normalize(size, lot.decimals)
-        ratio = float(normalize(floor, 18) / start)
+        opening = normalize(start, 18) / normalize(size, lot.decimals)
+        ratio = float(normalize(floor, 18) / opening)
         if ratio >= 1:
             return (
-                f" The lot's starting price ({_sig(start)} {self.want_symbol} per {lot.symbol}) is already at or "
+                f" The lot's starting price ({_sig(opening)} {self.want_symbol} per {lot.symbol}) is already at or "
                 "below the floor, so it is never live."
             )
-        steps = math.ceil(math.log(ratio) / math.log(1 - self.step_decay_rate / 10_000))
-        seconds = steps * self.step_duration
+        steps = math.ceil(math.log(ratio) / math.log(1 - decay / 10_000))
+        seconds = steps * step
         if self.auction_length and seconds >= self.auction_length:
-            return f" It opens at {_sig(start)} {self.want_symbol} per {lot.symbol} and decays for the full auction."
+            return f" It opens at {_sig(opening)} {self.want_symbol} per {lot.symbol} and decays for the full auction."
         return (
-            f" It opens at {_sig(start)} {self.want_symbol} per {lot.symbol} and reaches the floor after "
+            f" It opens at {_sig(opening)} {self.want_symbol} per {lot.symbol} and reaches the floor after "
             f"~{format_duration(seconds)}; if no taker buys by then, the rest stays unsold."
         )
 
-    def _min_amount_line(self, entry: AuctionCall) -> str:
+    def _min_amount_line(self, entry: AuctionCall, runs: dict[str, _LotRun]) -> str:
+        """``setMinAmountToSell(token, amount)``: old → new, carried into later kicks."""
         params = entry.call.params
         token = str(params[0][1]) if params else ""
         value = params[-1][1] if params else None
-        lot = self.lot_for(token)
-        if lot is None or not isinstance(value, int):
+        lot, run = self.lot_for(token), runs.get(token.lower())
+        if lot is None or run is None or not isinstance(value, int):
             return f"{entry.call.function_name}: minimum kick size for {token} → {value}."
-        before = lot.amount(lot.min_amount_to_sell) if lot.min_amount_to_sell is not None else "unknown"
+        before = lot.amount(run.min_amount) if run.min_amount is not None else "unknown"
+        run.min_amount = value
         return f"{entry.call.function_name}: the strategy kicks {lot.symbol} only above {before} → {lot.amount(value)}."
 
 
@@ -456,7 +585,7 @@ def _forwarded(chain_id: int, strategy: str, call: DecodedCall) -> tuple[str, ob
     fetched = fetch_source(chain_id, strategy)
     if fetched is None:
         return None
-    match = _FORWARD_RE.search(extract_short_function_body(fetched[1], call.function_name))
+    match = _FORWARD_RE.search(extract_short_function_body(fetched[1], call.function_name, call.signature))
     if match is None:
         return None
     names = fetch_function_input_names(chain_id, strategy, call.function_name, call.signature) or []
@@ -473,7 +602,7 @@ def _harvest_kicks(chain_id: int, strategy: str) -> bool:
     long to show, reads as unconfirmed rather than as "does not kick".
     """
     fetched = fetch_source(chain_id, strategy)
-    body = extract_short_function_body(fetched[1], "_harvestAndReport") if fetched else ""
+    body = extract_short_function_body(fetched[1], "_harvestAndReport", "_harvestAndReport()") if fetched else ""
     return "kick" in body.lower()
 
 
@@ -495,6 +624,12 @@ class _Probe:
             self.auctions[address] = _is_auction(self.client, address)
         return self.auctions[address]
 
+    def reassign(self, strategy: str, auction: object) -> None:
+        """After ``setAuction``: the strategy's later calls belong to the new auction, or to none if unreadable."""
+        new = _address(auction)
+        valid = new is not None and int(new, 16) != 0 and self.is_auction(new)
+        self.strategies[strategy] = new if valid else None
+
     def auction_of(self, strategy: str) -> str | None:
         if strategy not in self.strategies:
             auction = _address(call_view(self.client, strategy, "auction()", "address"))
@@ -507,7 +642,9 @@ def _classify(chain_id: int, probe: _Probe, target: str, call: DecodedCall) -> t
     """(auction address, call entry) for a call that touches an auction, else None."""
     name = call.function_name
     if name in AUCTION_CALLS and probe.is_auction(target):
-        value = call.params[-1][1] if call.params else None
+        # Every Auction call this adapter reads takes its subject first: `disable(address,uint256)`
+        # appends an array index, which is not the token.
+        value = call.params[0][1] if call.params else None
         kind = "kick" if name == "kick" else "auction"
         return target, AuctionCall(target, call, kind, function=name, value=value)
     auction = probe.auction_of(target)
@@ -543,6 +680,9 @@ def _read_lot(
         active=call_view(client, auction, "isActive(address)", "bool", (token,)) is True,
         available=_uint(client, auction, "available(address)", token) or 0,
     )
+    info = call_view(client, auction, "auctions(address)", "(uint64,uint64,uint128)", (token,))
+    if isinstance(info, tuple) and len(info) == 3 and isinstance(info[2], int):
+        lot.initial_available = info[2]
     if strategy:
         lot.strategy_held = _uint(client, token, "balanceOf(address)", strategy)
         lot.min_amount_to_sell = _uint(client, strategy, "minAmountToSell(address)", token)
@@ -645,6 +785,8 @@ def resolve_yearn_auction_context(
         grouped.setdefault(auction, []).append(entry)
         if entry.target.lower() != auction.lower():
             strategies.setdefault(auction, entry.target)
+        if entry.kind == "set_auction":
+            probe.reassign(entry.target, entry.value)
 
     contexts: list[YearnAuctionContext] = []
     for auction, calls in grouped.items():

@@ -51,6 +51,7 @@ def _auction(strategy: str, kicked: int) -> dict[str, object]:
         "kicked(address)": kicked,
         "isActive(address)": False,
         "available(address)": 0,
+        "auctions(address)": (kicked, 1, 698_582_228783993151690507 if kicked else 0),
     }
 
 
@@ -155,8 +156,11 @@ class TestYearnAuctionContext(unittest.TestCase):
         self.assertIn("(0.00503611 USDS per GROVE) the full lot clears for at least 4,949.86 USDS", prompt)
         self.assertIn("142,141.89 GROVE it claims", prompt)
         self.assertIn("no lot pending (kicked = 0: never kicked, or the last lot sold out)", prompt)
-        self.assertIn("The strategy holds 879.75 USDS idle", prompt)
-        self.assertIn("that is 0.088% of totalAssets booked as profit", prompt)
+        # The idle balance is stated, not attributed: nothing on-chain proves it is sale proceeds.
+        self.assertIn("The strategy holds 879.75 USDS idle (not deployed)", prompt)
+        self.assertIn("a sold lot is one possible source", prompt)
+        self.assertNotIn("proceeds the auction paid it", prompt)
+        self.assertIn("(all of it would be 0.088% of totalAssets)", prompt)
 
         report = format_yearn_auction_report(contexts, 1, {})
         self.assertIn(f"[`{BIG_AUCTION}`](https://etherscan.io/address/{BIG_AUCTION})", report)
@@ -168,13 +172,15 @@ class TestYearnAuctionContext(unittest.TestCase):
         self.assertIn("(0.006 USDS per GROVE) the full lot clears for at least 5,897.25 USDS", kick)
         self.assertIn("minimumPrice 0.006 USDS per GROVE → 0.00503611", setter)
 
-    def test_small_balance_below_min_amount_likely_does_not_kick(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+    def test_small_balance_below_min_amount_does_not_kick(self, mock_cm: MagicMock, *_: MagicMock) -> None:
         CHAIN[SMALL]["claimableRewards()"] = 10_000 * E18
         try:
             (context,) = self._resolve(mock_cm, [(SMALL, REPORT)])
         finally:
             CHAIN[SMALL]["claimableRewards()"] = 142_141_890111750914867167
-        self.assertIn("≈ 10,000 GROVE now, so it likely does not kick", context.proposal_lines(str)[0])
+        (line,) = context.proposal_lines(str)
+        self.assertIn("report: does not kick GROVE", line)
+        self.assertIn("(≈ 10,000 GROVE) does not exceed minAmountToSell 40,000 GROVE", line)
 
     def test_report_kick_is_hedged_when_the_harvest_is_not_verified(
         self, mock_cm: MagicMock, *mocks: MagicMock
@@ -220,6 +226,98 @@ class TestYearnAuctionContext(unittest.TestCase):
         prompt = format_yearn_auction_prompt([context])
         self.assertNotIn("Market (DeFiLlama", prompt)
         self.assertIn("→ 0.00503611 USDS per GROVE (-16.06%).", prompt)
+
+
+def _direct(name: str, *params: tuple[str, object]) -> DecodedCall:
+    types = ",".join(t for t, _ in params)
+    return DecodedCall(name, f"{name}({types})", list(params))
+
+
+# A lot kicked 320 minutes before NOW: 320 steps of 0.3% decay put its price (~0.005474 USDS per GROVE)
+# below the 0.006 floor, so it is inactive — but above 0.00503611, so lowering the floor revives it.
+REVIVABLE = NOW - 320 * 60
+
+
+@patch.object(yearn_auction_context, "get_contract_label", return_value="")
+@patch.object(yearn_auction_context, "fetch_prices", return_value=PRICES)
+@patch.object(yearn_auction_context, "fetch_function_input_names", return_value=["_minimumAuctionPrice"])
+@patch.object(yearn_auction_context, "fetch_source", return_value=("GroveCompounder", STRATEGY_SOURCE))
+@patch.object(yearn_auction_context, "fetch_erc20_metadata", side_effect=_metadata)
+@patch.object(yearn_auction_context, "call_view", side_effect=_call_view)
+@patch.object(yearn_auction_context, "ChainManager")
+class TestRunningBatchState(unittest.TestCase):
+    """Calls earlier in the batch change what later ones do."""
+
+    def _resolve(self, mock_cm: MagicMock, calls: list[tuple[str, DecodedCall]]) -> list:
+        mock_cm.get_client.return_value.eth.get_block.return_value = {"timestamp": NOW}
+        return resolve_yearn_auction_context("YEARN_MS", 1, calls)
+
+    def test_kick_timing_uses_the_starting_price_set_earlier(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        cheaper = _direct("setStartingPrice", ("uint256", 3_000 * E18))
+        (context,) = self._resolve(mock_cm, [(BIG_AUCTION, cheaper), (BIG, REPORT)])
+        _, kick = context.proposal_lines(str)
+        # 3,000 USDS over ~982.9k GROVE opens at ~0.003052, below the 0.006 floor.
+        self.assertIn("starting price (0.003052 USDS per GROVE) is already at or below the floor", kick)
+
+    def test_lowering_the_floor_revives_a_decayed_lot(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        CHAIN[BIG_AUCTION]["kicked(address)"] = REVIVABLE
+        CHAIN[BIG_AUCTION]["auctions(address)"] = (REVIVABLE, 1, 698_582_228783993151690507)
+        try:
+            (context,) = self._resolve(mock_cm, [(BIG, SET_FLOOR), (BIG, REPORT)])
+        finally:
+            CHAIN[BIG_AUCTION]["kicked(address)"] = 1_792_246_835
+            CHAIN[BIG_AUCTION]["auctions(address)"] = (1_792_246_835, 1, 698_582_228783993151690507)
+        setter, report = context.proposal_lines(str)
+        self.assertIn("This revives the GROVE lot kicked", setter)
+        self.assertIn("the GROVE lot is live, so the strategy does not kick a new one", report)
+        self.assertIn("284,291.94 GROVE it holds after claiming stays in the strategy", report)
+
+    def test_setter_while_a_lot_is_live_reverts(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        start = _direct("setStartingPrice", ("uint256", 5_000 * E18))
+        (context,) = self._resolve(mock_cm, [(BIG, REPORT), (BIG_AUCTION, start)])
+        _, setter = context.proposal_lines(str)
+        self.assertIn("Auction 1.0.5 rejects this setter while any lot is live (`active auction`)", setter)
+
+    def test_raised_min_amount_gates_the_later_report(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        raise_gate = _call(
+            "setMinAmountToSell", "setMinAmountToSell(address,uint256)", ("address", GROVE), ("uint256", 500_000 * E18)
+        )
+        (context,) = self._resolve(mock_cm, [(SMALL, raise_gate), (SMALL, REPORT)])
+        gate, report = context.proposal_lines(str)
+        self.assertIn("only above 40,000 GROVE → 500,000 GROVE", gate)
+        self.assertIn("does not kick GROVE", report)
+        self.assertIn("does not exceed minAmountToSell 500,000 GROVE", report)
+
+    def test_calls_after_set_auction_go_to_the_new_auction(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        switch = _call("setAuction", "setAuction(address)", ("address", SMALL_AUCTION))
+        old, new = self._resolve(mock_cm, [(BIG, switch), (BIG, REPORT)])
+        self.assertEqual((old.address, new.address), (BIG_AUCTION, SMALL_AUCTION))
+        self.assertEqual([e.kind for e in old.calls], ["set_auction"])
+        self.assertEqual([e.kind for e in new.calls], ["kick"])
+
+    def test_calls_after_set_auction_to_an_unreadable_contract_are_dropped(
+        self, mock_cm: MagicMock, *_: MagicMock
+    ) -> None:
+        switch = _call("setAuction", "setAuction(address)", ("address", PLAIN))
+        (context,) = self._resolve(mock_cm, [(BIG, switch), (BIG, REPORT)])
+        self.assertEqual([e.kind for e in context.calls], ["set_auction"])
+
+    def test_sweep_empties_the_lot_before_a_direct_kick(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        calls = [
+            (BIG_AUCTION, _direct("sweep", ("address", GROVE))),
+            (BIG_AUCTION, _direct("kick", ("address", GROVE))),
+        ]
+        (context,) = self._resolve(mock_cm, calls)
+        sweep, kick = context.proposal_lines(str)
+        self.assertIn("(698,582.22 GROVE) to the caller", sweep)
+        self.assertIn("kick: REVERTS — nothing to kick", kick)
+
+    def test_disable_with_an_index_names_the_token(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        disable = _direct("disable", ("address", GROVE), ("uint256", 0))
+        (context,) = self._resolve(mock_cm, [(BIG_AUCTION, disable)])
+        # The second argument is the enabled-auctions index; the token is the first.
+        self.assertEqual(context.calls[0].value, GROVE)
+        self.assertEqual(context.proposal_lines(str), ["disable: the auction stops selling GROVE."])
 
 
 if __name__ == "__main__":

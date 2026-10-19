@@ -445,16 +445,22 @@ class YearnV3VaultContext:
         """This vault's side of a parent vault's deposit into it, applied to ``state``."""
         idle_before = state.idle
         first = queue[0] if self.auto_allocate and queue else None
-        allocated = state.receive(amount, first)
+        move = state.receive(amount, first)
         head = (
             f"{parent} deposits {self.amount(amount)} into this vault (through its update_debt earlier in this batch)"
         )
-        if allocated is not None and first is not None:
+        line = f"{head}: vault idle {self.amount(idle_before)} → {self.amount(idle_before + amount)}"
+        if move is None or first is None:
+            return line + "."
+        if move.moved > 0:
+            limit = f", limited by {move.limited_by}" if move.limited_by else ""
             return (
-                f"{head}: auto_allocate forwards it to {self._name_of(first)} — current_debt "
-                f"{self.amount(allocated[0])} → {self.amount(allocated[1])}."
+                f"{line}; auto_allocate then deposits {self.amount(move.moved)} into {self._name_of(first)}{limit} "
+                f"— current_debt {self.amount(move.debt_before)} → {self.amount(move.debt_after)}; vault idle "
+                f"{self.amount(move.idle_after)}."
             )
-        return f"{head}: vault idle {self.amount(idle_before)} → {self.amount(state.idle)}."
+        reason = f" — limited by {move.limited_by}" if move.limited_by else ""
+        return f"{line}; auto_allocate moves nothing into {self._name_of(first)}{reason}."
 
     def outflow_line(self, parent: str, amount: int, state: VaultBatchState, queue: list[str]) -> str:
         """This vault's side of a parent vault's redemption from it, applied to ``state``."""
@@ -686,6 +692,7 @@ def walk_batch(
         context, run = contexts.get(key), runs.get(key)
         if context is None or run is None:
             continue
+        _refresh_inner_limits(key, contexts, runs)
         run.state.last_move = None
         line = context._proposal_line(call, run.added, run.state, run.queue)
         if line:
@@ -701,7 +708,29 @@ def walk_batch(
             lines[inner_key].append(inner.inflow_line(parent, move.moved, inner_run.state, inner_run.queue))
         else:
             lines[inner_key].append(inner.outflow_line(parent, -move.moved, inner_run.state, inner_run.queue))
+    for key in runs:
+        _refresh_inner_limits(key, contexts, runs)
     return lines, runs
+
+
+def _refresh_inner_limits(key: str, contexts: dict[str, YearnV3VaultContext], runs: dict[str, _Run]) -> None:
+    """Cap what vault ``key`` can redeem from each inner vault at that vault's exit liquidity now.
+
+    The pre-batch ``convertToAssets(maxRedeem(vault))`` goes stale once an earlier
+    call moves the inner vault's idle or queue debt: an inner vault that sent its
+    idle to an off-queue strategy can no longer pay a parent's redemption. On-chain
+    ``maxRedeem`` is the smaller of the position and the inner vault's liquidity,
+    and a vault never withdraws more than ``current_debt``, so the limit becomes
+    ``min(current_debt, inner exit liquidity)``. Unknown inner limits keep the snapshot.
+    """
+    run = runs[key]
+    for inner_key, inner_run in runs.items():
+        held = run.state.get(inner_key) if inner_key != key else None
+        if held is None or not held.active:
+            continue
+        liquidity = _exit_liquidity(contexts[inner_key], inner_run)
+        if liquidity is not None:
+            held.max_withdraw = min(held.current_debt, liquidity)
 
 
 def _strategy_debts(context: YearnV3VaultContext, run: _Run | None) -> dict[str, int]:
@@ -719,7 +748,13 @@ def _exposure(
     contexts: dict[str, YearnV3VaultContext],
     runs: dict[str, _Run] | None,
 ) -> dict[str, int]:
-    """Assets per underlying strategy: direct debt plus a pro-rata share of each allocator vault held."""
+    """Assets per underlying strategy: direct debt plus a pro-rata share of each allocator vault held.
+
+    A held vault's known strategies are its default queue plus those the batch names; it
+    keeps no on-chain list of the rest. Its idle (``idle:<vault>``) and the remainder of its
+    totalAssets (``unlisted:<vault>``) are kept as their own buckets, so the shares still
+    add up to the position instead of silently dropping off-queue holdings.
+    """
     exposure: dict[str, int] = {}
     own = _strategy_debts(context, runs.get(context.vault_address.lower()) if runs else None)
     for key, debt in own.items():
@@ -731,9 +766,19 @@ def _exposure(
         inner_total = inner.total_assets + (run.inflow if run else 0)
         if inner_total <= 0:
             continue
-        for sub, sub_debt in _strategy_debts(inner, run).items():
-            exposure[sub] = exposure.get(sub, 0) + debt * sub_debt // inner_total
+        sub_debts = _strategy_debts(inner, run)
+        idle = run.state.idle if run else inner.total_idle
+        buckets = {**sub_debts, f"idle:{key}": idle, f"unlisted:{key}": inner_total - idle - sum(sub_debts.values())}
+        for sub, sub_debt in buckets.items():
+            if sub_debt > 0:
+                exposure[sub] = exposure.get(sub, 0) + debt * sub_debt // inner_total
     return exposure
+
+
+def _unlisted_holdings(inner: YearnV3VaultContext) -> int:
+    """Pre-batch assets of a held vault in strategies neither in its default queue nor named by the batch."""
+    known = sum(s.current_debt for s in (*inner.default_queue, *inner.other_strategies))
+    return max(inner.total_assets - inner.total_idle - known, 0)
 
 
 def exposure_lines(
@@ -751,6 +796,9 @@ def exposure_lines(
     names: dict[str, str] = {}
     for vault in (context, *held):
         names.update({s.address.lower(): s.display for s in (*vault.default_queue, *vault.other_strategies)})
+        key = vault.vault_address.lower()
+        names[f"idle:{key}"] = f"idle in {vault.name}"
+        names[f"unlisted:{key}"] = f"{vault.name} holdings outside its default queue and this batch"
     rows = sorted(
         (key for key in {*before, *after} if before.get(key, 0) != after.get(key, 0)),
         key=lambda key: abs(after.get(key, 0) - before.get(key, 0)),
@@ -765,12 +813,21 @@ def exposure_lines(
         return f"{context.amount(raw)} ({share:.1f}%)"
 
     entries = [f"{names.get(key, key)} {cell(before.get(key, 0))} → {cell(after.get(key, 0))}" for key in rows]
-    return [
+    line = (
         f"Look-through exposure of {context.name} ({context.symbol}) — direct debt plus its pro-rata share of "
         f"{through}, before → after this batch, as a share of its totalAssets (changed strategies only): "
         + "; ".join(entries)
         + "."
-    ]
+    )
+    unlisted = [(vault, amount) for vault in held if (amount := _unlisted_holdings(vault))]
+    if unlisted:
+        line += " " + " ".join(
+            f"{vault.name} holds {vault.amount(amount)} in strategies outside its default queue that this batch "
+            "does not name; V3 vaults keep no on-chain list of them, so they appear as one bucket and may "
+            "include strategies listed above — exposure to those is understated by up to that bucket."
+            for vault, amount in unlisted
+        )
+    return [line]
 
 
 def resolve_yearn_v3_context(
