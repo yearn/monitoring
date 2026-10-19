@@ -175,6 +175,8 @@ class ReportContext:
     description: str = ""
     # Seatbelt-style checks (unverified target, ETH to nonpayable).
     safety_notes: list[str] = field(default_factory=list)
+    # Extra header rows as (name, markdown value), e.g. a Safe tx's nonce and safeTxHash.
+    metadata: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -570,7 +572,7 @@ def _chain_name(chain_id: int) -> str:
 
 
 def _format_metadata(ctx: ReportContext, risk_tag: str) -> str:
-    """Header bullet list: protocol, contract label, chain, risk."""
+    """Header bullet list: protocol, contract label, chain, caller-supplied rows, risk."""
     lines: list[str] = []
     if ctx.protocol:
         lines.append(f"- **Protocol:** {ctx.protocol}")
@@ -583,6 +585,7 @@ def _format_metadata(ctx: ReportContext, risk_tag: str) -> str:
         )
     if ctx.chain_id:
         lines.append(f"- **Chain:** {_chain_name(ctx.chain_id)} (chain id {ctx.chain_id})")
+    lines.extend(f"- **{name}:** {value}" for name, value in ctx.metadata if value)
     if risk_tag:
         lines.append(f"- **Risk:** {risk_tag}")
     return "\n".join(lines)

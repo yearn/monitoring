@@ -186,11 +186,7 @@ class YearnStrategyContext:
                     if unlock_time == 0
                     else f"unlocked to holders linearly over {_duration(unlock_time)}"
                 )
-                lines.append(
-                    f"report(): harvests and books profit or loss now; profit is {timing}. Previous report "
-                    f"{format_utc(self.last_report)}. Token transfers inside it (reward claims, auction kicks, "
-                    "redeposits into the yield source) are the strategy managing its own position, not payments."
-                )
+                lines.append(f"report(): harvests and books profit or loss now; profit is {timing}.")
                 reported = True
             elif name == TRIGGER_CALL and len(call.params) == 2:
                 lines.append(self._trigger_line(target, str(call.params[1][1]), render))
@@ -358,6 +354,18 @@ def resolve_yearn_strategy_context(
     return contexts
 
 
+# Said once per section, not once per report() call: a batch reporting several strategies repeated it for each.
+REPORT_TRANSFERS_NOTE = (
+    "Token transfers inside report() (reward claims, auction kicks, redeposits into the yield source) are the "
+    "strategy managing its own position, not payments."
+)
+
+
+def _reports(contexts: list[YearnStrategyContext]) -> bool:
+    """Whether any strategy in ``contexts`` has a report() call."""
+    return any(call.function_name == "report" for context in contexts for _, call in context.calls)
+
+
 def format_yearn_strategy_prompt(contexts: list[YearnStrategyContext]) -> str:
     """Render verified tokenized-strategy settings and changes for the LLM prompt."""
     sections: list[str] = []
@@ -374,6 +382,8 @@ def format_yearn_strategy_prompt(contexts: list[YearnStrategyContext]) -> str:
             *(f"  - {line}" for line in context.proposal_lines(render)),
         ]
         sections.append("\n".join(lines))
+    if _reports(contexts):
+        sections.append(REPORT_TRANSFERS_NOTE)
     return "\n\n".join(sections)
 
 
@@ -394,4 +404,6 @@ def format_yearn_strategy_report(
         lines = [f"**{header}**", f"- {settings}", "- **Proposed:**"]
         lines.extend(f"  - {line}" for line in context.proposal_lines(render))
         sections.append("\n".join(lines))
+    if _reports(contexts):
+        sections.append(REPORT_TRANSFERS_NOTE)
     return "\n\n".join(sections)

@@ -1,4 +1,4 @@
-"""Fetch verified contract source from Etherscan and extract relevant natspec.
+"""Fetch verified contract source from Etherscan and extract relevant natspec and short bodies.
 
 Used by the AI transaction explainer to ground LLM summaries in the actual
 contract semantics (function natspec, state-variable docs) rather than
@@ -9,6 +9,7 @@ Etherscan v2 uses a single multichain API key.
 
 import os
 import re
+import textwrap
 import threading
 from dataclasses import dataclass
 
@@ -27,6 +28,13 @@ ETHERSCAN_V2_API_URL = "https://api.etherscan.io/v2/api"
 # never blow the LLM prompt up. The natspec for one function + a state var is
 # always under a few hundred chars in practice.
 MAX_SNIPPET_CHARS = 4000
+
+# A function body is shown in full only when it is this short. Setters usually are,
+# and the body is what executes: GroveCompounder's natspec says setMinimumAuctionPrice
+# only records a requirement, while its body also sets the Auction's own floor — a
+# report that read only the natspec told signers the auction price was untouched.
+MAX_BODY_LINES = 30
+MAX_BODY_CHARS = 2000
 
 # Per-process cache: (chain_id, address_lower) -> VerifiedContract or None for miss.
 # Backed by an on-disk cache (below) so the same verified source is not re-fetched from
@@ -81,7 +89,10 @@ def _record_cache_event(source: str, hit: bool, cache_key: tuple[int, str]) -> N
     )
 
 
-_NATSPEC_LINE = r"(?:[ \t]*///.*\n|[ \t]*\*[^/].*\n|[ \t]*/\*\*[\s\S]*?\*/[ \t]*\n)"
+# A `/** ... */` block may not contain `*/`: with a lazy `[\s\S]*?` the leftmost match
+# began at an earlier function's comment and ran to the one above the target,
+# pulling every function in between into the "natspec".
+_NATSPEC_LINE = r"(?:[ \t]*///.*\n|[ \t]*\*[^/].*\n|[ \t]*/\*\*(?:[^*]|\*(?!/))*\*/[ \t]*\n)"
 _NATSPEC_BLOCK = rf"(?:(?:{_NATSPEC_LINE})+)?"
 _INHERITDOC_RE = re.compile(r"@inheritdoc\s+(\w+)")
 
@@ -125,6 +136,7 @@ class SourceContext:
     contract_name: str
     function_snippet: str  # natspec + function signature line
     state_var_snippets: list[str]  # natspec + declaration for each mutated state var
+    function_body: str = ""  # the body's statements, when short enough to show in full
 
 
 def _fetch_etherscan_contract(chain_id: int, address: str) -> VerifiedContract | None:
@@ -612,14 +624,38 @@ def find_state_var_writes(source: str, function_name: str, include_private: bool
 
 
 def _extract_function_body(source: str, function_name: str) -> str:
-    """Return the body of `function <name>(...) { ... }` or "" if not found."""
-    pattern = re.compile(rf"function\s+{re.escape(function_name)}\b[^{{]*\{{", re.MULTILINE)
+    """Return the body of `function <name>(...) { ... }` or "" if not found.
+
+    Bodiless declarations (``function f() external;`` in an interface) are skipped,
+    so the first implementation in the bundle is found wherever the interface sits.
+    """
+    pattern = re.compile(rf"function\s+{re.escape(function_name)}\b[^{{;]*\{{", re.MULTILINE)
     match = pattern.search(source)
     if not match:
         return ""
 
     end = _block_end(source, match.end() - 1)
     return source[match.end() : end - 1] if end != -1 else ""
+
+
+def _strip_vyper_docstring(body: str) -> str:
+    """Drop a Vyper body's leading docstring; the function snippet already shows it."""
+    return re.sub(r'^\s*"""[\s\S]*?"""[ \t]*\n?', "", body, count=1)
+
+
+def extract_short_function_body(source: str, function_name: str) -> str:
+    """A function's body, dedented, when it fits ``MAX_BODY_LINES``/``MAX_BODY_CHARS``; else "".
+
+    Natspec describes intent and can be stale; the body shows what runs — which
+    state it writes and which other contracts it calls.
+    """
+    body = _extract_function_body(source, function_name)
+    if not body.strip():
+        body = _strip_vyper_docstring(_extract_vyper_function_body(source, function_name))
+    body = textwrap.dedent(body.replace("\r\n", "\n")).strip("\n")
+    if not body.strip() or body.count("\n") + 1 > MAX_BODY_LINES or len(body) > MAX_BODY_CHARS:
+        return ""
+    return body
 
 
 def extract_state_var_snippet(source: str, var_name: str) -> str:
@@ -668,9 +704,10 @@ def _build_context(contract_name: str, source: str, function_name: str) -> Sourc
     if not func_snippet:
         return None
 
+    body = extract_short_function_body(source, function_name)
     var_names = find_state_var_writes(source, function_name)
     var_snippets: list[str] = []
-    total = len(func_snippet)
+    total = len(func_snippet) + len(body)
     for name in var_names:
         snippet = extract_state_var_snippet(source, name)
         if not snippet:
@@ -684,6 +721,7 @@ def _build_context(contract_name: str, source: str, function_name: str) -> Sourc
         contract_name=contract_name,
         function_snippet=func_snippet,
         state_var_snippets=var_snippets,
+        function_body=body,
     )
 
 
@@ -731,6 +769,10 @@ def format_source_context(ctx: SourceContext) -> str:
         lines.append(f"Contract: {ctx.contract_name}")
     lines.append("")
     lines.append(ctx.function_snippet)
+    if ctx.function_body:
+        lines.append("")
+        lines.append("Function body (verified source — what actually executes; it overrides the natspec):")
+        lines.append(textwrap.indent(ctx.function_body, "    "))
     if ctx.state_var_snippets:
         lines.append("")
         # These are the variables the function body assigns. Saying so stops the

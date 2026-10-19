@@ -33,3 +33,21 @@ def fetch_prices(token_keys: list[str]) -> dict[str, Decimal]:
     result = response.json()
     coins = result.get("coins", {})
     return {key: Decimal(str(data["price"])) for key, data in coins.items() if "price" in data}
+
+
+# DeFiLlama's chain slug for each chain id we monitor.
+DEFILLAMA_CHAINS: dict[int, str] = {
+    1: "ethereum",
+    10: "optimism",
+    137: "polygon",
+    999: "hyperliquid",
+    8453: "base",
+    42161: "arbitrum",
+    747474: "katana",
+}
+
+
+def defillama_key(chain_id: int, address: str) -> str | None:
+    """DeFiLlama price key (``"chain:address"``) for a token, or None for an unmapped chain."""
+    chain = DEFILLAMA_CHAINS.get(chain_id)
+    return f"{chain}:{address}" if chain else None

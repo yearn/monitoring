@@ -150,6 +150,14 @@ class TestYearnStrategyContext(unittest.TestCase):
         self.assertIn("unlocked to holders linearly over 2d", before.proposal_lines(render)[0])
         self.assertIn("as of before this transaction (a report earlier in the batch", before.proposal_lines(render)[1])
 
+    def test_report_transfers_note_is_said_once(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        contexts = self._resolve(mock_cm, [(GROVE, REPORT), (SPARK, REPORT)])
+        for rendered in (format_yearn_strategy_prompt(contexts), format_yearn_strategy_report(contexts, 1, {})):
+            self.assertEqual(rendered.count("Token transfers inside report()"), 1)
+            self.assertTrue(rendered.endswith("not payments."))
+        (context,) = self._resolve(mock_cm, [(GROVE, _unlock(0))])
+        self.assertNotIn("Token transfers", format_yearn_strategy_prompt([context]))
+
     def test_closing_spark_deposits(self, mock_cm: MagicMock, *_: MagicMock) -> None:
         close = _call("setOpenDeposits", "setOpenDeposits(bool)", ("bool", False))
         (context,) = self._resolve(mock_cm, [(SPARK, _unlock(0)), (SPARK, close)])

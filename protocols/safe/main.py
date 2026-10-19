@@ -33,6 +33,7 @@ from utils.chains import Chain, safe_network_to_chain_id
 from utils.formatting import parse_wei
 from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
 from utils.llm.credits import check_llm_credits
+from utils.llm.report import address_link, checksum_or_none
 from utils.logger import get_logger
 from utils.proxy import ProxyUpgrade, dedupe_upgrades, find_proxy_upgrades, format_upgrade_lines
 from utils.telegram import escape_markdown, send_error_message, send_telegram_message
@@ -42,6 +43,7 @@ load_dotenv()
 logger = get_logger("safe")
 
 SAFE_WEBSITE_URL = "https://app.safe.global/transactions/queue?safe="
+SAFE_TX_URL = "https://app.safe.global/transactions/tx"
 provider_url_mainnet = os.getenv("PROVIDER_URL_MAINNET")
 provider_url_arb = os.getenv("PROVIDER_URL_ARBITRUM")
 
@@ -337,6 +339,27 @@ def get_safe_url(safe_address: str, network_name: str) -> str:
     return f"{SAFE_WEBSITE_URL}{safe_address_network_prefix[network_name]}:{safe_address}"
 
 
+def _safe_tx_metadata(
+    tx: dict, safe_address: str, network_name: str, chain_id: int, safe_label: str | None = None
+) -> list[tuple[str, str]]:
+    """Report header rows that identify the Safe transaction: Safe, nonce, safeTxHash with its Safe app link.
+
+    Signers match the safeTxHash on their device; the report should carry it
+    rather than leave them to find it in the Safe queue.
+    """
+    checksum = checksum_or_none(safe_address)
+    labels = {checksum: safe_label} if checksum and safe_label else {}
+    rows = [("Safe", address_link(safe_address, chain_id, labels)), ("Nonce", str(tx.get("nonce", "")))]
+    safe_tx_hash = tx.get("safeTxHash") or ""
+    prefix = safe_address_network_prefix.get(network_name)
+    if safe_tx_hash and prefix:
+        url = f"{SAFE_TX_URL}?safe={prefix}:{safe_address}&id=multisig_{safe_address}_{safe_tx_hash}"
+        rows.append(("Safe tx hash", f"[`{safe_tx_hash}`]({url})"))
+    elif safe_tx_hash:
+        rows.append(("Safe tx hash", f"`{safe_tx_hash}`"))
+    return rows
+
+
 def _explain_safe_tx(
     tx: dict,
     target: str,
@@ -345,6 +368,7 @@ def _explain_safe_tx(
     protocol: str,
     safe_address: str,
     additional_info: str | None,
+    network_name: str = "",
 ):
     """Pick the right AI explainer path for a Safe transaction.
 
@@ -357,6 +381,7 @@ def _explain_safe_tx(
     """
     operation = int(tx.get("operation", 0) or 0)
     inner_calls = extract_inner_calls(tx) if operation == 1 else []
+    metadata = _safe_tx_metadata(tx, safe_address, network_name, chain_id, additional_info)
 
     if inner_calls:
         simulate = is_simulatable_multisend(tx, inner_calls)
@@ -375,6 +400,7 @@ def _explain_safe_tx(
             # A utility label names the multisend contract, not the Safe, so the
             # report's Contract link must point at the target in that case.
             label_address=target if utility_label else safe_address,
+            report_metadata=metadata,
         )
 
     # Non-multisend DELEGATECALLs (rare): skip sim but still try to explain.
@@ -392,6 +418,7 @@ def _explain_safe_tx(
         skip_simulation=skip_sim,
         context_note=context_note,
         refine=True,
+        report_metadata=metadata,
     )
 
 
@@ -541,6 +568,7 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
                     protocol=protocol,
                     safe_address=safe_address,
                     additional_info=additional_info,
+                    network_name=network_name,
                 )
                 if explanation:
                     message += format_explanation_line(explanation)

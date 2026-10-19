@@ -6,14 +6,18 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 from utils.source_context import (
+    MAX_BODY_LINES,
+    _build_context,
     _extract_function_body,
     _extract_function_snippet,
     _function_signature_from_abi,
+    extract_short_function_body,
     extract_state_var_snippet,
     fetch_function_input_names,
     fetch_source,
     fetch_verified_contract,
     find_state_var_writes,
+    format_source_context,
     get_contract_label,
     get_source_context,
     reset_cache,
@@ -131,6 +135,69 @@ class TestInheritdocResolution(unittest.TestCase):
         source = _INHERITDOC_SOURCE.replace("/// @notice Removes a user's commitment.", "/// @inheritdoc IBase")
         snippet = _extract_function_snippet(source, "bounce")
         self.assertIn("/// @inheritdoc IVault", snippet)
+
+
+# Shape of GroveCompounder (0xe060B80438771f13078048c3b0d930efECA6E622): an interface
+# declaration first, earlier functions with block natspec, and a setter whose natspec
+# says it only records a requirement while its body also sets the Auction's floor.
+GROVE_SOURCE = """
+interface IStrategy {
+    function setMinimumAuctionPrice(uint256 _minimumAuctionPrice) external;
+}
+
+contract GroveCompounder {
+    /**
+     * @notice Manually claim rewards from staking contract.
+     */
+    function claimRewards() external onlyKeepers {
+        _claimRewards();
+    }
+
+    /**
+     * @notice Set the minimum GROVE auction price required by the strategy.
+     * @dev The Auction itself must be configured with at least this minimum price.
+     */
+    function setMinimumAuctionPrice(uint256 _minimumAuctionPrice) external onlyManagement {
+        Auction(auction).setMinimumPrice(_minimumAuctionPrice);
+        minimumAuctionPrice = _minimumAuctionPrice;
+    }
+}
+"""
+
+
+class TestFunctionBody(unittest.TestCase):
+    def test_block_natspec_does_not_swallow_earlier_functions(self) -> None:
+        source = GROVE_SOURCE.replace("interface IStrategy {", "interface IUnrelated {").replace(
+            "function setMinimumAuctionPrice(uint256 _minimumAuctionPrice) external;", ""
+        )
+        snippet = _extract_function_snippet(source, "setMinimumAuctionPrice")
+        self.assertIn("@notice Set the minimum GROVE auction price", snippet)
+        self.assertNotIn("claimRewards", snippet)
+
+    def test_body_skips_interface_declarations(self) -> None:
+        body = _extract_function_body(GROVE_SOURCE, "setMinimumAuctionPrice")
+        self.assertIn("Auction(auction).setMinimumPrice(_minimumAuctionPrice);", body)
+
+    def test_short_body_is_shown_after_the_natspec(self) -> None:
+        ctx = _build_context("GroveCompounder", GROVE_SOURCE, "setMinimumAuctionPrice")
+        assert ctx is not None
+        self.assertEqual(
+            ctx.function_body,
+            "Auction(auction).setMinimumPrice(_minimumAuctionPrice);\nminimumAuctionPrice = _minimumAuctionPrice;",
+        )
+        rendered = format_source_context(ctx)
+        self.assertIn("Function body (verified source — what actually executes; it overrides the natspec):", rendered)
+        self.assertIn("    Auction(auction).setMinimumPrice(_minimumAuctionPrice);", rendered)
+
+    def test_long_body_is_omitted(self) -> None:
+        lines = "\n".join(f"        x{i} = {i};" for i in range(MAX_BODY_LINES + 1))
+        source = f"contract C {{\n    function big() external {{\n{lines}\n    }}\n}}"
+        self.assertEqual(extract_short_function_body(source, "big"), "")
+        self.assertIn("x0 = 0;", _extract_function_body(source, "big"))
+
+    def test_vyper_body_drops_the_docstring(self) -> None:
+        body = extract_short_function_body(VYPER_VAULT_SOURCE, "update_debt")
+        self.assertEqual(body, "return self._update_debt(strategy, target_debt, max_loss)")
 
 
 class TestExtractFunctionBody(unittest.TestCase):

@@ -93,6 +93,11 @@ Keep DETAIL lean:
 - Do not add a standalone list of contracts or addresses (the report's Call Flow and
   Reference sections already link them), and do not rebuild tables of values the Current
   State or Protocol Context sections already show — quote the before→after in prose.
+- When the same calls repeat across several contracts (a setter and a report() per
+  strategy), explain the pattern once, then give each contract's own numbers — do not
+  write a section per contract that repeats the same explanation.
+- Do not restate Protocol Context settings that do not bear on the verdict; the report
+  already publishes that section.
 
 Address hyperlink rule (applies to DETAIL only):
 - EVERY address you mention must be a markdown link to the block explorer, never a
@@ -110,7 +115,12 @@ Critical rules for parameter interpretation:
   use inverted or non-standard conventions (a "maxSlippage" may be a min-output ratio;
   a "fee" may be scaled to 1e4, 1e6, or 1e18).
 - When a Contract Source Context section is provided, trust the natspec over your prior
-  assumptions about the function name.
+  assumptions about the function name, and trust a shown function body over the natspec:
+  natspec can be stale, the body is what executes. An external call in the body
+  (`Auction(auction).setMinimumPrice(x)`) changes that other contract too — say so, and
+  never claim the other contract is left untouched. Natspec that describes what other code
+  enforces ("must be met before rewards can be kicked") is an unverified claim unless the
+  enforcing code is shown — do not state it as fact.
 - When a Current State section is provided, quote concrete before→after deltas.
 - Do NOT invent, recall, or assume the current/previous on-chain value. If no Current
   State section is present, describe only the NEW value being set — never phrase it as
@@ -1443,13 +1453,24 @@ def _format_simulation_context(
             name = log_entry.get("name", "Unknown")
             inputs = log_entry.get("inputs") or []
             input_strs = [f"{inp.get('soltype', {}).get('name', '?')}={inp.get('value', '?')}" for inp in inputs]
-            parts.append(f"  {name}({', '.join(input_strs)})")
+            # The emitter says which contract changed: a strategy setter whose
+            # UpdatedMinimumPrice came from its Auction also moved the Auction's floor.
+            emitter = _log_emitter(log_entry)
+            origin = f" — emitted by {_annotate_address(emitter, labels)}" if emitter else ""
+            parts.append(f"  {name}({', '.join(input_strs)}){origin}")
 
     return "\n".join(parts)
 
 
+def _log_emitter(log_entry: dict) -> str | None:
+    """Checksummed address of the contract that emitted a Tenderly log, or None."""
+    raw = log_entry.get("raw")
+    address = raw.get("address") if isinstance(raw, dict) else log_entry.get("address")
+    return _checksum_or_none(address) if isinstance(address, str) else None
+
+
 def _simulation_counterparties(sims: list[SimulationResult | None]) -> list[str]:
-    """Distinct non-zero transfer endpoints across successful sims, checksummed, first-seen order."""
+    """Distinct non-zero transfer endpoints, then event emitters, across successful sims; checksummed."""
     seen: set[str] = set()
     out: list[str] = []
     for sim in sims:
@@ -1462,6 +1483,14 @@ def _simulation_counterparties(sims: list[SimulationResult | None]) -> list[str]
                     continue
                 seen.add(checksum)
                 out.append(checksum)
+    for sim in sims:
+        if sim is None or not sim.success:
+            continue
+        for log_entry in sim.logs:
+            emitter = _log_emitter(log_entry)
+            if emitter is not None and emitter not in seen:
+                seen.add(emitter)
+                out.append(emitter)
     return out
 
 
@@ -1956,6 +1985,7 @@ def explain_transaction(
     refine: bool = True,
     description: str = "",
     label_address: str = "",
+    report_metadata: list[tuple[str, str]] | None = None,
 ) -> Explanation | None:
     """Generate an AI explanation for a governance transaction.
 
@@ -1988,6 +2018,8 @@ def explain_transaction(
             Contract header. Defaults to ``from_address`` — pass it explicitly
             when the label describes something else (e.g. a Safe multisend
             utility rather than the Safe itself).
+        report_metadata: Extra (name, markdown value) rows for the report header,
+            e.g. a Safe transaction's nonce and safeTxHash for signers to match.
 
     Returns:
         Explanation with summary and detail, or None on failure.
@@ -2024,6 +2056,7 @@ def explain_transaction(
             context_note=context_note,
             description=description,
             safety_notes=safety_notes,
+            report_metadata=report_metadata,
         )
 
     decoded_calls = [decoded]
@@ -2123,6 +2156,7 @@ def explain_transaction(
         label=label,
         from_address=from_address,
         label_address=label_address or from_address,
+        metadata=list(report_metadata or []),
         protocol_context=protocol_ctx.report,
         related_addresses=protocol_ctx.addresses,
         state_read_notes=state_reads.report_text(chain_id, address_labels),
@@ -2320,6 +2354,7 @@ def _deterministic_undecoded_explanation(
     context_note: str = "",
     description: str = "",
     safety_notes: list[str] | None = None,
+    report_metadata: list[tuple[str, str]] | None = None,
 ) -> Explanation:
     """Build summary + report for an all-unknown batch without any LLM calls."""
     report_ctx = ReportContext(
@@ -2338,6 +2373,7 @@ def _deterministic_undecoded_explanation(
         label=label,
         from_address=from_address,
         label_address=label_address or from_address,
+        metadata=list(report_metadata or []),
         context_note=context_note,
         description=description,
         safety_notes=safety_notes or [],
@@ -2365,6 +2401,7 @@ def explain_batch_transaction(
     refine: bool = True,
     description: str = "",
     label_address: str = "",
+    report_metadata: list[tuple[str, str]] | None = None,
 ) -> Explanation | None:
     """Generate an AI explanation for a batch/multicall governance transaction.
 
@@ -2389,6 +2426,8 @@ def explain_batch_transaction(
             Contract header. Defaults to ``from_address`` — pass it explicitly
             when the label describes something else (e.g. a Safe multisend
             utility rather than the Safe itself).
+        report_metadata: Extra (name, markdown value) rows for the report header,
+            e.g. a Safe transaction's nonce and safeTxHash for signers to match.
 
     Returns:
         Explanation with summary and detail, or None on failure.
@@ -2438,6 +2477,7 @@ def explain_batch_transaction(
             context_note=context_note,
             description=description,
             safety_notes=safety_notes,
+            report_metadata=report_metadata,
         )
 
     source_contexts = _collect_source_contexts(decoded_with_target, chain_id)
@@ -2508,6 +2548,7 @@ def explain_batch_transaction(
         label=label,
         from_address=from_address,
         label_address=label_address or from_address,
+        metadata=list(report_metadata or []),
         protocol_context=protocol_ctx.report,
         related_addresses=protocol_ctx.addresses,
         state_read_notes=state_reads.report_text(chain_id, address_labels),

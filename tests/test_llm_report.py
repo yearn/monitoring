@@ -507,6 +507,15 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestReportMetadata(unittest.TestCase):
+    def test_caller_rows_follow_chain_and_precede_risk(self) -> None:
+        ctx = _add_farms_ctx(metadata=[("Nonce", "3372"), ("Safe tx hash", "`0xabc`"), ("Empty", "")])
+        report = build_report("Summary.", "Analysis.", ctx, "LOW")
+        self.assertIn("- **Chain:** Mainnet (chain id 1)\n- **Nonce:** 3372\n- **Safe tx hash:** `0xabc`\n", report)
+        self.assertNotIn("**Empty:**", report)
+        self.assertLess(report.index("**Safe tx hash:**"), report.index("**Risk:**"))
+
+
 class TestRoleNameAnnotation(unittest.TestCase):
     """The call flow names a bytes32 role instead of showing only its digest."""
 

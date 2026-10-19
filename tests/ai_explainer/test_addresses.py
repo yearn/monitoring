@@ -9,6 +9,8 @@ from utils.formatting import format_decimal_amount, normalize_token_amount
 from utils.llm.ai_explainer import (
     _build_prompt,
     _collect_token_flows,
+    _format_simulation_context,
+    _simulation_counterparties,
     _token_label,
     _with_onchain_symbols,
     collect_unique_addresses,
@@ -224,6 +226,28 @@ class TestOnchainSymbols(unittest.TestCase):
             _with_onchain_symbols(SimulationResult(success=True), 1)
             _with_onchain_symbols(self._sim(""), 1)
         fetch.assert_not_called()
+
+
+class TestEventEmitters(unittest.TestCase):
+    """Each simulated event names the contract that emitted it."""
+
+    AUCTION = "0xF3318007c41539b691b49D3e898560AB5BB966A3"
+
+    def _sim(self) -> SimulationResult:
+        log = {
+            "name": "UpdatedMinimumPrice",
+            "inputs": [{"soltype": {"name": "minimumPrice"}, "value": "5036110000000000"}],
+            "raw": {"address": self.AUCTION.lower(), "topics": [], "data": "0x"},
+        }
+        return SimulationResult(success=True, gas_used=1, logs=[log, {"name": "Anonymous", "inputs": []}])
+
+    def test_event_line_names_its_emitter(self) -> None:
+        text = _format_simulation_context(self._sim(), {self.AUCTION: "Auction"})
+        self.assertIn(f"UpdatedMinimumPrice(minimumPrice=5036110000000000) — emitted by {self.AUCTION} (Auction)", text)
+        self.assertIn("  Anonymous()\n", text + "\n")
+
+    def test_emitters_are_labelled_and_linked(self) -> None:
+        self.assertEqual(_simulation_counterparties([self._sim()]), [self.AUCTION])
 
 
 class TestTokenFlows(unittest.TestCase):
