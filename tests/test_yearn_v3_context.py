@@ -706,17 +706,56 @@ class TestInnerVaultLiquidityChanges(unittest.TestCase):
         self.assertIn("withdraws 50 WETH", withdraw)
         self.assertNotIn("not modelled", withdraw)
 
-    def test_a_restricted_limit_after_a_deposit_is_stated_as_unknown(self) -> None:
+    def test_a_restricted_limit_after_a_deposit_stops_the_forecast(self) -> None:
+        # The parent may redeem only 10 WETH of its 100 (an owner restriction). It deposits 150, then
+        # withdraws everything: how much it gets is unknown, so nothing after it may be forecast.
         contexts = self._contexts()
         parent = contexts[VAULT.lower()]
         restricted = replace(parent.default_queue[0], max_withdraw=10 * E18)
-        contexts[VAULT.lower()] = replace(parent, total_idle=50 * E18, default_queue=(restricted,))
+        other = _strategy(PEER, "Spark Accumulator", 0, 1_000 * E18)
+        contexts[VAULT.lower()] = replace(parent, total_idle=150 * E18, default_queue=(restricted, other))
         ordered = [
-            (VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 150 * E18])),
+            (VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 250 * E18])),
+            (VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 0])),
+            (VAULT, _call("update_debt", ["address", "uint256"], [PEER, 1_000 * E18])),
+        ]
+        lines, runs = yearn_v3_context.walk_batch(contexts, ordered)
+        deposit, withdraw, later = lines[VAULT.lower()]
+        self.assertIn("deposits 150 WETH", deposit)
+        self.assertIn("would withdraw up to 250 WETH, but Inner Vault's withdraw limit", withdraw)
+        self.assertIn("not forecast", withdraw)
+        self.assertIn("update_debt(Spark Accumulator): not forecast", later)
+        # No guessed amount reaches the running state: the parent's idle is what the deposit left.
+        state = runs[VAULT.lower()].state
+        self.assertEqual(state.idle, 0)
+        inner, peer = state.get(self.INNER), state.get(PEER)
+        assert inner is not None and peer is not None
+        self.assertEqual((inner.current_debt, peer.current_debt), (250 * E18, 0))
+        # The inner vault received the deposit, and its balances stop there too.
+        self.assertTrue(runs[self.INNER.lower()].unforecast)
+
+    def test_outcome_lines_are_suppressed_once_unforecast(self) -> None:
+        contexts = self._contexts()
+        parent = contexts[VAULT.lower()]
+        restricted = replace(parent.default_queue[0], max_withdraw=10 * E18)
+        contexts[VAULT.lower()] = replace(parent, total_idle=150 * E18, default_queue=(restricted,))
+        calls = [
+            (VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 250 * E18])),
             (VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 0])),
         ]
-        lines, _ = yearn_v3_context.walk_batch(contexts, ordered)
-        self.assertIn("whether the full amount can be redeemed is not modelled", lines[VAULT.lower()][1])
+        reads = {VAULT: contexts[VAULT.lower()], self.INNER: contexts[self.INNER.lower()]}
+
+        def read(_chain: int, vault: str, calls: list[DecodedCall], queue_limits: bool = False) -> YearnV3VaultContext:
+            return replace(reads[vault], calls=tuple(calls))
+
+        with (
+            patch.object(yearn_v3_context, "_read_vault_context", side_effect=read),
+            patch.object(yearn_v3_context, "_allocator_losses", return_value={}),
+            patch.object(yearn_v3_context, "_allocator_configs", return_value={}),
+        ):
+            (context,) = resolve_yearn_v3_context("YEARN_MS", 1, calls)
+        (outcome,) = context.outcome_lines
+        self.assertIn("Liquidity, exposure and debt ratios after this batch are not forecast", outcome)
 
     def test_redemption_before_the_move_is_paid_from_idle(self) -> None:
         ordered = [(VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 0]))]

@@ -1965,7 +1965,12 @@ def _refine_summary(
             logger.warning("Summary refine round %d failed (%s); keeping draft", round_num, e)
             return draft
 
-        if not raw or not raw.strip() or raw.strip().upper().startswith("PASS"):
+        if not raw or not raw.strip():
+            # No review happened: keep the draft, but don't count it as a PASS.
+            _record(stages, stage, "empty", provider)
+            logger.warning("Summary refine round %d returned nothing; keeping draft", round_num)
+            return draft
+        if raw.strip().upper().startswith("PASS"):
             _record(stages, stage, "pass", provider)
             logger.info("Summary refine: PASS at round %d/%d", round_num, max_rounds)
             return draft

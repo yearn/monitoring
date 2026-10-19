@@ -309,3 +309,13 @@ class TestStageUsage(unittest.TestCase):
         )
         # The failed call keeps no usage: the provider's last_usage still belongs to the summary call.
         self.assertIsNone(explanation.stages[1].usage)
+
+
+class TestEmptyCritique(unittest.TestCase):
+    def test_blank_critique_keeps_the_draft_and_is_not_a_pass(self) -> None:
+        provider = _UsageProvider(["TLDR: Pauses the vault. LOW\nDETAIL: d", "   "])
+        explanation = _generate_explanation(provider, "prompt", refine=True)
+        self.assertEqual(explanation.summary, "Pauses the vault. LOW")
+        self.assertEqual(
+            [(s.stage, s.outcome) for s in explanation.stages], [("summary", "ok"), ("critique-1", "empty")]
+        )

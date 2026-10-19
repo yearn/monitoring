@@ -669,6 +669,8 @@ class _Run:
     redeem_caps: dict[str, int] = field(default_factory=dict)
     # Inner vaults whose owner-specific limit a deposit in this batch made unknowable.
     unknown_limits: set[str] = field(default_factory=set)
+    # Set once a call's amount is unknowable: from then on this vault's balances are not forecast.
+    unforecast: str = ""
 
 
 def walk_batch(
@@ -696,23 +698,35 @@ def walk_batch(
         context, run = contexts.get(key), runs.get(key)
         if context is None or run is None:
             continue
+        inner_key = str(call.params[0][1]).lower() if call.params else ""
+        inner, inner_run = contexts.get(inner_key), runs.get(inner_key)
+        if run.unforecast:
+            lines[key].append(_unforecast_line(context, call, run.unforecast))
+            continue
+        reason = _unknown_redemption(context, call, run, inner, inner_run)
+        if reason:
+            # Crediting a guessed amount would make every later balance in the batch a guess too.
+            lines[key].append(f"{reason} This call and every balance after it in this batch are not forecast.")
+            run.unforecast = reason
+            if inner_run is not None:
+                inner_run.unforecast = inner_run.unforecast or reason
+            continue
         _refresh_inner_limits(key, contexts, runs)
         run.state.last_move = None
         line = context._proposal_line(call, run.added, run.state, run.queue)
         if line:
             lines[key].append(line)
         move = run.state.last_move
-        inner_key = str(call.params[0][1]).lower() if call.params else ""
-        inner, inner_run = contexts.get(inner_key), runs.get(inner_key)
         if move is None or move.moved == 0 or inner is None or inner_run is None:
             continue
         parent = f"{context.name} ({context.symbol})"
-        inner_run.inflow += move.moved
-        if move.moved < 0 and inner_key in run.unknown_limits:
-            lines[key][-1] += (
-                f" {inner.name}'s withdraw limit for this vault was below its position before the batch, and this "
-                "batch deposited into it since, so whether the full amount can be redeemed is not modelled."
+        if inner_run.unforecast:
+            lines[inner_key].append(
+                f"{parent} moves {inner.amount(abs(move.moved))} {'into' if move.moved > 0 else 'out of'} this vault: "
+                f"not forecast — {inner_run.unforecast}"
             )
+            continue
+        inner_run.inflow += move.moved
         if move.moved < 0 and inner_key in run.redeem_caps:
             run.redeem_caps[inner_key] = max(run.redeem_caps[inner_key] + move.moved, 0)
         elif move.moved > 0 and inner_key in run.redeem_caps:
@@ -726,6 +740,45 @@ def walk_batch(
     for key in runs:
         _refresh_inner_limits(key, contexts, runs)
     return lines, runs
+
+
+def _unknown_redemption(
+    context: YearnV3VaultContext,
+    call: DecodedCall,
+    run: _Run,
+    inner: YearnV3VaultContext | None,
+    inner_run: _Run | None,
+) -> str:
+    """Why a withdrawal from an inner vault has an unknowable amount, or "".
+
+    Either the vault's own withdraw limit there was a restriction that a deposit in this
+    batch invalidated, or the inner vault's state is already unforecast.
+    """
+    if call.function_name != "update_debt" or inner is None or inner_run is None or len(call.params) < 2:
+        return ""
+    held = run.state.get(inner.vault_address)
+    target = call.params[1][1]
+    if held is None or not isinstance(target, int) or target >= held.current_debt:
+        return ""
+    head = (
+        f"update_debt({inner.name}) target_debt {context.amount(target)} would withdraw up to "
+        f"{context.amount(held.current_debt - target)}, but"
+    )
+    if inner.vault_address.lower() in run.unknown_limits:
+        return (
+            f"{head} {inner.name}'s withdraw limit for this vault was below its position before the batch and this "
+            "batch has deposited into it since, so how much it can redeem is unknown."
+        )
+    if inner_run.unforecast:
+        return f"{head} {inner.name}'s balances are not forecast at this point ({inner_run.unforecast})."
+    return ""
+
+
+def _unforecast_line(context: YearnV3VaultContext, call: DecodedCall, reason: str) -> str:
+    """A call on a vault whose balances depend on an earlier call with an unknown amount."""
+    first = call.params[0][1] if call.params else None
+    subject = context._name_of(first) if isinstance(first, str) and first.startswith("0x") else ""
+    return f"{call.function_name}({subject}): not forecast — an earlier call in this batch left an unknown amount."
 
 
 def _refresh_inner_limits(key: str, contexts: dict[str, YearnV3VaultContext], runs: dict[str, _Run]) -> None:
@@ -943,9 +996,13 @@ def resolve_yearn_v3_context(
             context,
             walked_lines=tuple(lines[key]),
             outcome_lines=(
-                *liquidity_lines(context, runs.get(key)),
-                *exposure_lines(context, everything, runs),
-                *allocator_config_lines(context, runs.get(key), configs),
+                (f"Liquidity, exposure and debt ratios after this batch are not forecast: {runs[key].unforecast}",)
+                if runs[key].unforecast
+                else (
+                    *liquidity_lines(context, runs.get(key)),
+                    *exposure_lines(context, everything, runs),
+                    *allocator_config_lines(context, runs.get(key), configs),
+                )
             ),
             debt_allocators=tuple((a, losses.get(a)) for a in allocators.get(context.vault_address, {})),
         )
