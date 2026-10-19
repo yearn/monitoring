@@ -702,6 +702,13 @@ def walk_batch(
         inner, inner_run = contexts.get(inner_key), runs.get(inner_key)
         if run.unforecast:
             lines[key].append(_unforecast_line(context, call, run.unforecast))
+            # The call still moves debt into or out of the inner vault, by an amount that is not known.
+            if call.function_name == "update_debt" and inner is not None and inner_run is not None:
+                inner_run.unforecast = inner_run.unforecast or run.unforecast
+                lines[inner_key].append(
+                    f"{context.name} ({context.symbol}) moves debt into or out of this vault by an amount that is "
+                    f"not forecast: {run.unforecast}"
+                )
             continue
         reason = _unknown_redemption(context, call, run, inner, inner_run)
         if reason:

@@ -215,7 +215,7 @@ def _upgrade_implementation(target: str, call: DecodedCall) -> str | None:
 
 def format_pendle_prompt(contexts: list[PendleSwapContext]) -> str:
     """Render integration references separately from live state and verified code."""
-    return _format_contexts(contexts, None, {})
+    return "\n\n".join(_format_contexts(group, None, {}) for group in _by_proxy(contexts))
 
 
 def format_pendle_report(
@@ -224,7 +224,19 @@ def format_pendle_report(
     labels: dict[str, str],
 ) -> str:
     """Render the same evidence with full explorer links for the gist report."""
-    return _format_contexts(contexts, chain_id, labels)
+    return "\n\n".join(_format_contexts(group, chain_id, labels) for group in _by_proxy(contexts))
+
+
+def _by_proxy(contexts: list[PendleSwapContext]) -> list[list[PendleSwapContext]]:
+    """Upgrades grouped by proxy, in batch order: each group's proxy state is rendered once, from its own reads.
+
+    Only the published PendleSwap proxy resolves today, so there is one group; grouping
+    keeps a second proxy from being rendered as upgrades of the first.
+    """
+    groups: dict[str, list[PendleSwapContext]] = {}
+    for context in contexts:
+        groups.setdefault(context.proxy.lower(), []).append(context)
+    return list(groups.values())
 
 
 # Payload bytes shown inline; the Decoded Calldata section carries the full value.

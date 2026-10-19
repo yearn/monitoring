@@ -734,6 +734,28 @@ class TestInnerVaultLiquidityChanges(unittest.TestCase):
         # The inner vault received the deposit, and its balances stop there too.
         self.assertTrue(runs[self.INNER.lower()].unforecast)
 
+    def test_a_frozen_vault_freezes_the_vaults_it_moves_debt_into(self) -> None:
+        # After the unknowable redemption, the parent's later deposit into a second inner vault has an
+        # unknown amount too, so that vault's balances must stop being forecast as well.
+        second = "0x00000000000000000000000000000000000000C3"
+        contexts = self._contexts()
+        parent = contexts[VAULT.lower()]
+        restricted = replace(parent.default_queue[0], max_withdraw=10 * E18)
+        held = _strategy(second, "Second Vault", 0, 1_000 * E18, is_vault=True)
+        contexts[VAULT.lower()] = replace(parent, total_idle=150 * E18, default_queue=(restricted, held))
+        contexts[second.lower()] = replace(
+            contexts[self.INNER.lower()], vault_address=second, name="Second Vault", symbol="yvSECOND"
+        )
+        ordered = [
+            (VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 250 * E18])),
+            (VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 0])),
+            (VAULT, _call("update_debt", ["address", "uint256"], [second, 100 * E18])),
+        ]
+        lines, runs = yearn_v3_context.walk_batch(contexts, ordered)
+        self.assertTrue(runs[second.lower()].unforecast)
+        (note,) = lines[second.lower()]
+        self.assertIn("by an amount that is not forecast", note)
+
     def test_outcome_lines_are_suppressed_once_unforecast(self) -> None:
         contexts = self._contexts()
         parent = contexts[VAULT.lower()]

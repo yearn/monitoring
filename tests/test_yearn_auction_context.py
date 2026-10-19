@@ -281,6 +281,19 @@ class TestRunningBatchState(unittest.TestCase):
         _, setter = context.proposal_lines(str)
         self.assertIn("Auction 1.0.5 rejects this setter while any lot is live (`active auction`)", setter)
 
+    def test_a_setter_rejected_while_live_does_not_change_later_calls(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        calls = [
+            (BIG, REPORT),
+            (BIG_AUCTION, _direct("setMinimumPrice", ("uint256", 10**15))),
+            (BIG_AUCTION, _direct("disable", ("address", GROVE))),
+            (BIG_AUCTION, _direct("setMinimumPrice", ("uint256", 2 * 10**15))),
+        ]
+        (context,) = self._resolve(mock_cm, calls)
+        _, rejected, _, applied = context.proposal_lines(str)
+        self.assertIn("so the call reverts and the setting is unchanged", rejected)
+        # The rejected 0.001 never landed: the next setter starts from 0.006.
+        self.assertIn("minimumPrice 0.006 USDS per GROVE → 0.002 USDS per GROVE", applied)
+
     def test_raised_min_amount_gates_the_later_report(self, mock_cm: MagicMock, *_: MagicMock) -> None:
         raise_gate = _call(
             "setMinAmountToSell", "setMinAmountToSell(address,uint256)", ("address", GROVE), ("uint256", 500_000 * E18)

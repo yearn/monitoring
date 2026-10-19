@@ -261,3 +261,14 @@ def test_same_upgrade_with_different_payloads_is_not_coalesced(boundaries: Bound
     ]
     contexts = resolve_pendle_context("pendle", 1, calls)
     assert [c.payload for c in contexts] == [b"\x01", b"\x02"]
+
+
+def test_each_proxy_is_rendered_with_its_own_state() -> None:
+    """Upgrades of two proxies are two sections, each with its own current implementation and owner."""
+    other = "0x00000000000000000000000000000000000000D4"
+    first = pendle_context.PendleSwapContext(PENDLE_SWAP, NEW, OLD, OWNER, "old src", "new src", False)
+    second = pendle_context.PendleSwapContext(other, NEW, other, other, "other src", "new src", False)
+    prompt = format_pendle_prompt([first, second])
+    assert prompt.count("PendleSwap adapter upgrade on") == 2
+    assert f"PendleSwap adapter upgrade on {other} — 1 upgrade call(s)" in prompt
+    assert f"Current proxy owner() (live read): {other}" in prompt

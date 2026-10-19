@@ -353,9 +353,12 @@ class YearnAuctionContext:
                 return [f"{via}: REVERTS — {invalid}."]
             live_before = {token: self._is_live(token, runs[token], settings) for token in runs}
             line = f"{via}: {self._setting_change(entry.function, settings, entry.value, render)}"
-            line += self._live_guard(live_before)
+            guard, reverts = self._live_guard(live_before)
+            if reverts:
+                # The call does not land: later calls must see the settings it would have replaced.
+                return [line + guard]
             settings[AUCTION_SETTERS[entry.function]] = entry.value
-            return [line + self._revival_note(live_before, runs, settings)]
+            return [line + guard + self._revival_note(live_before, runs, settings)]
         if entry.function in ("enable", "disable"):
             return [self._enable_line(entry, runs, settings, render)]
         if entry.function == "sweep":
@@ -442,17 +445,21 @@ class YearnAuctionContext:
         price = per_token * (1 - decay / 10_000) ** (elapsed // step)
         return price > 0 and price >= floor
 
-    def _live_guard(self, live: dict[str, bool]) -> str:
-        """A note when a lot is live while a pricing or receiver setter runs, which the verified Auction rejects."""
+    def _live_guard(self, live: dict[str, bool]) -> tuple[str, bool]:
+        """A note when a lot is live while a pricing or receiver setter runs, and whether the call reverts.
+
+        Auction 1.0.5 rejects these setters while any lot is live; other versions are not verified.
+        """
         if not any(live.values()):
-            return ""
+            return "", False
         symbols = ", ".join(lot.symbol for lot in self.lots if live.get(lot.token.lower()))
         if self.version == "1.0.5":
             return (
                 f" A {symbols} lot is live at this point, and Auction 1.0.5 rejects this setter while any lot is live "
-                "(`active auction`), so the call reverts."
+                "(`active auction`), so the call reverts and the setting is unchanged.",
+                True,
             )
-        return f" A {symbols} lot is live at this point; this Auction version may reject setters while one is."
+        return f" A {symbols} lot is live at this point; this Auction version may reject setters while one is.", False
 
     def _revival_note(self, live_before: dict[str, bool], runs: dict[str, _LotRun], settings: dict[str, object]) -> str:
         """Lots the new settings bring back to life: their decayed price is above the floor now in force."""
