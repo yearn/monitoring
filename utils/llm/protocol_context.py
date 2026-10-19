@@ -234,12 +234,21 @@ def resolve_protocol_context(
             continue
         if not contexts:
             continue
+        merged = dict(resolved_labels)
+        for context in contexts:
+            for address, label in context.labels.items():
+                merged.setdefault(address, label)
+        try:
+            prompt = adapter.format_prompt(contexts)
+            report = adapter.format_report(contexts, chain_id, {**(labels or {}), **merged})
+        except Exception as error:  # noqa: BLE001 - rendering must not break the alert either
+            logger.info("Protocol context adapter %s failed to render: %s", adapter.name, error)
+            continue
         for context in contexts:
             addresses.extend(context.addresses)
-            for address, label in context.labels.items():
-                resolved_labels.setdefault(address, label)
-        prompts.append(adapter.format_prompt(contexts))
-        reports.append(adapter.format_report(contexts, chain_id, {**(labels or {}), **resolved_labels}))
+        resolved_labels = merged
+        prompts.append(prompt)
+        reports.append(report)
 
     return ResolvedProtocolContext(
         prompt="\n\n".join(part for part in prompts if part),

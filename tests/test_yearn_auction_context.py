@@ -317,7 +317,73 @@ class TestRunningBatchState(unittest.TestCase):
         (context,) = self._resolve(mock_cm, [(BIG_AUCTION, disable)])
         # The second argument is the enabled-auctions index; the token is the first.
         self.assertEqual(context.calls[0].value, GROVE)
-        self.assertEqual(context.proposal_lines(str), ["disable: the auction stops selling GROVE."])
+        (line,) = context.proposal_lines(str)
+        self.assertIn("disable: the auction stops selling GROVE and deletes its lot state", line)
+
+
+@patch.object(yearn_auction_context, "get_contract_label", return_value="")
+@patch.object(yearn_auction_context, "fetch_prices", return_value=PRICES)
+@patch.object(yearn_auction_context, "fetch_function_input_names", return_value=["_minimumAuctionPrice"])
+@patch.object(yearn_auction_context, "fetch_source", return_value=("GroveCompounder", STRATEGY_SOURCE))
+@patch.object(yearn_auction_context, "fetch_erc20_metadata", side_effect=_metadata)
+@patch.object(yearn_auction_context, "call_view", side_effect=_call_view)
+@patch.object(yearn_auction_context, "ChainManager")
+class TestSecondReviewRound(unittest.TestCase):
+    def _resolve(self, mock_cm: MagicMock, calls: list[tuple[str, DecodedCall]]) -> list:
+        mock_cm.get_client.return_value.eth.get_block.return_value = {"timestamp": NOW}
+        return resolve_yearn_auction_context("YEARN_MS", 1, calls)
+
+    def test_strategy_balances_carry_across_a_set_auction(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        kick = _call("kickAuction", "kickAuction(address)", ("address", GROVE))
+        switch = _call("setAuction", "setAuction(address)", ("address", SMALL_AUCTION))
+        old, new = self._resolve(mock_cm, [(BIG, kick), (BIG, switch), (BIG, kick)])
+        first, _ = old.proposal_lines(str)
+        (second,) = new.proposal_lines(str)
+        self.assertIn("284,291.94 GROVE it claims", first)
+        # The first kick already took the claimed rewards; the new auction has nothing left to sell.
+        self.assertNotIn("284,291.94", second)
+        self.assertIn("does not kick GROVE — the strategy's balance after claiming (≈ 0 GROVE)", second)
+
+    def test_disabling_a_live_lot_lets_setters_through(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        calls = [
+            (BIG, REPORT),
+            (BIG_AUCTION, _direct("disable", ("address", GROVE))),
+            (BIG_AUCTION, _direct("setStartingPrice", ("uint256", 5_000 * E18))),
+            (BIG_AUCTION, _direct("kick", ("address", GROVE))),
+        ]
+        (context,) = self._resolve(mock_cm, calls)
+        _, disable, setter, kick = context.proposal_lines(str)
+        self.assertIn("the live lot ends, so it no longer counts as an active auction", disable)
+        self.assertNotIn("REVERTS", setter)
+        self.assertIn("startingPrice 10,000.00 USDS → 5,000.00 USDS", setter)
+        self.assertIn("kick: REVERTS — GROVE is disabled on the auction (`not enabled`)", kick)
+
+    def test_out_of_range_setters_revert_instead_of_crashing(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        calls = [
+            (BIG_AUCTION, _direct("setStepDecayRate", ("uint256", 10_000))),
+            (BIG_AUCTION, _direct("setStepDuration", ("uint256", 0))),
+            (BIG_AUCTION, _direct("setStartingPrice", ("uint256", 1))),
+            (BIG, REPORT),
+        ]
+        (context,) = self._resolve(mock_cm, calls)
+        decay, duration, start, kick = context.proposal_lines(str)
+        self.assertIn("REVERTS — stepDecayRate must be between 1 and 9,999 bps (`invalid decay rate`)", decay)
+        self.assertIn("REVERTS — stepDuration must be above 0", duration)
+        self.assertIn("REVERTS — startingPrice must exceed 1e9", start)
+        # The kick still uses the unchanged pricing: 0.3% steps to the unchanged 0.006 floor.
+        self.assertIn("reaches the floor after ~2h 56m", kick)
+
+    def test_rendering_guards_against_degenerate_pricing(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        # An Auction version this adapter has no validation rules for still must not crash.
+        CHAIN[BIG_AUCTION]["version()"] = "1.0.4"
+        try:
+            calls = [(BIG_AUCTION, _direct("setStepDecayRate", ("uint256", 10_000))), (BIG, REPORT)]
+            (context,) = self._resolve(mock_cm, calls)
+            _, kick = context.proposal_lines(str)
+        finally:
+            CHAIN[BIG_AUCTION]["version()"] = "1.0.5"
+        self.assertIn("kicks the GROVE auction", kick)
+        self.assertNotIn("reaches the floor", kick)
 
 
 if __name__ == "__main__":

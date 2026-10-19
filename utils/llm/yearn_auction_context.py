@@ -109,6 +109,8 @@ class _LotRun:
     kicked: int
     initial_available: int | None
     kicked_in_batch: bool = False
+    # False once `disable` deletes the lot's state; the auction no longer sells or counts it.
+    enabled: bool = True
 
     @classmethod
     def of(cls, lot: Lot) -> "_LotRun":
@@ -137,6 +139,8 @@ class AuctionCall:
     value: object = None
     # False when a report() could not be confirmed, from the strategy's verified source, to kick.
     confirmed: bool = True
+    # Position in the transaction, to replay a strategy's calls across auctions in order.
+    order: int = 0
 
 
 @dataclass
@@ -163,6 +167,9 @@ class YearnAuctionContext:
     strategy_idle_want: int | None = None
     calls: list[AuctionCall] = field(default_factory=list)
     labels: dict[str, str] = field(default_factory=dict)
+    # Strategy balances (held, claimable) per token as earlier auctions in the batch left them,
+    # e.g. before a `setAuction` moved the strategy's later calls here.
+    carried: dict[str, tuple[int | None, int | None]] = field(default_factory=dict)
 
     @property
     def addresses(self) -> list[str]:
@@ -274,6 +281,10 @@ class YearnAuctionContext:
 
     def proposal_lines(self, render: Render) -> list[str]:
         """Each call in batch order; settings and every lot carry forward so later calls see earlier ones."""
+        return self.walk(render)[0]
+
+    def walk(self, render: Render) -> tuple[list[str], dict[str, _LotRun]]:
+        """Lines for the calls in batch order, and every lot as they leave it."""
         settings: dict[str, object] = {
             "minimumPrice": self.minimum_price,
             "startingPrice": self.starting_price,
@@ -281,7 +292,12 @@ class YearnAuctionContext:
             "stepDuration": self.step_duration,
             "receiver": self.receiver,
         }
-        runs = {lot.token.lower(): _LotRun.of(lot) for lot in self.lots}
+        runs: dict[str, _LotRun] = {}
+        for lot in self.lots:
+            run = _LotRun.of(lot)
+            if lot.token.lower() in self.carried:
+                run.held, run.claimable = self.carried[lot.token.lower()]
+            runs[lot.token.lower()] = run
         lines: list[str] = []
         for entry in self.calls:
             name = entry.call.function_name
@@ -300,16 +316,17 @@ class YearnAuctionContext:
                     if entry.kind == "forward"
                     else entry.function
                 )
+                invalid = self._invalid_setting(entry.function, entry.value)
+                if invalid:
+                    lines.append(f"{via}: REVERTS — {invalid}.")
+                    continue
                 live_before = {token: self._is_live(token, runs[token], settings) for token in runs}
                 line = f"{via}: {self._setting_change(entry.function, settings, entry.value, render)}"
                 line += self._live_guard(live_before)
                 settings[AUCTION_SETTERS[entry.function]] = entry.value
                 lines.append(line + self._revival_note(live_before, runs, settings))
             elif entry.function in ("enable", "disable"):
-                lot = self.lot_for(entry.value)
-                token = lot.symbol if lot else render(str(entry.value))
-                verb = "starts selling" if entry.function == "enable" else "stops selling"
-                lines.append(f"{name}: the auction {verb} {token}.")
+                lines.append(self._enable_line(entry, runs, settings, render))
             elif entry.function == "sweep":
                 lot = self.lot_for(entry.value)
                 run = runs.get(lot.token.lower()) if lot else None
@@ -322,7 +339,47 @@ class YearnAuctionContext:
                     run.in_auction = 0
             elif entry.function == "setGovernanceOnlyKick":
                 lines.append(f"setGovernanceOnlyKick: {self.governance_only_kick} → {entry.value}.")
-        return lines
+        return lines, runs
+
+    def _enable_line(
+        self, entry: AuctionCall, runs: dict[str, _LotRun], settings: dict[str, object], render: Render
+    ) -> str:
+        """`enable` / `disable` against the lot's running state; `disable` deletes the lot on-chain."""
+        name = entry.call.function_name
+        lot = self.lot_for(entry.value)
+        run = runs.get(lot.token.lower()) if lot else None
+        if lot is None or run is None:
+            verb = "starts selling" if entry.function == "enable" else "stops selling"
+            return f"{name}: the auction {verb} {render(str(entry.value))}."
+        if entry.function == "enable":
+            if run.enabled:
+                return f"{name}: REVERTS — {lot.symbol} is already enabled (`already enabled`)."
+            run.enabled = True
+            return f"{name}: the auction sells {lot.symbol} again; its next kick starts a new lot."
+        if not run.enabled:
+            return f"{name}: REVERTS — {lot.symbol} is not enabled (`not enabled`)."
+        was_live = self._is_live(lot.token.lower(), run, settings)
+        run.enabled, run.kicked, run.initial_available, run.kicked_in_batch = False, 0, None, False
+        line = f"{name}: the auction stops selling {lot.symbol} and deletes its lot state"
+        if was_live:
+            line += " — the live lot ends, so it no longer counts as an active auction for setters"
+        if run.in_auction:
+            line += f"; the {lot.amount(run.in_auction)} it holds stays in the auction until swept or re-enabled"
+        return line + "."
+
+    def _invalid_setting(self, function: str, value: object) -> str:
+        """Why the verified Auction 1.0.5 rejects a setter's value, or ""."""
+        if self.version != "1.0.5":
+            return ""
+        if function == "setStartingPrice" and isinstance(value, int) and value <= 10**9:
+            return "startingPrice must exceed 1e9 (`starting price`)"
+        if function == "setStepDecayRate" and isinstance(value, int) and not 0 < value < 10_000:
+            return "stepDecayRate must be between 1 and 9,999 bps (`invalid decay rate`)"
+        if function == "setStepDuration" and isinstance(value, int) and not 0 < value < (self.auction_length or 86_400):
+            return "stepDuration must be above 0 and below the auction length (`invalid step duration`)"
+        if function == "setReceiver" and isinstance(value, str) and value.startswith("0x") and int(value, 16) == 0:
+            return "the receiver cannot be the zero address (`ZERO ADDRESS`)"
+        return ""
 
     def _is_live(self, token: str, run: _LotRun, settings: dict[str, object]) -> bool:
         """Whether a lot is live under the running settings, mirroring ``Auction._price``.
@@ -332,7 +389,7 @@ class YearnAuctionContext:
         state was read; falls back to the on-chain ``isActive`` when a setting is unknown.
         """
         lot = self.lot_for(token)
-        if lot is None or not run.kicked:
+        if lot is None or not run.enabled or not run.kicked:
             return False
         start, floor = settings["startingPrice"], settings["minimumPrice"]
         decay, step = settings["stepDecayRate"], settings["stepDuration"]
@@ -342,6 +399,7 @@ class YearnAuctionContext:
             and isinstance(decay, int)
             and isinstance(step, int)
             and step
+            and 0 < decay < 10_000
             and self.auction_length
             and run.initial_available
         ):
@@ -443,6 +501,12 @@ class YearnAuctionContext:
                 )
                 run.held, run.claimable = balance, 0
                 continue
+            if not run.enabled:
+                lines.append(
+                    f"{name}: REVERTS — {lot.symbol} is disabled on the auction (`not enabled`)"
+                    + ("; the kick inside it fails, so the whole call reverts." if from_strategy else ".")
+                )
+                continue
             size = run.in_auction + balance
             if size == 0:
                 lines.append(
@@ -502,9 +566,10 @@ class YearnAuctionContext:
             and isinstance(decay, int)
             and isinstance(step, int)
             and floor
+            and start > 0
             and size
-            and decay
-            and step
+            and 0 < decay < 10_000
+            and step > 0
         ):
             return ""
         opening = normalize(start, 18) / normalize(size, lot.decimals)
@@ -773,7 +838,7 @@ def resolve_yearn_auction_context(
 
     grouped: dict[str, list[AuctionCall]] = {}
     strategies: dict[str, str] = {}
-    for target, call in candidates:
+    for order, (target, call) in enumerate(candidates):
         try:
             classified = _classify(chain_id, probe, to_checksum_address(target), call)
         except Exception as error:  # noqa: BLE001 - enrichment must never block an alert
@@ -782,6 +847,7 @@ def resolve_yearn_auction_context(
         if classified is None:
             continue
         auction, entry = classified
+        entry.order = order
         grouped.setdefault(auction, []).append(entry)
         if entry.target.lower() != auction.lower():
             strategies.setdefault(auction, entry.target)
@@ -803,7 +869,40 @@ def resolve_yearn_auction_context(
             logger.info("Yearn auction context failed for %s: %s", auction, error)
             continue
         contexts.append(context)
+    _carry_strategy_holdings(contexts)
     return contexts
+
+
+def _carry_strategy_holdings(contexts: list[YearnAuctionContext]) -> None:
+    """Pass each strategy's held and claimable balances from one auction's calls to the next.
+
+    Every auction context reads the strategy's balances before the transaction. After
+    ``kickAuction`` → ``setAuction`` → ``kickAuction``, the second auction would sell
+    tokens the first kick already took. Contexts are replayed in the order of the
+    strategy's first call to each, and each starts from what the previous one left.
+    """
+
+    def first_strategy_call(context: YearnAuctionContext) -> float:
+        strategy = (context.strategy or "").lower()
+        return min((e.order for e in context.calls if e.target.lower() == strategy), default=math.inf)
+
+    holdings: dict[tuple[str, str], tuple[int | None, int | None]] = {}
+    for context in sorted(contexts, key=first_strategy_call):
+        if not context.strategy:
+            continue
+        strategy = context.strategy.lower()
+        context.carried = {
+            lot.token.lower(): holdings[(strategy, lot.token.lower())]
+            for lot in context.lots
+            if (strategy, lot.token.lower()) in holdings
+        }
+        try:
+            _, runs = context.walk(str)
+        except Exception as error:  # noqa: BLE001 - enrichment must never block an alert
+            logger.info("Yearn auction replay failed for %s: %s", context.address, error)
+            continue
+        for token, run in runs.items():
+            holdings[(strategy, token)] = (run.held, run.claimable)
 
 
 def format_yearn_auction_prompt(contexts: list[YearnAuctionContext]) -> str:

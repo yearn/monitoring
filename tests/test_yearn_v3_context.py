@@ -662,6 +662,29 @@ class TestInnerVaultLiquidityChanges(unittest.TestCase):
         # The inner vault's only line is its own deposit: no phantom redemption is applied to it.
         self.assertEqual(len(lines[self.INNER.lower()]), 1)
 
+    def test_an_owner_limit_below_the_inner_liquidity_is_kept(self) -> None:
+        # The parent's observed maxRedeem is 0 although the inner vault holds 100 idle (e.g. a
+        # withdraw limit module); the refresh must not raise it to the inner vault's liquidity.
+        contexts = self._contexts()
+        parent = contexts[VAULT.lower()]
+        restricted = replace(parent.default_queue[0], max_withdraw=0)
+        contexts[VAULT.lower()] = replace(parent, default_queue=(restricted,))
+        ordered = [(VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 0]))]
+        lines, _ = yearn_v3_context.walk_batch(contexts, ordered)
+        self.assertIn("moves nothing — limited by what the strategy can redeem now", lines[VAULT.lower()][0])
+        self.assertEqual(lines[self.INNER.lower()], [])
+
+    def test_a_withdraw_limit_module_keeps_the_observed_limit(self) -> None:
+        contexts = self._contexts()
+        parent = contexts[VAULT.lower()]
+        contexts[VAULT.lower()] = replace(
+            parent, default_queue=(replace(parent.default_queue[0], max_withdraw=40 * E18),)
+        )
+        contexts[self.INNER.lower()] = replace(contexts[self.INNER.lower()], withdraw_limit_module=PEER)
+        ordered = [(VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 0]))]
+        lines, _ = yearn_v3_context.walk_batch(contexts, ordered)
+        self.assertIn("withdraws 40 WETH", lines[VAULT.lower()][0])
+
     def test_redemption_before_the_move_is_paid_from_idle(self) -> None:
         ordered = [(VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 0]))]
         lines, runs = yearn_v3_context.walk_batch(self._contexts(), ordered)

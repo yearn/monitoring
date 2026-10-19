@@ -96,6 +96,8 @@ _VAULT_ABI = [
     _fn("deposit_limit", ["uint256"]),
     _fn("minimum_total_idle", ["uint256"]),
     _fn("use_default_queue", ["bool"]),
+    # Set when an external module decides each owner's withdraw limit.
+    _fn("withdraw_limit_module", ["address"]),
     # 3.1+: when True, every deposit is pushed straight into the first default-queue strategy.
     _fn("auto_allocate", ["bool"]),
     _fn("strategies", ["uint256", "uint256", "uint256", "uint256"], ["address"]),
@@ -166,6 +168,8 @@ class YearnV3VaultContext:
     calls: tuple[DecodedCall, ...] = field(default_factory=tuple)
     # 3.1+: deposits go straight to the first default-queue strategy; None when unreadable.
     auto_allocate: bool | None = None
+    # Non-zero when an external module sets each owner's withdraw limit; None when unreadable or unset.
+    withdraw_limit_module: str | None = None
     # DebtAllocators the update_debt calls come through, with their maxDebtUpdateLoss (bps; None if unread).
     debt_allocators: tuple[tuple[str, int | None], ...] = ()
     # Set by the resolver's global batch walk; None renders this vault's calls on their own.
@@ -622,6 +626,7 @@ def _read_vault_context(
     deposit_limit = _optional_call(contract.functions.deposit_limit())
     minimum_total_idle = _optional_call(contract.functions.minimum_total_idle())
     use_default_queue = _optional_call(contract.functions.use_default_queue())
+    module = _optional_call(contract.functions.withdraw_limit_module())
     auto_allocate = _optional_call(contract.functions.auto_allocate())
     return YearnV3VaultContext(
         vault_address=vault,
@@ -642,6 +647,9 @@ def _read_vault_context(
         other_strategies=tuple(states[a] for a in others),
         calls=tuple(calls),
         auto_allocate=auto_allocate if isinstance(auto_allocate, bool) else None,
+        withdraw_limit_module=(
+            to_checksum_address(module) if isinstance(module, str) and int(module, 16) != 0 else None
+        ),
     )
 
 
@@ -667,6 +675,8 @@ class _Run:
     added: set[str] = field(default_factory=set)
     # Net assets parent vaults moved into (positive) or out of (negative) this vault.
     inflow: int = 0
+    # Per inner vault: an owner-specific redemption limit observed before the batch, less what was redeemed.
+    redeem_caps: dict[str, int] = field(default_factory=dict)
 
 
 def walk_batch(
@@ -686,6 +696,8 @@ def walk_batch(
         key: _Run(context.batch_state(), [s.address.lower() for s in context.default_queue])
         for key, context in contexts.items()
     }
+    for key in runs:
+        _observe_redeem_caps(key, contexts, runs)
     lines: dict[str, list[str]] = {key: [] for key in contexts}
     for vault, call in ordered:
         key = vault.lower()
@@ -704,6 +716,8 @@ def walk_batch(
             continue
         parent = f"{context.name} ({context.symbol})"
         inner_run.inflow += move.moved
+        if move.moved < 0 and inner_key in run.redeem_caps:
+            run.redeem_caps[inner_key] = max(run.redeem_caps[inner_key] + move.moved, 0)
         if move.moved > 0:
             lines[inner_key].append(inner.inflow_line(parent, move.moved, inner_run.state, inner_run.queue))
         else:
@@ -721,7 +735,9 @@ def _refresh_inner_limits(key: str, contexts: dict[str, YearnV3VaultContext], ru
     idle to an off-queue strategy can no longer pay a parent's redemption. On-chain
     ``maxRedeem`` is the smaller of the position and the inner vault's liquidity,
     and a vault never withdraws more than ``current_debt``, so the limit becomes
-    ``min(current_debt, inner exit liquidity)``. Unknown inner limits keep the snapshot.
+    ``min(current_debt, inner exit liquidity)`` — further capped by any owner-specific
+    limit observed before the batch (``_observe_redeem_caps``). Unknown inner limits
+    keep the snapshot.
     """
     run = runs[key]
     for inner_key, inner_run in runs.items():
@@ -729,8 +745,32 @@ def _refresh_inner_limits(key: str, contexts: dict[str, YearnV3VaultContext], ru
         if held is None or not held.active:
             continue
         liquidity = _exit_liquidity(contexts[inner_key], inner_run)
-        if liquidity is not None:
-            held.max_withdraw = min(held.current_debt, liquidity)
+        if liquidity is None:
+            continue
+        limit = min(held.current_debt, liquidity)
+        cap = run.redeem_caps.get(inner_key)
+        held.max_withdraw = limit if cap is None else min(limit, cap)
+
+
+def _observe_redeem_caps(key: str, contexts: dict[str, YearnV3VaultContext], runs: dict[str, _Run]) -> None:
+    """Keep each pre-batch redemption limit that liquidity and debt alone do not explain.
+
+    ``maxRedeem`` is owner-specific: a ``withdraw_limit_module`` can cap one holder
+    below what the vault's liquidity allows, even to 0. Refreshing from liquidity alone
+    would raise such a limit and predict a withdrawal that cannot happen. A snapshot
+    below ``min(current_debt, inner exit liquidity)``, or any snapshot on a vault with
+    a module, is kept as a cap for the batch.
+    """
+    run = runs[key]
+    for inner_key in runs:
+        held = run.state.get(inner_key) if inner_key != key else None
+        if held is None or not held.active or held.max_withdraw is None:
+            continue
+        inner = contexts[inner_key]
+        liquidity = _exit_liquidity(inner, None)
+        explained = min(held.current_debt, liquidity) if liquidity is not None else None
+        if inner.withdraw_limit_module or explained is None or held.max_withdraw < explained:
+            run.redeem_caps[inner_key] = held.max_withdraw
 
 
 def _strategy_debts(context: YearnV3VaultContext, run: _Run | None) -> dict[str, int]:

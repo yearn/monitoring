@@ -66,6 +66,23 @@ class TestResolveProtocolContext(unittest.TestCase):
 
         self.assertEqual(resolved.prompt, "beta prompt")
 
+    def test_adapter_that_fails_to_render_does_not_block_the_others(self) -> None:
+        def explode(contexts: object) -> str:
+            raise ValueError("math domain error")
+
+        broken = _Adapter(
+            "broken",
+            lambda p, c, t: [_FakeContext([TOKEN], {TOKEN: "Broken"})],
+            explode,
+            lambda contexts, chain_id, labels: "x",
+        )
+        adapters = (broken, _adapter("alpha", [_FakeContext([TARGET], {TARGET: "Timelock"})]))
+        with patch.object(protocol_context, "_ADAPTERS", adapters):
+            resolved = resolve_protocol_context("x", 1, [(TARGET, _call())])
+        self.assertEqual((resolved.prompt, resolved.report), ("alpha prompt", "alpha report"))
+        # Nothing from the adapter that failed to render reaches the report.
+        self.assertEqual((resolved.addresses, resolved.labels), ([TARGET], {TARGET: "Timelock"}))
+
     def test_existing_labels_reach_the_report_renderer(self) -> None:
         seen: dict[str, str] = {}
 
