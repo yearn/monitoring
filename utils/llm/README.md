@@ -412,7 +412,14 @@ Adapters receive the inner calls of executed governance wrappers too. `expand_ex
 
 ### 6. LLM Prompt & Completion (`utils/llm/ai_explainer.py`)
 
-The prompt is split into a **system** prompt (static instructions) and a **user** prompt (per-tx context). `complete(prompt, system_prompt=...)` passes the system block via the provider's native system role, which improves instruction-following and lets the Anthropic provider mark it `cache_control: ephemeral` — repeated alerts within the cache window pay for the (large) instruction prompt only once. The static block (`SYSTEM_INSTRUCTIONS`) enforces brevity:
+The prompt is split into a **system** prompt (static instructions) and a **user** prompt (per-tx context).
+
+**Keeping the context lean.** Each LLM call resends the whole context, so repetition costs on every call:
+- Semantics shared by every vault or auction (V3 `update_debt` and queue rules, Dutch-auction mechanics) are stated once per Protocol Context section; each vault or auction keeps only its own numbers.
+- Simulation results drop `Transfer` events when token transfers are listed, since they restate them.
+- The preamble separates values read on-chain (verified) from the adapters' forecasts (amounts moved, lots, after-batch liquidity, exposure and ratios). Where the simulation differs, the simulation wins.
+
+The auction mechanics are worded as they work: takers buy near market as the price falls, and the floor only bounds an unbid lot. A loss-framed sentence ("the gap is the most a sale can give away") tipped a routine floor change to MEDIUM in 3 of 4 samples; the baseline did so in 1 of 4. Measure changes like these on pinned historical batches (an anvil fork at the alert block, Tenderly at that block, historical prices), with several samples per side: risk tags vary from run to run. `complete(prompt, system_prompt=...)` passes the system block via the provider's native system role, which improves instruction-following and lets the Anthropic provider mark it `cache_control: ephemeral` — repeated alerts within the cache window pay for the (large) instruction prompt only once. The static block (`SYSTEM_INSTRUCTIONS`) enforces brevity:
 
 - Starts with a verb, no "This transaction…" preamble
 - Trailing risk tag in caps (LOW / MEDIUM / HIGH / CRITICAL)

@@ -938,8 +938,11 @@ AUCTION_MECHANICS = (
     "Yearn Auctions are Dutch auctions. Each kick offers the auction's entire balance of a token — anything left "
     "unsold from an earlier lot plus what is sent in. The whole lot's price starts at startingPrice and decays every "
     "step; the lot ends after the auction length, or as soon as the per-token price falls below minimumPrice, and "
-    "unsold tokens stay in the auction for the next kick. Takers do not buy above market, so a floor above market "
-    "leaves lots unsold; below it, the gap is the most a sale can give away. Lot sizes, proceeds and timings below "
+    "unsold tokens stay in the auction for the next kick. The price starts far above market and falls, so a taker "
+    "normally buys near market (less their margin); minimumPrice only matters if no taker bids before the price "
+    "reaches it. A floor above market therefore leaves lots unsold, and a floor below market lets them clear — the "
+    "gap to market bounds what an unbid lot could lose, not what a sale is expected to lose. Lot sizes, proceeds and "
+    "timings below "
     "are this adapter's forecast from state read before the transaction: rewards keep accruing until execution, and "
     "each AuctionKicked event's `available` in the simulation is the exact lot."
 )
