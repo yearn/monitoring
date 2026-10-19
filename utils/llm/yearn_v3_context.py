@@ -221,21 +221,11 @@ class YearnV3VaultContext:
             return f"{ratio:.1f}× vault totalAssets"
         return f"{ratio * 100:.1f}% of vault totalAssets"
 
-    def semantics_line(self) -> str:
-        """Deterministic unit and flag semantics from the vault source."""
+    def units_line(self) -> str:
+        """The vault's unit for every debt and limit value, verified from its asset."""
         return (
             f"Units: max_debt, target_debt, deposit_limit and minimum_total_idle on this vault are denominated in "
-            f"its asset {self.asset_symbol} ({self.asset_decimals} decimals) — verified, do not hedge about units. "
-            "add_strategy(strategy, add_to_queue) registers the strategy with max_debt 0; add_to_queue=True "
-            "appends it to the default queue (used for withdrawals), False leaves it out. "
-            "update_max_debt_for_strategy only sets a ceiling: funds move only when a DEBT_MANAGER "
-            "(typically a debt allocator) calls update_debt. update_debt(strategy, target_debt) is a TARGET, not an "
-            "amount: a deposit is capped by the strategy's max_debt, its maxDeposit and the vault's idle above "
-            "minimum_total_idle, so a target above what the vault holds simply allocates everything available — "
-            "it is not a funding gap; the per-call lines below give the expected amounts, running through the "
-            "batch. Withdrawals (withdraw/redeem) pull from strategies in default_queue order unless the withdrawer "
-            "passes a custom queue; use_default_queue=True forces the default queue even then, and False only "
-            "permits custom queues — the default queue still applies to ordinary withdrawals."
+            f"its asset {self.asset_symbol} ({self.asset_decimals} decimals) — verified, do not hedge about units."
         )
 
     def proposal_lines(self) -> list[str]:
@@ -1090,14 +1080,29 @@ def _allocator_lines(context: YearnV3VaultContext, render: Any) -> list[str]:
     return lines
 
 
+# How V3 vault calls behave, from the vault source; stated once per prompt, not per vault.
+V3_SEMANTICS = (
+    "Yearn V3 vault semantics: add_strategy(strategy, add_to_queue) registers the strategy with max_debt 0; "
+    "add_to_queue=True appends it to the default queue (used for withdrawals), False leaves it out. "
+    "update_max_debt_for_strategy only sets a ceiling: funds move only when a DEBT_MANAGER (typically a debt "
+    "allocator) calls update_debt. update_debt(strategy, target_debt) is a TARGET, not an amount: a deposit is "
+    "capped by the strategy's max_debt, its maxDeposit and the vault's idle above minimum_total_idle, so a target "
+    "above what the vault holds simply allocates everything available — it is not a funding gap. Withdrawals "
+    "(withdraw/redeem) pull from strategies in default_queue order unless the withdrawer passes a custom queue; "
+    "use_default_queue=True forces the default queue even then, and False only permits custom queues — the "
+    "default queue still applies to ordinary withdrawals. Lines marked as moves, liquidity, exposure or ratios "
+    "after the batch are this adapter's model of the calls, run in batch order."
+)
+
+
 def format_yearn_v3_prompt(contexts: list[YearnV3VaultContext]) -> str:
-    """Render verified Yearn V3 vault context for the LLM prompt."""
-    sections: list[str] = []
+    """Render verified Yearn V3 vault context for the LLM prompt; shared semantics are stated once."""
+    sections: list[str] = [V3_SEMANTICS] if contexts else []
     for context in contexts:
         lines = [
             f"Yearn V3 vault {context.vault_address}: {context.name} ({context.symbol}), API {context.api_version}, "
             f"asset {context.asset_symbol} {context.asset_address}",
-            context.semantics_line(),
+            context.units_line(),
             f"State now: totalAssets {context.amount(context.total_assets)} (debt {context.amount(context.total_debt)}, "
             f"idle {context.amount(context.total_idle)}); deposit_limit {context.optional_amount(context.deposit_limit)}; "
             f"use_default_queue {context.use_default_queue}; shutdown {str(context.is_shutdown).lower()}",

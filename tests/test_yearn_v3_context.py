@@ -153,6 +153,10 @@ class TestRendering(unittest.TestCase):
         self.assertIn("WETH-2 yVault (yvWETH-2), API 3.0.2", prompt)
         self.assertIn("denominated in its asset WETH (18 decimals) — verified, do not hedge", prompt)
         self.assertIn("update_debt(strategy, target_debt) is a TARGET, not an amount", prompt)
+        # The shared semantics appear once however many vaults the batch touches.
+        two = format_yearn_v3_prompt([_context([ADD_LOOPER]), _context([CAP_LOOPER])])
+        self.assertEqual(two.count("is a TARGET, not an amount"), 1)
+        self.assertEqual(two.count("denominated in its asset WETH"), 2)
         self.assertIn("False only permits custom queues — the default queue still applies", prompt)
         self.assertIn(f"1. Spark Accumulator {PEER}: current_debt 921 WETH / max_debt 10,000 WETH", prompt)
 

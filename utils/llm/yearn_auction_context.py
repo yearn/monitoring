@@ -261,13 +261,11 @@ class YearnAuctionContext:
             if self.step_decay_rate is not None and self.step_duration
             else "decays on the auction's step schedule"
         )
-        length = format_duration(self.auction_length) if self.auction_length else "the auction length"
+        length = format_duration(self.auction_length) if self.auction_length else "unknown"
         return (
-            "Dutch auction. Each kick offers the auction's entire balance of the token — anything left unsold "
-            "from an earlier lot plus what is sent in. The whole lot's price starts at startingPrice = "
-            f"{self.want_amount(normalize(self.starting_price, 18))} and {decay}. The auction ends after {length}, "
-            f"or as soon as the per-token price falls below minimumPrice = {self.price(self.minimum_price, lot)} "
-            f"(raw {self.minimum_price}, 1e18-scaled); unsold tokens then stay in the auction until the next kick."
+            f"startingPrice = {self.want_amount(normalize(self.starting_price, 18))} for the whole lot, which "
+            f"{decay}; auction length {length}; minimumPrice = {self.price(self.minimum_price, lot)} "
+            f"(raw {self.minimum_price}, 1e18-scaled)."
         )
 
     def _lot_line(self, lot: Lot, render: Render) -> str:
@@ -492,8 +490,7 @@ class YearnAuctionContext:
                 line += (
                     f" Against the market (1 {lot.symbol} ≈ {_sig(lot.market_price)} {self.want_symbol}) the floor "
                     f"moves from {_versus(normalize(old or 0, 18), lot.market_price)} to "
-                    f"{_versus(normalize(value, 18), lot.market_price)}. Takers do not buy above market, so a floor "
-                    "above it leaves lots unsold; below it, the gap is the most a sale can give away."
+                    f"{_versus(normalize(value, 18), lot.market_price)}."
                 )
             return line
         if setting == "startingPrice":
@@ -567,8 +564,7 @@ class YearnAuctionContext:
             )
             line = (
                 f"{name}: {verb}. The lot is the auction's whole balance — ≈ "
-                f"{lot.amount(size)} ({' + '.join(parts)}; rewards keep accruing until execution, and the "
-                f"AuctionKicked event's `available` is the exact lot).{gate}"
+                f"{lot.amount(size)} ({' + '.join(parts)}).{gate}"
             )
             floor = settings["minimumPrice"]
             if isinstance(floor, int) and floor:
@@ -937,9 +933,21 @@ def walk_auctions(contexts: list[YearnAuctionContext], render: Render) -> dict[i
     return lines
 
 
+# How a Yearn Auction sells, from the verified Auction source; stated once per section, not per auction.
+AUCTION_MECHANICS = (
+    "Yearn Auctions are Dutch auctions. Each kick offers the auction's entire balance of a token — anything left "
+    "unsold from an earlier lot plus what is sent in. The whole lot's price starts at startingPrice and decays every "
+    "step; the lot ends after the auction length, or as soon as the per-token price falls below minimumPrice, and "
+    "unsold tokens stay in the auction for the next kick. Takers do not buy above market, so a floor above market "
+    "leaves lots unsold; below it, the gap is the most a sale can give away. Lot sizes, proceeds and timings below "
+    "are this adapter's forecast from state read before the transaction: rewards keep accruing until execution, and "
+    "each AuctionKicked event's `available` in the simulation is the exact lot."
+)
+
+
 def format_yearn_auction_prompt(contexts: list[YearnAuctionContext]) -> str:
-    """Render verified auction settings, lots and changes for the LLM prompt."""
-    sections: list[str] = []
+    """Render verified auction settings, lots and changes for the LLM prompt; mechanics are stated once."""
+    sections: list[str] = [AUCTION_MECHANICS] if contexts else []
     for context in contexts:
 
         def render(address: str, labels: dict[str, str] = context.labels) -> str:
@@ -961,8 +969,8 @@ def format_yearn_auction_report(
     chain_id: int,
     labels: dict[str, str],
 ) -> str:
-    """Render the deterministic auction section for the gist report."""
-    sections: list[str] = []
+    """Render the deterministic auction section for the gist report; mechanics are stated once."""
+    sections: list[str] = [f"_{AUCTION_MECHANICS}_"] if contexts else []
     for context in contexts:
         merged = {**context.labels, **labels}
 

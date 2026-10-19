@@ -147,9 +147,12 @@ Critical rules for parameter interpretation:
   normalized totalAssets, and configured token targets as verified deterministic facts. When it
   states the unit a parameter is denominated in (e.g. a Yearn V3 max_debt in the vault asset),
   use that unit and its normalized amounts without hedging, even if Related Tokens lists several
-  candidate tokens. Amounts it renders in a named token ("100,000,000 USDC") are AUTHORITATIVE —
-  report those, not the raw integers, and take full/partial, before→after and headroom figures
-  from it as stated. Prefer its contract names over raw labels. Distinguish
+  candidate tokens. Amounts it renders in a named token ("100,000,000 USDC") are AUTHORITATIVE
+  for units — report those, not the raw integers. Its current values are observations; its
+  after-batch figures (amounts moved, before→after, headroom, lots, liquidity, exposure) are the
+  adapter's model of the calls: use them, but where the Simulation Results show different
+  amounts, report the simulated ones and say they differ. Prefer its contract names over raw
+  labels. Distinguish
   the accounting asset from non-accounting ERC20 targets configured in an escrow whitelist;
   whitelisting proves permission to interact, but not how a token is valued or used downstream.
 - A bytes32 argument the Protocol Context or a Role Names section resolves to a keccak256
@@ -1452,8 +1455,15 @@ def _format_simulation_context(
             parts.append(f"    {sc.original} -> {sc.dirty}")
 
     if sim.logs:
-        shown_logs = sim.logs[:10]
-        parts.append(f"\nEvents emitted ({len(sim.logs)} total, showing {len(shown_logs)}):")
+        logs = sim.logs
+        # Transfer events restate the token transfers listed above; dropping them leaves the
+        # ten-event budget for the events that say what changed (DebtUpdated, UpdatedMinimumPrice).
+        if sim.asset_changes:
+            logs = [log_entry for log_entry in logs if log_entry.get("name") != "Transfer"]
+        shown_logs = logs[:10]
+        omitted = len(sim.logs) - len(logs)
+        note = f"; {omitted} Transfer events omitted — they restate the token transfers above" if omitted else ""
+        parts.append(f"\nEvents emitted ({len(sim.logs)} total, showing {len(shown_logs)}{note}):")
         for log_entry in shown_logs:
             name = log_entry.get("name", "Unknown")
             inputs = log_entry.get("inputs") or []
@@ -1701,9 +1711,12 @@ def _build_prompt(
     if protocol_context:
         parts.append(
             "\n--- Protocol Context (verified source, integration references and live on-chain reads) ---\n"
-            "Resolved identities, hashes, decimals, units and current values are VERIFIED facts. "
-            "State supplied facts; do not call them unavailable. Distinguish documented integration "
-            "architecture from live observations.\n" + protocol_context
+            "Values read on-chain before this transaction (identities, hashes, decimals, units, balances, "
+            "settings) are VERIFIED facts: state them, do not call them unavailable. Lines about what the "
+            "calls will do (amounts moved, lots kicked, liquidity, exposure or ratios after the batch) are the "
+            "adapter's model of the batch, not observations: where the Simulation Results differ, the simulation "
+            "wins — say so. Distinguish documented integration architecture from live observations.\n"
+            + protocol_context
         )
 
     if source_contexts:

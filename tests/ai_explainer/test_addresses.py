@@ -1,6 +1,7 @@
 """Tests for explainer addresses."""
 
 import unittest
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 from utils.calldata.decoder import DecodedCall
@@ -245,6 +246,27 @@ class TestEventEmitters(unittest.TestCase):
         text = _format_simulation_context(self._sim(), {self.AUCTION: "Auction"})
         self.assertIn(f"UpdatedMinimumPrice(minimumPrice=5036110000000000) — emitted by {self.AUCTION} (Auction)", text)
         self.assertIn("  Anonymous()\n", text + "\n")
+
+    def test_transfer_events_are_not_repeated_after_token_transfers(self) -> None:
+        change = AssetChange(
+            token_address="0x" + "11" * 20,
+            token_name="Grove",
+            token_symbol="GROVE",
+            from_address="0x1",
+            to_address="0x2",
+            amount="5",
+            raw_amount="5",
+            decimals=0,
+        )
+        transfer = {"name": "Transfer", "inputs": [], "raw": {"address": "0x" + "11" * 20}}
+        kicked = {"name": "AuctionKicked", "inputs": [], "raw": {"address": self.AUCTION}}
+        sim = SimulationResult(success=True, gas_used=1, asset_changes=[change], logs=[transfer, kicked])
+        text = _format_simulation_context(sim, {})
+        self.assertIn("Events emitted (2 total, showing 1; 1 Transfer events omitted", text)
+        self.assertIn("AuctionKicked()", text)
+        self.assertNotIn("  Transfer(", text)
+        # Without a transfer list, the Transfer events are the only record and stay.
+        self.assertIn("  Transfer(", _format_simulation_context(replace(sim, asset_changes=[]), {}))
 
     def test_emitters_are_labelled_and_linked(self) -> None:
         self.assertEqual(_simulation_counterparties([self._sim()]), [self.AUCTION])

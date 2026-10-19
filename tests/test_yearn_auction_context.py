@@ -136,7 +136,10 @@ class TestYearnAuctionContext(unittest.TestCase):
 
         self.assertIn(f"Yearn Auction {BIG_AUCTION} for strategy {BIG} (version 1.0.5)", prompt)
         self.assertIn(f"proceeds go to receiver {BIG} (the strategy itself)", prompt)
-        self.assertIn("starts at startingPrice = 10,000.00 USDS and drops 0.3% (30 bps) every 1m", prompt)
+        self.assertIn("startingPrice = 10,000.00 USDS for the whole lot, which drops 0.3% (30 bps) every 1m", prompt)
+        # Mechanics are explained once for the two auctions.
+        self.assertEqual(prompt.count("Yearn Auctions are Dutch auctions"), 1)
+        self.assertEqual(prompt.count("Takers do not buy above market"), 1)
         self.assertIn("698,582.22 GROVE unsold in the auction from the lot kicked", prompt)
         self.assertIn("Market (DeFiLlama, live): 1 GROVE ≈ 0.005751 USDS; minimumPrice is 4.32% above market", prompt)
         # The strategy setter is the Auction's floor, read from its verified body.
