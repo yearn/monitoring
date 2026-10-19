@@ -168,6 +168,11 @@ Critical rules for parameter interpretation:
 - Do not call a contract audited, battle-tested, low-fee, safe, or reputable, and do not
   characterize its fees or track record, unless a section of this prompt states it. A label
   names a contract; it is not evidence about its quality.
+- When the Protocol Context gives a vault's exit liquidity before → after, weigh it in the
+  verdict: a batch that cuts it sharply (by a third or more), or leaves funds reachable
+  only by a privileged manual update_debt (outside the default queue and the DebtAllocator),
+  limits depositors' withdrawals — say so in the TLDR and rate it at least MEDIUM, even when
+  no value leaves the protocol.
 - When a Risk Anchors section is provided, treat it as a typical floor/ceiling, not a
   verdict. Adjust up or down based on the specific parameters (e.g. grantRole of a
   minor role can be LOW; an upgrade to fresh-bytecode code can be CRITICAL).

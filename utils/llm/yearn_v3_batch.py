@@ -185,5 +185,8 @@ class VaultBatchState:
         strategy.current_debt += amount
         if strategy.max_deposit is not None:
             strategy.max_deposit -= amount
+        # What was just deposited can be redeemed again, as far as the model knows.
+        if strategy.max_withdraw is not None:
+            strategy.max_withdraw += amount
         self.idle -= amount
         return DebtMove(target, current, strategy.current_debt, idle_before, self.idle, limited_by=limited_by)

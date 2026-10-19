@@ -433,6 +433,13 @@ ALLOCATOR = "0x1e9eB053228B1156831759401dE0E115356b8671"
 ACCUMULATOR = "0x470e0e048F85CFD72EEf325895e02c8D297E7435"
 OG = "0xE89371eAaAC6D46d4C3ED23453241987916224FC"
 LENDER = "0xfca3F21D60d5bC8B4C5c35F169bb5B6402510151"
+LENDER_BORROWER = "0x5E8A9Acd00AdCED69b30D36929CbF7D4d4F9AE1F"
+# DebtAllocator.getStrategyConfig at block 26226696: (added, targetRatio, maxRatio, lastUpdate, open).
+CONFIGS = {
+    (VAULT.lower(), V1.lower()): (ALLOCATOR, (True, 4500, 5400, 1_792_391_867, 0)),
+    (VAULT.lower(), LOOPER.lower()): (ALLOCATOR, (False, 0, 0, 0, 0)),
+    (V1.lower(), LOOPER.lower()): (ALLOCATOR, (True, 1125, 1350, 1_784_883_287, 0)),
+}
 
 
 def _rebalance_contexts() -> tuple[YearnV3VaultContext, YearnV3VaultContext]:
@@ -452,8 +459,22 @@ def _rebalance_contexts() -> tuple[YearnV3VaultContext, YearnV3VaultContext]:
         minimum_total_idle=0,
         use_default_queue=True,
         default_queue=(
-            _strategy(V1, "WETH-1 yVault", 494_694679813225820365, 10_000 * E18, is_vault=True),
-            _strategy(PEER, "Spark Accumulator", 924_295390144208494863, 10_000 * E18),
+            _strategy(
+                V1,
+                "WETH-1 yVault",
+                494_694679813225820365,
+                10_000 * E18,
+                is_vault=True,
+                max_withdraw=494_873282251620633793,
+            ),
+            _strategy(PEER, "Spark Accumulator", 924_295390144208494863, 10_000 * E18, max_withdraw=0),
+            _strategy(
+                LENDER_BORROWER,
+                "Spark WETH/USDS Lender Borrower",
+                64_206588129811793804,
+                10_000 * E18,
+                max_withdraw=64_219267839140309165,
+            ),
         ),
         other_strategies=(_strategy(LOOPER, "wstETH/WETH Spark Looper", 0, 10_000 * E18),),
     )
@@ -505,11 +526,13 @@ class TestDebtAllocatorRebalance(unittest.TestCase):
                 side_effect=lambda _chain, vault, calls, queue_limits=False: replace(reads[vault], calls=tuple(calls)),
             ),
             patch.object(yearn_v3_context, "_allocator_losses", return_value={ALLOCATOR: 1}),
+            patch.object(yearn_v3_context, "_allocator_configs", return_value=CONFIGS),
         ]
         self.mock_read = patches[0].start()
         self.addCleanup(patches[0].stop)
-        patches[1].start()
-        self.addCleanup(patches[1].stop)
+        for extra in patches[1:]:
+            extra.start()
+            self.addCleanup(extra.stop)
         self.weth2, self.weth1 = resolve_yearn_v3_context("YEARN_MS", 1, REBALANCE)
 
     def test_allocator_calls_are_read_as_the_vaults_own(self) -> None:
@@ -537,18 +560,34 @@ class TestDebtAllocatorRebalance(unittest.TestCase):
         self.assertIn("ordinary withdrawals cannot pull it", looper)
 
     def test_look_through_exposure(self) -> None:
-        (line,) = self.weth2.exposure_lines
+        (line,) = [line for line in self.weth2.outcome_lines if line.startswith("Look-through")]
         self.assertIn("pro-rata share of WETH-1 yVault (yvWETH-1)", line)
         self.assertIn("wstETH/WETH Spark Looper 70.53 WETH (4.7%) → 294.60 WETH (19.7%)", line)
         self.assertIn("stETH Accumulator 189.02 WETH (12.6%) → 89.17 WETH (6.0%)", line)
         self.assertIn("Yearn OG WETH 46.11 WETH (3.1%) → 21.75 WETH (1.5%)", line)
-        self.assertEqual(self.weth1.exposure_lines, ())
+        self.assertFalse([line for line in self.weth1.outcome_lines if line.startswith("Look-through")])
         report = format_yearn_v3_report([self.weth2], 1, {})
         self.assertIn("- Look-through exposure of WETH-2 yVault", report)
 
+    def test_exit_liquidity_drops_by_the_off_queue_deposit(self) -> None:
+        (line,) = [line for line in self.weth2.outcome_lines if line.startswith("Exit liquidity")]
+        # idle 12.38 + yvWETH-1 494.69 + Lender Borrower 64.20; the 924 WETH accumulator can return nothing now.
+        self.assertIn("571.29 WETH (38.2% of totalAssets) → 301.29 WETH (20.1% of totalAssets)", line)
+
+    def test_allocator_config_against_the_debt_left(self) -> None:
+        weth2 = "\n".join(self.weth2.outcome_lines)
+        self.assertIn("DebtAllocator has no config for wstETH/WETH Spark Looper on this vault (added = false)", weth2)
+        self.assertIn("ignore the 270 WETH position", weth2)
+        self.assertIn("target 45% / max 54% of totalAssets; after this batch its debt is 224.69 WETH (15.0%)", weth2)
+        # yvWETH-1's ratio uses its totalAssets after the 270 WETH redemption.
+        weth1 = "\n".join(self.weth1.outcome_lines)
+        self.assertIn(
+            "target 11.25% / max 13.5% of totalAssets; after this batch its debt is 765.93 WETH (10.9%)", weth1
+        )
+
     def test_inner_vault_is_read_with_queue_limits(self) -> None:
         reads = self.mock_read.call_args_list
-        self.assertEqual({c.args[1]: c.kwargs["queue_limits"] for c in reads}, {VAULT: False, V1: True})
+        self.assertEqual({c.args[1]: c.kwargs["queue_limits"] for c in reads}, {VAULT: True, V1: True})
 
 
 class TestInnerVaultOnlyHeld(unittest.TestCase):
@@ -564,11 +603,12 @@ class TestInnerVaultOnlyHeld(unittest.TestCase):
         with (
             patch.object(yearn_v3_context, "_read_vault_context", side_effect=read) as mock_read,
             patch.object(yearn_v3_context, "_allocator_losses", return_value={ALLOCATOR: 1}),
+            patch.object(yearn_v3_context, "_allocator_configs", return_value={}),
         ):
             contexts = resolve_yearn_v3_context("YEARN_MS", 1, REBALANCE[:2])
         self.assertEqual([c.vault_address for c in contexts], [VAULT])
         mock_read.assert_any_call(1, V1, [], queue_limits=True)
-        (line,) = contexts[0].exposure_lines
+        (line,) = [line for line in contexts[0].outcome_lines if line.startswith("Look-through")]
         # Without calls 3-4, yvWETH-1 keeps its looper debt and OG stays drained by the redemption.
         self.assertIn("wstETH/WETH Spark Looper 70.53 WETH (4.7%) → 303.27 WETH (20.3%)", line)
         self.assertIn("Yearn OG WETH 46.11 WETH (3.1%) → 13.07 WETH (0.9%)", line)

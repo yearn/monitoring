@@ -296,6 +296,8 @@ It then states each proposed value in the vault asset against that state, in bat
 
 The inner vault's later calls then start from that state. In nonce 3373, yvWETH-1's stETH Accumulator could return nothing, so the redemption drew Yearn OG WETH from 677.20 to 407.20, and call 4 refilled it to 677.20, not 947.20. A held vault the batch never calls is read only for its side of the flow and gets no section of its own. Two further lines:
 - A deposit into a strategy outside the default queue says the funds are off the withdrawal path.
+- **Exit liquidity** before → after: idle plus what each default-queue strategy can return now. This is what ordinary withdrawals can get. In nonce 3373 it fell from 571.29 to 301.29 WETH (38.2% → 20.1%): the 270 WETH went to a strategy outside the queue, and the 924 WETH accumulator could return nothing. An outside review rated that MEDIUM; ours said LOW without mentioning it. The system prompt now treats a sharp cut (a third or more), or funds reachable only by a manual `update_debt`, as at least MEDIUM.
+- **DebtAllocator config** for each pair the batch moves through an allocator (`getStrategyConfig`). A pair with no config (`added = false`) is ignored by automated debt updates. A configured pair compares its target/max ratio with the debt ratio the batch leaves, using the vault's totalAssets after any redemption.
 - A vault that holds another vault shows its look-through exposure before → after: direct debt plus a pro-rata share of each held vault's strategies. The report had called nonce 3373 a shift "from indirect to direct exposure"; yvWETH-2's looper exposure actually went from 70.53 to 294.60 WETH (4.7% → 19.7%).
 
 ### 5f-3. Control Transfer Context (`utils/llm/control_transfer_context.py`)

@@ -170,7 +170,8 @@ class YearnV3VaultContext:
     debt_allocators: tuple[tuple[str, int | None], ...] = ()
     # Set by the resolver's global batch walk; None renders this vault's calls on their own.
     walked_lines: tuple[str, ...] | None = None
-    exposure_lines: tuple[str, ...] = ()
+    # Batch outcome: exit liquidity, look-through exposure and DebtAllocator config, set by the resolver.
+    outcome_lines: tuple[str, ...] = ()
 
     @property
     def addresses(self) -> list[str]:
@@ -787,6 +788,8 @@ def resolve_yearn_v3_context(
     ordered: list[tuple[str, DecodedCall]] = []
     calls_by_vault: dict[str, list[DecodedCall]] = {}
     allocators: dict[str, dict[str, None]] = {}
+    # (allocator, vault, strategy) for every allocator update_debt, in order.
+    allocated: list[tuple[str, str, str]] = []
     for target, call in targets_and_calls:
         try:
             mapped = _as_vault_call(target, call)
@@ -799,6 +802,7 @@ def resolve_yearn_v3_context(
         calls_by_vault.setdefault(vault, []).append(vault_call)
         if allocator:
             allocators.setdefault(vault, {})[allocator] = None
+            allocated.append((allocator, vault, to_checksum_address(str(vault_call.params[0][1]))))
     if not calls_by_vault:
         return []
 
@@ -806,7 +810,9 @@ def resolve_yearn_v3_context(
     contexts: dict[str, YearnV3VaultContext] = {}
     for vault, calls in calls_by_vault.items():
         try:
-            context = _read_vault_context(chain_id, vault, calls, queue_limits=vault.lower() in named)
+            # What each queue strategy can return is read whenever debt moves, for exit liquidity.
+            moves = any(call.function_name == "update_debt" for call in calls)
+            context = _read_vault_context(chain_id, vault, calls, queue_limits=moves or vault.lower() in named)
         except Exception as error:  # noqa: BLE001 - enrichment must never block an alert
             logger.info("Yearn V3 context resolution failed for %s: %s", vault, error)
             continue
@@ -832,14 +838,116 @@ def resolve_yearn_v3_context(
     everything = {**contexts, **support}
     lines, runs = walk_batch(everything, ordered)
     losses = _allocator_losses(chain_id, {a for found in allocators.values() for a in found})
+    configs = _allocator_configs(chain_id, allocated)
     return [
         replace(
             context,
             walked_lines=tuple(lines[key]),
-            exposure_lines=tuple(exposure_lines(context, everything, runs)),
+            outcome_lines=(
+                *liquidity_lines(context, runs.get(key)),
+                *exposure_lines(context, everything, runs),
+                *allocator_config_lines(context, runs.get(key), configs),
+            ),
             debt_allocators=tuple((a, losses.get(a)) for a in allocators.get(context.vault_address, {})),
         )
         for key, context in contexts.items()
+    ]
+
+
+# DebtAllocator.getStrategyConfig: (added, targetRatio bps, maxRatio bps, lastUpdate, open).
+StrategyConfig = tuple[bool, int, int, int, int]
+
+
+def _allocator_configs(
+    chain_id: int, allocated: list[tuple[str, str, str]]
+) -> dict[tuple[str, str], tuple[str, StrategyConfig | None]]:
+    """Each allocator-moved (vault, strategy) pair's config, keyed by lowercase addresses; None when unreadable."""
+    if not allocated:
+        return {}
+    client = ChainManager.get_client(Chain.from_chain_id(chain_id))
+    configs: dict[tuple[str, str], tuple[str, StrategyConfig | None]] = {}
+    for allocator, vault, strategy in allocated:
+        key = (vault.lower(), strategy.lower())
+        if key in configs:
+            continue
+        value = call_view(
+            client,
+            allocator,
+            "getStrategyConfig(address,address)",
+            "(bool,uint16,uint16,uint96,uint96)",
+            (vault, strategy),
+        )
+        config = tuple(value) if isinstance(value, tuple) and len(value) == 5 else None
+        configs[key] = (allocator, config)  # type: ignore[assignment]
+    return configs
+
+
+def allocator_config_lines(
+    context: YearnV3VaultContext,
+    run: _Run | None,
+    configs: dict[tuple[str, str], tuple[str, StrategyConfig | None]],
+) -> list[str]:
+    """How the DebtAllocator's own config for each moved strategy compares with the debt the batch leaves."""
+    lines: list[str] = []
+    debts = _strategy_debts(context, run)
+    for (vault, strategy), (_allocator, config) in configs.items():
+        if vault != context.vault_address.lower() or config is None:
+            continue
+        name = context._name_of(strategy)
+        debt = debts.get(strategy, 0)
+        if not config[0]:
+            lines.append(
+                f"DebtAllocator has no config for {name} on this vault (added = false): its automated debt updates "
+                f"ignore the {context.amount(debt)} position — only a manual update_debt moves it."
+            )
+            continue
+        target, maximum = config[1], config[2]
+        total = context.total_assets + (run.inflow if run is not None else 0)
+        ratio = debt / total * 10_000 if total > 0 else 0
+        line = (
+            f"DebtAllocator config for {name}: target {target / 100:g}% / max {maximum / 100:g}% of totalAssets; "
+            f"after this batch its debt is {context.amount(debt)} ({ratio / 100:.1f}%)"
+        )
+        if ratio > maximum:
+            line += " — above the max, so automated updates may pull it back"
+        elif ratio < target:
+            line += " — below the target, so automated updates may push idle back into it"
+        lines.append(line + ".")
+    return lines
+
+
+def _exit_liquidity(context: YearnV3VaultContext, run: _Run | None) -> int | None:
+    """Idle plus what each default-queue strategy can return now; None when a limit is unknown."""
+    state = run.state if run is not None else context.batch_state()
+    queue = run.queue if run is not None else [s.address.lower() for s in context.default_queue]
+    total = state.idle
+    for key in queue:
+        strategy = state.get(key)
+        if strategy is None or not strategy.active:
+            continue
+        if strategy.max_withdraw is None:
+            return None
+        total += min(strategy.current_debt, strategy.max_withdraw)
+    return total
+
+
+def liquidity_lines(context: YearnV3VaultContext, run: _Run | None) -> list[str]:
+    """Exit liquidity through the default queue, before → after, when the batch changes it."""
+    before, after = _exit_liquidity(context, None), _exit_liquidity(context, run)
+    if before is None or after is None or before == after:
+        return []
+
+    def cell(raw: int, total: int) -> str:
+        share = raw / total * 100 if total > 0 else 0.0
+        return f"{context.amount(raw)} ({share:.1f}% of totalAssets)"
+
+    total_after = context.total_assets + (run.inflow if run is not None else 0)
+
+    return [
+        f"Exit liquidity through the default queue (idle + what each queue strategy can return now; ordinary "
+        f"withdraw/redeem cannot get more without a custom queue or loss): {cell(before, context.total_assets)} → "
+        f"{cell(after, total_after)}. "
+        "Strategies outside the queue and queue strategies that cannot return funds now do not count."
     ]
 
 
@@ -889,7 +997,7 @@ def format_yearn_v3_prompt(contexts: list[YearnV3VaultContext]) -> str:
             *(f"  {i}. {_queue_line(context, s)}" for i, s in enumerate(context.default_queue, start=1)),
             "Proposed by this transaction (in batch order, across every vault in it):",
             *(f"  - {line}" for line in context.proposal_lines()),
-            *context.exposure_lines,
+            *context.outcome_lines,
         ]
         sections.append("\n".join(lines))
     return "\n\n".join(sections)
@@ -920,7 +1028,7 @@ def format_yearn_v3_report(
         lines.extend(f"- {line}" for line in _allocator_lines(context, lambda a: address_link(a, chain_id, labels)))
         lines.append("- **Proposed:**")
         lines.extend(f"  - {line}" for line in context.proposal_lines())
-        lines.extend(f"- {line}" for line in context.exposure_lines)
+        lines.extend(f"- {line}" for line in context.outcome_lines)
         lines.append(
             "- _Units: `max_debt`, `target_debt`, `deposit_limit` and `minimum_total_idle` are in the vault asset. "
             "Funds move only via `update_debt`._"
