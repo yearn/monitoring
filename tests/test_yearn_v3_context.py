@@ -685,6 +685,35 @@ class TestInnerVaultLiquidityChanges(unittest.TestCase):
         lines, _ = yearn_v3_context.walk_batch(contexts, ordered)
         self.assertIn("withdraws 40 WETH", lines[VAULT.lower()][0])
 
+    def test_an_empty_position_under_a_module_can_redeem_what_it_deposits(self) -> None:
+        # An empty position reads maxRedeem 0 under any module; that is the position, not a restriction.
+        contexts = self._contexts()
+        parent = contexts[VAULT.lower()]
+        empty = replace(parent.default_queue[0], current_debt=0, max_withdraw=0)
+        contexts[VAULT.lower()] = replace(parent, total_idle=50 * E18, default_queue=(empty,))
+        contexts[self.INNER.lower()] = replace(contexts[self.INNER.lower()], withdraw_limit_module=PEER)
+        ordered = [
+            (VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 50 * E18])),
+            (VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 0])),
+        ]
+        lines, _ = yearn_v3_context.walk_batch(contexts, ordered)
+        deposit, withdraw = lines[VAULT.lower()]
+        self.assertIn("deposits 50 WETH", deposit)
+        self.assertIn("withdraws 50 WETH", withdraw)
+        self.assertNotIn("not modelled", withdraw)
+
+    def test_a_restricted_limit_after_a_deposit_is_stated_as_unknown(self) -> None:
+        contexts = self._contexts()
+        parent = contexts[VAULT.lower()]
+        restricted = replace(parent.default_queue[0], max_withdraw=10 * E18)
+        contexts[VAULT.lower()] = replace(parent, total_idle=50 * E18, default_queue=(restricted,))
+        ordered = [
+            (VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 150 * E18])),
+            (VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 0])),
+        ]
+        lines, _ = yearn_v3_context.walk_batch(contexts, ordered)
+        self.assertIn("whether the full amount can be redeemed is not modelled", lines[VAULT.lower()][1])
+
     def test_redemption_before_the_move_is_paid_from_idle(self) -> None:
         ordered = [(VAULT, _call("update_debt", ["address", "uint256"], [self.INNER, 0]))]
         lines, runs = yearn_v3_context.walk_batch(self._contexts(), ordered)

@@ -344,6 +344,19 @@ class TestSecondReviewRound(unittest.TestCase):
         self.assertNotIn("284,291.94", second)
         self.assertIn("does not kick GROVE — the strategy's balance after claiming (≈ 0 GROVE)", second)
 
+    def test_calls_replay_in_transaction_order_across_auctions(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        # A → B → A: the report on B (second) takes the claimable rewards, so the report back on A
+        # (third) has none left. Replaying each auction's calls as a block gave them to A.
+        to_small = _call("setAuction", "setAuction(address)", ("address", SMALL_AUCTION))
+        to_big = _call("setAuction", "setAuction(address)", ("address", BIG_AUCTION))
+        calls = [(BIG, SET_FLOOR), (BIG, to_small), (BIG, REPORT), (BIG, to_big), (BIG, REPORT)]
+        big, small = self._resolve(mock_cm, calls)
+        _, _, report_on_big = big.proposal_lines(str)
+        report_on_small, _ = small.proposal_lines(str)
+        self.assertIn("284,291.94 GROVE it claims", report_on_small)
+        self.assertNotIn("284,291.94", report_on_big)
+        self.assertIn("does not kick GROVE — the strategy's balance after claiming (≈ 0 GROVE)", report_on_big)
+
     def test_min_amount_set_before_set_auction_still_gates(self, mock_cm: MagicMock, *_: MagicMock) -> None:
         raise_gate = _call(
             "setMinAmountToSell", "setMinAmountToSell(address,uint256)", ("address", GROVE), ("uint256", 500_000 * E18)

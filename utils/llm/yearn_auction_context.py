@@ -99,30 +99,67 @@ class Lot:
 
 
 @dataclass
+class _StrategySide:
+    """A strategy's own balance, claimable rewards and kick threshold for one token.
+
+    One object per (strategy, token), shared by every auction the strategy uses in the
+    batch, so a ``setAuction`` hands the running balances to the next auction.
+    """
+
+    held: int | None = None
+    claimable: int | None = None
+    min_amount: int | None = None
+
+    def fill(self, lot: Lot) -> None:
+        """Take the pre-batch values this side still lacks from a lot's snapshot."""
+        if self.held is None:
+            self.held = lot.strategy_held
+        if self.claimable is None:
+            self.claimable = lot.claimable
+        if self.min_amount is None:
+            self.min_amount = lot.min_amount_to_sell
+
+
+@dataclass
 class _LotRun:
-    """A lot as the calls so far leave it: balances, the strategy's gate and the current kick."""
+    """A lot as the calls so far leave it: the auction's balance and kick, and the strategy's side."""
 
     in_auction: int
-    held: int | None
-    claimable: int | None
-    min_amount: int | None
     kicked: int
     initial_available: int | None
+    side: _StrategySide
     kicked_in_batch: bool = False
     # False once `disable` deletes the lot's state; the auction no longer sells or counts it.
     enabled: bool = True
 
     @classmethod
-    def of(cls, lot: Lot) -> "_LotRun":
+    def of(cls, lot: Lot, side: _StrategySide) -> "_LotRun":
         """The lot before the transaction."""
-        return cls(
-            lot.in_auction,
-            lot.strategy_held,
-            lot.claimable,
-            lot.min_amount_to_sell,
-            lot.kicked,
-            lot.initial_available,
-        )
+        return cls(lot.in_auction, lot.kicked, lot.initial_available, side)
+
+    @property
+    def held(self) -> int | None:
+        return self.side.held
+
+    @held.setter
+    def held(self, value: int | None) -> None:
+        self.side.held = value
+
+    @property
+    def claimable(self) -> int | None:
+        return self.side.claimable
+
+    @claimable.setter
+    def claimable(self, value: int | None) -> None:
+        self.side.claimable = value
+
+    @property
+    def min_amount(self) -> int | None:
+        return self.side.min_amount
+
+    @min_amount.setter
+    def min_amount(self, value: int | None) -> None:
+        self.side.min_amount = value
 
 
 @dataclass
@@ -167,9 +204,9 @@ class YearnAuctionContext:
     strategy_idle_want: int | None = None
     calls: list[AuctionCall] = field(default_factory=list)
     labels: dict[str, str] = field(default_factory=dict)
-    # Strategy-side state per token (held, claimable, minAmountToSell) as earlier auctions in the
-    # batch left it, e.g. before a `setAuction` moved the strategy's later calls here.
-    carried: dict[str, tuple[int | None, int | None, int | None]] = field(default_factory=dict)
+    # Every auction context resolved for the same transaction, this one included: calls are
+    # replayed across all of them in transaction order (see `walk_auctions`).
+    peers: list["YearnAuctionContext"] = field(default_factory=list, repr=False, compare=False)
 
     @property
     def addresses(self) -> list[str]:
@@ -280,66 +317,62 @@ class YearnAuctionContext:
         return line
 
     def proposal_lines(self, render: Render) -> list[str]:
-        """Each call in batch order; settings and every lot carry forward so later calls see earlier ones."""
-        return self.walk(render)[0]
+        """This auction's calls, replayed with every peer auction's calls in transaction order."""
+        return walk_auctions(self.peers or [self], render)[id(self)]
 
-    def walk(self, render: Render) -> tuple[list[str], dict[str, _LotRun]]:
-        """Lines for the calls in batch order, and every lot as they leave it."""
-        settings: dict[str, object] = {
+    def initial_settings(self) -> dict[str, object]:
+        """Pricing and receiver before the transaction."""
+        return {
             "minimumPrice": self.minimum_price,
             "startingPrice": self.starting_price,
             "stepDecayRate": self.step_decay_rate,
             "stepDuration": self.step_duration,
             "receiver": self.receiver,
         }
-        runs: dict[str, _LotRun] = {}
-        for lot in self.lots:
-            run = _LotRun.of(lot)
-            if lot.token.lower() in self.carried:
-                run.held, run.claimable, run.min_amount = self.carried[lot.token.lower()]
-            runs[lot.token.lower()] = run
-        lines: list[str] = []
-        for entry in self.calls:
-            name = entry.call.function_name
-            if entry.kind == "kick":
-                lines.extend(self._kick_lines(entry, settings, runs))
-            elif entry.kind == "min_amount":
-                lines.append(self._min_amount_line(entry, runs))
-            elif entry.kind == "set_auction":
-                lines.append(
-                    f"{name}: the strategy's auction {render(self.address)} → {render(str(entry.value))}. Its later "
-                    "calls in this batch use the new auction and are described with it, if it is a readable Auction."
-                )
-            elif entry.function in AUCTION_SETTERS:
-                via = (
-                    f"{name} on the strategy forwards to Auction.{entry.function} (verified body)"
-                    if entry.kind == "forward"
-                    else entry.function
-                )
-                invalid = self._invalid_setting(entry.function, entry.value)
-                if invalid:
-                    lines.append(f"{via}: REVERTS — {invalid}.")
-                    continue
-                live_before = {token: self._is_live(token, runs[token], settings) for token in runs}
-                line = f"{via}: {self._setting_change(entry.function, settings, entry.value, render)}"
-                line += self._live_guard(live_before)
-                settings[AUCTION_SETTERS[entry.function]] = entry.value
-                lines.append(line + self._revival_note(live_before, runs, settings))
-            elif entry.function in ("enable", "disable"):
-                lines.append(self._enable_line(entry, runs, settings, render))
-            elif entry.function == "sweep":
-                lot = self.lot_for(entry.value)
-                run = runs.get(lot.token.lower()) if lot else None
-                held = f" ({lot.amount(run.in_auction)})" if lot and run else ""
-                lines.append(
-                    f"sweep: sends the auction's entire balance of {lot.symbol if lot else render(str(entry.value))}"
-                    f"{held} to the caller (governance) — those tokens leave the sale."
-                )
-                if run is not None:
-                    run.in_auction = 0
-            elif entry.function == "setGovernanceOnlyKick":
-                lines.append(f"setGovernanceOnlyKick: {self.governance_only_kick} → {entry.value}.")
-        return lines, runs
+
+    def step(
+        self, entry: AuctionCall, settings: dict[str, object], runs: dict[str, _LotRun], render: Render
+    ) -> list[str]:
+        """Describe one call against the running settings and lots, and apply it to them."""
+        name = entry.call.function_name
+        if entry.kind == "kick":
+            return self._kick_lines(entry, settings, runs)
+        if entry.kind == "min_amount":
+            return [self._min_amount_line(entry, runs)]
+        if entry.kind == "set_auction":
+            return [
+                f"{name}: the strategy's auction {render(self.address)} → {render(str(entry.value))}. Its later "
+                "calls in this batch use the new auction and are described with it, if it is a readable Auction."
+            ]
+        if entry.function in AUCTION_SETTERS:
+            via = (
+                f"{name} on the strategy forwards to Auction.{entry.function} (verified body)"
+                if entry.kind == "forward"
+                else entry.function
+            )
+            invalid = self._invalid_setting(entry.function, entry.value)
+            if invalid:
+                return [f"{via}: REVERTS — {invalid}."]
+            live_before = {token: self._is_live(token, runs[token], settings) for token in runs}
+            line = f"{via}: {self._setting_change(entry.function, settings, entry.value, render)}"
+            line += self._live_guard(live_before)
+            settings[AUCTION_SETTERS[entry.function]] = entry.value
+            return [line + self._revival_note(live_before, runs, settings)]
+        if entry.function in ("enable", "disable"):
+            return [self._enable_line(entry, runs, settings, render)]
+        if entry.function == "sweep":
+            lot = self.lot_for(entry.value)
+            run = runs.get(lot.token.lower()) if lot else None
+            held = f" ({lot.amount(run.in_auction)})" if lot and run else ""
+            if run is not None:
+                run.in_auction = 0
+            return [
+                f"sweep: sends the auction's entire balance of {lot.symbol if lot else render(str(entry.value))}"
+                f"{held} to the caller (governance) — those tokens leave the sale."
+            ]
+        if entry.function == "setGovernanceOnlyKick":
+            return [f"setGovernanceOnlyKick: {self.governance_only_kick} → {entry.value}."]
+        return []
 
     def _enable_line(
         self, entry: AuctionCall, runs: dict[str, _LotRun], settings: dict[str, object], render: Render
@@ -869,40 +902,39 @@ def resolve_yearn_auction_context(
             logger.info("Yearn auction context failed for %s: %s", auction, error)
             continue
         contexts.append(context)
-    _carry_strategy_holdings(contexts)
+    for context in contexts:
+        context.peers = contexts
     return contexts
 
 
-def _carry_strategy_holdings(contexts: list[YearnAuctionContext]) -> None:
-    """Pass each strategy's held and claimable balances and its kick thresholds from one auction to the next.
+def walk_auctions(contexts: list[YearnAuctionContext], render: Render) -> dict[int, list[str]]:
+    """Replay every auction call of the transaction in order; lines keyed by ``id(context)``.
 
-    Every auction context reads the strategy's balances before the transaction. After
-    ``kickAuction`` → ``setAuction`` → ``kickAuction``, the second auction would sell
-    tokens the first kick already took. Contexts are replayed in the order of the
-    strategy's first call to each, and each starts from what the previous one left.
+    A strategy's own balance, claimable rewards and kick threshold are one shared state
+    per token across all its auctions, and calls run strictly in transaction order. With
+    ``setAuction`` back and forth (A → B → A), the rewards B's kick takes are gone when A
+    reports again — replaying each auction's calls as a block misattributed them.
     """
+    sides: dict[tuple[str, str], _StrategySide] = {}
+    states: dict[int, tuple[dict[str, object], dict[str, _LotRun]]] = {}
+    for context in contexts:
+        owner = (context.strategy or context.address).lower()
+        runs: dict[str, _LotRun] = {}
+        for lot in context.lots:
+            side = sides.setdefault((owner, lot.token.lower()), _StrategySide())
+            side.fill(lot)
+            runs[lot.token.lower()] = _LotRun.of(lot, side)
+        states[id(context)] = (context.initial_settings(), runs)
 
-    def first_strategy_call(context: YearnAuctionContext) -> float:
-        strategy = (context.strategy or "").lower()
-        return min((e.order for e in context.calls if e.target.lower() == strategy), default=math.inf)
-
-    holdings: dict[tuple[str, str], tuple[int | None, int | None, int | None]] = {}
-    for context in sorted(contexts, key=first_strategy_call):
-        if not context.strategy:
-            continue
-        strategy = context.strategy.lower()
-        context.carried = {
-            lot.token.lower(): holdings[(strategy, lot.token.lower())]
-            for lot in context.lots
-            if (strategy, lot.token.lower()) in holdings
-        }
-        try:
-            _, runs = context.walk(str)
-        except Exception as error:  # noqa: BLE001 - enrichment must never block an alert
-            logger.info("Yearn auction replay failed for %s: %s", context.address, error)
-            continue
-        for token, run in runs.items():
-            holdings[(strategy, token)] = (run.held, run.claimable, run.min_amount)
+    # A stable sort keeps each context's own call order when orders tie (contexts built by hand).
+    steps = sorted(
+        ((entry.order, context, entry) for context in contexts for entry in context.calls), key=lambda s: s[0]
+    )
+    lines: dict[int, list[str]] = {id(context): [] for context in contexts}
+    for _, context, entry in steps:
+        settings, runs = states[id(context)]
+        lines[id(context)].extend(context.step(entry, settings, runs, render))
+    return lines
 
 
 def format_yearn_auction_prompt(contexts: list[YearnAuctionContext]) -> str:

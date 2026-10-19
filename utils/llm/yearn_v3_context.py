@@ -677,6 +677,8 @@ class _Run:
     inflow: int = 0
     # Per inner vault: an owner-specific redemption limit observed before the batch, less what was redeemed.
     redeem_caps: dict[str, int] = field(default_factory=dict)
+    # Inner vaults whose owner-specific limit a deposit in this batch made unknowable.
+    unknown_limits: set[str] = field(default_factory=set)
 
 
 def walk_batch(
@@ -716,8 +718,17 @@ def walk_batch(
             continue
         parent = f"{context.name} ({context.symbol})"
         inner_run.inflow += move.moved
+        if move.moved < 0 and inner_key in run.unknown_limits:
+            lines[key][-1] += (
+                f" {inner.name}'s withdraw limit for this vault was below its position before the batch, and this "
+                "batch deposited into it since, so whether the full amount can be redeemed is not modelled."
+            )
         if move.moved < 0 and inner_key in run.redeem_caps:
             run.redeem_caps[inner_key] = max(run.redeem_caps[inner_key] + move.moved, 0)
+        elif move.moved > 0 and inner_key in run.redeem_caps:
+            # How an owner-specific limit responds to a deposit is unknown: stop forecasting it.
+            del run.redeem_caps[inner_key]
+            run.unknown_limits.add(inner_key)
         if move.moved > 0:
             lines[inner_key].append(inner.inflow_line(parent, move.moved, inner_run.state, inner_run.queue))
         else:
@@ -753,13 +764,14 @@ def _refresh_inner_limits(key: str, contexts: dict[str, YearnV3VaultContext], ru
 
 
 def _observe_redeem_caps(key: str, contexts: dict[str, YearnV3VaultContext], runs: dict[str, _Run]) -> None:
-    """Keep each pre-batch redemption limit that liquidity and debt alone do not explain.
+    """Keep each pre-batch redemption limit that the position and liquidity do not explain.
 
     ``maxRedeem`` is owner-specific: a ``withdraw_limit_module`` can cap one holder
     below what the vault's liquidity allows, even to 0. Refreshing from liquidity alone
     would raise such a limit and predict a withdrawal that cannot happen. A snapshot
-    below ``min(current_debt, inner exit liquidity)``, or any snapshot on a vault with
-    a module, is kept as a cap for the batch.
+    below ``min(current_debt, inner exit liquidity)`` is kept as a cap for the batch.
+    A snapshot that the position explains is not a restriction — an empty position
+    reads 0 under any module — since ``current_debt`` already tracks the position.
     """
     run = runs[key]
     for inner_key in runs:
@@ -769,7 +781,7 @@ def _observe_redeem_caps(key: str, contexts: dict[str, YearnV3VaultContext], run
         inner = contexts[inner_key]
         liquidity = _exit_liquidity(inner, None)
         explained = min(held.current_debt, liquidity) if liquidity is not None else None
-        if inner.withdraw_limit_module or explained is None or held.max_withdraw < explained:
+        if explained is not None and held.max_withdraw < explained:
             run.redeem_caps[inner_key] = held.max_withdraw
 
 
