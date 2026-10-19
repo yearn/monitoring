@@ -158,6 +158,26 @@ class TestYearnStrategyContext(unittest.TestCase):
         (context,) = self._resolve(mock_cm, [(GROVE, _unlock(0))])
         self.assertNotIn("Token transfers", format_yearn_strategy_prompt([context]))
 
+    def test_settings_follow_the_calls(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        (context,) = self._resolve(mock_cm, [(GROVE, REPORT)])
+        (_, settings) = context.header_lines(str)
+        # A report depends on the unlock time, last report and fee — not on keeper or emergency admin.
+        self.assertIn("profitMaxUnlockTime 2d (172800 s)", settings)
+        self.assertIn("last report", settings)
+        self.assertIn("performanceFee 0% to", settings)
+        self.assertNotIn("keeper", settings)
+        self.assertNotIn("emergencyAdmin", settings)
+        # With unlock time 0 the profit lands instantly, so who may deposit matters too.
+        (instant,) = self._resolve(mock_cm, [(GROVE, _unlock(0)), (GROVE, REPORT)])
+        self.assertIn("deposits are allowlist-only", instant.header_lines(str)[1])
+
+    def test_role_explanations_are_shared_across_strategies(self, mock_cm: MagicMock, *_: MagicMock) -> None:
+        admin = _call("setEmergencyAdmin", "setEmergencyAdmin(address)", ("address", SAM))
+        contexts = self._resolve(mock_cm, [(GROVE, admin), (SPARK, admin)])
+        prompt = format_yearn_strategy_prompt(contexts)
+        self.assertEqual(prompt.count("The emergency admin can shut a strategy down"), 1)
+        self.assertEqual(prompt.count("setEmergencyAdmin:"), 2)
+
     def test_closing_spark_deposits(self, mock_cm: MagicMock, *_: MagicMock) -> None:
         close = _call("setOpenDeposits", "setOpenDeposits(bool)", ("bool", False))
         (context,) = self._resolve(mock_cm, [(SPARK, _unlock(0)), (SPARK, close)])

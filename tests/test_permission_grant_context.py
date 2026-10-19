@@ -299,6 +299,30 @@ class TestResolve(unittest.TestCase):
         self.assertEqual((second.holders_before, second.holders_after()), ((BRAIN,), ()))
         self.assertIn("members before: " + BRAIN + "; after: none.", second.lines()[-1])
 
+    def test_a_batch_states_scope_and_members_once(self, mock_client: MagicMock, *_mocks: MagicMock) -> None:
+        executors = [f"0x{i:040x}" for i in range(1, 11)]
+        getter = mock_client.return_value.get_contract.return_value.functions.__getitem__.return_value
+        getter.return_value.call.return_value = executors
+        calls = [
+            (EXECUTOR, DecodedCall("removeExecutor", "removeExecutor(address)", [("address", a)])) for a in executors
+        ]
+        with patch.object(
+            permission_grant_context,
+            "describe_controller",
+            side_effect=lambda chain_id, client, a: ControllerInfo(address=a, kind="eoa"),
+        ):
+            contexts = resolve_permission_grant_context("YEARN_MS", 1, calls)
+        prompt = format_permission_grant_prompt(contexts)
+        self.assertEqual(prompt.count("gates executeBatch("), 1)
+        self.assertEqual(prompt.count("Members before this batch"), 1)
+        self.assertIn("Members after this batch: none.", prompt)
+        self.assertIn(f"  10. removeExecutor(address) REVOKES {executors[-1]}.", prompt)
+        # Each change adds a line, not another copy of the scope and membership: linear, not quadratic.
+        self.assertLess(len(prompt), 2_800)
+        report = format_permission_grant_report(contexts, 1, {})
+        self.assertEqual(report.count("**Entry points it closes:**"), 1)
+        self.assertEqual(report.count("**Members after:**"), 1)
+
     def test_ignores_non_setters_without_source_lookups(self, mock_client: MagicMock, *_mocks: MagicMock) -> None:
         call = DecodedCall("transfer", "transfer(address,uint256)", [("address", OPS_EOA), ("uint256", 1)])
         self.assertEqual(resolve_permission_grant_context("YEARN_MS", 1, [(RELAYER, call)]), [])

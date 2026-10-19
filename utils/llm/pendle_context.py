@@ -75,6 +75,8 @@ class PendleSwapContext:
     current_source: str
     proposed_source: str
     is_upgrade_and_call: bool
+    # upgradeToAndCall's initialization/migration calldata; empty for upgradeTo.
+    payload: bytes = b""
 
     @property
     def addresses(self) -> list[str]:
@@ -167,13 +169,15 @@ def resolve_pendle_context(
     if protocol.lower() != "pendle" or chain_id not in SUPPORTED_CHAINS:
         return []
     contexts: list[PendleSwapContext] = []
-    seen: set[tuple[str, bool]] = set()
+    seen: set[tuple[str, bool, bytes]] = set()
     for target, call in targets_and_calls:
         implementation = _upgrade_implementation(target, call)
         if implementation is None:
             continue
         is_upgrade_and_call = call.signature == "upgradeToAndCall(address,bytes)"
-        key = (implementation.lower(), is_upgrade_and_call)
+        payload = call.params[1][1] if is_upgrade_and_call and isinstance(call.params[1][1], bytes) else b""
+        # Identical calls coalesce; the same upgrade with a different payload is a different call.
+        key = (implementation.lower(), is_upgrade_and_call, payload)
         if key in seen:
             continue
         seen.add(key)
@@ -188,6 +192,7 @@ def resolve_pendle_context(
                     current_source=_source_evidence(fetch_verified_contract(chain_id, current) if current else None),
                     proposed_source=_source_evidence(fetch_verified_contract(chain_id, implementation)),
                     is_upgrade_and_call=is_upgrade_and_call,
+                    payload=payload,
                 )
             )
         except Exception as error:  # noqa: BLE001 - retain other batch members on enrichment failure
@@ -210,7 +215,7 @@ def _upgrade_implementation(target: str, call: DecodedCall) -> str | None:
 
 def format_pendle_prompt(contexts: list[PendleSwapContext]) -> str:
     """Render integration references separately from live state and verified code."""
-    return "\n\n".join(_format_context(context, None, {}) for context in contexts)
+    return _format_contexts(contexts, None, {})
 
 
 def format_pendle_report(
@@ -219,29 +224,62 @@ def format_pendle_report(
     labels: dict[str, str],
 ) -> str:
     """Render the same evidence with full explorer links for the gist report."""
-    return "\n\n".join(_format_context(context, chain_id, labels) for context in contexts)
+    return _format_contexts(contexts, chain_id, labels)
 
 
-def _format_context(context: PendleSwapContext, chain_id: int | None, labels: dict[str, str]) -> str:
-    """Keep prompt and report facts identical, varying only address rendering."""
+# Payload bytes shown inline; the Decoded Calldata section carries the full value.
+MAX_PAYLOAD_BYTES = 68
+
+
+def _execution_note(context: PendleSwapContext) -> str:
+    """What the upgrade call runs besides switching the implementation."""
+    if not context.is_upgrade_and_call:
+        return "upgradeTo has no initialization/migration payload."
+    payload = context.payload
+    shown = payload[:MAX_PAYLOAD_BYTES].hex() + ("…" if len(payload) > MAX_PAYLOAD_BYTES else "")
+    selector = f", selector 0x{payload[:4].hex()}" if len(payload) >= 4 else ""
+    return (
+        f"upgradeToAndCall includes a bytes payload ({len(payload)} bytes{selector}: 0x{shown}); inspect its "
+        "initialization/migration effects separately."
+    )
+
+
+def _format_contexts(contexts: list[PendleSwapContext], chain_id: int | None, labels: dict[str, str]) -> str:
+    """Keep prompt and report facts identical, varying only address rendering.
+
+    The integration reference, proxy state and each implementation's source are stated
+    once for the batch; every upgrade call keeps its own line and payload.
+    """
+    if not contexts:
+        return ""
 
     def link(address: str | None) -> str:
         """Link known addresses and keep missing state explicit."""
         return address_link(address, chain_id, labels) if address and chain_id else address or "unavailable"
 
-    execution = (
-        "upgradeToAndCall includes a bytes payload; inspect its initialization/migration effects separately."
-        if context.is_upgrade_and_call
-        else "upgradeTo has no initialization/migration payload."
-    )
-    return (
-        f"PendleSwap adapter upgrade on {link(context.proxy)}\n{_INTEGRATION_CONTEXT}\n"
-        f"Router integration reference: {_ROUTER_REFERENCE}\n"
-        f"Current implementation: {link(context.current_implementation)}\n"
-        f"Proposed implementation: {link(context.implementation)}\n"
-        f"Current proxy owner() (live read): {link(context.owner)}\n{execution}\n"
-        "Authorization must be assessed from the hook AND ownership guard below; "
-        "a modifier name alone is not proof.\n"
-        f"Current implementation evidence:\n```solidity\n{context.current_source}\n```\n"
-        f"Proposed implementation evidence:\n```solidity\n{context.proposed_source}\n```"
-    )
+    first = contexts[0]
+    lines = [
+        f"PendleSwap adapter upgrade on {link(first.proxy)} — {len(contexts)} upgrade call(s) in this batch.",
+        _INTEGRATION_CONTEXT,
+        f"Router integration reference: {_ROUTER_REFERENCE}",
+        f"Current implementation: {link(first.current_implementation)}",
+        f"Current proxy owner() (live read): {link(first.owner)}",
+        "Authorization must be assessed from the hook AND ownership guard below; a modifier name alone is not proof.",
+        "Upgrade calls, in batch order:",
+        *(
+            f"  {index}. {'upgradeToAndCall' if c.is_upgrade_and_call else 'upgradeTo'} → {link(c.implementation)}: "
+            f"{_execution_note(c)}"
+            for index, c in enumerate(contexts, start=1)
+        ),
+        f"Current implementation evidence:\n```solidity\n{first.current_source}\n```",
+    ]
+    shown = {(first.current_implementation or "").lower()}
+    for context in contexts:
+        if context.implementation.lower() in shown:
+            continue
+        shown.add(context.implementation.lower())
+        lines.append(
+            f"Proposed implementation evidence: {link(context.implementation)}\n"
+            f"```solidity\n{context.proposed_source}\n```"
+        )
+    return "\n".join(lines)

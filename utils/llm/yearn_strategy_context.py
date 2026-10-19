@@ -55,6 +55,19 @@ STRATEGY_CALLS = frozenset(
 # Called on a CommonReportTrigger with the strategy as its first argument.
 TRIGGER_CALL = "setCustomStrategyTrigger"
 
+# The settings each call changes or depends on, shown as the before-state.
+_SETTING_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    "setProfitMaxUnlockTime": ("unlock", "deposits"),
+    "setEmergencyAdmin": ("emergency_admin", "management"),
+    "setPerformanceFeeRecipient": ("fee",),
+    "setPerformanceFee": ("fee",),
+    "setKeeper": ("keeper",),
+    "setOpen": ("deposits",),
+    "setOpenDeposits": ("deposits",),
+    "report": ("unlock", "last_report", "fee"),
+    TRIGGER_CALL: ("last_report",),
+}
+
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
@@ -121,19 +134,45 @@ class YearnStrategyContext:
             return f"deposits are open to anyone (`{self.deposit_gate}` = true)"
         return f"deposits are allowlist-only (`{self.deposit_gate}` = false)"
 
+    def relevant_settings(self) -> set[str]:
+        """The settings the proposed calls change or depend on.
+
+        A report's profit lands instantly when the unlock time is (or is set to) 0, and
+        then who may deposit matters; a new emergency admin is read against management.
+        """
+        names = {call.function_name for _, call in self.calls}
+        keys = {key for name in names for key in _SETTING_DEPENDENCIES.get(name, ())}
+        sets_zero_unlock = any(
+            call.function_name == "setProfitMaxUnlockTime" and call.params and call.params[-1][1] == 0
+            for _, call in self.calls
+        )
+        if "report" in names and (self.profit_max_unlock_time == 0 or sets_zero_unlock):
+            keys.add("deposits")
+        return keys
+
     def header_lines(self, render: Render) -> list[str]:
-        """Strategy identity and settings before the transaction."""
-        fee = f"{self.performance_fee / 100:g}%"
-        return [
+        """Strategy identity, and the settings before the transaction that its calls touch."""
+        keys = self.relevant_settings()
+        settings = {
+            "management": f"management {render(self.management)}",
+            "keeper": f"keeper {render(self.keeper)}",
+            "emergency_admin": f"emergencyAdmin {render(self.emergency_admin)}",
+            "fee": f"performanceFee {self.performance_fee / 100:g}% to {render(self.performance_fee_recipient)}",
+            "unlock": f"profitMaxUnlockTime {_duration(self.profit_max_unlock_time)}",
+            "last_report": (
+                f"last report {format_utc(self.last_report)} ({format_duration(self.now - self.last_report)} ago)"
+            ),
+            "deposits": self.deposit_gate_text(self.deposits_open),
+        }
+        lines = [
             f"Yearn tokenized strategy {render(self.address)}: {self.name}, API {self.api_version}, "
             f"asset {self.asset_symbol}; totalAssets {self.amount(self.total_assets)}; "
-            f"shutdown {str(self.is_shutdown).lower()}.",
-            f"Settings before this transaction: management {render(self.management)}; keeper {render(self.keeper)}; "
-            f"emergencyAdmin {render(self.emergency_admin)}; performanceFee {fee} to "
-            f"{render(self.performance_fee_recipient)}; profitMaxUnlockTime {_duration(self.profit_max_unlock_time)}; "
-            f"last report {format_utc(self.last_report)} ({format_duration(self.now - self.last_report)} ago); "
-            f"{self.deposit_gate_text(self.deposits_open)}.",
+            f"shutdown {str(self.is_shutdown).lower()}."
         ]
+        shown = [text for key, text in settings.items() if key in keys]
+        if shown:
+            lines.append(f"Settings before this transaction: {'; '.join(shown)}.")
+        return lines
 
     def proposal_lines(self, render: Render) -> list[str]:
         """Each call as old → new, applied in batch order so later calls see earlier ones."""
@@ -154,11 +193,7 @@ class YearnStrategyContext:
                 lines.append(self._unlock_line(unlock_time, value, reported))
                 unlock_time = value
             elif name == "setEmergencyAdmin" and isinstance(value, str):
-                lines.append(
-                    f"setEmergencyAdmin: {render(admin)} → {render(value)}. The emergency admin can shut the "
-                    "strategy down and, once shut down, emergency-withdraw from the yield source; funds stay in the "
-                    f"strategy for holders. Management stays {render(self.management)}."
-                )
+                lines.append(f"setEmergencyAdmin: {render(admin)} → {render(value)}; management is unchanged.")
                 admin = value
             elif name == "setPerformanceFeeRecipient" and isinstance(value, str):
                 note = (
@@ -172,7 +207,7 @@ class YearnStrategyContext:
                 lines.append(f"setPerformanceFee: {fee / 100:g}% → {value / 100:g}% of reported profit.")
                 fee = value
             elif name == "setKeeper" and isinstance(value, str):
-                lines.append(f"setKeeper: {render(keeper)} → {render(value)} (may call report() and tend()).")
+                lines.append(f"setKeeper: {render(keeper)} → {render(value)}.")
                 keeper = value
             elif name in ("setOpen", "setOpenDeposits") and isinstance(value, bool):
                 line = f"{name}: {self.deposit_gate_text(deposits_open)} → {self.deposit_gate_text(value)}."
@@ -354,16 +389,26 @@ def resolve_yearn_strategy_context(
     return contexts
 
 
-# Said once per section, not once per report() call: a batch reporting several strategies repeated it for each.
-REPORT_TRANSFERS_NOTE = (
-    "Token transfers inside report() (reward claims, auction kicks, redeposits into the yield source) are the "
-    "strategy managing its own position, not payments."
-)
+# Explanations said once per section, not once per call: a batch configuring several strategies
+# repeated each for every strategy. Keyed by the call that needs it.
+SHARED_NOTES = {
+    "report": (
+        "Token transfers inside report() (reward claims, auction kicks, redeposits into the yield source) are the "
+        "strategy managing its own position, not payments."
+    ),
+    "setEmergencyAdmin": (
+        "The emergency admin can shut a strategy down and, once shut down, emergency-withdraw from the yield source; "
+        "funds stay in the strategy for holders."
+    ),
+    "setKeeper": "The keeper may call report() and tend().",
+}
+REPORT_TRANSFERS_NOTE = SHARED_NOTES["report"]
 
 
-def _reports(contexts: list[YearnStrategyContext]) -> bool:
-    """Whether any strategy in ``contexts`` has a report() call."""
-    return any(call.function_name == "report" for context in contexts for _, call in context.calls)
+def _shared_notes(contexts: list[YearnStrategyContext]) -> list[str]:
+    """The shared explanations the calls in ``contexts`` need, once each."""
+    names = {call.function_name for context in contexts for _, call in context.calls}
+    return [note for name, note in SHARED_NOTES.items() if name in names]
 
 
 def format_yearn_strategy_prompt(contexts: list[YearnStrategyContext]) -> str:
@@ -382,8 +427,7 @@ def format_yearn_strategy_prompt(contexts: list[YearnStrategyContext]) -> str:
             *(f"  - {line}" for line in context.proposal_lines(render)),
         ]
         sections.append("\n".join(lines))
-    if _reports(contexts):
-        sections.append(REPORT_TRANSFERS_NOTE)
+    sections.extend(_shared_notes(contexts))
     return "\n\n".join(sections)
 
 
@@ -404,6 +448,5 @@ def format_yearn_strategy_report(
         lines = [f"**{header}**", f"- {settings}", "- **Proposed:**"]
         lines.extend(f"  - {line}" for line in context.proposal_lines(render))
         sections.append("\n".join(lines))
-    if _reports(contexts):
-        sections.append(REPORT_TRANSFERS_NOTE)
+    sections.extend(_shared_notes(contexts))
     return "\n\n".join(sections)

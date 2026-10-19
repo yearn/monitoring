@@ -130,20 +130,16 @@ class SwapPairContext:
         return {}
 
     def prompt_line(self) -> str:
+        """This pair's numbers; ``PAIR_SEMANTICS`` explains them once per prompt."""
         pair = f"{self.token_in.symbol}/{self.token_out.symbol}"
         parts = [
-            f"SwapFarmV2 {self.farm} setPairConfig({pair}): _slippage {self.ratio} is a MINIMUM-OUTPUT ratio, "
-            f"not a loss allowance — the code enforces minAmountOut = convert(tokenIn, tokenOut, amountIn) "
-            f"× {_percent(self.ratio)}, so each swap of this pair (either direction; the key is "
-            f"direction-independent) must return at least {_percent(self.ratio)} of the oracle-converted input, "
-            f"i.e. at most {_percent(WAD - self.ratio)} loss versus Accounting prices. The natspec's "
-            '"maximum slippage tolerance" wording describes this same bound',
+            f"SwapFarmV2 {self.farm} setPairConfig({pair}): _slippage {self.ratio} → each swap must return at "
+            f"least {_percent(self.ratio)} of the oracle-converted input (at most {_percent(WAD - self.ratio)} "
+            "loss versus Accounting prices)",
             self._floor_text(),
-            f"cooldown {self.cooldown:,} seconds ({_duration(self.cooldown)}) between swaps of this pair "
-            f"(compared with block.timestamp; maximum {_duration(self.max_cooldown)})",
+            f"cooldown {self.cooldown:,} seconds ({_duration(self.cooldown)}; maximum {_duration(self.max_cooldown)})",
             f"current pair config: {self.current_text()}",
-            f"token support (both must be supported or the call reverts InvalidToken): "
-            f"{self.token_in.describe()}; {self.token_out.describe()}",
+            f"token support: {self.token_in.describe()}; {self.token_out.describe()}",
         ]
         if self.farm_assets is not None:
             parts.append(
@@ -156,10 +152,7 @@ class SwapPairContext:
         if self.ratio < self.floor:
             return f"BELOW the farm-wide floor maxSlippage {_percent(self.floor)} — the call reverts InvalidSlippage"
         relation = "stricter than" if self.ratio > self.floor else "equal to"
-        return (
-            f"farm-wide floor maxSlippage {_percent(self.floor)} (a pair ratio below it reverts InvalidSlippage); "
-            f"this pair is {relation} the floor"
-        )
+        return f"farm-wide floor maxSlippage {_percent(self.floor)}; this pair is {relation} the floor"
 
     def current_text(self) -> str:
         """The pair's configuration before the batch."""
@@ -484,9 +477,22 @@ def resolve_infinifi_farm_context(
     return contexts
 
 
+# What a SwapFarmV2 pair configuration means, from the verified code; stated once per prompt.
+PAIR_SEMANTICS = (
+    "SwapFarmV2.setPairConfig(tokenIn, tokenOut, cooldown, slippage): _slippage is a MINIMUM-OUTPUT ratio, not a "
+    "loss allowance — the code enforces minAmountOut = convert(tokenIn, tokenOut, amountIn) × slippage, so each swap "
+    "of the pair (either direction; the key is direction-independent) must return at least that share of the "
+    'oracle-converted input. The natspec\'s "maximum slippage tolerance" wording describes this same bound. A '
+    "ratio below the farm-wide floor maxSlippage reverts InvalidSlippage. The cooldown is in seconds between swaps "
+    "of the pair, compared with block.timestamp. Both tokens must be supported or the call reverts InvalidToken."
+)
+
+
 def format_infinifi_farm_prompt(contexts: list[FarmContext]) -> str:
-    """Render verified farm-configuration context for the LLM prompt."""
-    return "\n".join(context.prompt_line() for context in contexts)
+    """Render verified farm-configuration context for the LLM prompt; pair semantics are stated once."""
+    lines = [PAIR_SEMANTICS] if any(isinstance(context, SwapPairContext) for context in contexts) else []
+    lines.extend(context.prompt_line() for context in contexts)
+    return "\n".join(lines)
 
 
 def format_infinifi_farm_report(contexts: list[FarmContext], chain_id: int, labels: dict[str, str]) -> str:

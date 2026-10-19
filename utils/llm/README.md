@@ -414,6 +414,17 @@ Adapters receive the inner calls of executed governance wrappers too. `expand_ex
 
 The prompt is split into a **system** prompt (static instructions) and a **user** prompt (per-tx context).
 
+**Measuring cost.** Each provider records the latest call's `LLMUsage`: input tokens (cached ones included), cached input, cache writes, output, and latency. The explainer keeps one `StageUsage` per call on `Explanation.stages`: `summary`, `critique-N` (`pass` / `revised`, with the revised TLDR) and `detail`. It logs one line per alert: `LLM usage (<model>): summary ok in=… cached=… out=… 8.1s | critique-1 pass … | detail ok … | total …`.
+
+Venice applies automatic prefix caching and reports it as `prompt_tokens_details.cached_tokens`. Anthropic reports cache reads and writes separately; the provider folds them into the same fields.
+
+Measured on two Strategist Safe batches pinned to their alert blocks (8 runs, Venice deepseek-v4-flash at $0.138/M input, $0.028/M cached, $0.275/M output):
+- about **$0.003 and 48 s per alert**;
+- the detail stage takes 69% of the latency;
+- every critique passed in round 1.
+
+The stages use different system prompts (JSON note, format reminder, none), so the shared context is cached only between identical prefixes.
+
 **Keeping the context lean.** Each LLM call resends the whole context, so repetition costs on every call:
 - Semantics shared by every vault or auction (V3 `update_debt` and queue rules, Dutch-auction mechanics) are stated once per Protocol Context section; each vault or auction keeps only its own numbers.
 - Simulation results drop `Transfer` events when token transfers are listed, since they restate them.

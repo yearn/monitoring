@@ -138,8 +138,8 @@ class TestSwapPair(unittest.TestCase):
         *_, pair = _resolve(BATCH)
         assert isinstance(pair, SwapPairContext)
         prompt = format_infinifi_farm_prompt([pair])
-        self.assertIn("_slippage 999500000000000000 is a MINIMUM-OUTPUT ratio, not a loss allowance", prompt)
-        self.assertIn("must return at least 99.95% of the oracle-converted input", prompt)
+        self.assertIn("_slippage is a MINIMUM-OUTPUT ratio, not a loss allowance", prompt)
+        self.assertIn("_slippage 999500000000000000 → each swap must return at least 99.95% of the oracle", prompt)
         self.assertIn("at most 0.05% loss versus Accounting prices", prompt)
         self.assertIn("farm-wide floor maxSlippage 99%", prompt)
         self.assertIn("this pair is stricter than the floor", prompt)
@@ -147,7 +147,7 @@ class TestSwapPair(unittest.TestCase):
     def test_cooldown_is_in_seconds(self) -> None:
         *_, pair = _resolve(BATCH)
         prompt = format_infinifi_farm_prompt([pair])
-        self.assertIn("cooldown 1,200 seconds (20 min)", prompt)
+        self.assertIn("cooldown 1,200 seconds (20 min", prompt)
         self.assertIn("maximum 12h", prompt)
         self.assertIn("current pair config: unset", prompt)
 
@@ -159,6 +159,13 @@ class TestSwapPair(unittest.TestCase):
             "Accounting has its oracle (NOT set yet)",
             prompt,
         )
+
+    def test_pair_semantics_are_stated_once_for_several_pairs(self) -> None:
+        *_, pair = _resolve(BATCH)
+        prompt = format_infinifi_farm_prompt([pair, pair, pair])
+        self.assertEqual(prompt.count("MINIMUM-OUTPUT ratio, not a loss allowance"), 1)
+        self.assertEqual(prompt.count("must return at least 99.95%"), 3)
+        self.assertLess(len(pair.prompt_line()), 800)
 
     def test_ratio_below_the_floor_reverts(self) -> None:
         low = _call(

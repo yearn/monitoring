@@ -170,20 +170,32 @@ class PermissionGrantContext:
             "checks allow — not arbitrary calls."
         )
 
-    def lines(self) -> list[str]:
-        """Plain-text facts for the prompt."""
-        target = f"{self.target} ({self.target_label})" if self.target_label else self.target
-        lines = [
-            f"{self.signature} on {target} {self.verb} {self.holder.address} an entry in `{self.allowlist}`.",
-            self.scope_line(),
-        ]
-        lines.extend(line for line in (self.forwarder_line(), self.restricted_line()) if line)
-        lines.append(f"Holder: {self.holder.describe()}.")
+    @property
+    def target_text(self) -> str:
+        """The target with its label, for prose."""
+        return f"{self.target} ({self.target_label})" if self.target_label else self.target
+
+    def scope_lines(self) -> list[str]:
+        """What the allowlist gates on the target: the same for every call writing it."""
+        return [self.scope_line(), *(line for line in (self.forwarder_line(), self.restricted_line()) if line)]
+
+    def holder_lines(self) -> list[str]:
+        """Who the holder is, and whether it forwards arbitrary calls itself."""
+        lines = [f"Holder: {self.holder.describe()}."]
         if self.holder_forwarders:
             lines.append(
                 "The holder itself forwards arbitrary calls — "
                 f"{', '.join(self.holder_forwarders)} — so whoever passes its checks acts with this entry."
             )
+        return lines
+
+    def lines(self) -> list[str]:
+        """Plain-text facts for one call on its own."""
+        lines = [
+            f"{self.signature} on {self.target_text} {self.verb} {self.holder.address} an entry in `{self.allowlist}`.",
+            *self.scope_lines(),
+            *self.holder_lines(),
+        ]
         after = self.holders_after()
         if self.holders_before is not None and after is not None:
             lines.append(
@@ -550,9 +562,42 @@ def resolve_permission_grant_context(
     return contexts
 
 
+def _groups(contexts: list[PermissionGrantContext]) -> list[list[PermissionGrantContext]]:
+    """Calls grouped by the allowlist they write, in batch order of each list's first call."""
+    groups: dict[tuple[str, str], list[PermissionGrantContext]] = {}
+    for context in contexts:
+        groups.setdefault((context.target.lower(), context.allowlist), []).append(context)
+    return list(groups.values())
+
+
 def format_permission_grant_prompt(contexts: list[PermissionGrantContext]) -> str:
-    """Render verified allowlist-scope facts for the LLM prompt."""
-    return "\n\n".join("\n".join(context.lines()) for context in contexts)
+    """Render verified allowlist-scope facts for the LLM prompt.
+
+    Each allowlist's scope and members before the batch are stated once, then its
+    changes in batch order, then the members after. Printing scope and full member
+    lists per call made a ten-grant batch mostly repetition.
+    """
+    sections: list[str] = []
+    for group in _groups(contexts):
+        first, last = group[0], group[-1]
+        if len(group) == 1:
+            sections.append("\n".join(first.lines()))
+            continue
+        lines = [
+            f"`{first.allowlist}` on {first.target_text} — {len(group)} changes in this batch.",
+            *first.scope_lines(),
+        ]
+        if first.holders_before is not None:
+            lines.append(f"Members before this batch: {', '.join(first.holders_before) or 'none'}.")
+        lines.append("Changes, in batch order:")
+        for index, context in enumerate(group, start=1):
+            lines.append(f"  {index}. {context.signature} {context.verb} {context.holder.address}.")
+            lines.extend(f"     {line}" for line in context.holder_lines())
+        after = last.holders_after()
+        if first.holders_before is not None and after is not None:
+            lines.append(f"Members after this batch: {', '.join(after) or 'none'}.")
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
 
 
 # What the call does to the gated entry points, keyed by the holder's access afterwards.
@@ -564,31 +609,60 @@ def format_permission_grant_report(
     chain_id: int,
     labels: dict[str, str],
 ) -> str:
-    """Render the deterministic allowlist-scope section for the gist report."""
+    """Render the deterministic allowlist-scope section for the gist report.
+
+    One block per allowlist: its entry points and members before the batch once,
+    then each change with its holder, then the members after.
+    """
+
+    def links(addresses: tuple[str, ...]) -> str:
+        return ", ".join(address_link(a, chain_id, labels) for a in addresses) or "none"
+
     sections: list[str] = []
-    for context in contexts:
-        lines = [
-            f"**`{context.signature}`** on {address_link(context.target, chain_id, labels)} — "
-            f"{context.verb.lower()} an entry in `{context.allowlist}`",
-            f"- **Holder:** {describe_controller_markdown(context.holder, chain_id, labels)}",
-            f"- **Entry points it {_EFFECT[context.access]}:**",
-        ]
-        for fn in context.gated:
+    for group in _groups(contexts):
+        first, last = group[0], group[-1]
+        accesses = {context.access for context in group}
+        effect = _EFFECT[accesses.pop()] if len(accesses) == 1 else "gates"
+        if len(group) == 1:
+            lines = [
+                f"**`{first.signature}`** on {address_link(first.target, chain_id, labels)} — "
+                f"{first.verb.lower()} an entry in `{first.allowlist}`",
+                f"- **Holder:** {describe_controller_markdown(first.holder, chain_id, labels)}",
+            ]
+        else:
+            lines = [
+                f"**`{first.allowlist}`** on {address_link(first.target, chain_id, labels)} — {len(group)} changes"
+            ]
+        lines.append(f"- **Entry points it {effect}:**")
+        for fn in first.gated:
             flag = f" — **arbitrary {fn.arbitrary_call}**" if fn.arbitrary_call else ""
             if fn.restricted_by:
                 flag = f" — forwards calls, restricted by {fn.restricted_by}"
             lines.append(f"  - `{fn.signature}` ({fn.via}){flag}")
-        if any(fn.arbitrary_call for fn in context.gated):
+        if any(fn.arbitrary_call for fn in first.gated):
             lines.append(
                 "- **Scope:** an arbitrary-call entry point lets the holder use every permission the target holds."
             )
-        if context.holder_forwarders:
-            forwarders = ", ".join(f"`{f}`" for f in context.holder_forwarders)
+        if len(group) > 1:
+            if first.holders_before is not None:
+                lines.append(f"- **Members before:** {links(first.holders_before)}")
+            lines.append("- **Changes, in batch order:**")
+            for context in group:
+                lines.append(
+                    f"  - `{context.signature}` {context.verb.lower()} "
+                    f"{describe_controller_markdown(context.holder, chain_id, labels)}"
+                )
+                if context.holder_forwarders:
+                    forwarders = ", ".join(f"`{f}`" for f in context.holder_forwarders)
+                    lines.append(f"    - holder forwards arbitrary calls: {forwarders}")
+        elif first.holder_forwarders:
+            forwarders = ", ".join(f"`{f}`" for f in first.holder_forwarders)
             lines.append(f"- **Holder forwards arbitrary calls:** {forwarders}")
-        after = context.holders_after()
-        if context.holders_before is not None and after is not None:
-            before_links = ", ".join(address_link(a, chain_id, labels) for a in context.holders_before) or "none"
-            after_links = ", ".join(address_link(a, chain_id, labels) for a in after) or "none"
-            lines.append(f"- **`{context.allowlist}` members:** {before_links} → {after_links}")
+        after = last.holders_after()
+        if first.holders_before is not None and after is not None:
+            if len(group) > 1:
+                lines.append(f"- **Members after:** {links(after)}")
+            else:
+                lines.append(f"- **`{first.allowlist}` members:** {links(first.holders_before)} → {links(after)}")
         sections.append("\n".join(lines))
     return "\n\n".join(sections)

@@ -231,3 +231,33 @@ def test_ambiguous_interfaces_and_owner_bases_are_not_guessed() -> None:
     assert "Verified swap payload/enum" not in evidence
     assert "Verified ownership guard" not in evidence
     assert "_zeroExSwap" in evidence
+
+
+def test_batch_states_shared_evidence_once_and_keeps_each_call(boundaries: Boundaries) -> None:
+    """The integration reference and each implementation's code appear once; every call and payload stays."""
+    migrate = DecodedCall(
+        "upgradeToAndCall", "upgradeToAndCall(address,bytes)", [("address", NEW), ("bytes", bytes.fromhex("c4d66de8"))]
+    )
+    contexts = resolve_pendle_context("pendle", 1, [(PENDLE_SWAP, _upgrade()), (PENDLE_SWAP, migrate)])
+    prompt = format_pendle_prompt(contexts)
+    assert prompt.count("not a live trace") == 1
+    assert prompt.count("Proposed implementation evidence:") == 1
+    assert prompt.count("Current implementation evidence:") == 1
+    assert f"1. upgradeTo → {NEW}: upgradeTo has no initialization/migration payload." in prompt
+    assert (
+        f"2. upgradeToAndCall → {NEW}: upgradeToAndCall includes a bytes payload (4 bytes, selector 0xc4d66de8"
+        in prompt
+    )
+
+
+def test_same_upgrade_with_different_payloads_is_not_coalesced(boundaries: Boundaries) -> None:
+    """Coalescing keys on the payload: two different migrations are two calls."""
+    calls = [
+        (
+            PENDLE_SWAP,
+            DecodedCall("upgradeToAndCall", "upgradeToAndCall(address,bytes)", [("address", NEW), ("bytes", data)]),
+        )
+        for data in (b"\x01", b"\x02", b"\x01")
+    ]
+    contexts = resolve_pendle_context("pendle", 1, calls)
+    assert [c.payload for c in contexts] == [b"\x01", b"\x02"]
