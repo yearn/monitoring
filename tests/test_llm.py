@@ -310,3 +310,39 @@ class TestFactory(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUsage(unittest.TestCase):
+    """Providers report usage with input counting every prompt token, cached ones included."""
+
+    def test_openai_compatible_reads_prefix_cache_hits(self) -> None:
+        from types import SimpleNamespace
+
+        from utils.llm.openai_compat import _usage
+
+        # Shape of a Venice deepseek-v4-flash response on a repeated system prompt.
+        details = SimpleNamespace(cached_tokens=3584, cache_write_tokens=None)
+        response = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=3613, completion_tokens=211, prompt_tokens_details=details)
+        )
+        usage = _usage(response, 2.0)
+        self.assertEqual((usage.input_tokens, usage.cached_input_tokens, usage.output_tokens), (3613, 3584, 211))
+        # A first call reports no details at all.
+        first = _usage(SimpleNamespace(usage=SimpleNamespace(prompt_tokens=3613, completion_tokens=337)), 3.5)
+        self.assertEqual((first.input_tokens, first.cached_input_tokens), (3613, None))
+
+    def test_anthropic_totals_uncached_writes_and_reads(self) -> None:
+        from types import SimpleNamespace
+
+        from utils.llm.anthropic_provider import _usage
+
+        response = SimpleNamespace(
+            usage=SimpleNamespace(
+                input_tokens=500, cache_creation_input_tokens=3000, cache_read_input_tokens=0, output_tokens=90
+            )
+        )
+        usage = _usage(response, 1.0)
+        self.assertEqual(
+            (usage.input_tokens, usage.cached_input_tokens, usage.cache_write_tokens, usage.output_tokens),
+            (3500, 0, 3000, 90),
+        )

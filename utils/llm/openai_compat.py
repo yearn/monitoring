@@ -7,12 +7,13 @@ Works with any provider that implements the OpenAI chat completions API:
 """
 
 import json
+import time
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from openai.types.chat import ChatCompletionMessageParam
 
-from utils.llm.base import LLMError, LLMProvider, wrap_llm_errors
+from utils.llm.base import LLMError, LLMProvider, LLMUsage, wrap_llm_errors
 from utils.logger import get_logger
 
 logger = get_logger("utils.llm.openai_compat")
@@ -49,10 +50,12 @@ class OpenAICompatProvider(LLMProvider):
     def complete(self, prompt: str, system_prompt: str = "") -> str:
         """Generate a completion using the OpenAI chat completions API."""
         with wrap_llm_errors("LLM API call failed"):
+            start = time.monotonic()
             response = self._client.chat.completions.create(
                 model=self._model,
                 messages=self._build_messages(prompt, system_prompt),
             )
+            self.last_usage = _usage(response, time.monotonic() - start)
             content = response.choices[0].message.content
             if not content:
                 raise LLMError("Empty response from LLM")
@@ -66,6 +69,7 @@ class OpenAICompatProvider(LLMProvider):
     def complete_structured(self, prompt: str, schema: dict[str, Any], system_prompt: str = "") -> dict[str, Any]:
         """Request a JSON-schema-constrained response and return it parsed."""
         with wrap_llm_errors("Structured LLM call failed"):
+            start = time.monotonic()
             response = self._client.chat.completions.create(
                 model=self._model,
                 messages=self._build_messages(prompt, system_prompt),
@@ -74,6 +78,7 @@ class OpenAICompatProvider(LLMProvider):
                     "json_schema": {"name": "explanation", "schema": schema, "strict": True},
                 },
             )
+            self.last_usage = _usage(response, time.monotonic() - start)
             content = response.choices[0].message.content
             if not content:
                 raise LLMError("Empty response from LLM")
@@ -95,3 +100,20 @@ class OpenAICompatProvider(LLMProvider):
     def model_name(self) -> str:
         """Return the model identifier."""
         return self._model
+
+
+def _usage(response: Any, latency_s: float) -> LLMUsage:
+    """Usage from a chat-completions response; prefix-cache hits come in ``prompt_tokens_details``.
+
+    Venice reports automatic prefix caching as ``prompt_tokens_details.cached_tokens``
+    (and ``cache_write_tokens`` where the model bills writes); fields it omits stay None.
+    """
+    usage = getattr(response, "usage", None)
+    details = getattr(usage, "prompt_tokens_details", None)
+    return LLMUsage(
+        input_tokens=getattr(usage, "prompt_tokens", None),
+        cached_input_tokens=getattr(details, "cached_tokens", None),
+        cache_write_tokens=getattr(details, "cache_write_tokens", None),
+        output_tokens=getattr(usage, "completion_tokens", None),
+        latency_s=latency_s,
+    )

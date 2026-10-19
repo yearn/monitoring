@@ -4,9 +4,10 @@ Uses the native Anthropic API which has a different format from
 the OpenAI chat completions API.
 """
 
+import time
 from typing import Any
 
-from utils.llm.base import LLMError, LLMProvider, wrap_llm_errors
+from utils.llm.base import LLMError, LLMProvider, LLMUsage, wrap_llm_errors
 from utils.logger import get_logger
 
 logger = get_logger("utils.llm.anthropic_provider")
@@ -51,7 +52,9 @@ class AnthropicProvider(LLMProvider):
         }
         self._add_system(kwargs, system_prompt)
         with wrap_llm_errors("Anthropic API call failed"):
+            start = time.monotonic()
             response = self._client.messages.create(**kwargs)
+            self.last_usage = _usage(response, time.monotonic() - start)
             block = response.content[0]
             if block.type != "text":
                 raise LLMError(f"Unexpected response block type: {block.type}")
@@ -75,7 +78,9 @@ class AnthropicProvider(LLMProvider):
         }
         self._add_system(kwargs, system_prompt)
         with wrap_llm_errors("Anthropic structured call failed"):
+            start = time.monotonic()
             response = self._client.messages.create(**kwargs)
+            self.last_usage = _usage(response, time.monotonic() - start)
             for block in response.content:
                 if block.type == "tool_use":
                     return dict(block.input)
@@ -90,3 +95,21 @@ class AnthropicProvider(LLMProvider):
     def model_name(self) -> str:
         """Return the model identifier."""
         return self._model
+
+
+def _usage(response: Any, latency_s: float) -> LLMUsage:
+    """Usage from a Messages response, totalled the way :class:`LLMUsage` defines input.
+
+    Anthropic reports uncached input, cache writes and cache reads separately.
+    """
+    usage = getattr(response, "usage", None)
+    uncached = getattr(usage, "input_tokens", None)
+    written = getattr(usage, "cache_creation_input_tokens", None) or 0
+    read = getattr(usage, "cache_read_input_tokens", None) or 0
+    return LLMUsage(
+        input_tokens=None if uncached is None else uncached + written + read,
+        cached_input_tokens=read,
+        cache_write_tokens=written,
+        output_tokens=getattr(usage, "output_tokens", None),
+        latency_s=latency_s,
+    )

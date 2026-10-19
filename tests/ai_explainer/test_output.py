@@ -11,7 +11,7 @@ from utils.llm.ai_explainer import (
     _split_risk_tag,
     format_explanation_line,
 )
-from utils.llm.base import LLMError
+from utils.llm.base import LLMError, LLMProvider, LLMUsage
 
 
 class TestStructuredOutput(unittest.TestCase):
@@ -259,3 +259,53 @@ class TestTextRefineDetailBudget(unittest.TestCase):
         result = _generate_explanation(provider, "prompt", refine=True)
         self.assertIn("revised. LOW", result.summary)
         self.assertEqual(result.detail, "")
+
+
+class _UsageProvider(LLMProvider):
+    """A text provider that reports a fixed usage per call, like a real provider; fails after ``fail_after`` calls."""
+
+    def __init__(self, responses: list[str], fail_after: int | None = None) -> None:
+        self.responses = responses
+        self.fail_after = fail_after
+        self.calls = 0
+
+    def complete(self, prompt: str, system_prompt: str = "") -> str:
+        if self.fail_after is not None and self.calls >= self.fail_after:
+            raise LLMError("boom")
+        self.calls += 1
+        self.last_usage = LLMUsage(1000 * self.calls, 900, None, 100, 0.5)
+        return self.responses.pop(0)
+
+    @property
+    def model_name(self) -> str:
+        return "test"
+
+
+class TestStageUsage(unittest.TestCase):
+    """Each LLM call is recorded with its stage, outcome and usage."""
+
+    def test_summary_critique_rounds_and_detail_are_recorded(self) -> None:
+        provider = _UsageProvider(
+            [
+                "TLDR: Pauses the vault. LOW\nDETAIL: d",
+                "TLDR: Pauses the vault and blocks deposits. MEDIUM",
+                "PASS",
+                "The vault is paused.",
+            ]
+        )
+        explanation = _generate_explanation(provider, "prompt", refine=True)
+        stages = [(s.stage, s.outcome) for s in explanation.stages]
+        self.assertEqual(
+            stages, [("summary", "ok"), ("critique-1", "revised"), ("critique-2", "pass"), ("detail", "ok")]
+        )
+        self.assertEqual(explanation.stages[1].summary, "Pauses the vault and blocks deposits. MEDIUM")
+        self.assertEqual([s.usage.input_tokens for s in explanation.stages if s.usage], [1000, 2000, 3000, 4000])
+
+    def test_failed_call_reports_no_usage(self) -> None:
+        provider = _UsageProvider(["TLDR: Pauses the vault. LOW\nDETAIL: d"], fail_after=1)
+        explanation = _generate_explanation(provider, "prompt", refine=True)
+        self.assertEqual(
+            [(s.stage, s.outcome) for s in explanation.stages], [("summary", "ok"), ("critique-1", "error")]
+        )
+        # The failed call keeps no usage: the provider's last_usage still belongs to the summary call.
+        self.assertIsNone(explanation.stages[1].usage)

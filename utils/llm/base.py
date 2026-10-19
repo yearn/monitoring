@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -30,8 +31,28 @@ def wrap_llm_errors(label: str) -> Iterator[None]:
         raise LLMError(f"{label}: {e}") from e
 
 
+@dataclass(frozen=True)
+class LLMUsage:
+    """Tokens and latency of one completion; token fields are None when the provider omits them.
+
+    ``input_tokens`` counts every prompt token, cached ones included, so the uncached
+    share is ``input_tokens - cached_input_tokens - cache_write_tokens`` — the same
+    meaning for OpenAI-compatible APIs (which report a total) and Anthropic (which
+    reports the three parts separately).
+    """
+
+    input_tokens: int | None
+    cached_input_tokens: int | None
+    cache_write_tokens: int | None
+    output_tokens: int | None
+    latency_s: float
+
+
 class LLMProvider(ABC):
     """Interface for LLM providers used to generate transaction explanations."""
+
+    # Usage of the latest completion; set by providers that report it.
+    last_usage: LLMUsage | None = None
 
     @abstractmethod
     def complete(self, prompt: str, system_prompt: str = "") -> str:

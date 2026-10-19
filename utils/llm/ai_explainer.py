@@ -21,7 +21,7 @@ from utils.erc20_metadata import ERC20Metadata, fetch_erc20_metadata
 from utils.formatting import format_decimal_amount, normalize_token_amount, parse_wei
 from utils.impl_diff import diff_implementations, format_impl_diff
 from utils.llm import get_llm_provider
-from utils.llm.base import LLMError, LLMProvider
+from utils.llm.base import LLMError, LLMProvider, LLMUsage
 from utils.llm.protocol_context import expand_executed_calls, resolve_protocol_context
 from utils.llm.report import (
     TOKEN_MOVE_SIGS,
@@ -372,6 +372,24 @@ class Explanation:
     detail: str
     report: str = ""
     title: str = ""
+    # One entry per LLM call, in order: what each stage cost and did.
+    stages: tuple["StageUsage", ...] = ()
+
+
+@dataclass(frozen=True)
+class StageUsage:
+    """One LLM call while explaining a transaction.
+
+    ``stage`` is ``summary`` (``summary-structured`` for a structured attempt that fell
+    back to text), ``critique-N`` or ``detail``. ``outcome`` says what the call did:
+    ``ok``, ``pass`` / ``revised`` for a critique, ``empty`` or ``error``. ``summary``
+    holds the TLDR a summary or revising critique produced, to compare rounds.
+    """
+
+    stage: str
+    outcome: str
+    usage: LLMUsage | None = None
+    summary: str = ""
 
 
 @dataclass(frozen=True)
@@ -1855,7 +1873,41 @@ def _explanation_from_json(data: dict) -> Explanation:
     return Explanation(summary=summary, detail=detail)
 
 
-def _generate_summary(provider: LLMProvider, prompt: str) -> Explanation:
+def _record(
+    stages: list[StageUsage] | None, stage: str, outcome: str, provider: LLMProvider, summary: str = ""
+) -> None:
+    """Append one stage's usage; a failed call reports no usage (``last_usage`` would be stale)."""
+    if stages is not None:
+        usage = provider.last_usage if outcome != "error" else None
+        stages.append(StageUsage(stage, outcome, usage if isinstance(usage, LLMUsage) else None, summary))
+
+
+def _usage_line(stages: list[StageUsage]) -> str:
+    """One log line per alert: each stage's tokens, cache reads and latency, then totals."""
+
+    def tokens(usage: LLMUsage | None) -> tuple[int, int, int, float]:
+        if usage is None:
+            return 0, 0, 0, 0.0
+        return (
+            usage.input_tokens or 0,
+            usage.cached_input_tokens or 0,
+            usage.output_tokens or 0,
+            usage.latency_s,
+        )
+
+    parts = []
+    for stage in stages:
+        inp, cached, out, latency = tokens(stage.usage)
+        parts.append(f"{stage.stage} {stage.outcome} in={inp} cached={cached} out={out} {latency:.1f}s")
+    totals = [tokens(stage.usage) for stage in stages]
+    parts.append(
+        f"total in={sum(t[0] for t in totals)} cached={sum(t[1] for t in totals)} "
+        f"out={sum(t[2] for t in totals)} {sum(t[3] for t in totals):.1f}s"
+    )
+    return " | ".join(parts)
+
+
+def _generate_summary(provider: LLMProvider, prompt: str, stages: list[StageUsage] | None = None) -> Explanation:
     """Stage 1: produce the authoritative summary + risk_tag, preferring structured output.
 
     Uses the provider's JSON-schema path when available (guaranteed-valid risk
@@ -1869,13 +1921,18 @@ def _generate_summary(provider: LLMProvider, prompt: str) -> Explanation:
             data = provider.complete_structured(prompt, SUMMARY_SCHEMA, system_prompt=SYSTEM_INSTRUCTIONS_SUMMARY_JSON)
             explanation = _explanation_from_json(data)
             if explanation.summary:
+                _record(stages, "summary", "ok", provider, explanation.summary)
                 return explanation
+            _record(stages, "summary-structured", "empty", provider)
             logger.warning("Structured summary returned an empty summary; falling back to text")
         except LLMError as e:
+            _record(stages, "summary-structured", "error", provider)
             logger.warning("Structured summary failed (%s); falling back to text", e)
 
     raw = provider.complete(prompt, system_prompt=SYSTEM_INSTRUCTIONS)
-    return _parse_explanation(raw)
+    explanation = _parse_explanation(raw)
+    _record(stages, "summary", "ok" if explanation.summary else "empty", provider, explanation.summary)
+    return explanation
 
 
 def _refine_summary(
@@ -1883,6 +1940,7 @@ def _refine_summary(
     draft: Explanation,
     provider: LLMProvider,
     max_rounds: int = MAX_REFINE_ROUNDS,
+    stages: list[StageUsage] | None = None,
 ) -> Explanation:
     """Iteratively self-critique the summary and revise until PASS or ``max_rounds``.
 
@@ -1899,20 +1957,25 @@ def _refine_summary(
         refine_prompt = (
             f"{original_prompt}\n\n--- Your Previous Draft ---\nTLDR: {draft.summary}\n\n{SUMMARY_REFINE_TASK}"
         )
+        stage = f"critique-{round_num}"
         try:
             raw = provider.complete(refine_prompt, system_prompt=SYSTEM_INSTRUCTIONS)
         except LLMError as e:
+            _record(stages, stage, "error", provider)
             logger.warning("Summary refine round %d failed (%s); keeping draft", round_num, e)
             return draft
 
         if not raw or not raw.strip() or raw.strip().upper().startswith("PASS"):
+            _record(stages, stage, "pass", provider)
             logger.info("Summary refine: PASS at round %d/%d", round_num, max_rounds)
             return draft
 
         revised = _parse_explanation(raw)
         if not revised.summary:
+            _record(stages, stage, "empty", provider)
             logger.warning("Summary refine round %d returned empty summary; keeping draft", round_num)
             return draft
+        _record(stages, stage, "revised", provider, revised.summary)
 
         logger.info(
             "Summary refine round %d/%d revised TLDR (%d→%d chars)",
@@ -1927,7 +1990,7 @@ def _refine_summary(
     return draft
 
 
-def _expand_detail(provider: LLMProvider, prompt: str, summary: str) -> str:
+def _expand_detail(provider: LLMProvider, prompt: str, summary: str, stages: list[StageUsage] | None = None) -> str:
     """Stage 2: write the full report *from* the confirmed summary so the two can't disagree.
 
     Returns the detail text (no TLDR/DETAIL headers). Empty string on any LLM error —
@@ -1937,10 +2000,13 @@ def _expand_detail(provider: LLMProvider, prompt: str, summary: str) -> str:
     try:
         raw = provider.complete(detail_prompt, system_prompt=SYSTEM_PROMPT)
     except LLMError as e:
+        _record(stages, "detail", "error", provider)
         logger.warning("Detail expansion failed (%s); leaving detail empty", e)
         return ""
     if not raw or not raw.strip():
+        _record(stages, "detail", "empty", provider)
         return ""
+    _record(stages, "detail", "ok", provider)
     # The model is told to emit bare detail text, but strip stray headers just in case.
     parsed = _parse_explanation(raw)
     return parsed.detail or raw.strip()
@@ -1964,13 +2030,15 @@ def _generate_explanation(
     (metadata header, summary, deterministic call flow, optional protocol
     context, analysis).
     """
-    summary_draft = _generate_summary(provider, prompt)
+    stages: list[StageUsage] = []
+    summary_draft = _generate_summary(provider, prompt, stages)
     if not summary_draft.summary:
-        return summary_draft
+        logger.info("LLM usage (%s): %s", provider.model_name, _usage_line(stages))
+        return replace(summary_draft, stages=tuple(stages))
 
     had_detail = bool(summary_draft.detail)
     if refine:
-        summary_draft = _refine_summary(prompt, summary_draft, provider)
+        summary_draft = _refine_summary(prompt, summary_draft, provider, stages=stages)
 
     # Structured stage 1 (the production path) yields no detail, so we expand it from
     # the confirmed summary — that's the derive-from-summary guarantee. The text
@@ -1979,7 +2047,8 @@ def _generate_explanation(
     # summary rather than resurrecting stale prose.
     detail = summary_draft.detail
     if not detail and (provider.supports_structured_output or had_detail):
-        detail = _expand_detail(provider, prompt, summary_draft.summary)
+        detail = _expand_detail(provider, prompt, summary_draft.summary, stages)
+    logger.info("LLM usage (%s): %s", provider.model_name, _usage_line(stages))
 
     report = ""
     title = ""
@@ -1987,7 +2056,7 @@ def _generate_explanation(
         prose, risk_tag = _split_risk_tag(summary_draft.summary)
         report = build_report(prose, detail, report_ctx, risk_tag)
         title = build_title(report_ctx, risk_tag, fallback=DETAIL_REPORT_TITLE)
-    return Explanation(summary=summary_draft.summary, detail=detail, report=report, title=title)
+    return Explanation(summary=summary_draft.summary, detail=detail, report=report, title=title, stages=tuple(stages))
 
 
 def explain_transaction(
