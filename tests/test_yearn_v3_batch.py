@@ -77,5 +77,25 @@ class TestUpdateDebt(unittest.TestCase):
         self.assertEqual(state.update_debt("0xABC", 50).moved, 50)
 
 
+class TestParentVaultFlows(unittest.TestCase):
+    """The inner vault's side of a parent vault's deposit or redemption."""
+
+    def test_auto_allocated_deposit_stays_redeemable(self) -> None:
+        state = _state(idle=0)
+        state.add_strategy("0xA", max_deposit=500, max_withdraw=100)
+        state.strategies["0xa"].current_debt = 100
+        self.assertEqual(state.receive(50, "0xA"), (100, 150))
+        strategy = state.strategies["0xa"]
+        self.assertEqual((strategy.max_withdraw, strategy.max_deposit), (150, 450))
+        # A later redemption in the same batch can take the deposit back out.
+        self.assertEqual(state.redeem(150, ["0xa"]), (0, [("0xa", 150, 0)], 0))
+
+    def test_deposit_without_auto_allocate_lands_in_idle(self) -> None:
+        state = _state(idle=10)
+        state.add_strategy("0xA", None, None)
+        self.assertIsNone(state.receive(50))
+        self.assertEqual(state.idle, 60)
+
+
 if __name__ == "__main__":
     unittest.main()

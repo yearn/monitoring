@@ -40,6 +40,18 @@ class StrategyDebt:
     max_deposit: int | None = None  # strategy.maxDeposit(vault); None when unread
     max_withdraw: int | None = None  # strategy.convertToAssets(strategy.maxRedeem(vault)); None when unread
 
+    def credit(self, amount: int) -> None:
+        """Book a deposit: debt rises, deposit room shrinks, and the deposit is redeemable again.
+
+        Shared by update_debt deposits and a parent vault's auto-allocated deposit,
+        so exit liquidity and later redemptions in the batch see the same limits.
+        """
+        self.current_debt += amount
+        if self.max_deposit is not None:
+            self.max_deposit -= amount
+        if self.max_withdraw is not None:
+            self.max_withdraw += amount
+
 
 @dataclass(frozen=True)
 class DebtMove:
@@ -99,7 +111,7 @@ class VaultBatchState:
             self.idle += amount
             return None
         before = strategy.current_debt
-        strategy.current_debt += amount
+        strategy.credit(amount)
         return before, strategy.current_debt
 
     def redeem(self, amount: int, queue: list[str]) -> tuple[int, list[tuple[str, int, int]], int]:
@@ -182,11 +194,6 @@ class VaultBatchState:
         if amount == 0:
             return DebtMove(target, current, current, idle_before, idle_before, limited_by=limited_by)
 
-        strategy.current_debt += amount
-        if strategy.max_deposit is not None:
-            strategy.max_deposit -= amount
-        # What was just deposited can be redeemed again, as far as the model knows.
-        if strategy.max_withdraw is not None:
-            strategy.max_withdraw += amount
+        strategy.credit(amount)
         self.idle -= amount
         return DebtMove(target, current, strategy.current_debt, idle_before, self.idle, limited_by=limited_by)
