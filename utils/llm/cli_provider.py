@@ -7,8 +7,9 @@ with approvals disabled (``codex exec --yolo`` / ``claude -p
 fresh temp directory so neither agent picks up this repo's AGENTS.md/CLAUDE.md.
 
 Both receive the same prompt and system prompt as the API providers. Claude is
-also cut off from user settings, rules and skills. Codex is cut off from MCP
-servers, but still loads the host user's global ``~/.codex/AGENTS.md`` and
+also cut off from user settings, rules and skills. Codex gets every configured
+MCP server explicitly disabled plus the apps/plugins features turned off, but
+still loads the host user's global ``~/.codex/AGENTS.md`` and
 ``~/.agents/skills`` (there is no supported switch for those).
 
 Any process-level failure (binary missing, non-zero exit, timeout, auth or
@@ -17,6 +18,7 @@ credit errors) raises ``LLMUnavailableError`` so the fallback chain moves on.
 
 import json
 import os
+import re
 import signal
 import subprocess
 import tempfile
@@ -31,6 +33,12 @@ logger = get_logger("utils.llm.cli_provider")
 DEFAULT_CLI_TIMEOUT_SECONDS = 300
 # Cap on CLI stderr/result text quoted in error messages.
 _ERROR_SNIPPET_CHARS = 500
+# `codex mcp list` reads config only; it should never take long.
+_CODEX_MCP_LIST_TIMEOUT_SECONDS = 30
+# Server names codex's `-c` dotted-path parser can address. It splits on dots
+# even inside quotes and keeps quotes as part of the key, so other names can't
+# be disabled per server and fail closed instead.
+_CODEX_MCP_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _tail(text: str) -> str:
@@ -120,6 +128,7 @@ class CodexCLIProvider(LLMProvider):
         self._binary = binary
         self._model = model
         self._timeout = timeout
+        self._isolation_args: list[str] | None = None
         logger.info("Initialized Codex CLI provider: binary=%s model=%s", binary, model or "<cli default>")
 
     def complete(self, prompt: str, system_prompt: str = "") -> str:
@@ -135,6 +144,44 @@ class CodexCLIProvider(LLMProvider):
         """Request a schema-constrained final message via ``--output-schema`` and parse it."""
         return _parse_json_object("codex", self._exec(prompt, system_prompt, schema=schema))
 
+    def _mcp_isolation_args(self) -> list[str]:
+        """Return codex flags that disable every configured MCP server, apps and plugins.
+
+        ``--config mcp_servers={}`` does not work: codex merges overrides into the
+        loaded config, so existing servers stay enabled. Each server has to be
+        disabled by name, so the configured servers are listed once per process.
+
+        Raises:
+            LLMUnavailableError: If the servers can't be listed or a name can't be
+                addressed. Codex is skipped rather than run with MCP access.
+        """
+        if self._isolation_args is not None:
+            return self._isolation_args
+        with tempfile.TemporaryDirectory(prefix="llm-codex-mcp-") as tmp:
+            proc = _run_cli(
+                "codex mcp list",
+                [self._binary, "mcp", "list", "--json"],
+                "",
+                Path(tmp),
+                _CODEX_MCP_LIST_TIMEOUT_SECONDS,
+            )
+        try:
+            servers = json.loads(proc.stdout)
+        except json.JSONDecodeError as e:
+            raise LLMUnavailableError(f"codex: could not parse MCP server list to disable it: {e}") from e
+        if not isinstance(servers, list):
+            raise LLMUnavailableError("codex: MCP server list was not a JSON array")
+
+        args = ["--disable", "apps", "--disable", "plugins"]
+        for server in servers:
+            name = server.get("name") if isinstance(server, dict) else None
+            if not isinstance(name, str) or not _CODEX_MCP_NAME_RE.match(name):
+                raise LLMUnavailableError(f"codex: cannot disable MCP server {name!r}; refusing to run with it enabled")
+            args += ["--config", f"mcp_servers.{name}.enabled=false"]
+        logger.info("Codex CLI: disabling %d MCP server(s) for explainer runs", len(servers))
+        self._isolation_args = args
+        return args
+
     def _exec(self, prompt: str, system_prompt: str, schema: dict[str, Any] | None) -> str:
         """Run one ``codex exec`` session and return its last message.
 
@@ -143,6 +190,7 @@ class CodexCLIProvider(LLMProvider):
         """
         if system_prompt:
             prompt = f"<system_instructions>\n{system_prompt}\n</system_instructions>\n\n{prompt}"
+        isolation_args = self._mcp_isolation_args()
         with tempfile.TemporaryDirectory(prefix="llm-codex-") as tmp:
             workdir = Path(tmp)
             output_path = workdir / "last_message.txt"
@@ -154,9 +202,8 @@ class CodexCLIProvider(LLMProvider):
                 "--ephemeral",
                 "--color",
                 "never",
-                # Drop the user's MCP servers so prompt content can't be sent to them.
-                "--config",
-                "mcp_servers={}",
+                # No MCP servers, apps or plugins: prompt content can't reach them.
+                *isolation_args,
                 "--cd",
                 str(workdir),
                 "--output-last-message",

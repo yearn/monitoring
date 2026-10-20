@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -94,16 +95,30 @@ class TestRunCLI(unittest.TestCase):
         self._assert_child_killed()
 
 
+def _codex_fake(
+    last_message: str, servers: list[dict[str, Any]] | None = None, seen: list[list[str]] | None = None
+) -> Any:
+    """Fake ``_run_cli`` for codex: answers ``mcp list`` and writes ``last_message`` for ``exec``."""
+
+    def fake_run(label: str, args: list[str], prompt: str, cwd: Path, timeout: int) -> MagicMock:
+        if seen is not None:
+            seen.append(args)
+        if args[1:3] == ["mcp", "list"]:
+            return _completed(args, stdout=json.dumps(servers or []))
+        if "--output-schema" in args and seen is not None:
+            seen.append(["schema", Path(_arg_after(args, "--output-schema")).read_text()])
+        Path(_arg_after(args, "--output-last-message")).write_text(last_message)
+        return _completed(args)
+
+    return fake_run
+
+
 class TestCodexCLIProvider(unittest.TestCase):
     """Tests for CodexCLIProvider."""
 
     @patch("utils.llm.cli_provider._run_cli")
     def test_complete_reads_last_message_and_runs_yolo(self, mock_run: MagicMock) -> None:
-        def fake_run(label: str, args: list[str], prompt: str, cwd: Path, timeout: int) -> MagicMock:
-            Path(_arg_after(args, "--output-last-message")).write_text("  Pauses the vault. LOW.\n")
-            return _completed(args)
-
-        mock_run.side_effect = fake_run
+        mock_run.side_effect = _codex_fake("  Pauses the vault. LOW.\n")
         provider = CodexCLIProvider(binary="/bin/codex", model="gpt-x", timeout=7)
 
         result = provider.complete("Explain this tx", system_prompt="Be terse.")
@@ -112,7 +127,6 @@ class TestCodexCLIProvider(unittest.TestCase):
         _, args, stdin, cwd, timeout = mock_run.call_args.args
         self.assertEqual(args[:3], ["/bin/codex", "exec", "--yolo"])
         self.assertEqual(_arg_after(args, "--model"), "gpt-x")
-        self.assertEqual(_arg_after(args, "--config"), "mcp_servers={}")
         self.assertEqual(args[-1], "-")
         self.assertNotIn("--output-schema", args)
         self.assertIn("<system_instructions>\nBe terse.\n</system_instructions>", stdin)
@@ -122,20 +136,49 @@ class TestCodexCLIProvider(unittest.TestCase):
         self.assertEqual(str(cwd), _arg_after(args, "--cd"))
 
     @patch("utils.llm.cli_provider._run_cli")
+    def test_every_configured_mcp_server_is_disabled_by_name(self, mock_run: MagicMock) -> None:
+        servers = [{"name": "context7", "enabled": True}, {"name": "review_probe", "enabled": True}]
+        seen: list[list[str]] = []
+        mock_run.side_effect = _codex_fake("ok", servers, seen)
+        provider = CodexCLIProvider(binary="codex")
+
+        provider.complete("p")
+        provider.complete("p")
+
+        exec_calls = [a for a in seen if a[1] == "exec"]
+        self.assertEqual([a for a in seen if a[1] == "mcp"], [["codex", "mcp", "list", "--json"]])  # listed once
+        for args in exec_calls:
+            configs = [args[i + 1] for i, a in enumerate(args) if a == "--config"]
+            self.assertEqual(configs, ["mcp_servers.context7.enabled=false", "mcp_servers.review_probe.enabled=false"])
+            disabled = [args[i + 1] for i, a in enumerate(args) if a == "--disable"]
+            self.assertEqual(disabled, ["apps", "plugins"])
+            # `mcp_servers={}` is a no-op merge in codex; it must not be relied on.
+            self.assertNotIn("mcp_servers={}", args)
+
+    @patch("utils.llm.cli_provider._run_cli")
+    def test_unaddressable_mcp_server_fails_closed(self, mock_run: MagicMock) -> None:
+        mock_run.side_effect = _codex_fake("ok", [{"name": "weird.name", "enabled": True}])
+        with self.assertRaises(LLMUnavailableError) as ctx:
+            CodexCLIProvider(binary="codex").complete("p")
+        self.assertIn("weird.name", str(ctx.exception))
+        self.assertEqual(mock_run.call_count, 1)  # never reached `exec`
+
+    @patch("utils.llm.cli_provider._run_cli")
+    def test_unparseable_mcp_list_fails_closed(self, mock_run: MagicMock) -> None:
+        mock_run.side_effect = lambda label, args, *rest: _completed(args, stdout="WARNING: something\n[]")
+        with self.assertRaises(LLMUnavailableError):
+            CodexCLIProvider(binary="codex").complete("p")
+        self.assertEqual(mock_run.call_count, 1)
+
+    @patch("utils.llm.cli_provider._run_cli")
     def test_complete_structured_passes_schema_file(self, mock_run: MagicMock) -> None:
-        seen_schema: dict[str, Any] = {}
-
-        def fake_run(label: str, args: list[str], prompt: str, cwd: Path, timeout: int) -> MagicMock:
-            seen_schema.update(json.loads(Path(_arg_after(args, "--output-schema")).read_text()))
-            Path(_arg_after(args, "--output-last-message")).write_text('{"summary": "ok"}')
-            return _completed(args)
-
-        mock_run.side_effect = fake_run
+        seen: list[list[str]] = []
+        mock_run.side_effect = _codex_fake('{"summary": "ok"}', seen=seen)
         provider = CodexCLIProvider(binary="codex")
 
         self.assertTrue(provider.supports_structured_output)
         self.assertEqual(provider.complete_structured("p", SCHEMA), {"summary": "ok"})
-        self.assertEqual(seen_schema, SCHEMA)
+        self.assertIn(["schema", json.dumps(SCHEMA)], seen)
         self.assertNotIn("--model", mock_run.call_args.args[1])
 
     @patch("utils.llm.cli_provider._run_cli")
@@ -146,14 +189,28 @@ class TestCodexCLIProvider(unittest.TestCase):
 
     @patch("utils.llm.cli_provider._run_cli")
     def test_invalid_structured_json_is_plain_llm_error(self, mock_run: MagicMock) -> None:
-        def fake_run(label: str, args: list[str], prompt: str, cwd: Path, timeout: int) -> MagicMock:
-            Path(_arg_after(args, "--output-last-message")).write_text("not json")
-            return _completed(args)
-
-        mock_run.side_effect = fake_run
+        mock_run.side_effect = _codex_fake("not json")
         with self.assertRaises(LLMError) as ctx:
             CodexCLIProvider(binary="codex").complete_structured("p", SCHEMA)
         self.assertNotIsInstance(ctx.exception, LLMUnavailableError)
+
+
+@unittest.skipUnless(shutil.which("codex"), "codex CLI not installed")
+class TestCodexMCPIsolationLive(unittest.TestCase):
+    """Runs the real codex CLI against a synthetic config (no auth or network needed)."""
+
+    def test_isolation_args_disable_every_server_in_real_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            Path(home, "config.toml").write_text(
+                '[mcp_servers.review_probe]\ncommand = "true"\n\n'
+                '[mcp_servers.other-probe]\nurl = "https://example.invalid/mcp"\n'
+            )
+            binary = shutil.which("codex") or "codex"
+            with patch.dict(os.environ, {"CODEX_HOME": home}):
+                isolation = CodexCLIProvider(binary=binary)._mcp_isolation_args()
+                listed = _run_cli("codex", [binary, *isolation, "mcp", "list", "--json"], "", Path(home), 30)
+        servers = {s["name"]: s["enabled"] for s in json.loads(listed.stdout)}
+        self.assertEqual(servers, {"review_probe": False, "other-probe": False})
 
 
 class TestClaudeCLIProvider(unittest.TestCase):
