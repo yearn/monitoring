@@ -77,7 +77,10 @@ class FallbackProvider(LLMProvider):
                 continue
             self._last_used = provider
             return result
-        raise LLMError(f"All LLM providers failed for {op}: " + ("; ".join(errors) or "no eligible provider"))
+        if not errors:
+            skipped = "disabled after earlier failures" if self._disabled else "no eligible provider"
+            raise LLMError(f"No LLM provider available for {op}: {skipped}")
+        raise LLMError(f"All LLM providers failed for {op}: " + "; ".join(errors))
 
     @property
     def model_name(self) -> str:

@@ -173,29 +173,39 @@ def get_llm_provider() -> LLMProvider:
     """Create or return the cached LLM provider based on environment variables.
 
     Returns:
-        The single configured provider, or a ``FallbackProvider`` chaining the
-        available CLIs and the API provider in priority order.
+        The API provider alone when no CLI is available, otherwise a
+        ``FallbackProvider`` chaining the CLIs and the API provider in priority order.
 
     Raises:
-        LLMError: If no CLI is available and LLM_API_KEY is not set.
+        LLMError: If no CLI is available and the API provider is unset or fails to initialize.
     """
     global _instance
     if _instance is not None:
         return _instance
 
     providers = _cli_providers()
-    api = _api_provider()
+    if not providers:
+        api = _api_provider()
+        if api is None:
+            raise LLMError("No LLM CLI (codex/claude) found and LLM_API_KEY environment variable is not set")
+        _instance = api
+        return _instance
+
+    # A broken API config (missing SDK, no base URL) must not block working CLIs;
+    # it only costs the last-resort fallback.
+    try:
+        api = _api_provider()
+    except LLMError as e:
+        logger.warning("API LLM provider unavailable, continuing with CLIs only: %s", e)
+        api = None
     if api is not None:
         providers.append(api)
-    if not providers:
-        raise LLMError("No LLM CLI (codex/claude) found and LLM_API_KEY environment variable is not set")
 
-    if len(providers) == 1:
-        _instance = providers[0]
-    else:
-        from utils.llm.fallback import FallbackProvider
+    from utils.llm.fallback import FallbackProvider
 
-        _instance = FallbackProvider(providers)
+    # Always wrap CLIs, even a lone one, so a CLI that's out of credits or timing
+    # out is disabled after its first failure instead of retried on every call.
+    _instance = FallbackProvider(providers)
     return _instance
 
 

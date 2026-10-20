@@ -600,11 +600,13 @@ All configuration is via environment variables:
 The CLIs run on their own login/subscription, so the metered API key is only spent when both are out of credits or broken. Details:
 
 - A CLI is skipped when its binary isn't on `PATH`. With nothing on `PATH` and no API key, the factory raises `LLMError` and alerts ship without an AI summary, as before.
+- An API provider that fails to initialize (SDK not installed, no `LLM_BASE_URL` for a custom provider) is logged and dropped when a CLI is available, so it can't block the CLIs. With no CLI, the error is raised as before.
 - The CLIs get exactly the same context as the API: the full per-transaction prompt (decoded calldata, source, before-state, simulation, protocol adapters) and the same system prompts. Only the transport differs.
 - Each call runs in a fresh temp directory, so neither agent loads this repo's AGENTS.md/CLAUDE.md. Host-level agent config is stripped where the CLI supports it:
   - Claude: `--setting-sources "" --disable-slash-commands --strict-mcp-config --no-session-persistence` (no user rules/CLAUDE.md, skills, or MCP servers).
   - Codex: `--config mcp_servers={} --ephemeral --skip-git-repo-check` (no MCP servers). Codex has no supported switch for the global `~/.codex/AGENTS.md` or `~/.agents/skills`, so keep those empty for the user that runs monitoring.
-- A non-zero exit, timeout, missing binary, or Claude `is_error` result (auth, rate limit, no credits) raises `LLMUnavailableError`. `FallbackProvider` then drops that CLI **for the rest of the process**, so a dead CLI isn't retried on every stage of every alert. A bad response (empty text, invalid JSON) only falls through for that one call.
+- A non-zero exit, timeout, missing binary, or Claude `is_error` result (auth, rate limit, no credits) raises `LLMUnavailableError`. `FallbackProvider` then drops that CLI **for the rest of the process**, so a dead CLI isn't retried on every stage of every alert. CLIs are always wrapped in `FallbackProvider`, even a lone one with no API key, so this tracking applies there too. A bad response (empty text, invalid JSON) only falls through for that one call.
+- Each CLI runs as the leader of its own process group. The whole group is SIGKILLed on timeout and after the CLI exits, so commands the agent spawned can't outlive the call. Output goes to temp files, not pipes, so a backgrounded child holding stdout can't stall a finished call until the timeout.
 - Codex has no system-prompt flag, so the system prompt is prepended to the stdin prompt in a `<system_instructions>` block.
 - The log line `AI summary using <model>` names the provider that actually answered (`codex-cli`, `claude-cli`, or the API model).
 

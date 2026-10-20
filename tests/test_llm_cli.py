@@ -2,14 +2,17 @@
 
 import json
 import os
+import stat
 import subprocess
+import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 from utils.llm.base import LLMError, LLMProvider, LLMUnavailableError
-from utils.llm.cli_provider import ClaudeCLIProvider, CodexCLIProvider
+from utils.llm.cli_provider import ClaudeCLIProvider, CodexCLIProvider, _run_cli
 from utils.llm.factory import get_llm_provider, reset_provider
 from utils.llm.fallback import FallbackProvider
 
@@ -26,38 +29,103 @@ def _arg_after(args: list[str], flag: str) -> str:
     return args[args.index(flag) + 1]
 
 
+def _pid_alive(pid: int) -> bool:
+    """True if ``pid`` is running (not exited, not a zombie awaiting reaping)."""
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except FileNotFoundError:
+        return False
+    return state != "Z"
+
+
+class TestRunCLI(unittest.TestCase):
+    """Process handling in ``_run_cli``, exercised with real shell scripts."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.pid_file = self.dir / "child.pid"
+
+    def _script(self, body: str) -> str:
+        path = self.dir / "fake-cli"
+        path.write_text(f"#!/bin/sh\n{body}\n")
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+        return str(path)
+
+    def _assert_child_killed(self) -> None:
+        pid = int(self.pid_file.read_text())
+        deadline = time.monotonic() + 5
+        while _pid_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(_pid_alive(pid), "agent-spawned child outlived the CLI call")
+
+    def test_success_returns_output_and_reads_stdin(self) -> None:
+        binary = self._script('cat; echo "warn" >&2')
+        proc = _run_cli("fake", [binary], "the prompt", self.dir, timeout=10)
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "the prompt", "warn\n"))
+
+    def test_nonzero_exit_is_unavailable(self) -> None:
+        binary = self._script('echo "ERROR: 401 Unauthorized" >&2; exit 1')
+        with self.assertRaises(LLMUnavailableError) as ctx:
+            _run_cli("fake", [binary], "", self.dir, timeout=10)
+        self.assertIn("exited with code 1: ERROR: 401 Unauthorized", str(ctx.exception))
+
+    def test_missing_binary_is_unavailable(self) -> None:
+        with self.assertRaises(LLMUnavailableError):
+            _run_cli("fake", [str(self.dir / "missing")], "", self.dir, timeout=10)
+
+    def test_timeout_kills_whole_process_group(self) -> None:
+        binary = self._script(f"sleep 60 & echo $! > {self.pid_file}; sleep 60")
+        start = time.monotonic()
+        with self.assertRaises(LLMUnavailableError) as ctx:
+            _run_cli("fake", [binary], "", self.dir, timeout=1)
+        self.assertIn("timed out after 1s", str(ctx.exception))
+        self.assertLess(time.monotonic() - start, 10)
+        self._assert_child_killed()
+
+    def test_background_child_holding_stdout_does_not_block_or_survive(self) -> None:
+        # The CLI exits right away but leaves a child that inherited stdout.
+        binary = self._script(f"sleep 60 & echo $! > {self.pid_file}; echo done")
+        start = time.monotonic()
+        proc = _run_cli("fake", [binary], "", self.dir, timeout=30)
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertEqual(proc.stdout, "done\n")
+        self._assert_child_killed()
+
+
 class TestCodexCLIProvider(unittest.TestCase):
     """Tests for CodexCLIProvider."""
 
-    @patch("utils.llm.cli_provider.subprocess.run")
+    @patch("utils.llm.cli_provider._run_cli")
     def test_complete_reads_last_message_and_runs_yolo(self, mock_run: MagicMock) -> None:
-        def fake_run(args: list[str], **kwargs: Any) -> MagicMock:
+        def fake_run(label: str, args: list[str], prompt: str, cwd: Path, timeout: int) -> MagicMock:
             Path(_arg_after(args, "--output-last-message")).write_text("  Pauses the vault. LOW.\n")
             return _completed(args)
 
         mock_run.side_effect = fake_run
-        provider = CodexCLIProvider(binary="/bin/codex", model="gpt-x")
+        provider = CodexCLIProvider(binary="/bin/codex", model="gpt-x", timeout=7)
 
         result = provider.complete("Explain this tx", system_prompt="Be terse.")
 
         self.assertEqual(result, "Pauses the vault. LOW.")
-        args = mock_run.call_args.args[0]
+        _, args, stdin, cwd, timeout = mock_run.call_args.args
         self.assertEqual(args[:3], ["/bin/codex", "exec", "--yolo"])
         self.assertEqual(_arg_after(args, "--model"), "gpt-x")
         self.assertEqual(_arg_after(args, "--config"), "mcp_servers={}")
         self.assertEqual(args[-1], "-")
         self.assertNotIn("--output-schema", args)
-        stdin = mock_run.call_args.kwargs["input"]
         self.assertIn("<system_instructions>\nBe terse.\n</system_instructions>", stdin)
         self.assertTrue(stdin.endswith("Explain this tx"))
+        self.assertEqual(timeout, 7)
         # Runs outside the repo so the agent doesn't pick up project instructions.
-        self.assertEqual(str(mock_run.call_args.kwargs["cwd"]), _arg_after(args, "--cd"))
+        self.assertEqual(str(cwd), _arg_after(args, "--cd"))
 
-    @patch("utils.llm.cli_provider.subprocess.run")
+    @patch("utils.llm.cli_provider._run_cli")
     def test_complete_structured_passes_schema_file(self, mock_run: MagicMock) -> None:
         seen_schema: dict[str, Any] = {}
 
-        def fake_run(args: list[str], **kwargs: Any) -> MagicMock:
+        def fake_run(label: str, args: list[str], prompt: str, cwd: Path, timeout: int) -> MagicMock:
             seen_schema.update(json.loads(Path(_arg_after(args, "--output-schema")).read_text()))
             Path(_arg_after(args, "--output-last-message")).write_text('{"summary": "ok"}')
             return _completed(args)
@@ -68,30 +136,17 @@ class TestCodexCLIProvider(unittest.TestCase):
         self.assertTrue(provider.supports_structured_output)
         self.assertEqual(provider.complete_structured("p", SCHEMA), {"summary": "ok"})
         self.assertEqual(seen_schema, SCHEMA)
-        self.assertNotIn("--model", mock_run.call_args.args[0])
+        self.assertNotIn("--model", mock_run.call_args.args[1])
 
-    @patch("utils.llm.cli_provider.subprocess.run")
-    def test_nonzero_exit_is_unavailable(self, mock_run: MagicMock) -> None:
-        mock_run.side_effect = lambda args, **kw: _completed(args, stderr="ERROR: 401 Unauthorized", returncode=1)
-        with self.assertRaises(LLMUnavailableError) as ctx:
-            CodexCLIProvider(binary="codex").complete("p")
-        self.assertIn("401 Unauthorized", str(ctx.exception))
-
-    @patch("utils.llm.cli_provider.subprocess.run")
-    def test_timeout_is_unavailable(self, mock_run: MagicMock) -> None:
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="codex", timeout=5)
+    @patch("utils.llm.cli_provider._run_cli")
+    def test_unavailable_propagates(self, mock_run: MagicMock) -> None:
+        mock_run.side_effect = LLMUnavailableError("codex: timed out after 5s")
         with self.assertRaises(LLMUnavailableError):
             CodexCLIProvider(binary="codex", timeout=5).complete("p")
 
-    @patch("utils.llm.cli_provider.subprocess.run")
-    def test_missing_binary_is_unavailable(self, mock_run: MagicMock) -> None:
-        mock_run.side_effect = FileNotFoundError("codex")
-        with self.assertRaises(LLMUnavailableError):
-            CodexCLIProvider(binary="codex").complete("p")
-
-    @patch("utils.llm.cli_provider.subprocess.run")
+    @patch("utils.llm.cli_provider._run_cli")
     def test_invalid_structured_json_is_plain_llm_error(self, mock_run: MagicMock) -> None:
-        def fake_run(args: list[str], **kwargs: Any) -> MagicMock:
+        def fake_run(label: str, args: list[str], prompt: str, cwd: Path, timeout: int) -> MagicMock:
             Path(_arg_after(args, "--output-last-message")).write_text("not json")
             return _completed(args)
 
@@ -104,11 +159,11 @@ class TestCodexCLIProvider(unittest.TestCase):
 class TestClaudeCLIProvider(unittest.TestCase):
     """Tests for ClaudeCLIProvider."""
 
-    @patch("utils.llm.cli_provider.subprocess.run")
+    @patch("utils.llm.cli_provider._run_cli")
     def test_complete_skips_permissions_and_uses_system_prompt_file(self, mock_run: MagicMock) -> None:
         seen_system: list[str] = []
 
-        def fake_run(args: list[str], **kwargs: Any) -> MagicMock:
+        def fake_run(label: str, args: list[str], prompt: str, cwd: Path, timeout: int) -> MagicMock:
             seen_system.append(Path(_arg_after(args, "--system-prompt-file")).read_text())
             return _completed(args, stdout=json.dumps({"is_error": False, "result": " Pauses. LOW. "}))
 
@@ -116,7 +171,7 @@ class TestClaudeCLIProvider(unittest.TestCase):
         provider = ClaudeCLIProvider(binary="/bin/claude", model="opus")
 
         self.assertEqual(provider.complete("Explain", system_prompt="Be terse."), "Pauses. LOW.")
-        args = mock_run.call_args.args[0]
+        _, args, stdin, _cwd, _timeout = mock_run.call_args.args
         self.assertEqual(args[:3], ["/bin/claude", "-p", "--dangerously-skip-permissions"])
         self.assertIn("--strict-mcp-config", args)
         self.assertEqual(_arg_after(args, "--setting-sources"), "")
@@ -124,31 +179,25 @@ class TestClaudeCLIProvider(unittest.TestCase):
         self.assertEqual(_arg_after(args, "--model"), "opus")
         self.assertEqual(_arg_after(args, "--output-format"), "json")
         self.assertEqual(seen_system, ["Be terse."])
-        self.assertEqual(mock_run.call_args.kwargs["input"], "Explain")
+        self.assertEqual(stdin, "Explain")
 
-    @patch("utils.llm.cli_provider.subprocess.run")
+    @patch("utils.llm.cli_provider._run_cli")
     def test_complete_structured_reads_structured_output(self, mock_run: MagicMock) -> None:
         envelope = {"is_error": False, "result": "", "structured_output": {"summary": "ok"}}
-        mock_run.side_effect = lambda args, **kw: _completed(args, stdout=json.dumps(envelope))
+        mock_run.side_effect = lambda label, args, *rest: _completed(args, stdout=json.dumps(envelope))
 
         result = ClaudeCLIProvider(binary="claude").complete_structured("p", SCHEMA)
 
         self.assertEqual(result, {"summary": "ok"})
-        self.assertEqual(json.loads(_arg_after(mock_run.call_args.args[0], "--json-schema")), SCHEMA)
+        self.assertEqual(json.loads(_arg_after(mock_run.call_args.args[1], "--json-schema")), SCHEMA)
 
-    @patch("utils.llm.cli_provider.subprocess.run")
+    @patch("utils.llm.cli_provider._run_cli")
     def test_is_error_envelope_is_unavailable(self, mock_run: MagicMock) -> None:
         envelope = {"is_error": True, "result": "Credit balance is too low"}
-        mock_run.side_effect = lambda args, **kw: _completed(args, stdout=json.dumps(envelope))
+        mock_run.side_effect = lambda label, args, *rest: _completed(args, stdout=json.dumps(envelope))
         with self.assertRaises(LLMUnavailableError) as ctx:
             ClaudeCLIProvider(binary="claude").complete("p")
         self.assertIn("Credit balance is too low", str(ctx.exception))
-
-    @patch("utils.llm.cli_provider.subprocess.run")
-    def test_nonzero_exit_is_unavailable(self, mock_run: MagicMock) -> None:
-        mock_run.side_effect = lambda args, **kw: _completed(args, stdout='{"is_error": true}', returncode=1)
-        with self.assertRaises(LLMUnavailableError):
-            ClaudeCLIProvider(binary="claude").complete("p")
 
 
 class _StubProvider(LLMProvider):
@@ -237,6 +286,16 @@ class TestFallbackProvider(unittest.TestCase):
             chain.complete_structured("p", SCHEMA)
         self.assertFalse(chain.supports_structured_output)
 
+    def test_fully_disabled_chain_fails_fast_with_reason(self) -> None:
+        codex = _StubProvider("codex", [LLMUnavailableError("no credits")])
+        chain = FallbackProvider([codex])
+        with self.assertRaises(LLMError):
+            chain.complete("p")
+        with self.assertRaises(LLMError) as ctx:
+            chain.complete("p")
+        self.assertIn("disabled after earlier failures", str(ctx.exception))
+        self.assertEqual(codex.calls, 1)
+
     def test_empty_chain_rejected(self) -> None:
         with self.assertRaises(LLMError):
             FallbackProvider([])
@@ -264,14 +323,53 @@ class TestFactoryCLIChain(unittest.TestCase):
         self.assertIsInstance(provider, FallbackProvider)
         self.assertEqual(provider.model_name, "codex-cli -> claude-cli -> deepseek-v4-flash")
 
-    def test_cli_only_without_api_key(self) -> None:
+    def test_lone_cli_is_still_wrapped(self) -> None:
         with (
             patch.dict(os.environ, {"LLM_CLAUDE_MODEL": "opus"}, clear=True),
             patch("utils.llm.factory.shutil.which", side_effect=self._which({"claude"})),
         ):
             provider = get_llm_provider()
-        self.assertIsInstance(provider, ClaudeCLIProvider)
+        self.assertIsInstance(provider, FallbackProvider)
         self.assertEqual(provider.model_name, "claude-cli:opus")
+
+    @patch("utils.llm.cli_provider._run_cli")
+    def test_lone_unavailable_cli_is_called_once_across_summaries(self, mock_run: MagicMock) -> None:
+        from utils.llm.ai_explainer import _generate_summary
+
+        mock_run.side_effect = LLMUnavailableError("codex: timed out after 300s")
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("utils.llm.factory.shutil.which", side_effect=self._which({"codex"})),
+        ):
+            provider = get_llm_provider()
+        for _ in range(2):
+            with self.assertRaises(LLMError):
+                _generate_summary(provider, "prompt")
+        # Structured attempt of the first summary only; the text path and the
+        # second summary skip the disabled CLI instead of waiting on it again.
+        self.assertEqual(mock_run.call_count, 1)
+
+    def test_broken_api_config_does_not_block_clis(self) -> None:
+        env = {"LLM_PROVIDER": "venice", "LLM_API_KEY": "key"}
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("utils.llm.factory.shutil.which", side_effect=self._which({"codex"})),
+            patch("utils.llm.factory._create_provider", side_effect=LLMError("openai package not installed")),
+        ):
+            provider = get_llm_provider()
+        self.assertIsInstance(provider, FallbackProvider)
+        self.assertEqual(provider.model_name, "codex-cli")
+
+    def test_broken_api_config_raises_without_clis(self) -> None:
+        env = {"LLM_PROVIDER": "venice", "LLM_API_KEY": "key"}
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("utils.llm.factory.shutil.which", return_value=None),
+            patch("utils.llm.factory._create_provider", side_effect=LLMError("openai package not installed")),
+        ):
+            with self.assertRaises(LLMError) as ctx:
+                get_llm_provider()
+        self.assertIn("openai package not installed", str(ctx.exception))
 
     def test_custom_order_and_timeout(self) -> None:
         env = {"LLM_CLI_PROVIDERS": "claude, codex", "LLM_CLI_TIMEOUT": "42"}
@@ -293,6 +391,7 @@ class TestFactoryCLIChain(unittest.TestCase):
             patch("utils.llm.factory.shutil.which", side_effect=self._which({"codex", "claude"})),
         ):
             provider = get_llm_provider()
+        self.assertNotIsInstance(provider, FallbackProvider)
         self.assertEqual(provider.model_name, "gpt-4o-mini")
 
     def test_nothing_available_raises(self) -> None:

@@ -16,6 +16,8 @@ credit errors) raises ``LLMUnavailableError`` so the fallback chain moves on.
 """
 
 import json
+import os
+import signal
 import subprocess
 import tempfile
 from pathlib import Path
@@ -36,15 +38,29 @@ def _tail(text: str) -> str:
     return text.strip()[-_ERROR_SNIPPET_CHARS:]
 
 
+def _kill_process_group(pgid: int) -> None:
+    """SIGKILL every process in ``pgid``; a group that's already gone is fine."""
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 def _run_cli(label: str, args: list[str], prompt: str, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
     """Run a CLI with ``prompt`` on stdin, mapping process failures to ``LLMUnavailableError``.
+
+    The CLI is an agent that can spawn its own commands, so it runs as the leader
+    of a new process group and the whole group is killed when it exits or times
+    out — otherwise agent-spawned children outlive the call. Output goes to temp
+    files rather than pipes so a backgrounded child holding stdout open can't
+    keep us waiting after the CLI itself has exited.
 
     Args:
         label: Provider name used in error messages.
         args: Full argv, binary first.
         prompt: Text written to the process's stdin.
         cwd: Working directory for the process.
-        timeout: Seconds before the process is killed.
+        timeout: Seconds before the process group is killed.
 
     Returns:
         The completed process (exit code 0).
@@ -52,18 +68,31 @@ def _run_cli(label: str, args: list[str], prompt: str, cwd: Path, timeout: int) 
     Raises:
         LLMUnavailableError: If the binary is missing, times out, or exits non-zero.
     """
-    try:
-        proc = subprocess.run(args, input=prompt, capture_output=True, text=True, cwd=cwd, timeout=timeout, check=False)
-    except FileNotFoundError as e:
-        raise LLMUnavailableError(f"{label}: binary not found ({args[0]})") from e
-    except subprocess.TimeoutExpired as e:
-        raise LLMUnavailableError(f"{label}: timed out after {timeout}s") from e
-    except OSError as e:
-        raise LLMUnavailableError(f"{label}: failed to start: {e}") from e
-    if proc.returncode != 0:
-        detail = _tail(proc.stderr) or _tail(proc.stdout)
-        raise LLMUnavailableError(f"{label}: exited with code {proc.returncode}: {detail}")
-    return proc
+    with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
+        try:
+            proc = subprocess.Popen(
+                args, stdin=subprocess.PIPE, stdout=out, stderr=err, text=True, cwd=cwd, start_new_session=True
+            )
+        except FileNotFoundError as e:
+            raise LLMUnavailableError(f"{label}: binary not found ({args[0]})") from e
+        except OSError as e:
+            raise LLMUnavailableError(f"{label}: failed to start: {e}") from e
+        try:
+            proc.communicate(input=prompt, timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            _kill_process_group(proc.pid)
+            proc.wait()
+            raise LLMUnavailableError(f"{label}: timed out after {timeout}s") from e
+        finally:
+            # Leftover agent-spawned processes; also covers the timeout path's raise.
+            _kill_process_group(proc.pid)
+        out.seek(0)
+        err.seek(0)
+        result = subprocess.CompletedProcess(args, proc.returncode, out.read(), err.read())
+    if result.returncode != 0:
+        detail = _tail(result.stderr) or _tail(result.stdout)
+        raise LLMUnavailableError(f"{label}: exited with code {result.returncode}: {detail}")
+    return result
 
 
 def _parse_json_object(label: str, raw: str) -> dict[str, Any]:
