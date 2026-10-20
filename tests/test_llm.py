@@ -222,10 +222,13 @@ class TestAnthropicProvider(unittest.TestCase):
 
 
 class TestFactory(unittest.TestCase):
-    """Tests for the LLM provider factory."""
+    """Tests for the LLM provider factory (API path; no CLIs on PATH)."""
 
     def setUp(self) -> None:
         reset_provider()
+        which_patcher = patch("utils.llm.factory.shutil.which", return_value=None)
+        which_patcher.start()
+        self.addCleanup(which_patcher.stop)
 
     def tearDown(self) -> None:
         reset_provider()

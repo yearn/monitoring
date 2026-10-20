@@ -10,6 +10,14 @@ class LLMError(Exception):
     """Exception raised for LLM API errors."""
 
 
+class LLMUnavailableError(LLMError):
+    """The provider itself can't serve requests (missing binary, auth, credits, timeout).
+
+    Distinct from a bad response: a fallback chain stops retrying a provider that
+    raised this for the rest of the process instead of paying the failure per call.
+    """
+
+
 @contextmanager
 def wrap_llm_errors(label: str) -> Iterator[None]:
     """Translate any non-``LLMError`` raised inside the block into an ``LLMError``.

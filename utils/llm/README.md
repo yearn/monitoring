@@ -573,8 +573,12 @@ All configuration is via environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLM_PROVIDER` | `venice` | Provider name: `venice`, `groq`, `openai`, `anthropic`, or custom |
-| `LLM_API_KEY` | *(required)* | API key for the LLM provider |
+| `LLM_CLI_PROVIDERS` | `codex,claude` | Local agent CLIs tried before the API, in order. `none` disables them (see [Provider Order](#provider-order-cli-first-then-api)) |
+| `LLM_CLI_TIMEOUT` | `300` | Seconds per CLI completion before it counts as unavailable |
+| `LLM_CODEX_MODEL` | *(CLI default)* | Model passed to `codex exec --model` |
+| `LLM_CLAUDE_MODEL` | *(CLI default)* | Model passed to `claude --model` |
+| `LLM_PROVIDER` | `venice` | API provider name: `venice`, `groq`, `openai`, `anthropic`, or custom |
+| `LLM_API_KEY` | *(required without a CLI)* | API key for the LLM provider. Optional when a CLI is available |
 | `LLM_MODEL` | `deepseek-v4-flash` | Model identifier |
 | `LLM_BASE_URL` | *(per provider)* | API base URL (not needed for anthropic) |
 | `LLM_STRUCTURED_OUTPUT` | *(per provider)* | `true`/`false` to force JSON-schema output. Default: on for anthropic/openai/venice (all verified live), off for groq/custom |
@@ -585,7 +589,27 @@ All configuration is via environment variables:
 | `TENDERLY_ACCOUNT` | `yearn` | Tenderly account slug |
 | `TENDERLY_PROJECT` | `sam` | Tenderly project slug |
 
-### Supported Providers
+### Provider Order: CLI First, Then API
+
+`get_llm_provider()` builds a chain and tries it in order:
+
+1. **Codex CLI**: `codex exec --yolo` (approvals and sandbox off), prompt on stdin, `--output-schema` for structured output.
+2. **Claude Code CLI**: `claude -p --dangerously-skip-permissions --output-format json`, system prompt via `--system-prompt-file`, `--json-schema` for structured output.
+3. **API provider** from `LLM_PROVIDER` / `LLM_API_KEY` (below).
+
+The CLIs run on their own login/subscription, so the metered API key is only spent when both are out of credits or broken. Details:
+
+- A CLI is skipped when its binary isn't on `PATH`. With nothing on `PATH` and no API key, the factory raises `LLMError` and alerts ship without an AI summary, as before.
+- Each call runs in a fresh temp directory (`--skip-git-repo-check --ephemeral` for Codex, `--no-session-persistence --strict-mcp-config` for Claude) so neither agent loads this repo's AGENTS.md/CLAUDE.md or MCP servers into the analysis.
+- A non-zero exit, timeout, missing binary, or Claude `is_error` result (auth, rate limit, no credits) raises `LLMUnavailableError`. `FallbackProvider` then drops that CLI **for the rest of the process**, so a dead CLI isn't retried on every stage of every alert. A bad response (empty text, invalid JSON) only falls through for that one call.
+- Codex has no system-prompt flag, so the system prompt is prepended to the stdin prompt in a `<system_instructions>` block.
+- The log line `AI summary using <model>` names the provider that actually answered (`codex-cli`, `claude-cli`, or the API model).
+
+**Security note.** Both CLIs run as full agents with approvals disabled, and the prompt carries attacker-influenced text (proposal descriptions, verified source, labels). A prompt injection could make the agent run shell commands as the monitoring user. Only enable the CLIs on a host where that is acceptable, or set `LLM_CLI_PROVIDERS=none`.
+
+**Deployment.** `deploy/systemd/monitoring.service` sets `PATH=<repo>/.venv/bin:/usr/local/bin:/usr/bin:/bin` and `ProtectHome=read-only`. A CLI installed under `~/.local/bin` is therefore not found, and both CLIs need write access to their home config dirs (`~/.codex`, `~/.claude`). As shipped, the VPS keeps using the API provider until the unit is adjusted.
+
+### Supported API Providers
 
 | Provider | Base URL | Default Model | Package |
 |---|---|---|---|
@@ -610,6 +634,7 @@ uv pip install 'monitoring-scripts-py[ai]'
 - Alerts when DIEM + bundled credits + USD (all three are spendable, in that order) is below `LLM_CREDIT_ALERT_THRESHOLD_USD` (default $1), or when Venice reports `accessPermitted: false`.
 - Sends to the internal errors channel via `send_error_message`, labelled `yearn`, stored under `yearn-internal`.
 - Sends at most one alert every 24h while the balance stays low. A top-up clears the cooldown, so the next drop alerts right away.
+- Still runs when a CLI answers first. The Venice key is the last-resort fallback, so it should stay funded.
 - Does nothing for other providers or when no key is set. Never raises: a failed balance read, cooldown write or alert send is logged and the monitor carries on. A failed send retries on the next run.
 
 ## Module Structure
@@ -619,9 +644,11 @@ utils/llm/
 ├── __init__.py              # Exports: LLMProvider, get_llm_provider
 ├── ai_explainer.py          # Orchestrator: decode → fetch context → prompt → explain
 ├── anthropic_provider.py    # Anthropic (Claude) native API provider
-├── base.py                  # Abstract LLMProvider base class + LLMError
+├── base.py                  # Abstract LLMProvider base class + LLMError / LLMUnavailableError
+├── cli_provider.py          # Codex (`codex exec --yolo`) and Claude Code (`claude -p`) CLI providers
 ├── credits.py               # Venice low-balance alert, run at the start of Safe/timelock monitors
-├── factory.py               # Provider factory with env-based config + singleton
+├── factory.py               # Provider factory: CLI-first chain from env config + singleton
+├── fallback.py              # FallbackProvider: tries providers in order, drops unavailable ones
 ├── infinifi_context.py      # Infinifi adapter: escrow → farm, custody, setRate APR, whitelist calls
 ├── infinifi_oracle_context.py # Infinifi setOracle: price in reference units, wrapped feed, heartbeat
 ├── infinifi_farm_context.py # Infinifi farms: swap-pair min-output ratio, enableAssets oracle, PT discount
