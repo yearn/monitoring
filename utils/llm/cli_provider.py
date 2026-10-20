@@ -6,6 +6,11 @@ with approvals disabled (``codex exec --yolo`` / ``claude -p
 --dangerously-skip-permissions``) so the CLI never blocks on a prompt, inside a
 fresh temp directory so neither agent picks up this repo's AGENTS.md/CLAUDE.md.
 
+Both receive the same prompt and system prompt as the API providers. Claude is
+also cut off from user settings, rules and skills. Codex is cut off from MCP
+servers, but still loads the host user's global ``~/.codex/AGENTS.md`` and
+``~/.agents/skills`` (there is no supported switch for those).
+
 Any process-level failure (binary missing, non-zero exit, timeout, auth or
 credit errors) raises ``LLMUnavailableError`` so the fallback chain moves on.
 """
@@ -120,6 +125,9 @@ class CodexCLIProvider(LLMProvider):
                 "--ephemeral",
                 "--color",
                 "never",
+                # Drop the user's MCP servers so prompt content can't be sent to them.
+                "--config",
+                "mcp_servers={}",
                 "--cd",
                 str(workdir),
                 "--output-last-message",
@@ -193,6 +201,11 @@ class ClaudeCLIProvider(LLMProvider):
                 "--dangerously-skip-permissions",
                 "--no-session-persistence",
                 "--strict-mcp-config",
+                # No user/project settings (rules, CLAUDE.md) and no skills: the
+                # model sees only our system prompt and the transaction prompt.
+                "--setting-sources",
+                "",
+                "--disable-slash-commands",
                 "--output-format",
                 "json",
             ]

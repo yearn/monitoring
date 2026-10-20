@@ -600,7 +600,10 @@ All configuration is via environment variables:
 The CLIs run on their own login/subscription, so the metered API key is only spent when both are out of credits or broken. Details:
 
 - A CLI is skipped when its binary isn't on `PATH`. With nothing on `PATH` and no API key, the factory raises `LLMError` and alerts ship without an AI summary, as before.
-- Each call runs in a fresh temp directory (`--skip-git-repo-check --ephemeral` for Codex, `--no-session-persistence --strict-mcp-config` for Claude) so neither agent loads this repo's AGENTS.md/CLAUDE.md or MCP servers into the analysis.
+- The CLIs get exactly the same context as the API: the full per-transaction prompt (decoded calldata, source, before-state, simulation, protocol adapters) and the same system prompts. Only the transport differs.
+- Each call runs in a fresh temp directory, so neither agent loads this repo's AGENTS.md/CLAUDE.md. Host-level agent config is stripped where the CLI supports it:
+  - Claude: `--setting-sources "" --disable-slash-commands --strict-mcp-config --no-session-persistence` (no user rules/CLAUDE.md, skills, or MCP servers).
+  - Codex: `--config mcp_servers={} --ephemeral --skip-git-repo-check` (no MCP servers). Codex has no supported switch for the global `~/.codex/AGENTS.md` or `~/.agents/skills`, so keep those empty for the user that runs monitoring.
 - A non-zero exit, timeout, missing binary, or Claude `is_error` result (auth, rate limit, no credits) raises `LLMUnavailableError`. `FallbackProvider` then drops that CLI **for the rest of the process**, so a dead CLI isn't retried on every stage of every alert. A bad response (empty text, invalid JSON) only falls through for that one call.
 - Codex has no system-prompt flag, so the system prompt is prepended to the stdin prompt in a `<system_instructions>` block.
 - The log line `AI summary using <model>` names the provider that actually answered (`codex-cli`, `claude-cli`, or the API model).

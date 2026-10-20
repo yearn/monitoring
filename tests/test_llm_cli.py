@@ -44,6 +44,7 @@ class TestCodexCLIProvider(unittest.TestCase):
         args = mock_run.call_args.args[0]
         self.assertEqual(args[:3], ["/bin/codex", "exec", "--yolo"])
         self.assertEqual(_arg_after(args, "--model"), "gpt-x")
+        self.assertEqual(_arg_after(args, "--config"), "mcp_servers={}")
         self.assertEqual(args[-1], "-")
         self.assertNotIn("--output-schema", args)
         stdin = mock_run.call_args.kwargs["input"]
@@ -118,6 +119,8 @@ class TestClaudeCLIProvider(unittest.TestCase):
         args = mock_run.call_args.args[0]
         self.assertEqual(args[:3], ["/bin/claude", "-p", "--dangerously-skip-permissions"])
         self.assertIn("--strict-mcp-config", args)
+        self.assertEqual(_arg_after(args, "--setting-sources"), "")
+        self.assertIn("--disable-slash-commands", args)
         self.assertEqual(_arg_after(args, "--model"), "opus")
         self.assertEqual(_arg_after(args, "--output-format"), "json")
         self.assertEqual(seen_system, ["Be terse."])
