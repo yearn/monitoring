@@ -66,7 +66,4 @@ jobs:
         run: uv python install
 
       - name: Audit dependencies for known vulnerabilities
-        # Upstream certifi GHSA-6q48-6c7w-9gw2 says 2026.10.18 is patched, but
-        # the audit feed currently names an unpublished 2026.10.19 as its fix.
-        # Remove this ignore when the feed is corrected.
-        run: uv audit --preview-features audit-command --ignore PYSEC-2026-4320
+        run: uv audit --preview-features audit-command
