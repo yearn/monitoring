@@ -105,6 +105,25 @@ def _claude_tool_events(events: list[dict[str, Any]]) -> list[str]:
     return tools
 
 
+def _claude_model(events: list[dict[str, Any]]) -> str:
+    """Read the initialized model, updating it from subsequent assistant responses."""
+    model = ""
+    for event in events:
+        if (event.get("type"), event.get("subtype")) == ("system", "init"):
+            candidate = event.get("model")
+        elif event.get("type") == "assistant":
+            message = event.get("message")
+            candidate = message.get("model") if isinstance(message, dict) else None
+        else:
+            continue
+        if not isinstance(candidate, str):
+            continue
+        candidate = candidate.strip()
+        if candidate not in ("", "<synthetic>"):
+            model = candidate
+    return model
+
+
 def _tail(text: str) -> str:
     """Return the last ``_ERROR_SNIPPET_CHARS`` of ``text``, stripped, for error messages."""
     return text.strip()[-_ERROR_SNIPPET_CHARS:]
@@ -306,6 +325,7 @@ class ClaudeCLIProvider(LLMProvider):
         """
         self._binary = binary
         self._model = model
+        self._reported_model = ""
         self._timeout = timeout
         logger.info("Initialized Claude CLI provider: binary=%s model=%s", binary, model or "<cli default>")
 
@@ -333,6 +353,7 @@ class ClaudeCLIProvider(LLMProvider):
 
     def _exec(self, prompt: str, system_prompt: str, schema: dict[str, Any] | None) -> dict[str, Any]:
         """Run one ``claude -p`` session and return its decoded JSON result envelope."""
+        self._reported_model = ""
         with tempfile.TemporaryDirectory(prefix="llm-claude-") as tmp:
             workdir = Path(tmp)
             args = [
@@ -381,9 +402,11 @@ class ClaudeCLIProvider(LLMProvider):
         if envelope.get("is_error"):
             # Auth, rate-limit and out-of-credit failures land here.
             raise LLMUnavailableError(f"claude: {_tail(str(envelope.get('result') or envelope.get('subtype')))}")
+        self._reported_model = _claude_model(events)
         return envelope
 
     @property
     def model_name(self) -> str:
-        """Return a label identifying the CLI and model."""
-        return f"claude-cli:{self._model}" if self._model else "claude-cli"
+        """Return the reported model, falling back to the configured model or CLI label."""
+        model = self._reported_model or self._model
+        return f"claude-cli:{model}" if model else "claude-cli"

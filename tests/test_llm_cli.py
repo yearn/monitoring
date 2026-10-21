@@ -314,6 +314,73 @@ class TestClaudeCLIProvider(unittest.TestCase):
     """Tests for ClaudeCLIProvider."""
 
     @patch("utils.llm.cli_provider._run_cli")
+    def test_default_model_is_read_from_init_metadata(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = _completed(
+            [],
+            stdout=_events(
+                {"type": "system", "subtype": "init", "model": "claude-opus-5-5"},
+                {"type": "result", "is_error": False, "result": "OK"},
+            ),
+        )
+        provider = ClaudeCLIProvider(binary="claude")
+        provider.complete("p")
+        self.assertEqual(provider.model_name, "claude-cli:claude-opus-5-5")
+
+    @patch("utils.llm.cli_provider._run_cli")
+    def test_answering_model_overrides_init_model_and_configured_alias(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = _completed(
+            [],
+            stdout=_events(
+                {"type": "system", "subtype": "init", "model": "initial-model"},
+                {"type": "assistant", "message": {"model": "first-model", "content": []}},
+                {"type": "assistant", "message": {"model": "answering-model", "content": []}},
+                {"type": "result", "is_error": False, "result": "OK"},
+            ),
+        )
+        provider = ClaudeCLIProvider(binary="claude", model="opus")
+        provider.complete("p")
+        self.assertEqual(provider.model_name, "claude-cli:answering-model")
+
+    @patch("utils.llm.cli_provider._run_cli")
+    def test_structured_completion_records_model(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = _completed(
+            [],
+            stdout=_events(
+                {"type": "assistant", "message": {"model": "claude-opus-5-5", "content": []}},
+                {"type": "result", "is_error": False, "structured_output": {"summary": "OK"}},
+            ),
+        )
+        provider = ClaudeCLIProvider(binary="claude")
+        self.assertEqual(provider.complete_structured("p", SCHEMA), {"summary": "OK"})
+        self.assertEqual(provider.model_name, "claude-cli:claude-opus-5-5")
+
+    @patch("utils.llm.cli_provider._run_cli")
+    def test_missing_or_invalid_metadata_does_not_reuse_previous_model(self, mock_run: MagicMock) -> None:
+        for configured in ("", "opus"):
+            for model in (None, "", " ", [], {}, "<synthetic>"):
+                with self.subTest(configured=configured, model=model):
+                    mock_run.side_effect = [
+                        _completed(
+                            [],
+                            stdout=_events(
+                                {"type": "system", "subtype": "init", "model": "previous-model"},
+                                {"type": "result", "is_error": False, "result": "OK"},
+                            ),
+                        ),
+                        _completed(
+                            [],
+                            stdout=_events(
+                                {"type": "assistant", "message": {"model": model}},
+                                {"type": "result", "is_error": False, "result": "OK"},
+                            ),
+                        ),
+                    ]
+                    provider = ClaudeCLIProvider(binary="claude", model=configured)
+                    provider.complete("previous")
+                    provider.complete("current")
+                    self.assertEqual(provider.model_name, f"claude-cli:{configured}" if configured else "claude-cli")
+
+    @patch("utils.llm.cli_provider._run_cli")
     def test_complete_disables_builtins_and_mcp(self, mock_run: MagicMock) -> None:
         seen_system: list[str] = []
 
@@ -442,7 +509,9 @@ class TestFallbackProvider(unittest.TestCase):
     def test_first_success_wins(self) -> None:
         first, second = _StubProvider("a", ["from a"]), _StubProvider("b", ["from b"])
         chain = FallbackProvider([first, second])
-        self.assertEqual(chain.complete("p"), "from a")
+        with self.assertLogs("utils.llm.fallback", level="INFO") as logs:
+            self.assertEqual(chain.complete("p"), "from a")
+        self.assertTrue(any("LLM attempt: model=a operation=complete" in line for line in logs.output))
         self.assertEqual(second.calls, 0)
         self.assertEqual(chain.model_name, "a")
 

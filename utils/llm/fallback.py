@@ -64,6 +64,7 @@ class FallbackProvider(LLMProvider):
         for index, provider in enumerate(self._providers):
             if index in self._disabled or (only_structured and not provider.supports_structured_output):
                 continue
+            logger.info("LLM attempt: model=%s operation=%s", provider.model_name, op)
             try:
                 result = call(provider)
             except LLMUnavailableError as e:

@@ -12,6 +12,8 @@ from utils.llm.ai_explainer import (
     format_explanation_line,
 )
 from utils.llm.base import LLMError, LLMProvider, LLMUsage
+from utils.llm.fallback import FallbackProvider
+from utils.llm.report import ReportContext
 
 
 class TestStructuredOutput(unittest.TestCase):
@@ -264,10 +266,11 @@ class TestTextRefineDetailBudget(unittest.TestCase):
 class _UsageProvider(LLMProvider):
     """A text provider that reports a fixed usage per call, like a real provider; fails after ``fail_after`` calls."""
 
-    def __init__(self, responses: list[str], fail_after: int | None = None) -> None:
+    def __init__(self, responses: list[str], fail_after: int | None = None, *, model_name: str = "test") -> None:
         self.responses = responses
         self.fail_after = fail_after
         self.calls = 0
+        self._model_name = model_name
 
     def complete(self, prompt: str, system_prompt: str = "") -> str:
         if self.fail_after is not None and self.calls >= self.fail_after:
@@ -278,7 +281,7 @@ class _UsageProvider(LLMProvider):
 
     @property
     def model_name(self) -> str:
-        return "test"
+        return self._model_name
 
 
 class TestStageUsage(unittest.TestCase):
@@ -300,6 +303,7 @@ class TestStageUsage(unittest.TestCase):
         )
         self.assertEqual(explanation.stages[1].summary, "Pauses the vault and blocks deposits. MEDIUM")
         self.assertEqual([s.usage.input_tokens for s in explanation.stages if s.usage], [1000, 2000, 3000, 4000])
+        self.assertEqual([s.model_name for s in explanation.stages], ["test"] * 4)
 
     def test_failed_call_reports_no_usage(self) -> None:
         provider = _UsageProvider(["TLDR: Pauses the vault. LOW\nDETAIL: d"], fail_after=1)
@@ -309,6 +313,56 @@ class TestStageUsage(unittest.TestCase):
         )
         # The failed call keeps no usage: the provider's last_usage still belongs to the summary call.
         self.assertIsNone(explanation.stages[1].usage)
+        self.assertEqual(explanation.stages[1].model_name, "")
+
+
+class TestGenerationMetadata(unittest.TestCase):
+    """Published reports identify all answering models and total generation time."""
+
+    @patch("utils.llm.ai_explainer.upload_to_gist", return_value="https://gist.wavey.info/abc123")
+    @patch("utils.llm.ai_explainer.perf_counter", side_effect=[100.0, 110.0])
+    def test_fallback_models_and_total_time_reach_gist(self, _clock: MagicMock, gist: MagicMock) -> None:
+        primary = _UsageProvider(
+            ["TLDR: Pauses the vault. LOW\nDETAIL: Initial detail."], fail_after=1, model_name="primary"
+        )
+        fallback = _UsageProvider(
+            ["TLDR: Pauses the vault and blocks deposits. MEDIUM", "PASS", "Final detail."], model_name="fallback"
+        )
+        unused = _UsageProvider([], model_name="unused")
+        provider = FallbackProvider([primary, fallback, unused])
+
+        with self.assertLogs("utils.llm.ai_explainer", level="INFO") as logs:
+            explanation = _generate_explanation(provider, "prompt", refine=True, report_ctx=ReportContext(chain_id=1))
+        format_explanation_line(explanation)
+
+        body = gist.call_args.args[0]
+        self.assertIn("- **Chain:** Mainnet (chain id 1)", body)
+        self.assertIn("- **Risk:** MEDIUM\n- **Model:** primary / fallback\n- **Time:** 10.0s", body)
+        self.assertNotIn("unused", body)
+        self.assertIn("Final detail.", body)
+        self.assertEqual([stage.model_name for stage in explanation.stages], ["primary"] + ["fallback"] * 3)
+        output = "\n".join(logs.output)
+        self.assertIn("LLM stage=summary outcome=ok model=primary", output)
+        self.assertIn("LLM stage=critique-1 outcome=revised model=fallback", output)
+        self.assertIn("generation time=10.0s", output)
+
+    def test_failed_detail_does_not_attribute_previous_alerts_model(self) -> None:
+        primary = _UsageProvider(["Previous alert."], fail_after=1, model_name="previous")
+        fallback = _UsageProvider(
+            ["TLDR: Pauses the vault. LOW\nDETAIL: Initial detail.", "TLDR: Pauses deposits. LOW", "PASS"],
+            fail_after=3,
+            model_name="current",
+        )
+        provider = FallbackProvider([primary, fallback])
+        provider.complete("previous alert")
+
+        explanation = _generate_explanation(provider, "prompt", refine=True, report_ctx=ReportContext(chain_id=1))
+
+        self.assertIn("- **Model:** current\n", explanation.report)
+        self.assertNotIn("previous", explanation.report)
+        self.assertEqual(explanation.stages[-1].outcome, "error")
+        self.assertEqual(explanation.stages[-1].model_name, "")
+        self.assertIn("Pauses deposits.", explanation.summary)
 
 
 class TestEmptyCritique(unittest.TestCase):

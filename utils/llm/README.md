@@ -414,7 +414,7 @@ Adapters receive the inner calls of executed governance wrappers too. `expand_ex
 
 The prompt is split into a **system** prompt (static instructions) and a **user** prompt (per-tx context).
 
-**Measuring cost.** Each provider records the latest call's `LLMUsage`: input tokens (cached ones included), cached input, cache writes, output, and latency. The explainer keeps one `StageUsage` per call on `Explanation.stages`: `summary`, `critique-N` (`pass`, `revised` with the revised TLDR, or `empty` when the critic returned nothing and the draft was kept) and `detail`. It logs one line per alert: `LLM usage (<model>): summary ok in=… cached=… out=… 8.1s | critique-1 pass … | detail ok … | total …`.
+**Measuring cost.** API providers record the latest call's `LLMUsage`: input tokens (cached ones included), cached input, cache writes, output, and latency. The explainer keeps one `StageUsage` per call on `Explanation.stages`: `summary`, `critique-N` (`pass`, `revised` with the revised TLDR, or `empty` when the critic returned nothing and the draft was kept) and `detail`. Each stage also records the answering model and logs `LLM stage=summary outcome=ok model=…`. The per-alert usage line includes the model for each stage and the total generation time.
 
 Venice applies automatic prefix caching and reports it as `prompt_tokens_details.cached_tokens`. Anthropic reports cache reads and writes separately; the provider folds them into the same fields.
 
@@ -578,6 +578,8 @@ The gist is the artifact a reviewer actually opens, so it carries more than the 
 - **Contract:** Infinifi Shorttimelock — [`0x4B17…7c32`](https://etherscan.io/address/0x4B17…)
 - **Chain:** Mainnet (chain id 1)
 - **Risk:** MEDIUM
+- **Model:** codex-cli:my-configured-model / claude-cli:claude-opus-5-5
+- **Time:** 10.0s
 
 ## Summary
 Registers a new type-2 farm in FarmRegistry. …
@@ -593,6 +595,8 @@ Registers a new type-2 farm in FarmRegistry. …
    - `address[] _farms`:
      - [`0x79e1…971f`](https://etherscan.io/address/0x79e1…)
 ```
+
+The header's **Model** line lists the distinct models that answered during summary, critique and detail generation, in first-use order. Failed attempts are logged but do not add a model to that line. Claude's CLI reports its resolved model in the event stream: the provider reads the last assistant message's `model`, or the initialization event's `model` when no assistant model is available. This resolves aliases such as `opus` without another CLI call. If neither event reports a model, the label uses `LLM_CLAUDE_MODEL` or `claude-cli`. Codex's `exec --json` stream does not expose the model (verified with CLI 0.163.0), so its label uses `LLM_CODEX_MODEL` or `codex-cli`. **Time** measures total LLM generation time, including retries and refinement, and excludes context gathering and gist upload. These fields are omitted for deterministic reports that do not use an LLM.
 
 The report can end with a code-generated `## Reference` table after Call Flow. It lists only the addresses the rest of the report does not already link: the executor, alert contract, call targets, calldata arguments (nested calldata included) and addresses resolved by protocol adapters, minus any that appear in the body above it. The table is omitted when nothing is left.
 
@@ -677,7 +681,7 @@ The API provider is used by default. When CLIs are explicitly enabled, they run 
 - A non-zero exit, timeout, missing binary, or Claude `is_error` result (auth, rate limit, no credits) raises `LLMUnavailableError`. `FallbackProvider` then drops that CLI **for the rest of the process**, so a dead CLI isn't retried on every stage of every alert. CLIs are always wrapped in `FallbackProvider`, even a lone one with no API key, so this tracking applies there too. A bad response (empty text, invalid JSON) only falls through for that one call.
 - Each CLI runs as the leader of its own process group. The whole group is SIGKILLed on timeout and after the CLI exits, so commands the agent spawned can't outlive the call. Output goes to temp files, not pipes, so a backgrounded child holding stdout can't stall a finished call until the timeout.
 - Codex has no system-prompt flag, so the system prompt is prepended to the stdin prompt in a `<system_instructions>` block.
-- The log line `AI summary using <model>` names the provider that actually answered (`codex-cli`, `claude-cli`, or the API model).
+- `LLM attempt: model=… operation=…` logs each fallback attempt before it starts. `LLM stage=… outcome=… model=…` identifies the provider that answered each generation stage. The gist header lists these models, so a fallback during critique or detail cannot hide the model that wrote the summary.
 
 **Security note.** The prompt contains attacker-influenced text (proposal descriptions, verified source, labels). With no tools, an injection can only change the summary text, not run commands or make requests. The tool restrictions are CLI flags, so a CLI update that changes their meaning would weaken them; event auditing detects unexpected tool calls after the fact and cannot undo one. Both CLIs still run as the monitoring service's Unix user. Keep `LLM_CLI_PROVIDERS=none` until tested in the target service.
 

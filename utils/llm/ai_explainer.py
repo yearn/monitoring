@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from functools import lru_cache
+from time import perf_counter
 
 from eth_utils import function_signature_to_4byte_selector, to_checksum_address
 
@@ -384,12 +385,15 @@ class StageUsage:
     back to text), ``critique-N`` or ``detail``. ``outcome`` says what the call did:
     ``ok``, ``pass`` / ``revised`` for a critique, ``empty`` or ``error``. ``summary``
     holds the TLDR a summary or revising critique produced, to compare rounds.
+    ``model_name`` identifies the provider that answered that call; it is empty
+    on errors because a fallback chain's last successful model would be stale.
     """
 
     stage: str
     outcome: str
     usage: LLMUsage | None = None
     summary: str = ""
+    model_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -1876,10 +1880,13 @@ def _explanation_from_json(data: dict) -> Explanation:
 def _record(
     stages: list[StageUsage] | None, stage: str, outcome: str, provider: LLMProvider, summary: str = ""
 ) -> None:
-    """Append one stage's usage; a failed call reports no usage (``last_usage`` would be stale)."""
+    """Log and record a stage; failed calls omit stale usage and model attribution."""
+    model_name = provider.model_name if outcome != "error" else ""
+    model_name = model_name if isinstance(model_name, str) else ""
+    logger.info("LLM stage=%s outcome=%s model=%s", stage, outcome, model_name or "unknown")
     if stages is not None:
         usage = provider.last_usage if outcome != "error" else None
-        stages.append(StageUsage(stage, outcome, usage if isinstance(usage, LLMUsage) else None, summary))
+        stages.append(StageUsage(stage, outcome, usage if isinstance(usage, LLMUsage) else None, summary, model_name))
 
 
 def _usage_line(stages: list[StageUsage]) -> str:
@@ -1898,7 +1905,10 @@ def _usage_line(stages: list[StageUsage]) -> str:
     parts = []
     for stage in stages:
         inp, cached, out, latency = tokens(stage.usage)
-        parts.append(f"{stage.stage} {stage.outcome} in={inp} cached={cached} out={out} {latency:.1f}s")
+        parts.append(
+            f"{stage.stage} {stage.outcome} model={stage.model_name or 'unknown'} "
+            f"in={inp} cached={cached} out={out} {latency:.1f}s"
+        )
     totals = [tokens(stage.usage) for stage in stages]
     parts.append(
         f"total in={sum(t[0] for t in totals)} cached={sum(t[1] for t in totals)} "
@@ -2033,12 +2043,14 @@ def _generate_explanation(
 
     When ``report_ctx`` is given, the detail is wrapped into the full gist page
     (metadata header, summary, deterministic call flow, optional protocol
-    context, analysis).
+    context, analysis). The header lists the models that answered and the total
+    generation time, including refinement and fallback attempts.
     """
+    started = perf_counter()
     stages: list[StageUsage] = []
     summary_draft = _generate_summary(provider, prompt, stages)
     if not summary_draft.summary:
-        logger.info("LLM usage (%s): %s", provider.model_name, _usage_line(stages))
+        logger.info("LLM usage: %s", _usage_line(stages))
         return replace(summary_draft, stages=tuple(stages))
 
     had_detail = bool(summary_draft.detail)
@@ -2053,13 +2065,21 @@ def _generate_explanation(
     detail = summary_draft.detail
     if not detail and (provider.supports_structured_output or had_detail):
         detail = _expand_detail(provider, prompt, summary_draft.summary, stages)
-    logger.info("LLM usage (%s): %s", provider.model_name, _usage_line(stages))
+    elapsed_s = perf_counter() - started
+    logger.info("LLM usage: %s | generation time=%.1fs", _usage_line(stages), elapsed_s)
 
     report = ""
     title = ""
     if report_ctx is not None:
         prose, risk_tag = _split_risk_tag(summary_draft.summary)
-        report = build_report(prose, detail, report_ctx, risk_tag)
+        report = build_report(
+            prose,
+            detail,
+            report_ctx,
+            risk_tag,
+            model_names=tuple(stage.model_name for stage in stages if stage.model_name),
+            elapsed_s=elapsed_s,
+        )
         title = build_title(report_ctx, risk_tag, fallback=DETAIL_REPORT_TITLE)
     return Explanation(summary=summary_draft.summary, detail=detail, report=report, title=title, stages=tuple(stages))
 
@@ -2254,7 +2274,7 @@ def explain_transaction(
 
     try:
         explanation = _generate_explanation(provider, prompt, refine=refine, report_ctx=report_ctx)
-        logger.info("AI summary using %s:\n%s", provider.model_name, explanation.summary)
+        logger.info("AI summary:\n%s", explanation.summary)
         if explanation.detail:
             logger.info("AI detail:\n%s", explanation.detail)
         return explanation
@@ -2639,7 +2659,7 @@ def explain_batch_transaction(
 
     try:
         explanation = _generate_explanation(provider, prompt, refine=refine, report_ctx=report_ctx)
-        logger.info("Batch AI summary using %s:\n%s", provider.model_name, explanation.summary)
+        logger.info("Batch AI summary:\n%s", explanation.summary)
         if explanation.detail:
             logger.info("Batch AI detail:\n%s", explanation.detail)
         return explanation

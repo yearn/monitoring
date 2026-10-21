@@ -474,6 +474,28 @@ class TestBuildReport(unittest.TestCase):
         report = build_report("Summary.", "Analysis.", _add_farms_ctx())
         self.assertIn("- **Contract:** Infinifi Shorttimelock\n", report)
 
+    def test_generation_metadata_lists_unique_models_in_order(self) -> None:
+        report = build_report(
+            "Summary.",
+            "Analysis.",
+            _add_farms_ctx(),
+            "MEDIUM",
+            model_names=("primary-model", "fallback-model", "primary-model"),
+            elapsed_s=10.25,
+        )
+        self.assertIn("- **Model:** primary-model / fallback-model\n- **Time:** 10.2s", report)
+        self.assertLess(report.index("**Risk:**"), report.index("**Model:**"))
+        self.assertLess(report.index("**Time:**"), report.index("## Summary"))
+
+    def test_generation_metadata_omitted_when_unknown(self) -> None:
+        report = build_report("Summary.", "Analysis.", _add_farms_ctx())
+        self.assertNotIn("**Model:**", report)
+        self.assertNotIn("**Time:**", report)
+
+    def test_zero_generation_time_is_shown(self) -> None:
+        report = build_report("Summary.", "Analysis.", _add_farms_ctx(), elapsed_s=0)
+        self.assertIn("- **Time:** 0.0s", report)
+
     def test_contract_unlinked_on_chain_without_explorer(self) -> None:
         ctx = _add_farms_ctx(chain_id=999999, label_address=TIMELOCK)
         self.assertIn("- **Contract:** Infinifi Shorttimelock\n", build_report("S.", "A.", ctx))

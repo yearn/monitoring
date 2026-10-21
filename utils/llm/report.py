@@ -569,8 +569,8 @@ def _chain_name(chain_id: int) -> str:
         return f"Chain {chain_id}"
 
 
-def _format_metadata(ctx: ReportContext, risk_tag: str) -> str:
-    """Header bullet list: protocol, contract label, chain, risk."""
+def _format_metadata(ctx: ReportContext, risk_tag: str, model_names: tuple[str, ...], elapsed_s: float | None) -> str:
+    """Header bullet list: protocol, contract label, chain, risk, models and time."""
     lines: list[str] = []
     if ctx.protocol:
         lines.append(f"- **Protocol:** {ctx.protocol}")
@@ -585,6 +585,10 @@ def _format_metadata(ctx: ReportContext, risk_tag: str) -> str:
         lines.append(f"- **Chain:** {_chain_name(ctx.chain_id)} (chain id {ctx.chain_id})")
     if risk_tag:
         lines.append(f"- **Risk:** {risk_tag}")
+    if model_names:
+        lines.append(f"- **Model:** {' / '.join(dict.fromkeys(model_names))}")
+    if elapsed_s is not None:
+        lines.append(f"- **Time:** {elapsed_s:.1f}s")
     return "\n".join(lines)
 
 
@@ -611,7 +615,15 @@ def build_title(ctx: ReportContext, risk_tag: str = "", now: datetime | None = N
     return " - ".join(part for part in parts if part)
 
 
-def build_report(summary: str, detail: str, ctx: ReportContext, risk_tag: str = "") -> str:
+def build_report(
+    summary: str,
+    detail: str,
+    ctx: ReportContext,
+    risk_tag: str = "",
+    *,
+    model_names: tuple[str, ...] = (),
+    elapsed_s: float | None = None,
+) -> str:
     """Assemble the full markdown gist body.
 
     Sections: metadata header, the Telegram-visible summary (so the gist is
@@ -623,6 +635,8 @@ def build_report(summary: str, detail: str, ctx: ReportContext, risk_tag: str = 
         detail: The LLM's detailed analysis.
         ctx: Decoded calls, labels, and alert metadata.
         risk_tag: LOW / MEDIUM / HIGH / CRITICAL, when known.
+        model_names: Models that answered during generation, in call order.
+        elapsed_s: Total generation time including retries, when measured.
 
     Returns:
         Markdown body, or "" when there is nothing worth publishing.
@@ -632,7 +646,7 @@ def build_report(summary: str, detail: str, ctx: ReportContext, risk_tag: str = 
         return ""
 
     sections: list[str] = []
-    metadata = _format_metadata(ctx, risk_tag)
+    metadata = _format_metadata(ctx, risk_tag, model_names, elapsed_s)
     if metadata:
         sections.append(metadata)
     if summary:
