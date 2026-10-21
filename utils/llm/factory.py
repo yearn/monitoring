@@ -5,7 +5,7 @@ login/subscription), then the API provider. CLIs that aren't installed are
 skipped; a CLI that fails (no credits, auth, timeout) falls through to the next.
 
 Environment variables:
-    LLM_CLI_PROVIDERS: Comma-separated CLI order (default: "codex,claude").
+    LLM_CLI_PROVIDERS: Comma-separated CLI order (default: "none").
         Set to "none" to use the API provider only.
     LLM_CLI_TIMEOUT: Seconds per CLI completion (default: 300).
     LLM_CODEX_MODEL / LLM_CLAUDE_MODEL: Optional model override per CLI; unset
@@ -107,8 +107,8 @@ def _create_provider(
     return OpenAICompatProvider(api_key=api_key, base_url=base_url, model=model, structured_output=structured_output)
 
 
-# CLI providers tried before the API, in this order unless LLM_CLI_PROVIDERS overrides it.
-_DEFAULT_CLI_ORDER = "codex,claude"
+# CLI providers require explicit opt-in; the API remains the default.
+_DEFAULT_CLI_ORDER = "none"
 # Disabling values for LLM_CLI_PROVIDERS.
 _CLI_DISABLED_VALUES = ("", "none", "off", "false", "0")
 

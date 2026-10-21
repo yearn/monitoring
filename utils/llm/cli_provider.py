@@ -1,16 +1,14 @@
 """LLM providers backed by locally installed agent CLIs (Codex, Claude Code).
 
-These run on the CLI's own login/subscription instead of a metered API key, so
-the factory tries them before the API provider. Each call runs non-interactively
-with approvals disabled (``codex exec --yolo`` / ``claude -p
---dangerously-skip-permissions``) so the CLI never blocks on a prompt, inside a
-fresh temp directory so neither agent picks up this repo's AGENTS.md/CLAUDE.md.
+These run on the CLI's own login/subscription instead of a metered API key. The
+explainer supplies all transaction context before the CLI call, so model tools
+are disabled. Each call is non-interactive and runs in a fresh temp directory.
 
-Both receive the same prompt and system prompt as the API providers. Claude is
-also cut off from user settings, rules and skills. Codex gets every configured
-MCP server explicitly disabled plus the apps/plugins features turned off, but
-still loads the host user's global ``~/.codex/AGENTS.md`` and
-``~/.agents/skills`` (there is no supported switch for those).
+Both receive the same prompt and system prompt as the API providers. The child
+environment contains only CLI authentication and basic process variables, not
+the monitoring service's RPC, Etherscan, Telegram or API-provider credentials.
+CLI event streams are checked for tool use; unexpected tool activity disables
+that provider for the process and lets the fallback chain try the next one.
 
 Any process-level failure (binary missing, non-zero exit, timeout, auth or
 credit errors) raises ``LLMUnavailableError`` so the fallback chain moves on.
@@ -18,7 +16,6 @@ credit errors) raises ``LLMUnavailableError`` so the fallback chain moves on.
 
 import json
 import os
-import re
 import signal
 import subprocess
 import tempfile
@@ -33,12 +30,67 @@ logger = get_logger("utils.llm.cli_provider")
 DEFAULT_CLI_TIMEOUT_SECONDS = 300
 # Cap on CLI stderr/result text quoted in error messages.
 _ERROR_SNIPPET_CHARS = 500
-# `codex mcp list` reads config only; it should never take long.
-_CODEX_MCP_LIST_TIMEOUT_SECONDS = 30
-# Server names codex's `-c` dotted-path parser can address. It splits on dots
-# even inside quotes and keeps quotes as part of the key, so other names can't
-# be disabled per server and fail closed instead.
-_CODEX_MCP_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_BASE_ENV = ("HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR")
+_AUTH_ENV = {
+    "codex": ("CODEX_HOME", "OPENAI_API_KEY"),
+    "claude": ("CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),
+}
+_TOOL_FREE_INSTRUCTIONS = (
+    "You have no tools or network access. Use only the supplied transaction context. "
+    "Do not claim to run commands, inspect files, or fetch external data."
+)
+
+
+def _cli_environment(provider: str) -> dict[str, str]:
+    """Give an agent CLI only its own auth and basic process environment."""
+    return {name: os.environ[name] for name in (*_BASE_ENV, *_AUTH_ENV[provider]) if name in os.environ}
+
+
+def _jsonl_events(label: str, raw: str) -> list[dict[str, Any]]:
+    """Parse CLI event output without logging prompts or tool arguments."""
+    try:
+        events = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    except json.JSONDecodeError as e:
+        raise LLMUnavailableError(f"{label}: invalid event stream: {e}") from e
+    if not events or any(not isinstance(event, dict) for event in events):
+        raise LLMUnavailableError(f"{label}: missing or invalid event stream")
+    return events
+
+
+def _codex_tool_events(events: list[dict[str, Any]]) -> list[str]:
+    """Identify attempted tools; errors are status items, not tool calls."""
+    tools = []
+    for event in events:
+        if event.get("type") not in ("item.started", "item.completed", "item.updated"):
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict):
+            raise LLMUnavailableError("codex: malformed item event")
+        kind = item.get("type")
+        if kind not in ("agent_message", "reasoning", "error"):
+            tools.append(str(kind or "unknown"))
+    return tools
+
+
+def _claude_tool_events(events: list[dict[str, Any]]) -> list[str]:
+    """Find tool_use blocks in full messages and streaming block starts."""
+    tools = []
+    for event in events:
+        stream_event = event.get("event") if event.get("type") == "stream_event" else None
+        block = stream_event.get("content_block") if isinstance(stream_event, dict) else None
+        if isinstance(block, dict) and block.get("type") == "tool_use":
+            tools.append(str(block.get("name") or "unknown"))
+        message = event.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            tools.extend(
+                str(part.get("name") or "unknown")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "tool_use"
+            )
+    return tools
 
 
 def _tail(text: str) -> str:
@@ -54,7 +106,9 @@ def _kill_process_group(pgid: int) -> None:
         pass
 
 
-def _run_cli(label: str, args: list[str], prompt: str, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+def _run_cli(
+    label: str, args: list[str], prompt: str, cwd: Path, timeout: int, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run a CLI with ``prompt`` on stdin, mapping process failures to ``LLMUnavailableError``.
 
     The CLI is an agent that can spawn its own commands, so it runs as the leader
@@ -69,6 +123,7 @@ def _run_cli(label: str, args: list[str], prompt: str, cwd: Path, timeout: int) 
         prompt: Text written to the process's stdin.
         cwd: Working directory for the process.
         timeout: Seconds before the process group is killed.
+        env: Explicit child environment. ``None`` is for process handling tests.
 
     Returns:
         The completed process (exit code 0).
@@ -79,7 +134,7 @@ def _run_cli(label: str, args: list[str], prompt: str, cwd: Path, timeout: int) 
     with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
         try:
             proc = subprocess.Popen(
-                args, stdin=subprocess.PIPE, stdout=out, stderr=err, text=True, cwd=cwd, start_new_session=True
+                args, stdin=subprocess.PIPE, stdout=out, stderr=err, text=True, cwd=cwd, env=env, start_new_session=True
             )
         except FileNotFoundError as e:
             raise LLMUnavailableError(f"{label}: binary not found ({args[0]})") from e
@@ -115,7 +170,7 @@ def _parse_json_object(label: str, raw: str) -> dict[str, Any]:
 
 
 class CodexCLIProvider(LLMProvider):
-    """LLM provider that shells out to ``codex exec --yolo``."""
+    """LLM provider that shells out to tool-free ``codex exec``."""
 
     def __init__(self, binary: str, model: str = "", timeout: int = DEFAULT_CLI_TIMEOUT_SECONDS) -> None:
         """Initialize the provider.
@@ -128,7 +183,6 @@ class CodexCLIProvider(LLMProvider):
         self._binary = binary
         self._model = model
         self._timeout = timeout
-        self._isolation_args: list[str] | None = None
         logger.info("Initialized Codex CLI provider: binary=%s model=%s", binary, model or "<cli default>")
 
     def complete(self, prompt: str, system_prompt: str = "") -> str:
@@ -144,66 +198,57 @@ class CodexCLIProvider(LLMProvider):
         """Request a schema-constrained final message via ``--output-schema`` and parse it."""
         return _parse_json_object("codex", self._exec(prompt, system_prompt, schema=schema))
 
-    def _mcp_isolation_args(self) -> list[str]:
-        """Return codex flags that disable every configured MCP server, apps and plugins.
-
-        ``--config mcp_servers={}`` does not work: codex merges overrides into the
-        loaded config, so existing servers stay enabled. Each server has to be
-        disabled by name, so the configured servers are listed once per process.
-
-        Raises:
-            LLMUnavailableError: If the servers can't be listed or a name can't be
-                addressed. Codex is skipped rather than run with MCP access.
-        """
-        if self._isolation_args is not None:
-            return self._isolation_args
-        with tempfile.TemporaryDirectory(prefix="llm-codex-mcp-") as tmp:
-            proc = _run_cli(
-                "codex mcp list",
-                [self._binary, "mcp", "list", "--json"],
-                "",
-                Path(tmp),
-                _CODEX_MCP_LIST_TIMEOUT_SECONDS,
-            )
-        try:
-            servers = json.loads(proc.stdout)
-        except json.JSONDecodeError as e:
-            raise LLMUnavailableError(f"codex: could not parse MCP server list to disable it: {e}") from e
-        if not isinstance(servers, list):
-            raise LLMUnavailableError("codex: MCP server list was not a JSON array")
-
-        args = ["--disable", "apps", "--disable", "plugins"]
-        for server in servers:
-            name = server.get("name") if isinstance(server, dict) else None
-            if not isinstance(name, str) or not _CODEX_MCP_NAME_RE.match(name):
-                raise LLMUnavailableError(f"codex: cannot disable MCP server {name!r}; refusing to run with it enabled")
-            args += ["--config", f"mcp_servers.{name}.enabled=false"]
-        logger.info("Codex CLI: disabling %d MCP server(s) for explainer runs", len(servers))
-        self._isolation_args = args
-        return args
-
     def _exec(self, prompt: str, system_prompt: str, schema: dict[str, Any] | None) -> str:
         """Run one ``codex exec`` session and return its last message.
 
         ``codex exec`` has no system-prompt flag, so static instructions are
         prepended to the prompt in a tagged block.
         """
-        if system_prompt:
-            prompt = f"<system_instructions>\n{system_prompt}\n</system_instructions>\n\n{prompt}"
-        isolation_args = self._mcp_isolation_args()
+        instructions = f"{_TOOL_FREE_INSTRUCTIONS}\n\n{system_prompt}" if system_prompt else _TOOL_FREE_INSTRUCTIONS
+        prompt = f"<system_instructions>\n{instructions}\n</system_instructions>\n\n{prompt}"
         with tempfile.TemporaryDirectory(prefix="llm-codex-") as tmp:
             workdir = Path(tmp)
             output_path = workdir / "last_message.txt"
             args = [
                 self._binary,
                 "exec",
-                "--yolo",
+                "--sandbox",
+                "read-only",
+                "--strict-config",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--json",
                 "--skip-git-repo-check",
                 "--ephemeral",
                 "--color",
                 "never",
-                # No MCP servers, apps or plugins: prompt content can't reach them.
-                *isolation_args,
+                # No shell, code execution, browser, image or agent handoff tools.
+                "--disable",
+                "shell_tool",
+                "--disable",
+                "code_mode",
+                "--disable",
+                "code_mode_host",
+                "--disable",
+                "multi_agent",
+                "--disable",
+                "hooks",
+                "--disable",
+                "browser_use",
+                "--disable",
+                "computer_use",
+                "--disable",
+                "image_generation",
+                "--disable",
+                "view_image",
+                "--config",
+                'approval_policy="never"',
+                "--config",
+                'web_search="disabled"',
+                "--disable",
+                "apps",
+                "--disable",
+                "plugins",
                 "--cd",
                 str(workdir),
                 "--output-last-message",
@@ -217,8 +262,15 @@ class CodexCLIProvider(LLMProvider):
                 args += ["--output-schema", str(schema_path)]
             args.append("-")  # read the prompt from stdin
 
-            proc = _run_cli("codex", args, prompt, workdir, self._timeout)
-            text = output_path.read_text().strip() if output_path.exists() else proc.stdout.strip()
+            proc = _run_cli("codex", args, prompt, workdir, self._timeout, _cli_environment("codex"))
+            events = _jsonl_events("codex", proc.stdout)
+            tool_events = _codex_tool_events(events)
+            logger.info("Codex CLI tool audit: %d tool event(s)", len(tool_events))
+            if tool_events:
+                raise LLMUnavailableError(f"codex: unexpected tool activity: {', '.join(sorted(set(tool_events)))}")
+            if not any(event.get("type") == "turn.completed" for event in events):
+                raise LLMUnavailableError("codex: turn did not complete")
+            text = output_path.read_text().strip() if output_path.exists() else ""
         if not text:
             raise LLMError("codex: empty response")
         return text
@@ -230,7 +282,7 @@ class CodexCLIProvider(LLMProvider):
 
 
 class ClaudeCLIProvider(LLMProvider):
-    """LLM provider that shells out to ``claude -p --dangerously-skip-permissions``."""
+    """LLM provider that shells out to tool-free ``claude -p``."""
 
     def __init__(self, binary: str, model: str = "", timeout: int = DEFAULT_CLI_TIMEOUT_SECONDS) -> None:
         """Initialize the provider.
@@ -274,7 +326,12 @@ class ClaudeCLIProvider(LLMProvider):
             args = [
                 self._binary,
                 "-p",
-                "--dangerously-skip-permissions",
+                "--permission-mode",
+                "dontAsk",
+                "--tools",
+                "",
+                "--disallowedTools",
+                "mcp__*",
                 "--no-session-persistence",
                 "--strict-mcp-config",
                 # No user/project settings (rules, CLAUDE.md) and no skills: the
@@ -282,26 +339,34 @@ class ClaudeCLIProvider(LLMProvider):
                 "--setting-sources",
                 "",
                 "--disable-slash-commands",
+                "--verbose",
                 "--output-format",
-                "json",
+                "stream-json",
             ]
             if self._model:
                 args += ["--model", self._model]
-            if system_prompt:
-                system_path = workdir / "system_prompt.txt"
-                system_path.write_text(system_prompt)
-                args += ["--system-prompt-file", str(system_path)]
+            system_path = workdir / "system_prompt.txt"
+            system_path.write_text(
+                f"{_TOOL_FREE_INSTRUCTIONS}\n\n{system_prompt}" if system_prompt else _TOOL_FREE_INSTRUCTIONS
+            )
+            args += ["--system-prompt-file", str(system_path)]
             if schema is not None:
                 args += ["--json-schema", json.dumps(schema)]
 
-            proc = _run_cli("claude", args, prompt, workdir, self._timeout)
+            proc = _run_cli("claude", args, prompt, workdir, self._timeout, _cli_environment("claude"))
 
-        try:
-            envelope = json.loads(proc.stdout)
-        except json.JSONDecodeError as e:
-            raise LLMError(f"claude: output was not valid JSON: {e}") from e
-        if not isinstance(envelope, dict):
-            raise LLMError("claude: output was not a JSON object")
+        events = _jsonl_events("claude", proc.stdout)
+        tool_events = _claude_tool_events(events)
+        # Claude implements --json-schema through an internal StructuredOutput
+        # formatting tool. It cannot access the filesystem or network.
+        unexpected = [name for name in tool_events if not (schema is not None and name == "StructuredOutput")]
+        logger.info("Claude CLI tool audit: %d external tool event(s)", len(unexpected))
+        if unexpected:
+            raise LLMUnavailableError(f"claude: unexpected tool activity: {', '.join(sorted(set(unexpected)))}")
+        results = [event for event in events if event.get("type") == "result"]
+        if len(results) != 1:
+            raise LLMUnavailableError("claude: missing or duplicate result event")
+        envelope = results[0]
         if envelope.get("is_error"):
             # Auth, rate-limit and out-of-credit failures land here.
             raise LLMUnavailableError(f"claude: {_tail(str(envelope.get('result') or envelope.get('subtype')))}")
