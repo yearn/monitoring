@@ -1,8 +1,9 @@
 """Factory for creating LLM provider instances from environment configuration.
 
-Providers are tried in order: local agent CLIs first (they run on the CLI's own
-login/subscription), then the API provider. CLIs that aren't installed are
-skipped; a CLI that fails (no credits, auth, timeout) falls through to the next.
+By default only the API provider is used. CLIs named in LLM_CLI_PROVIDERS are
+tried first, in order (they run on the CLI's own login/subscription), then the
+API provider. CLIs that aren't installed are skipped; a CLI that fails (no
+credits, auth, timeout) falls through to the next.
 
 Environment variables:
     LLM_CLI_PROVIDERS: Comma-separated CLI order (default: "none").

@@ -82,6 +82,13 @@ class TestRunCLI(unittest.TestCase):
             _run_cli("fake", [binary], "", self.dir, timeout=10)
         self.assertIn("exited with code 1: ERROR: 401 Unauthorized", str(ctx.exception))
 
+    def test_nonzero_exit_does_not_quote_event_stream(self) -> None:
+        binary = self._script('echo \'{"type": "item.completed", "text": "prompt-derived"}\'; exit 1')
+        with self.assertRaises(LLMUnavailableError) as ctx:
+            _run_cli("fake", [binary], "", self.dir, timeout=10)
+        self.assertNotIn("prompt-derived", str(ctx.exception))
+        self.assertIn("no stderr", str(ctx.exception))
+
     def test_missing_binary_is_unavailable(self) -> None:
         with self.assertRaises(LLMUnavailableError):
             _run_cli("fake", [str(self.dir / "missing")], "", self.dir, timeout=10)
@@ -111,7 +118,7 @@ class TestRunCLI(unittest.TestCase):
         self.assertNotIn("sensitive-rpc", proc.stdout)
         self.assertNotIn("sensitive-key", proc.stdout)
 
-    def test_cli_environment_allowlists_auth_and_chain_credentials(self) -> None:
+    def test_cli_environment_allowlists_only_cli_auth(self) -> None:
         with patch.dict(
             os.environ,
             {
@@ -126,12 +133,7 @@ class TestRunCLI(unittest.TestCase):
         ):
             self.assertEqual(
                 _cli_environment("codex"),
-                {
-                    "CODEX_HOME": "/tmp/codex",
-                    "OPENAI_API_KEY": "auth",
-                    "PROVIDER_URL_MAINNET": "rpc",
-                    "ETHERSCAN_TOKEN": "explorer",
-                },
+                {"CODEX_HOME": "/tmp/codex", "OPENAI_API_KEY": "auth"},
             )
 
 
@@ -153,7 +155,7 @@ class TestCodexCLIProvider(unittest.TestCase):
     """Tests for CodexCLIProvider."""
 
     @patch("utils.llm.cli_provider._run_cli")
-    def test_complete_reads_last_message_with_chain_only_sandbox(self, mock_run: MagicMock) -> None:
+    def test_complete_reads_last_message_with_tool_free_sandbox(self, mock_run: MagicMock) -> None:
         mock_run.side_effect = _codex_fake("  Pauses the vault. LOW.\n")
         provider = CodexCLIProvider(binary="/bin/codex", model="gpt-x", timeout=7)
 
@@ -170,7 +172,7 @@ class TestCodexCLIProvider(unittest.TestCase):
         self.assertEqual(_arg_after(args, "--model"), "gpt-x")
         self.assertEqual(args[-1], "-")
         self.assertNotIn("--output-schema", args)
-        self.assertIn("monitoring_chain rpc_read and etherscan_contract", stdin)
+        self.assertIn("You have no tools", stdin)
         self.assertIn("Be terse.\n</system_instructions>", stdin)
         self.assertTrue(stdin.endswith("Explain this tx"))
         self.assertEqual(timeout, 7)
@@ -190,11 +192,10 @@ class TestCodexCLIProvider(unittest.TestCase):
         exec_calls = [a for a in seen if a[1] == "exec"]
         for args in exec_calls:
             configs = [args[i + 1] for i, a in enumerate(args) if a == "--config"]
-            self.assertEqual(configs[:2], ['approval_policy="never"', 'web_search="disabled"'])
-            self.assertEqual(len(configs), 5)
-            self.assertIn("mcp_servers.monitoring_chain.command=", configs[2])
-            self.assertEqual(configs[3], 'mcp_servers.monitoring_chain.args=["-m", "utils.llm.chain_mcp"]')
-            self.assertIn("mcp_servers.monitoring_chain.env_vars=", configs[4])
+            self.assertEqual(
+                configs, ['approval_policy="never"', 'web_search="disabled"', 'cli_auth_credentials_store="auto"']
+            )
+            self.assertFalse(any("mcp" in a for a in args))
             disabled = [args[i + 1] for i, a in enumerate(args) if a == "--disable"]
             self.assertEqual(
                 disabled,
@@ -268,56 +269,56 @@ class TestCodexCLIProvider(unittest.TestCase):
         self.assertEqual(CodexCLIProvider(binary="codex").complete("p"), "OK")
 
     @patch("utils.llm.cli_provider._run_cli")
-    def test_allowlisted_chain_tool_event_succeeds(self, mock_run: MagicMock) -> None:
+    def test_any_mcp_tool_call_fails_closed(self, mock_run: MagicMock) -> None:
         def fake_run(label: str, args: list[str], *rest: Any) -> MagicMock:
             Path(_arg_after(args, "--output-last-message")).write_text("OK")
             return _completed(
                 args,
                 stdout=_events(
-                    {
-                        "type": "item.completed",
-                        "item": {"type": "mcp_tool_call", "server": "monitoring_chain", "tool": "rpc_read"},
-                    },
+                    {"type": "item.completed", "item": {"type": "mcp_tool_call", "server": "x", "tool": "y"}},
                     {"type": "turn.completed"},
                 ),
             )
 
         mock_run.side_effect = fake_run
-        with self.assertLogs("utils.llm.cli_provider", level="INFO") as logs:
-            self.assertEqual(CodexCLIProvider(binary="codex").complete("p"), "OK")
-        self.assertTrue(any("rpc_read=1 etherscan_contract=0" in line for line in logs.output))
+        with self.assertRaises(LLMUnavailableError) as ctx:
+            CodexCLIProvider(binary="codex").complete("p")
+        self.assertIn("mcp_tool_call", str(ctx.exception))
 
     @patch("utils.llm.cli_provider._run_cli")
-    def test_other_mcp_tool_fails_closed(self, mock_run: MagicMock) -> None:
+    def test_plan_items_and_warning_lines_are_not_tool_activity(self, mock_run: MagicMock) -> None:
         def fake_run(label: str, args: list[str], *rest: Any) -> MagicMock:
             Path(_arg_after(args, "--output-last-message")).write_text("OK")
-            return _completed(
-                args,
-                stdout=_events(
-                    {
-                        "type": "item.completed",
-                        "item": {"type": "mcp_tool_call", "server": "other", "tool": "rpc_read"},
-                    },
-                    {"type": "turn.completed"},
-                ),
+            stream = _events(
+                {"type": "item.updated", "item": {"type": "todo_list", "items": []}},
+                {"type": "turn.completed"},
             )
+            return _completed(args, stdout=f"WARNING: update available\n{stream}\n{{truncated")
 
         mock_run.side_effect = fake_run
-        with self.assertRaises(LLMUnavailableError):
+        self.assertEqual(CodexCLIProvider(binary="codex").complete("p"), "OK")
+
+    @patch("utils.llm.cli_provider._run_cli")
+    def test_output_without_events_fails_only_the_call(self, mock_run: MagicMock) -> None:
+        def fake_run(label: str, args: list[str], *rest: Any) -> MagicMock:
+            Path(_arg_after(args, "--output-last-message")).write_text("OK")
+            return _completed(args, stdout="not json")
+
+        mock_run.side_effect = fake_run
+        with self.assertRaises(LLMError) as ctx:
             CodexCLIProvider(binary="codex").complete("p")
+        self.assertNotIsInstance(ctx.exception, LLMUnavailableError)
 
 
 class TestClaudeCLIProvider(unittest.TestCase):
     """Tests for ClaudeCLIProvider."""
 
     @patch("utils.llm.cli_provider._run_cli")
-    def test_complete_disables_builtins_and_uses_chain_mcp(self, mock_run: MagicMock) -> None:
+    def test_complete_disables_builtins_and_mcp(self, mock_run: MagicMock) -> None:
         seen_system: list[str] = []
-        seen_mcp: list[dict[str, Any]] = []
 
         def fake_run(label: str, args: list[str], prompt: str, cwd: Path, timeout: int, env: Any = None) -> MagicMock:
             seen_system.append(Path(_arg_after(args, "--system-prompt-file")).read_text())
-            seen_mcp.append(json.loads(Path(_arg_after(args, "--mcp-config")).read_text()))
             return _completed(args, stdout=_claude_result(result=" Pauses. LOW. "))
 
         mock_run.side_effect = fake_run
@@ -327,10 +328,8 @@ class TestClaudeCLIProvider(unittest.TestCase):
         _, args, stdin, _cwd, _timeout, env = mock_run.call_args.args
         self.assertEqual(args[:4], ["/bin/claude", "-p", "--permission-mode", "dontAsk"])
         self.assertEqual(_arg_after(args, "--tools"), "")
-        self.assertEqual(
-            _arg_after(args, "--allowedTools"),
-            "mcp__monitoring_chain__rpc_read,mcp__monitoring_chain__etherscan_contract",
-        )
+        self.assertNotIn("--allowedTools", args)
+        self.assertNotIn("--mcp-config", args)
         self.assertNotIn("--dangerously-skip-permissions", args)
         self.assertIn("--strict-mcp-config", args)
         self.assertEqual(_arg_after(args, "--setting-sources"), "")
@@ -339,8 +338,7 @@ class TestClaudeCLIProvider(unittest.TestCase):
         self.assertEqual(_arg_after(args, "--model"), "opus")
         self.assertEqual(_arg_after(args, "--output-format"), "stream-json")
         self.assertEqual(len(seen_system), 1)
-        self.assertIn("monitoring_chain rpc_read and etherscan_contract", seen_system[0])
-        self.assertEqual(seen_mcp[0]["mcpServers"]["monitoring_chain"]["args"], ["-m", "utils.llm.chain_mcp"])
+        self.assertIn("You have no tools", seen_system[0])
         self.assertTrue(seen_system[0].endswith("Be terse."))
         self.assertEqual(stdin, "Explain")
         self.assertNotIn("TELEGRAM_BOT_TOKEN", env)
@@ -383,20 +381,28 @@ class TestClaudeCLIProvider(unittest.TestCase):
         self.assertIn("unexpected tool activity", str(ctx.exception))
 
     @patch("utils.llm.cli_provider._run_cli")
-    def test_allowlisted_chain_tool_event_succeeds(self, mock_run: MagicMock) -> None:
+    def test_mcp_tool_event_fails_closed(self, mock_run: MagicMock) -> None:
         mock_run.side_effect = lambda label, args, *rest: _completed(
             args,
             stdout=_events(
-                {
-                    "type": "assistant",
-                    "message": {"content": [{"type": "tool_use", "name": "mcp__monitoring_chain__etherscan_contract"}]},
-                },
+                {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "mcp__x__y"}]}},
                 {"type": "result", "is_error": False, "result": "OK"},
             ),
         )
-        with self.assertLogs("utils.llm.cli_provider", level="INFO") as logs:
-            self.assertEqual(ClaudeCLIProvider(binary="claude").complete("p"), "OK")
-        self.assertTrue(any("rpc_read=0 etherscan_contract=1" in line for line in logs.output))
+        with self.assertRaises(LLMUnavailableError):
+            ClaudeCLIProvider(binary="claude").complete("p")
+
+    @patch("utils.llm.cli_provider._run_cli")
+    def test_structured_output_tool_is_rejected_for_plain_completion(self, mock_run: MagicMock) -> None:
+        mock_run.side_effect = lambda label, args, *rest: _completed(
+            args,
+            stdout=_events(
+                {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "StructuredOutput"}]}},
+                {"type": "result", "is_error": False, "result": "OK"},
+            ),
+        )
+        with self.assertRaises(LLMUnavailableError):
+            ClaudeCLIProvider(binary="claude").complete("p")
 
 
 class _StubProvider(LLMProvider):

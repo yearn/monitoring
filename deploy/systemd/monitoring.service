@@ -32,7 +32,7 @@ WorkingDirectory=__REPO_DIR__
 # crontab resolves to .venv/bin/python; flock (util-linux) and supercronic live
 # in the system paths after it. ~/.local/bin is where the Codex and Claude Code CLIs
 # install; utils/llm/factory.py finds them with shutil.which and tries them before
-# the API provider (LLM_CLI_PROVIDERS, default "codex,claude").
+# the API provider when opted in (LLM_CLI_PROVIDERS, default "none").
 Environment=REPO_ROOT=__REPO_DIR__
 Environment=PATH=__REPO_DIR__/.venv/bin:__HOME_DIR__/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=LOG_LEVEL=INFO
