@@ -385,8 +385,8 @@ class StageUsage:
     back to text), ``critique-N`` or ``detail``. ``outcome`` says what the call did:
     ``ok``, ``pass`` / ``revised`` for a critique, ``empty`` or ``error``. ``summary``
     holds the TLDR a summary or revising critique produced, to compare rounds.
-    ``model_name`` identifies the provider that answered that call; it is empty
-    on errors because a fallback chain's last successful model would be stale.
+    ``model_name`` identifies the answering model, or a direct provider's configured
+    model on errors. Failed fallback chains leave it empty.
     """
 
     stage: str
@@ -1880,13 +1880,12 @@ def _explanation_from_json(data: dict) -> Explanation:
 def _record(
     stages: list[StageUsage] | None, stage: str, outcome: str, provider: LLMProvider, summary: str = ""
 ) -> None:
-    """Log and record a stage; failed calls omit stale usage and model attribution."""
-    model_name = provider.model_name if outcome != "error" else ""
-    model_name = model_name if isinstance(model_name, str) else ""
-    logger.info("LLM stage=%s outcome=%s model=%s", stage, outcome, model_name or "unknown")
+    """Record a stage; failed direct API calls can retain stale usage, so omit it."""
     if stages is not None:
         usage = provider.last_usage if outcome != "error" else None
-        stages.append(StageUsage(stage, outcome, usage if isinstance(usage, LLMUsage) else None, summary, model_name))
+        stages.append(
+            StageUsage(stage, outcome, usage if isinstance(usage, LLMUsage) else None, summary, provider.model_name)
+        )
 
 
 def _usage_line(stages: list[StageUsage]) -> str:
@@ -2050,7 +2049,7 @@ def _generate_explanation(
     stages: list[StageUsage] = []
     summary_draft = _generate_summary(provider, prompt, stages)
     if not summary_draft.summary:
-        logger.info("LLM usage: %s", _usage_line(stages))
+        logger.info("LLM usage: %s | generation time=%.1fs", _usage_line(stages), perf_counter() - started)
         return replace(summary_draft, stages=tuple(stages))
 
     had_detail = bool(summary_draft.detail)
@@ -2077,7 +2076,9 @@ def _generate_explanation(
             detail,
             report_ctx,
             risk_tag,
-            model_names=tuple(stage.model_name for stage in stages if stage.model_name),
+            model_names=tuple(
+                stage.model_name for stage in stages if stage.model_name and stage.outcome in ("ok", "pass", "revised")
+            ),
             elapsed_s=elapsed_s,
         )
         title = build_title(report_ctx, risk_tag, fallback=DETAIL_REPORT_TITLE)

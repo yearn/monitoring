@@ -30,8 +30,8 @@ class FallbackProvider(LLMProvider):
             raise LLMError("FallbackProvider needs at least one provider")
         self._providers = list(providers)
         self._disabled: set[int] = set()
-        self._last_used: LLMProvider | None = None
-        logger.info("LLM fallback chain: %s", " -> ".join(p.model_name for p in self._providers))
+        self._model_name = " -> ".join(p.model_name for p in self._providers)
+        logger.info("LLM fallback chain: %s", self._model_name)
 
     def complete(self, prompt: str, system_prompt: str = "") -> str:
         """Return the first successful completion in chain order."""
@@ -60,11 +60,13 @@ class FallbackProvider(LLMProvider):
         Raises:
             LLMError: If every eligible provider failed.
         """
+        self._model_name = ""
+        self.last_usage = None
         errors: list[str] = []
         for index, provider in enumerate(self._providers):
             if index in self._disabled or (only_structured and not provider.supports_structured_output):
                 continue
-            logger.info("LLM attempt: model=%s operation=%s", provider.model_name, op)
+            logger.debug("LLM attempt: provider=%s operation=%s", type(provider).__name__, op)
             try:
                 result = call(provider)
             except LLMUnavailableError as e:
@@ -76,7 +78,8 @@ class FallbackProvider(LLMProvider):
                 logger.warning("%s %s failed, trying next provider: %s", provider.model_name, op, e)
                 errors.append(f"{provider.model_name}: {e}")
                 continue
-            self._last_used = provider
+            self._model_name = provider.model_name
+            self.last_usage = provider.last_usage
             return result
         if not errors:
             skipped = "disabled after earlier failures" if self._disabled else "no eligible provider"
@@ -85,7 +88,5 @@ class FallbackProvider(LLMProvider):
 
     @property
     def model_name(self) -> str:
-        """Model of the provider that last answered, or the chain description before any call."""
-        if self._last_used is not None:
-            return self._last_used.model_name
-        return " -> ".join(p.model_name for p in self._providers)
+        """Latest call's answering model, empty after failure; chain description before any call."""
+        return self._model_name

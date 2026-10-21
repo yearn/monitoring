@@ -469,28 +469,25 @@ class TestBuildReport(unittest.TestCase):
         )
         self.assertIn("- **Chain:** Mainnet (chain id 1)", report)
         self.assertIn("- **Risk:** HIGH", report)
+        self.assertNotIn("**Model:**", report)
+        self.assertNotIn("**Time:**", report)
 
     def test_contract_unlinked_without_label_address(self) -> None:
         report = build_report("Summary.", "Analysis.", _add_farms_ctx())
         self.assertIn("- **Contract:** Infinifi Shorttimelock\n", report)
 
-    def test_generation_metadata_lists_unique_models_in_order(self) -> None:
+    def test_model_metadata_is_plain_text(self) -> None:
         report = build_report(
             "Summary.",
             "Analysis.",
             _add_farms_ctx(),
-            "MEDIUM",
-            model_names=("primary-model", "fallback-model", "primary-model"),
-            elapsed_s=10.25,
+            model_names=("model_[link](https://example.com)<b>*`\\\n- injected",),
         )
-        self.assertIn("- **Model:** primary-model / fallback-model\n- **Time:** 10.2s", report)
-        self.assertLess(report.index("**Risk:**"), report.index("**Model:**"))
-        self.assertLess(report.index("**Time:**"), report.index("## Summary"))
-
-    def test_generation_metadata_omitted_when_unknown(self) -> None:
-        report = build_report("Summary.", "Analysis.", _add_farms_ctx())
-        self.assertNotIn("**Model:**", report)
-        self.assertNotIn("**Time:**", report)
+        self.assertIn(
+            r"- **Model:** model\_\[link\](https://example.com)&lt;b&gt;\*\`\\ - injected",
+            report,
+        )
+        self.assertNotIn("\n- injected", report)
 
     def test_zero_generation_time_is_shown(self) -> None:
         report = build_report("Summary.", "Analysis.", _add_farms_ctx(), elapsed_s=0)

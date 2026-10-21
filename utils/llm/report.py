@@ -15,6 +15,7 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from html import escape
 
 from eth_utils import to_checksum_address
 
@@ -569,6 +570,12 @@ def _chain_name(chain_id: int) -> str:
         return f"Chain {chain_id}"
 
 
+def _model_label(model: str) -> str:
+    """Escape model identifiers as single-line Markdown text, including HTML."""
+    model = escape(" ".join(model.split()), quote=False)
+    return re.sub(r"([\\`*_\[\]])", r"\\\1", model)
+
+
 def _format_metadata(ctx: ReportContext, risk_tag: str, model_names: tuple[str, ...], elapsed_s: float | None) -> str:
     """Header bullet list: protocol, contract label, chain, risk, models and time."""
     lines: list[str] = []
@@ -586,7 +593,7 @@ def _format_metadata(ctx: ReportContext, risk_tag: str, model_names: tuple[str, 
     if risk_tag:
         lines.append(f"- **Risk:** {risk_tag}")
     if model_names:
-        lines.append(f"- **Model:** {' / '.join(dict.fromkeys(model_names))}")
+        lines.append(f"- **Model:** {' / '.join(_model_label(model) for model in dict.fromkeys(model_names))}")
     if elapsed_s is not None:
         lines.append(f"- **Time:** {elapsed_s:.1f}s")
     return "\n".join(lines)
