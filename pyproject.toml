@@ -15,7 +15,7 @@ dependencies = [
     "async-timeout==5.0.1",
     "attrs==26.1.0",
     "bitarray==3.11.0",
-    "certifi==2026.7.22",
+    "certifi==2026.10.18",
     "charset-normalizer==3.5.1",
     "ckzg==2.1.8",
     "click==8.5.0",
@@ -86,6 +86,10 @@ dev = [
 # or ISO 8601 (e.g. "P7D"). Applies to `uv pip install`, `uv lock`,
 # `uv sync`, etc. Also settable via `UV_EXCLUDE_NEWER=1 week`.
 exclude-newer = "1 week"
+# The emSign CA compromise needs certifi's Oct 18 security release before the
+# normal seven-day cooldown; the pinned version and PyPI provenance were checked.
+# TODO: remove after 2026-10-25T16:21Z (2026.10.18 upload + 7 days), then `uv lock`.
+exclude-newer-package = { certifi = "2026-10-21T00:00:00Z" }
 
 [build-system]
 requires = ["setuptools>=42", "wheel"]
