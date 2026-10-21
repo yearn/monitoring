@@ -7,6 +7,11 @@
 # Caddy provisions and renews TLS automatically once DNS for $ALERTS_API_DOMAIN
 # points at this box and ports 80 + 443 are reachable.
 #
+# Requires Caddy >= 2.11.3 (bundles quic-go >= 0.59.1, which fixes the QPACK
+# amplification DoS: CVE-2025-64702 / GHSA-g754-hx8w-x2g6 and the trailer variant
+# GHSA-vvgj-x9jq-8cj9). Check with `caddy version`; use the official repo, not a
+# distro package. HTTP/3 is also disabled below as defense in depth.
+#
 # Install (Debian/Ubuntu, official Caddy apt repo — https://caddyserver.com/docs/install):
 #   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
 #   sudo systemctl edit caddy        # add the [Service] Environment= block below
@@ -33,6 +38,14 @@
 
 {
 	email {$ACME_EMAIL}
+
+	# HTTP/3 off (TCP only): this GET-only internal API gains nothing from QUIC,
+	# and it removes the QPACK amplification surface (CVE-2025-64702 /
+	# GHSA-vvgj-x9jq-8cj9). Still run Caddy >= 2.11.3 (quic-go >= 0.59.1).
+	servers {
+		protocols h1 h2
+	}
+
 	# Uncomment once the caddy-ratelimit plugin is installed:
 	# order rate_limit before reverse_proxy
 }

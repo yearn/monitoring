@@ -184,10 +184,17 @@ would wedge it.
 (auto-provisioned by Caddy), exposes `GET /healthz` publicly for uptime checks,
 and gates everything else behind an `Authorization: Bearer <token>` header.
 
+**Minimum version: Caddy 2.11.3.** Older builds bundle a quic-go vulnerable to
+the QPACK amplification DoS against HTTP/3 (CVE-2025-64702 / GHSA-g754-hx8w-x2g6,
+plus the trailer variant GHSA-vvgj-x9jq-8cj9, fixed in quic-go 0.59.1). The
+Caddyfile also turns HTTP/3 off (`servers { protocols h1 h2 }`), so Caddy only
+listens on TCP 443.
+
 ```sh
 # 1. DNS: point an A record (e.g. alerts.example.com) at the VPS public IP.
 
-# 2. Install Caddy (official apt repo) and drop in the config:
+# 2. Install Caddy >= 2.11.3 (official apt repo; distro packages lag) and drop in the config:
+caddy version                    # must be v2.11.3 or later (quic-go >= 0.59.1)
 sudo cp /srv/monitoring/deploy/Caddyfile /etc/caddy/Caddyfile
 
 # 3. Provide domain + tokens + ACME email to the caddy service:
@@ -250,7 +257,7 @@ Hetzner includes baseline L3/L4 DDoS protection at its network edge for free, so
 volumetric floods are largely absorbed before reaching the box. Layer the rest:
 
 - **Hetzner Cloud Firewall** (console): allow inbound `22` (SSH), `80` + `443`
-  (Caddy/ACME) only. Never open `8923` — the API must stay localhost-only so the
+  (Caddy/ACME) only, TCP. HTTP/3 is disabled, so leave UDP `443` closed. Never open `8923` — the API must stay localhost-only so the
   only path in is through Caddy's auth.
 - On-box `ufw` as defense-in-depth: `ufw allow 22,80,443/tcp && ufw enable`.
 - **Rate limiting**: enable the commented `rate_limit` blocks in the Caddyfile
