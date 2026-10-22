@@ -136,6 +136,7 @@ class TestDefaultProviderUrls(unittest.TestCase):
 
     def test_production_mapping_has_hyperevm_public_rpc(self):
         self.assertEqual(PUBLIC_RPC_URLS[Chain.HYPEREVM.chain_id], "https://rpc.hyperliquid.xyz/evm")
+        self.assertEqual(PUBLIC_RPC_URLS[Chain.ROBINHOOD.chain_id], "https://rpc.mainnet.chain.robinhood.com")
 
     def test_hyperevm_falls_back_to_public_rpc(self):
         with (

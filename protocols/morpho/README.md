@@ -8,16 +8,18 @@ Morpho governance monitoring is defined in the [Python script](./governance.py) 
 
 The script checks if there are any new values pending in the timelock for a given vault. It detects the following changes:
 
-- Changing timelock value, minimal values is 1 day.
+- Decreasing the timelock (increases apply instantly, so only decreases are ever pending), minimal value is 1 day. The HIGH alert shows the current → new value and when it becomes executable.
 - Changing guardian address.
 - Changing supply caps, only to higher value than the current one, for both supply and withdraw markets.
-- Removing of a market from the vault.
+- Removing of a market from the vault (`submitMarketRemoval`). Once `removableAt` passes, `updateWithdrawQueue` can drop the market **even if the vault still supplies it**, writing that supply off. The monitor reads the vault's Morpho Blue position in the market:
+  - any non-zero supply → **CRITICAL** potential-loss alert with the amount at risk and its share of `totalAssets`, re-alerted once within 24h of `removableAt`;
+  - no supply → MEDIUM (routine cleanup).
 
 ### How to Add a New Vault
 
 Add a `VaultConfig` to `VAULTS_V1_BY_CHAIN` in [config.py](./config.py). Every configured V1 vault receives both market and governance monitoring. `governance.py` iterates every chain in that mapping, so a new chain needs no script change; a failure on one chain is logged and the remaining chains are still checked before the run fails.
 
-Monitored chains: Mainnet, Base, Katana, HyperEVM, and Robinhood Chain (V2 only). HyperEVM uses `PROVIDER_URL_HYPEREVM` when set; if no `PROVIDER_URL_HYPEREVM*` variable exists it falls back to the public `https://rpc.hyperliquid.xyz/evm` (`PUBLIC_RPC_URLS` in [utils/chains.py](../../utils/chains.py)). RPC requests time out after 60 seconds so a stalled public endpoint cannot hang the daily profile.
+Monitored chains: Mainnet, Base, Katana, HyperEVM, and Robinhood Chain (V2 only). HyperEVM uses `PROVIDER_URL_HYPEREVM` when set; if no `PROVIDER_URL_HYPEREVM*` variable exists it falls back to the public `https://rpc.hyperliquid.xyz/evm` (`PUBLIC_RPC_URLS` in [utils/chains.py](../../utils/chains.py)). Robinhood Chain likewise falls back to its official `https://rpc.mainnet.chain.robinhood.com`, used by the V2 adapter timelock reads. RPC requests time out after 60 seconds so a stalled public endpoint cannot hang the daily profile.
 
 ## Vaults & Markets
 
@@ -152,7 +154,21 @@ Morpho's [Vault V2](https://github.com/morpho-org/vault-v2) replaces the v1 sing
 
 - [`governance_v2.py`](./governance_v2.py) — daily, pulls a per-vault governance **snapshot** from Morpho's GraphQL API (`vaultV2s.pendingConfigs` + `owner` / `curator` / `sentinels` / `allocators` / `adapters`) and diffs it against the persisted cache. Mirrors v1's pull-based approach (`pendingTimelock` / `pendingGuardian` / `pendingCap`) so RPC usage stays bounded. Alerts on: new pending timelocked operations, executed or revoked operations, owner / curator changes, sentinel / allocator / adapter set changes.
 - [`markets_v2.py`](./markets_v2.py) — hourly, GraphQL-only (no RPC): one `vaultV2s` query loads TVL, liquidity, and `MorphoMarketV1` adapter positions for every configured vault, then one `markets` query per chain loads state/bad debt. Applies the shared [risk.py](./risk.py) policy using each position's `supplyAssetsUsd`, and checks withdrawable liquidity (idle plus the vault's position in the liquidity adapter's market, capped by market cash) against the 2% V2 threshold for every vault, including YV-collateral ones, which `markets.py` also covers with the combined collateral-at-risk check. Non-`MorphoMarketV1` adapters fail the run (configured vaults are market-adapter only).
+- [`adapter_timelocks_v2.py`](./adapter_timelocks_v2.py) — run by `governance_v2.py`, reads each `MorphoMarketV1AdapterV2`'s own timelock on-chain, which the GraphQL API does not expose. For every market the adapter holds it batch-reads `executableAt(burnShares(marketId))`; a pending `burnShares` writes off the adapter's supply in that market (the V2 analogue of a V1 market removal). It also watches `timelock(burnShares)` and alerts HIGH when it drops. A failed RPC read still lets the GraphQL diff run, then fails the job; every chain with a V2 vault needs an RPC provider (`PROVIDER_URL_<CHAIN>`).
 - [`v2_decoders.py`](./v2_decoders.py) — selector→signature map and decoders for every v2 timelocked function (and the three `idData` tag prefixes used by `increaseAbsoluteCap`/`increaseRelativeCap`). Absolute caps are denominated in the *vault's* asset whatever id they are keyed by, so the decoder takes the vault's asset decimals/symbol; `type(uint128).max` renders as `unlimited`.
+
+### Potential vault loss alerts
+
+Operations that can write off vault funds are **CRITICAL** for any non-zero amount, sent as their own message prefixed `🚨 POTENTIAL VAULT LOSS` (never bundled into the grouped diff), and re-alerted once when within 24 hours of execution:
+
+| Vault | Operation | Condition |
+|---|---|---|
+| V1 | `submitMarketRemoval` | the vault still supplies the market |
+| V2 | `removeAdapter(adapter)` | the adapter holds assets (`totalAssets` is the sum of adapter `realAssets`) |
+| V2 | `decreaseTimelock(removeAdapter, …)` | any adapter holds assets |
+| V2 adapter | `burnShares(marketId)` | the adapter holds assets in the market |
+
+Other V2 timelock decreases and `abdicate` (irreversible) are HIGH; remaining pending operations stay MEDIUM. Pending V2 operations can be cancelled by the curator or a sentinel with `revoke(data)`; V1 removals by the curator or guardian with `revokePendingMarketRemoval`.
 
 ### Grouped alerts
 

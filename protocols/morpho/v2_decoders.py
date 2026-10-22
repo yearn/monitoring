@@ -272,10 +272,8 @@ def _format_args(  # noqa: PLR0911,PLR0912
     """Render a decoded argument tuple per signature."""
     name = _function_name(sig)
 
-    if name == "removeAdapter":
-        return ""
-    if name == "addAdapter":
-        return f"{_format_address(args[0])}"
+    if name in ("addAdapter", "removeAdapter"):
+        return _address_link(args[0], chain)
     if name == "setIsAllocator":
         addr, flag = args
         return f"{_format_address(addr)} = {bool(flag)}"
@@ -368,6 +366,29 @@ def decode_submit(
 
     formatted = _format_args(sig, args, chain, asset_decimals=asset_decimals, asset_symbol=asset_symbol)
     return f"{_function_name(sig)}({formatted})"
+
+
+def decode_call(data: bytes) -> tuple[str, tuple[Any, ...]] | None:
+    """ABI-decode a known timelocked call into ``(function name, args)``, or None.
+
+    Unlike ``decode_submit`` this returns raw arguments, so callers can make
+    severity decisions (e.g. which adapter a ``removeAdapter`` targets).
+    """
+    if len(data) < 4:
+        return None
+    sig = SELECTOR_TO_SIG.get(_selector_hex(data))
+    if sig is None:
+        return None
+    try:
+        args = abi_decode(_arg_types(sig), data[4:])
+    except Exception:
+        return None
+    return _function_name(sig), tuple(args)
+
+
+def selector_of(sig: str) -> bytes:
+    """Return the 4-byte selector for a solidity signature."""
+    return bytes(Web3.keccak(text=sig)[:4])
 
 
 def submit_data_key(data: bytes) -> str:

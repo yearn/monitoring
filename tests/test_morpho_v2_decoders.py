@@ -68,7 +68,7 @@ class TestDecodeSubmit(unittest.TestCase):
         data = _build("removeAdapter(address)", ["address"], [A2])
         self.assertEqual(
             decode_submit(data),
-            "removeAdapter()",
+            f"removeAdapter({Web3.to_checksum_address(A2)})",
         )
 
     def test_set_is_allocator_grant(self):
