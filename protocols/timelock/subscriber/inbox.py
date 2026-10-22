@@ -157,7 +157,15 @@ class EventInbox:
             pass
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
+    def _connect(self, write: bool = False) -> Iterator[sqlite3.Connection]:
+        """Open a connection; one transaction spans the ``with`` block.
+
+        Args:
+            write: Take the database write lock before the first statement
+                (``BEGIN IMMEDIATE``). Required wherever a read decides a write:
+                otherwise the WebSocket and reconcile threads can both read an id
+                as unseen and the second insert fails on the primary key.
+        """
         with closing(sqlite3.connect(self.path, timeout=10)) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
@@ -165,6 +173,8 @@ class EventInbox:
             conn.execute("PRAGMA busy_timeout=10000")
             conn.executescript(_SCHEMA)
             with conn:
+                if write:
+                    conn.execute("BEGIN IMMEDIATE")
                 yield conn
 
     def observe(self, events: Iterable[dict[str, Any]], source: str, now: float) -> ObserveResult:
@@ -187,7 +197,7 @@ class EventInbox:
         new_ids: list[str] = []
         seen_col = "ws_first_seen_at" if source == SOURCE_WS else "http_first_seen_at"
         count_col = "ws_observations" if source == SOURCE_WS else "http_observations"
-        with self._connect() as conn:
+        with self._connect(write=True) as conn:
             for event in events:
                 event_id = str(event["id"])
                 fingerprint = event_fingerprint(event)
@@ -297,7 +307,7 @@ class EventInbox:
         Returns:
             The ids newly marked as removed.
         """
-        with self._connect() as conn:
+        with self._connect(write=True) as conn:
             rows = conn.execute(
                 """
                 SELECT event_id, fingerprint, payload_json FROM timelock_sub_events
@@ -345,14 +355,17 @@ class EventInbox:
 
     def set_checkpoint(self, chain_id: int, block_number: int, indexed_head: int, now: float) -> None:
         """Advance a chain's checkpoint; it never moves backwards."""
-        previous = self.get_checkpoint(chain_id)
-        head_changed_at = now
-        if previous is not None:
-            block_number = max(block_number, previous.block_number)
-            if indexed_head <= previous.indexed_head:
-                indexed_head = previous.indexed_head
-                head_changed_at = previous.head_changed_at
-        with self._connect() as conn:
+        with self._connect(write=True) as conn:
+            previous = conn.execute(
+                "SELECT block_number, indexed_head, head_changed_at FROM timelock_sub_checkpoints WHERE chain_id = ?",
+                (chain_id,),
+            ).fetchone()
+            head_changed_at = now
+            if previous is not None:
+                block_number = max(block_number, previous["block_number"])
+                if indexed_head <= previous["indexed_head"]:
+                    indexed_head = previous["indexed_head"]
+                    head_changed_at = previous["head_changed_at"]
             conn.execute(
                 """
                 INSERT INTO timelock_sub_checkpoints (chain_id, block_number, indexed_head, head_changed_at, updated_at)
@@ -378,6 +391,17 @@ class EventInbox:
             rows = conn.execute("SELECT * FROM timelock_sub_log WHERE at >= ? ORDER BY at, id", (since,)).fetchall()
         wanted = set(kinds) if kinds is not None else None
         return [row for row in rows if wanted is None or row["kind"] in wanted]
+
+    def last_log_entry_before(self, before: float, kinds: Iterable[str]) -> sqlite3.Row | None:
+        """Return the newest worker log entry of one of ``kinds`` strictly before ``before``."""
+        wanted = list(kinds)
+        placeholders = ", ".join("?" for _ in wanted)
+        with self._connect() as conn:
+            return conn.execute(
+                f"SELECT * FROM timelock_sub_log WHERE at < ? AND kind IN ({placeholders}) ORDER BY at DESC, id DESC "
+                "LIMIT 1",
+                (before, *wanted),
+            ).fetchone()
 
     def events_since(self, since_block_timestamp: int) -> list[sqlite3.Row]:
         """Return inbox rows whose block timestamp is at or after ``since_block_timestamp``."""

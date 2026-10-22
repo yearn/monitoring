@@ -9,6 +9,7 @@ backlog recovery, and assert every expected event lands exactly once.
 import asyncio
 import json
 import socket
+import sqlite3
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -20,7 +21,7 @@ from websockets.typing import Subprotocol
 from protocols.timelock.subscriber.inbox import SOURCE_HTTP, SOURCE_WS, EventInbox
 from protocols.timelock.subscriber.reconcile import ReconcileConfig, reconcile_all
 from protocols.timelock.subscriber.report import PilotReport, _recommend, build_report, format_report, percentile
-from protocols.timelock.subscriber.worker import Worker, WorkerConfig
+from protocols.timelock.subscriber.worker import Worker, WorkerConfig, backoff_delay
 from tests.timelock_subscriber_fakes import TIMELOCK, FakeEnvio, FakeWSServer, make_event
 from utils.graphql_ws import GraphQLWSError, http_to_ws_url, subscribe
 from utils.sd_notify import notify
@@ -345,3 +346,100 @@ def test_sd_notify_sends_datagram(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         assert sock.recv(1024) == b"READY=1\nSTATUS=ok"
     monkeypatch.delenv("NOTIFY_SOCKET")
     assert notify("READY=1") is False
+
+
+def test_backoff_delay_is_capped_without_overflow() -> None:
+    assert backoff_delay(1, 1.0, 60.0) == 1.0
+    assert backoff_delay(4, 1.0, 60.0) == 8.0
+    assert backoff_delay(7, 1.0, 60.0) == 60.0
+    # 2 ** 1024 overflows a float; the exponent is capped before the multiply.
+    assert backoff_delay(1_025, 1.0, 60.0) == 60.0
+    assert backoff_delay(10**9, 1.0, 60.0) == 60.0
+
+
+def test_reconcile_loop_survives_unexpected_errors(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        envio = FakeEnvio()
+        _seed_heads(envio)
+        calls = {"n": 0}
+
+        def flaky_post(query: str, variables: dict) -> dict:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise sqlite3.IntegrityError("simulated bug")  # not an EnvioQueryError
+            return envio.post(query, variables)
+
+        inbox = EventInbox(str(tmp_path / "sub.db"))
+        worker = Worker(flaky_post, None, inbox, SCOPE, _config(transport="http", reconcile_interval=0.05))
+
+        async def body() -> None:
+            await _until(lambda: worker.last_reconcile is not None and worker.last_reconcile.ok)
+            envio.add(_now_event(1, 3))
+            await _until(lambda: "1_3_0" in _rows(inbox))
+            assert worker.is_alive()
+
+        await _run_worker(worker, body)
+
+    asyncio.run(scenario())
+
+
+def test_watchdog_deadline_covers_a_hung_first_reconcile(tmp_path: Path) -> None:
+    clock = [1_000.0]
+    worker = Worker(
+        FakeEnvio().post,
+        None,
+        EventInbox(str(tmp_path / "sub.db")),
+        SCOPE,
+        _config(transport="http"),
+        now=lambda: clock[0],
+    )
+    worker.started_at = clock[0]  # run() started; the first reconcile never returns
+    assert worker.is_alive()
+    clock[0] += 3 * worker.config.reconcile_interval + 121
+    assert not worker.is_alive()
+    worker.last_reconcile_at = clock[0]  # a completed cycle resets the deadline
+    assert worker.is_alive()
+
+
+def test_watchdog_withheld_when_a_loop_task_ended(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        worker = Worker(FakeEnvio().post, None, EventInbox(str(tmp_path / "sub.db")), SCOPE, _config(transport="http"))
+        worker.started_at = worker.now()
+
+        async def crashed() -> None:
+            raise RuntimeError("loop died")
+
+        task = asyncio.create_task(crashed())
+        await asyncio.gather(task, return_exceptions=True)
+        worker._tasks = [task]
+        assert not worker.is_alive()
+
+    asyncio.run(scenario())
+
+
+def test_report_includes_outage_that_began_before_the_window(tmp_path: Path) -> None:
+    inbox = EventInbox(str(tmp_path / "sub.db"))
+    inbox.log("worker_started", 0.0, transport="both")
+    inbox.log("ws_connected", 10.0)
+    inbox.log("ws_disconnected", 500.0, error="ConnectionClosedError: boom")
+    # Window [1000, 3400]: no connection log entries inside it.
+    report = build_report(inbox, hours=2400 / 3600, now=3_400.0)
+    assert len(report.outages) == 1
+    outage = report.outages[0]
+    assert outage.clipped and outage.start == 1_000.0 and outage.end is None
+    assert report.ws_downtime_seconds == 2_400.0
+    assert "began before the window" in format_report(report)
+
+    # Reconnected inside the window: clipped at the start, closed at the connect.
+    inbox.log("ws_connected", 1_600.0)
+    report = build_report(inbox, hours=2400 / 3600, now=3_400.0)
+    assert [(o.start, o.end, o.clipped) for o in report.outages] == [(1_000.0, 1_600.0, True)]
+    assert report.ws_downtime_seconds == 600.0
+
+
+def test_report_ignores_closed_outage_before_the_window(tmp_path: Path) -> None:
+    inbox = EventInbox(str(tmp_path / "sub.db"))
+    inbox.log("worker_started", 0.0, transport="both")
+    inbox.log("ws_connected", 10.0)
+    report = build_report(inbox, hours=1, now=7_200.0)
+    assert report.outages == [] and report.ws_downtime_seconds == 0.0

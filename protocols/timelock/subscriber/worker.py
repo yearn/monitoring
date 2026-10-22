@@ -35,6 +35,15 @@ TRANSPORTS = ("both", "ws", "http")
 
 SubscribeFn = Callable[..., AsyncIterator[dict[str, Any]]]
 
+# Doublings beyond this cannot matter (2**20 x any sane initial delay exceeds any
+# cap) and keep ``2 ** n`` from overflowing a float after ~1,000 failures.
+_MAX_BACKOFF_DOUBLINGS = 20
+
+
+def backoff_delay(failures: int, initial: float, cap: float) -> float:
+    """Return the reconnect delay before jitter: ``initial * 2**(failures-1)``, capped at ``cap``."""
+    return min(cap, initial * 2 ** min(max(failures - 1, 0), _MAX_BACKOFF_DOUBLINGS))
+
 
 @dataclass(frozen=True)
 class WorkerConfig:
@@ -83,6 +92,8 @@ class Worker:
         self.last_reconcile_at: float | None = None
         self.last_reconcile: ReconcileReport | None = None
         self._stalled: set[int] = set()
+        self.started_at: float | None = None
+        self._tasks: list[asyncio.Task[None]] = []
 
     def stop(self) -> None:
         """Ask every loop to finish."""
@@ -103,20 +114,23 @@ class Worker:
                 loop.add_signal_handler(sig, self.stop)
             except NotImplementedError, RuntimeError:
                 pass
-        await asyncio.to_thread(self.inbox.log, "worker_started", self.now(), transport=self.config.transport)
-        tasks = [asyncio.create_task(self.heartbeat_loop(), name="heartbeat")]
+        self.started_at = self.now()
+        await asyncio.to_thread(self.inbox.log, "worker_started", self.started_at, transport=self.config.transport)
+        loops = []
         if self.config.transport in ("both", "http"):
-            tasks.append(asyncio.create_task(self.reconcile_loop(), name="reconcile"))
+            loops.append(asyncio.create_task(self.reconcile_loop(), name="reconcile"))
         if self.config.transport in ("both", "ws"):
-            tasks.append(asyncio.create_task(self.ws_loop(), name="ws"))
+            loops.append(asyncio.create_task(self.ws_loop(), name="ws"))
+        self._tasks = loops
+        heartbeat = asyncio.create_task(self.heartbeat_loop(), name="heartbeat")
         notify("READY=1", f"STATUS=transport={self.config.transport}")
         try:
             await self._stop.wait()
         finally:
             notify("STOPPING=1")
-            for task in tasks:
+            for task in [*loops, heartbeat]:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*loops, heartbeat, return_exceptions=True)
             await asyncio.to_thread(self.inbox.log, "worker_stopped", self.now())
 
     async def ws_loop(self) -> None:
@@ -156,7 +170,7 @@ class Worker:
             if self._stop.is_set():
                 break
             failures += 1
-            delay = min(self.config.backoff_max, self.config.backoff_initial * 2 ** (failures - 1))
+            delay = backoff_delay(failures, self.config.backoff_initial, self.config.backoff_max)
             delay *= random.uniform(0.8, 1.2)
             _logger.warning("WebSocket disconnected (%s); reconnecting in %.1fs", error, delay)
             await self._sleep(delay)
@@ -197,9 +211,15 @@ class Worker:
         while not self._stop.is_set():
             started = self.now()
             ws_was_connected = self.ws_connected
-            report = await asyncio.to_thread(
-                reconcile_all, self.post, self.inbox, self.scope, self.config.reconcile, self.now
-            )
+            try:
+                report = await asyncio.to_thread(
+                    reconcile_all, self.post, self.inbox, self.scope, self.config.reconcile, self.now
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - an unexpected bug must not end reconciliation
+                _logger.exception("reconcile cycle crashed")
+                report = ReconcileReport(started_at=started, error=f"{type(exc).__name__}: {exc}")
             self.last_reconcile = report
             self.last_reconcile_at = self.now()
             self._log_reconcile(report, ws_was_connected and self.config.transport == "both")
@@ -253,13 +273,21 @@ class Worker:
             "chains": chains,
         }
 
-    def reconcile_is_alive(self) -> bool:
-        """True while reconcile cycles keep completing (always True without the http loop)."""
+    def is_alive(self) -> bool:
+        """True while every loop task runs and reconcile cycles keep completing.
+
+        A loop task that ended (it should only end on stop) makes the worker dead. The
+        reconcile deadline counts from the worker's start until the first cycle
+        completes, so a first cycle that hangs is caught too.
+        """
+        if any(task.done() for task in self._tasks):
+            return False
         if self.config.transport == "ws":
             return True
-        if self.last_reconcile_at is None:
-            return True  # first cycle still running; systemd's WatchdogSec bounds it
-        return self.now() - self.last_reconcile_at < 3 * self.config.reconcile_interval + 120
+        last = self.last_reconcile_at if self.last_reconcile_at is not None else self.started_at
+        if last is None:
+            return True  # run() has not started the loops yet
+        return self.now() - last < 3 * self.config.reconcile_interval + 120
 
     async def heartbeat_loop(self) -> None:
         """Persist health, report stalled chains, and ping the systemd watchdog."""
@@ -279,10 +307,12 @@ class Worker:
                 elif not chain["stalled"] and chain_id in self._stalled:
                     _logger.info("chain %s indexed head advancing again", chain_id)
                     self._stalled.discard(chain_id)
-            if self.reconcile_is_alive():
+            if self.is_alive():
                 notify(
                     "WATCHDOG=1", f"STATUS=ws={'up' if self.ws_connected else 'down'} stalled={sorted(self._stalled)}"
                 )
             else:
-                _logger.error("reconcile loop has not completed recently; withholding watchdog ping")
+                _logger.error(
+                    "a worker loop stopped or reconcile has not completed recently; withholding watchdog ping"
+                )
             await self._sleep(self.config.heartbeat_interval)

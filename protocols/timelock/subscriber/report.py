@@ -45,6 +45,8 @@ class Outage:
     start: float
     end: float | None
     error: str | None
+    # True when the outage began before the report window; ``start`` is then the window start.
+    clipped: bool = False
     events_inside: int = 0
     recovered_by_ws: int = 0
     recovered_by_http: int = 0
@@ -106,22 +108,38 @@ def latency_stats(values: Sequence[float]) -> LatencyStats:
     )
 
 
-def _outages(inbox: EventInbox, since: float, until: float) -> list[Outage]:
-    """Rebuild WebSocket outage windows from the worker log.
+_CONNECTION_KINDS = ("ws_connected", "ws_disconnected", "worker_started", "worker_stopped")
 
-    An outage runs from a disconnect (or worker start) to the next connect. Worker
-    restarts count too: nothing is subscribed while the worker is down.
+
+def _opens_outage(entry: Any) -> bool:
+    """True for a log entry after which no subscription is live until the next connect."""
+    if entry["kind"] == "ws_connected":
+        return False
+    if entry["kind"] == "worker_started":
+        return json.loads(entry["details_json"] or "{}").get("transport") != "http"
+    return True
+
+
+def _outages(inbox: EventInbox, since: float, until: float) -> list[Outage]:
+    """Rebuild WebSocket outage windows from the worker log, clipped to ``[since, until]``.
+
+    An outage runs from a disconnect (or worker start or stop) to the next connect.
+    Worker restarts count too: nothing is subscribed while the worker is down. The
+    connection state at ``since`` comes from the last log entry before it, so an
+    outage that began earlier and still covers the window is reported from ``since``.
     """
     outages: list[Outage] = []
     current: Outage | None = None
-    for entry in inbox.log_entries(since, ("ws_connected", "ws_disconnected", "worker_started", "worker_stopped")):
+    before = inbox.last_log_entry_before(since, _CONNECTION_KINDS)
+    if before is not None and _opens_outage(before):
+        error = json.loads(before["details_json"] or "{}").get("error") or before["kind"]
+        current = Outage(start=since, end=None, error=error, clipped=True)
+    for entry in inbox.log_entries(since, _CONNECTION_KINDS):
         kind, at = entry["kind"], entry["at"]
         if at > until:
             break
-        if kind in ("ws_disconnected", "worker_stopped", "worker_started") and current is None:
+        if current is None and _opens_outage(entry):
             details = json.loads(entry["details_json"] or "{}")
-            if kind == "worker_started" and details.get("transport") == "http":
-                continue
             current = Outage(start=at, end=None, error=details.get("error") or kind)
         elif kind == "ws_connected" and current is not None:
             current.end = at
@@ -284,6 +302,8 @@ def format_report(report: PilotReport) -> str:
     ]
     for outage in report.outages:
         end = "ongoing" if outage.end is None else f"{outage.end - outage.start:.0f}s"
+        if outage.clipped:
+            end += ", began before the window"
         lines.append(
             f"  - outage at {time.strftime('%H:%M:%S', time.gmtime(outage.start))} ({end}, {outage.error}): "
             f"{outage.events_inside} events, {outage.recovered_by_ws} via WS, {outage.recovered_by_http} via HTTP, "

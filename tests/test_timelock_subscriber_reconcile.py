@@ -1,5 +1,6 @@
 """Inbox and HTTP reconciliation tests for the continuous timelock subscriber."""
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -268,3 +269,28 @@ def test_reconcile_logs_timing(inbox: EventInbox) -> None:
     _seed(envio, inbox)
     (entry, *_rest) = inbox.log_entries(0, ("reconcile",))
     assert entry["duration_ms"] is not None and entry["duration_ms"] >= 0
+
+
+def test_concurrent_observers_never_collide_on_new_ids(inbox: EventInbox) -> None:
+    """WS and HTTP threads observing the same unseen ids at once must not raise IntegrityError."""
+    errors: list[BaseException] = []
+    for round_ in range(20):
+        batch = [make_event(1, round_ * 100 + i) for i in range(20)]
+        barrier = threading.Barrier(2)
+
+        def observe(source: str, batch: list[dict] = batch, barrier: threading.Barrier = barrier) -> None:
+            barrier.wait()
+            try:
+                inbox.observe(batch, source, 1.0)
+            except BaseException as exc:  # noqa: BLE001 - collected for the assertion
+                errors.append(exc)
+
+        threads = [threading.Thread(target=observe, args=(s,)) for s in (SOURCE_WS, SOURCE_HTTP)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    assert errors == []
+    rows = inbox.events_since(0)
+    assert len(rows) == 400
+    assert all(row["ws_observations"] == 1 and row["http_observations"] == 1 for row in rows)
