@@ -121,6 +121,9 @@ class Worker:
                 pass
         self.started_at = self.now()
         await asyncio.to_thread(self.inbox.log, "worker_started", self.started_at, transport=self.config.transport)
+        if self.notices is not None:
+            # Before any loop runs, so the first WebSocket snapshot is judged against it.
+            await self.notices.start()
         loops = []
         if self.config.transport in ("both", "http"):
             loops.append(asyncio.create_task(self.reconcile_loop(), name="reconcile"))

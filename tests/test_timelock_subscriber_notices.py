@@ -43,7 +43,8 @@ def inbox(tmp_path: Path) -> EventInbox:
 
 @pytest.fixture
 def notices(inbox: EventInbox) -> PilotNotices:
-    return PilotNotices(RecordingNotifier(), inbox, TIMELOCKS, NoticeConfig(max_event_notices=3))
+    # Baseline at t=0: every fixture event (2023 block timestamps) is after it.
+    return PilotNotices(RecordingNotifier(), inbox, TIMELOCKS, NoticeConfig(max_event_notices=3), now=lambda: 0.0)
 
 
 def _posted(notices: PilotNotices) -> list[str]:
@@ -132,6 +133,7 @@ def test_new_event_notice_has_full_address_links_and_transport(notices: PilotNot
 
 def test_event_burst_becomes_one_summary_per_chain(notices: PilotNotices) -> None:
     ids = [f"1_{b}_0" for b in range(5)] + ["8453_7_0"]
+    notices.inbox.observe([*(make_event(1, b) for b in range(5)), make_event(8453, 7)], SOURCE_HTTP, 1.0)
     asyncio.run(notices.new_events(SOURCE_HTTP, ids))
     assert _posted(notices) == [
         "🛰️ 5 new timelock events on Mainnet via HTTP: 1_0_0, 1_1_0, 1_2_0, 1_3_0, 1_4_0",
@@ -276,3 +278,71 @@ def test_worker_posts_each_event_once_and_ws_outage_notices(tmp_path: Path) -> N
     assert text.count("New timelock event") == 1
     assert "via WS" in text and "WS miss" not in text
     assert text.count("WebSocket down") == 1 and text.count("WebSocket reconnected") == 1
+
+
+# ── startup baseline ───────────────────────────────────────────────────
+
+
+def test_events_before_the_baseline_are_never_announced(inbox: EventInbox) -> None:
+    notices = PilotNotices(RecordingNotifier(), inbox, TIMELOCKS, now=lambda: 1_700_000_000.0)
+    inbox.observe(
+        [make_event(1, 10, ts=1_699_000_000), make_event(1, 11, ts=1_700_000_005)], SOURCE_WS, 1_700_000_010.0
+    )
+    asyncio.run(notices.new_events(SOURCE_WS, ["1_10_0", "1_11_0"]))
+    (text,) = _posted(notices)
+    assert "1_11_0" in text and "1_10_0" not in text
+
+    report = ReconcileReport(started_at=0, chains=[ChainReconcileResult(chain_id=1, new=1, new_ids=["1_10_0"])])
+    asyncio.run(notices.reconcile(report, ws_expected=True))
+    assert len(_posted(notices)) == 1  # no notice and no WS miss for a historical event
+
+
+def test_baseline_is_persisted_across_restarts(inbox: EventInbox) -> None:
+    first = PilotNotices(RecordingNotifier(), inbox, TIMELOCKS, now=lambda: 1_000.0)
+    assert asyncio.run(first.start()) == 1_000.0
+    restarted = PilotNotices(RecordingNotifier(), inbox, TIMELOCKS, now=lambda: 9_000.0)
+    assert asyncio.run(restarted.start()) == 1_000.0
+
+
+def test_fresh_pilot_stays_quiet_about_history_and_restart_announces_downtime_events(tmp_path: Path) -> None:
+    async def run_for(envio: FakeEnvio, server: FakeWSServer, path: str, sent: list[str], body) -> None:  # noqa: ANN001
+        inbox = EventInbox(path)
+        notices = PilotNotices(Notifier(send=sent.append, min_interval=0), inbox, TIMELOCKS)
+        config = WorkerConfig(reconcile_interval=60, heartbeat_interval=0.05, reconcile=ReconcileConfig())
+        worker = Worker(envio.post, server.url, inbox, SCOPE, config, notices=notices)
+        task = asyncio.create_task(worker.run())
+        try:
+            deadline = time.monotonic() + 5
+            while not (worker.ws_messages and worker.last_reconcile_at is not None):
+                assert time.monotonic() < deadline
+                await asyncio.sleep(0.02)
+            await body()
+            await asyncio.sleep(0.2)
+        finally:
+            worker.stop()
+            await asyncio.wait_for(task, 5)
+
+    async def scenario() -> tuple[list[str], list[str]]:
+        path = str(tmp_path / "sub.db")
+        envio = FakeEnvio()
+        envio.add(make_event(1, 100, ts=int(time.time()) - 7 * 86_400))  # week-old, already indexed
+        envio.set_head(8453, 1)
+        server = FakeWSServer(envio)
+        await server.start()
+        fresh: list[str] = []
+        restarted: list[str] = []
+        try:
+
+            async def nothing() -> None:
+                return None
+
+            await run_for(envio, server, path, fresh, nothing)
+            envio.add(make_event(1, 101, ts=int(time.time())))  # lands while the worker is down
+            await run_for(envio, server, path, restarted, nothing)
+        finally:
+            await server.stop()
+        return fresh, restarted
+
+    fresh, restarted = asyncio.run(scenario())
+    assert fresh == []
+    assert len(restarted) == 1 and "1_101_0" in restarted[0] and "1_100_0" not in restarted[0]

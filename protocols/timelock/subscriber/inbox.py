@@ -94,6 +94,47 @@ CREATE TABLE IF NOT EXISTS timelock_sub_status (
 """
 
 
+# Current schema version (PRAGMA user_version). Databases from older revisions are
+# migrated in place by _migrate; observations, changes, and checkpoints are kept.
+SCHEMA_VERSION = 1
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring a database created by an earlier revision up to ``SCHEMA_VERSION``.
+
+    v0 → v1: ``timelock_sub_events.block_hash`` (rows observed before the event
+    selection included ``blockHash`` keep NULL until they are next observed).
+    """
+    if conn.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:
+        return
+    with conn:
+        # Lock, then re-check: another process may have migrated in between.
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:
+            return
+        if "block_hash" not in _columns(conn, "timelock_sub_events"):
+            conn.execute("ALTER TABLE timelock_sub_events ADD COLUMN block_hash TEXT")
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
+def _widened_only(stored_payload: str, event: dict[str, Any], stored_fingerprint: str) -> bool:
+    """True when ``event`` differs from the stored row only by fields it newly selects.
+
+    A row stored before the selection grew (e.g. before ``blockHash`` was added)
+    fingerprints differently once re-observed. If dropping the fields the stored
+    payload lacks reproduces the stored fingerprint, nothing on chain changed.
+    """
+    old = json.loads(stored_payload)
+    added = set(event) - set(old)
+    if not added:
+        return False
+    return event_fingerprint({k: v for k, v in event.items() if k not in added}) == stored_fingerprint
+
+
 @dataclass
 class ObserveResult:
     """What one batch of observed rows did to the inbox."""
@@ -174,6 +215,7 @@ class EventInbox:
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA busy_timeout=10000")
             conn.executescript(_SCHEMA)
+            _migrate(conn)
             with conn:
                 if write:
                     conn.execute("BEGIN IMMEDIATE")
@@ -244,6 +286,21 @@ class EventInbox:
                 if row["status"] == "removed":
                     kind = "restored"
                     result.restored += 1
+                elif row["fingerprint"] != fingerprint and _widened_only(
+                    row["payload_json"], event, row["fingerprint"]
+                ):
+                    # Same event, stored before the selection grew: upgrade it in place.
+                    conn.execute(
+                        "UPDATE timelock_sub_events SET fingerprint = ?, payload_json = ?, block_hash = ? "
+                        "WHERE event_id = ?",
+                        (
+                            fingerprint,
+                            json.dumps(event, sort_keys=True, default=str),
+                            _lower(event.get("blockHash")),
+                            event_id,
+                        ),
+                    )
+                    result.duplicate += 1
                 elif row["fingerprint"] != fingerprint:
                     kind = "changed"
                     result.changed += 1

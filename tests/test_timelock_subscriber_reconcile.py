@@ -1,12 +1,14 @@
 """Inbox and HTTP reconciliation tests for the continuous timelock subscriber."""
 
+import json
+import sqlite3
 import threading
 from pathlib import Path
 
 import pytest
 
 from protocols.timelock.subscriber.envio import EnvioQueryError, fetch_range, range_query
-from protocols.timelock.subscriber.inbox import SOURCE_HTTP, SOURCE_WS, EventInbox, event_fingerprint
+from protocols.timelock.subscriber.inbox import SCHEMA_VERSION, SOURCE_HTTP, SOURCE_WS, EventInbox, event_fingerprint
 from protocols.timelock.subscriber.reconcile import ReconcileConfig, build_scope, in_scope, reconcile_all
 from tests.timelock_subscriber_fakes import OTHER_TIMELOCK, TIMELOCK, FakeEnvio, make_event
 
@@ -294,3 +296,84 @@ def test_concurrent_observers_never_collide_on_new_ids(inbox: EventInbox) -> Non
     rows = inbox.events_since(0)
     assert len(rows) == 400
     assert all(row["ws_observations"] == 1 and row["http_observations"] == 1 for row in rows)
+
+
+# ── schema migration ───────────────────────────────────────────────────
+
+# timelock_sub_events as created by the first pilot revision (schema v0, no block_hash).
+_V0_EVENTS = """
+CREATE TABLE timelock_sub_events (
+    event_id TEXT PRIMARY KEY, chain_id INTEGER NOT NULL, timelock_address TEXT NOT NULL,
+    block_number INTEGER NOT NULL, log_index INTEGER NOT NULL, block_timestamp INTEGER NOT NULL,
+    transaction_hash TEXT NOT NULL, event_name TEXT, operation_id TEXT, fingerprint TEXT NOT NULL,
+    payload_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', revision INTEGER NOT NULL DEFAULT 0,
+    first_seen_at REAL NOT NULL, first_source TEXT NOT NULL, ws_first_seen_at REAL, http_first_seen_at REAL,
+    ws_observations INTEGER NOT NULL DEFAULT 0, http_observations INTEGER NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE timelock_sub_checkpoints (
+    chain_id INTEGER PRIMARY KEY, block_number INTEGER NOT NULL, indexed_head INTEGER NOT NULL,
+    head_changed_at REAL NOT NULL, updated_at REAL NOT NULL
+);
+"""
+
+
+def _v0_database(path: Path) -> dict:
+    """Create a v0 inbox holding one event (stored without blockHash) and one checkpoint."""
+    legacy = make_event(1, 10)
+    legacy.pop("blockHash")
+    with sqlite3.connect(path) as conn:
+        conn.executescript(_V0_EVENTS)
+        conn.execute(
+            "INSERT INTO timelock_sub_events (event_id, chain_id, timelock_address, block_number, log_index, "
+            "block_timestamp, transaction_hash, event_name, operation_id, fingerprint, payload_json, first_seen_at, "
+            "first_source, http_first_seen_at, http_observations, updated_at) "
+            "VALUES (?, 1, ?, 10, 0, ?, ?, 'CallScheduled', ?, ?, ?, 5.0, 'http', 5.0, 1, 5.0)",
+            (
+                legacy["id"],
+                TIMELOCK,
+                legacy["blockTimestamp"],
+                legacy["transactionHash"],
+                legacy["operationId"],
+                event_fingerprint(legacy),
+                json.dumps(legacy, sort_keys=True),
+            ),
+        )
+        conn.execute("INSERT INTO timelock_sub_checkpoints VALUES (1, 10, 10, 5.0, 5.0)")
+    return legacy
+
+
+def test_v0_database_is_migrated_in_place(tmp_path: Path) -> None:
+    path = tmp_path / "sub.db"
+    _v0_database(path)
+    inbox = EventInbox(str(path))
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert "block_hash" in {r[1] for r in conn.execute("PRAGMA table_info(timelock_sub_events)")}
+    (row,) = inbox.events_since(0)
+    assert row["event_id"] == "1_10_0" and row["block_hash"] is None and row["first_seen_at"] == 5.0
+    assert _checkpoint(inbox, 1) == 10
+
+    # Re-observing it with the wider selection is a duplicate, not a reorg.
+    result = inbox.observe([make_event(1, 10), make_event(1, 11)], SOURCE_WS, 20.0)
+    assert (result.new, result.duplicate, result.changed) == (1, 1, 0)
+    assert inbox.changes_since(0) == []
+    rows = {r["event_id"]: r for r in inbox.events_since(0)}
+    assert rows["1_10_0"]["block_hash"] == make_event(1, 10)["blockHash"]
+    assert rows["1_10_0"]["revision"] == 0 and rows["1_10_0"]["ws_first_seen_at"] == 20.0
+
+    # Reopening is a no-op, and a real change is still detected afterwards.
+    reopened = EventInbox(str(path))
+    replaced = make_event(1, 10, blockHash="0x" + "dd" * 32)
+    assert reopened.observe([replaced], SOURCE_HTTP, 30.0).changed == 1
+
+
+def test_widened_selection_does_not_hide_a_real_change(tmp_path: Path) -> None:
+    path = tmp_path / "sub.db"
+    _v0_database(path)
+    inbox = EventInbox(str(path))
+    # New field present AND the tx changed: a reorg, even though blockHash is new.
+    result = inbox.observe([make_event(1, 10, transactionHash="0x" + "ee" * 32)], SOURCE_HTTP, 20.0)
+    assert result.changed == 1
+    assert [c["kind"] for c in inbox.changes_since(0)] == ["changed"]

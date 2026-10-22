@@ -20,7 +20,7 @@ It runs two transports side by side and records which one saw each event first:
 - **WebSocket**: a `graphql-transport-ws` live query (`utils/graphql_ws.py`) over the newest 50 monitored events, filtered by monitored chains and addresses. Hasura resends the whole snapshot on every change, so most rows are repeats; the inbox deduplicates them. On disconnect the worker reconnects with capped exponential backoff (1s to 60s).
 - **HTTP reconciliation**, every 60s and also while the WebSocket is connected: for each chain, read `chain_metadata.latest_processed_block`, then fetch `(checkpoint - overlap, head]` in chunks of at most `MAX_BLOCK_SPAN` blocks, paginated in pages of 200 ordered by `(blockNumber, logIndex, id)`. This is the completeness guarantee.
 
-State lives in `$CACHE_DIR/timelock_subscriber.db` (SQLite, WAL), separate from the hourly monitor's state:
+State lives in `$CACHE_DIR/timelock_subscriber.db` (SQLite, WAL), separate from the hourly monitor's state. The schema is versioned (`PRAGMA user_version`); a database from an earlier revision is migrated in place on open, keeping observations, changes, and checkpoints. A row stored before the event selection grew (e.g. before `blockHash`) is upgraded silently on its next observation, not recorded as a change.
 
 - **Per-chain checkpoints** (`timelock_sub_checkpoints`): the highest block fully fetched over HTTP, never moved backwards. They are independent per chain and do not use `TIMELOCK_LAST_TS`, so a failing or lagging chain never holds back the others. A chain's first run starts at the indexed head unless `TIMELOCK_SUBSCRIBER_START_LOOKBACK_SECONDS` is set.
 - **Event provenance** (`timelock_sub_events`): one row per Envio event id (`<chainId>_<blockNumber>_<logIndex>`) with its block hash, a content fingerprint, the first transport and time it was seen, first-seen times and observation counts per transport.
@@ -50,13 +50,15 @@ With `TIMELOCK_SUBSCRIBER_NOTIFY=errors` (or `run --notify errors`), the worker 
 
 | Notice | When |
 |---|---|
-| 🛰️ New timelock event | First sighting of each event: timelock, chain, event id, full timelock address and tx links, which transport saw it first, and the delay since its block. More than 10 new events in one batch post one summary per chain instead. A chain's first run (start or backfill) posts nothing. |
+| 🛰️ New timelock event | First sighting of each event: timelock, chain, event id, full timelock address and tx links, which transport saw it first, and the delay since its block. More than 10 new events in one batch post one summary per chain instead. Only events from blocks after the notice baseline are announced (see below). |
 | ⚠️ WS miss | HTTP reconciliation found events first although the WebSocket was connected. |
 | 🔀 Events changed | Indexed rows changed, were removed, or came back (a reorg or indexer rewrite). |
 | 🔌 / ✅ WebSocket | Down for more than 5 minutes, then reconnected. |
 | 🐢 / ✅ Envio head | A chain's indexed head stalled for `TIMELOCK_SUBSCRIBER_STALL_SECONDS`, then advanced again. |
 | ❌ / ✅ Reconciliation | HTTP reconciliation failed 3 cycles in a row, then recovered. |
 | 📊 Daily summary | Every 24h: the report's coverage, delays, outages, changes, and recommendation. The schedule survives restarts. |
+
+The **notice baseline** is the time notices were first enabled on this inbox, stored in `timelock_sub_status`. Events from earlier blocks are history and never announced: the first WebSocket snapshot of a fresh pilot (the newest 50 historical events), a backfill, or enabling notices on an existing pilot. Events from later blocks are announced even when first seen after a restart, so events indexed while the worker was down still get a notice.
 
 Notices go through a bounded background queue, never through the ingestion path, so a slow or failing Telegram call cannot delay event intake. Notices queued while a send is in flight are combined into one message; a failed send is logged and dropped.
 

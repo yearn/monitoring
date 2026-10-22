@@ -15,7 +15,8 @@ Hooks that read the inbox run their queries in a thread; posting never blocks.
 """
 
 import asyncio
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,6 +27,10 @@ from protocols.timelock.subscriber.reconcile import ReconcileReport
 from protocols.timelock.subscriber.report import build_report
 
 SUMMARY_STATUS_KEY = "last_summary_at"
+# When notices were first enabled on this inbox. Events from blocks before it are
+# history (startup snapshot, backfill, enabling notices on an existing pilot) and
+# are never announced; events after it are, even if first seen after a restart.
+BASELINE_STATUS_KEY = "notices_baseline_at"
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,7 @@ class PilotNotices:
         inbox: EventInbox,
         timelocks: Mapping[tuple[str, int], Any],
         config: NoticeConfig = NoticeConfig(),
+        now: Callable[[], float] = time.time,
     ) -> None:
         self.notifier = notifier
         self.inbox = inbox
@@ -62,11 +68,38 @@ class PilotNotices:
         self.ws_down_notified = False
         self.reconcile_failures = 0
         self.reconcile_failure_notified = False
+        self.now = now
+        self.baseline: float | None = None
 
     # ── events ────────────────────────────────────────────────────────
 
+    async def start(self) -> float:
+        """Load the notice baseline, recording it on the first run with notices enabled."""
+        if self.baseline is None:
+            status = await asyncio.to_thread(self.inbox.status)
+            stored = status.get(BASELINE_STATUS_KEY, (None, 0.0))[0]
+            if stored is None:
+                stored = self.now()
+                await asyncio.to_thread(self.inbox.set_status, BASELINE_STATUS_KEY, stored, stored)
+            self.baseline = float(stored)
+        return self.baseline
+
+    async def _announceable(self, event_ids: list[str] | tuple[str, ...]) -> list[str]:
+        """Return the ids whose block is at or after the baseline, in order."""
+        if not event_ids:
+            return []
+        baseline = await self.start()
+        rows = await asyncio.to_thread(self.inbox.get_events, event_ids)
+        # Block timestamps are whole seconds; a block in the baseline's own second counts.
+        return [row["event_id"] for row in rows if row["block_timestamp"] >= int(baseline)]
+
     async def new_events(self, source: str, event_ids: list[str] | tuple[str, ...]) -> None:
-        """Post a notice per newly observed event, or one summary per chain for a burst."""
+        """Post a notice per newly observed event, or one summary per chain for a burst.
+
+        Events from blocks before the baseline are skipped: the first snapshot of a
+        fresh pilot holds the newest historical events, which are not news.
+        """
+        event_ids = await self._announceable(event_ids)
         if not event_ids:
             return
         if len(event_ids) > self.config.max_event_notices:
@@ -94,8 +127,9 @@ class PilotNotices:
                 continue  # first run or backfill: history, not news
             if chain.new_ids:
                 await self.new_events("http", chain.new_ids)
-                if ws_expected:
-                    self.notifier.post(messages.format_ws_miss(chain.chain_id, chain.new_ids))
+                missed = await self._announceable(chain.new_ids)
+                if ws_expected and missed:
+                    self.notifier.post(messages.format_ws_miss(chain.chain_id, missed))
             if chain.changed or chain.restored or chain.removed:
                 self.notifier.post(
                     messages.format_changes(chain.chain_id, "http", chain.changed, chain.restored, chain.removed)
