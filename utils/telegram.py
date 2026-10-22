@@ -337,6 +337,15 @@ def _channel_configured(channel: str) -> bool:
     return bool(os.getenv(f"TELEGRAM_TOPIC_ID_{channel.upper()}") or os.getenv(f"TELEGRAM_CHAT_ID_{channel.upper()}"))
 
 
+def error_channel_configured() -> bool:
+    """Return True if the dedicated errors chat or topic is configured.
+
+    ``send_error_message`` falls back to the protocol's own channel otherwise; callers
+    that must never reach a protocol group check this first.
+    """
+    return _channel_configured(ERROR_CHANNEL)
+
+
 def resolve_channel(channel: str, fallback: str) -> str:
     """Return `channel` when its chat id is configured, else `fallback`.
 

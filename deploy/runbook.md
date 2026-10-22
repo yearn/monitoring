@@ -235,8 +235,10 @@ directly.
 `monitoring-timelock-subscriber` is the continuous timelock event worker from
 [#438](https://github.com/yearn/monitoring/issues/438). It runs alongside the
 hourly `timelock-alerts` task, which still sends every timelock alert. The pilot
-sends nothing: it records what it observes in `/srv/cache/timelock_subscriber.db`
-and journald. Stopping it has no effect on alerting. Design notes are in
+sends no alerts: it records what it observes in `/srv/cache/timelock_subscriber.db`
+and journald. With `TIMELOCK_SUBSCRIBER_NOTIFY=errors` it also posts diagnostic
+notices (new events, WebSocket outages, stalls, failures, a daily summary) to the
+internal errors chat; see the timelock README for the list. Stopping it has no effect on alerting. Design notes are in
 [`protocols/timelock/README.md`](../protocols/timelock/README.md#continuous-subscriber-pilot).
 
 ```sh
@@ -289,6 +291,7 @@ Set in `/etc/monitoring/.env`, then restart the unit:
 | Variable | Default | Meaning |
 |---|---|---|
 | `TIMELOCK_SUBSCRIBER_TRANSPORT` | `both` | `both`, `ws`, or `http` |
+| `TIMELOCK_SUBSCRIBER_NOTIFY` | `none` | `errors` posts pilot notices to the internal errors chat (needs `TELEGRAM_TOPIC_ID_ERRORS` or `TELEGRAM_CHAT_ID_ERRORS`) |
 | `TIMELOCK_SUBSCRIBER_RECONCILE_SECONDS` | `60` | HTTP reconcile interval |
 | `TIMELOCK_SUBSCRIBER_STALL_SECONDS` | `900` | Indexed head age that counts as stalled |
 | `TIMELOCK_SUBSCRIBER_START_LOOKBACK_SECONDS` | `0` | History to backfill on a chain's first run |

@@ -13,7 +13,7 @@ The script runs hourly via the [monitoring runner](../../automation/jobs.yaml).
 
 ## Continuous Subscriber Pilot
 
-`event_subscriber.py` is a continuously running worker that observes the same `TimelockEvent` rows as `timelock_alerts.py` with lower latency ([#438](https://github.com/yearn/monitoring/issues/438), the first step of [#437](https://github.com/yearn/monitoring/issues/437)). It is an observation pilot: **it sends no alerts and changes nothing about current delivery**. The hourly task remains the only sender. It runs as the `monitoring-timelock-subscriber` systemd unit; operations are in the [runbook](../../deploy/runbook.md#timelock-event-subscriber-pilot).
+`event_subscriber.py` is a continuously running worker that observes the same `TimelockEvent` rows as `timelock_alerts.py` with lower latency ([#438](https://github.com/yearn/monitoring/issues/438), the first step of [#437](https://github.com/yearn/monitoring/issues/437)). It is an observation pilot: **it sends no alerts and changes nothing about current delivery**. The hourly task remains the only sender to protocol groups. Optionally it posts diagnostic notices to the internal errors chat (see [Pilot notices](#pilot-notices)). It runs as the `monitoring-timelock-subscriber` systemd unit; operations are in the [runbook](../../deploy/runbook.md#timelock-event-subscriber-pilot).
 
 It runs two transports side by side and records which one saw each event first:
 
@@ -43,6 +43,22 @@ Supervision: a heartbeat every 30s stores worker status, flags any chain whose i
 - WebSocket outages with the events that fell inside them, which transport recovered them, and how long it took.
 - Reconcile timing and errors, absorbed duplicates, and changed/removed rows.
 - A recommendation: `both` when the WebSocket saw at least 99% of confirmed events and was faster at p95, `http` otherwise, `undecided` with fewer than 5 events. Envio [fully supports hosted WebSockets only on Dedicated plans](https://docs.envio.dev/docs/HyperIndex/websockets), which the final decision must weigh.
+
+### Pilot notices
+
+With `TIMELOCK_SUBSCRIBER_NOTIFY=errors` (or `run --notify errors`), the worker posts plain-text diagnostics to the internal errors chat (`TELEGRAM_TOPIC_ID_ERRORS` or `TELEGRAM_CHAT_ID_ERRORS`), labelled `[timelock-subscriber]` and stored in alert history under `yearn-internal`. They are for comparing the pilot with the hourly alerts, not alerts themselves. Notices stay off unless an errors chat is configured: `send_error_message` would otherwise fall back to a protocol group.
+
+| Notice | When |
+|---|---|
+| 🛰️ New timelock event | First sighting of each event: timelock, chain, event id, full timelock address and tx links, which transport saw it first, and the delay since its block. More than 10 new events in one batch post one summary per chain instead. A chain's first run (start or backfill) posts nothing. |
+| ⚠️ WS miss | HTTP reconciliation found events first although the WebSocket was connected. |
+| 🔀 Events changed | Indexed rows changed, were removed, or came back (a reorg or indexer rewrite). |
+| 🔌 / ✅ WebSocket | Down for more than 5 minutes, then reconnected. |
+| 🐢 / ✅ Envio head | A chain's indexed head stalled for `TIMELOCK_SUBSCRIBER_STALL_SECONDS`, then advanced again. |
+| ❌ / ✅ Reconciliation | HTTP reconciliation failed 3 cycles in a row, then recovered. |
+| 📊 Daily summary | Every 24h: the report's coverage, delays, outages, changes, and recommendation. The schedule survives restarts. |
+
+Notices go through a bounded background queue, never through the ingestion path, so a slow or failing Telegram call cannot delay event intake. Notices queued while a send is in flight are combined into one message; a failed send is logged and dropped.
 
 ## Stale Ready Operations
 

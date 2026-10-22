@@ -4,7 +4,8 @@
 Runs alongside the hourly ``timelock_alerts.py`` and never replaces it: it
 observes the same ``TimelockEvent`` rows over an Envio WebSocket subscription and
 bounded HTTP reconciliation, records provenance and timing in a local SQLite
-inbox, and sends no alerts. See ``protocols/timelock/README.md``.
+inbox, and sends no alerts. With ``--notify errors`` it posts diagnostic notices
+to the internal errors chat. See ``protocols/timelock/README.md``.
 
 Usage:
     python protocols/timelock/event_subscriber.py run [--transport both|ws|http]
@@ -25,10 +26,12 @@ from dotenv import load_dotenv
 
 from protocols.timelock.subscriber.envio import http_poster
 from protocols.timelock.subscriber.inbox import EventInbox
+from protocols.timelock.subscriber.notices import PilotNotices
+from protocols.timelock.subscriber.notifier import NOTIFY_MODES, build_notifier
 from protocols.timelock.subscriber.reconcile import ReconcileConfig, build_scope, reconcile_all
 from protocols.timelock.subscriber.report import build_report, format_report, report_to_json
 from protocols.timelock.subscriber.worker import TRANSPORTS, Worker, WorkerConfig
-from protocols.timelock.timelock_alerts import TIMELOCK_LIST
+from protocols.timelock.timelock_alerts import TIMELOCK_LIST, TIMELOCKS
 from utils.graphql_ws import http_to_ws_url
 from utils.logger import get_logger
 
@@ -69,9 +72,15 @@ def cmd_run(args: argparse.Namespace) -> None:
         head_stall_seconds=args.head_stall_seconds,
         reconcile=_reconcile_config(args),
     )
-    worker = Worker(http_poster(url), ws_url, EventInbox(), build_scope(TIMELOCK_LIST), config)
+    inbox = EventInbox()
+    notifier = build_notifier(args.notify)
+    notices = PilotNotices(notifier, inbox, TIMELOCKS) if notifier is not None else None
+    worker = Worker(http_poster(url), ws_url, inbox, build_scope(TIMELOCK_LIST), config, notices=notices)
     _logger.info(
-        "starting timelock subscriber: transport=%s reconcile every %.0fs", config.transport, config.reconcile_interval
+        "starting timelock subscriber: transport=%s reconcile every %.0fs notices=%s",
+        config.transport,
+        config.reconcile_interval,
+        "errors chat" if notices else "off",
     )
     asyncio.run(worker.run())
 
@@ -142,6 +151,12 @@ def main() -> None:
     run.add_argument("--heartbeat-interval", type=float, default=30)
     run.add_argument("--snapshot-limit", type=int, default=50, help="Rows in each live-query snapshot.")
     run.add_argument("--head-stall-seconds", type=float, default=_env_float("TIMELOCK_SUBSCRIBER_STALL_SECONDS", 900))
+    run.add_argument(
+        "--notify",
+        choices=NOTIFY_MODES,
+        default=os.getenv("TIMELOCK_SUBSCRIBER_NOTIFY", "none"),
+        help="Post pilot notices to the internal errors chat (errors) or not at all (none, default).",
+    )
     add_reconcile_args(run)
     run.set_defaults(func=cmd_run)
 

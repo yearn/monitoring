@@ -7,7 +7,9 @@
 # Continuous timelock event subscriber (observation pilot, issue #438). It runs
 # alongside the hourly timelock-alerts task and never replaces it: it records
 # what it sees in __CACHE_DIR__/timelock_subscriber.db and journald, and sends no
-# alerts. See protocols/timelock/README.md and deploy/runbook.md.
+# alerts. TIMELOCK_SUBSCRIBER_NOTIFY=errors in the env file adds diagnostic
+# notices to the internal errors chat. See protocols/timelock/README.md and
+# deploy/runbook.md.
 #
 # Type=notify + WatchdogSec: the worker sends READY=1 once its loops start and
 # WATCHDOG=1 from its heartbeat only while HTTP reconciliation keeps completing,

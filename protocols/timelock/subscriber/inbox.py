@@ -104,6 +104,8 @@ class ObserveResult:
     restored: int = 0
     # event_ids first seen in this batch, in input order.
     new_ids: tuple[str, ...] = ()
+    # event_ids whose content changed or that came back after removal.
+    changed_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -195,6 +197,7 @@ class EventInbox:
         """
         result = ObserveResult()
         new_ids: list[str] = []
+        changed_ids: list[str] = []
         seen_col = "ws_first_seen_at" if source == SOURCE_WS else "http_first_seen_at"
         count_col = "ws_observations" if source == SOURCE_WS else "http_observations"
         with self._connect(write=True) as conn:
@@ -248,6 +251,7 @@ class EventInbox:
                     result.duplicate += 1
 
                 if kind:
+                    changed_ids.append(event_id)
                     conn.execute(
                         """
                         INSERT INTO timelock_sub_changes (
@@ -294,6 +298,7 @@ class EventInbox:
                     (now, now, event_id),
                 )
         result.new_ids = tuple(new_ids)
+        result.changed_ids = tuple(changed_ids)
         return result
 
     def mark_missing(
@@ -402,6 +407,17 @@ class EventInbox:
                 "LIMIT 1",
                 (before, *wanted),
             ).fetchone()
+
+    def get_events(self, event_ids: Iterable[str]) -> list[sqlite3.Row]:
+        """Return inbox rows for ``event_ids``, in the given order (unknown ids are skipped)."""
+        ids = list(event_ids)
+        if not ids:
+            return []
+        placeholders = ", ".join("?" for _ in ids)
+        with self._connect() as conn:
+            rows = conn.execute(f"SELECT * FROM timelock_sub_events WHERE event_id IN ({placeholders})", ids).fetchall()
+        by_id = {row["event_id"]: row for row in rows}
+        return [by_id[event_id] for event_id in ids if event_id in by_id]
 
     def events_since(self, since_block_timestamp: int) -> list[sqlite3.Row]:
         """Return inbox rows whose block timestamp is at or after ``since_block_timestamp``."""

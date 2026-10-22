@@ -11,7 +11,9 @@ Three asyncio tasks share one ``EventInbox``:
   advancing, and pings the systemd watchdog only while reconciliation keeps
   completing, so a wedged worker is restarted.
 
-The pilot keeps all output local (journald and the inbox). It sends no alerts.
+The pilot sends no alerts. With an optional ``PilotNotices`` it posts diagnostic
+notices to the internal errors chat from a background queue (see ``notices.py``);
+without one, all output stays in journald and the inbox.
 """
 
 import asyncio
@@ -24,6 +26,7 @@ from typing import Any
 
 from protocols.timelock.subscriber.envio import GraphQLPost, address_variants, live_subscription
 from protocols.timelock.subscriber.inbox import SOURCE_HTTP, SOURCE_WS, EventInbox
+from protocols.timelock.subscriber.notices import PilotNotices
 from protocols.timelock.subscriber.reconcile import ReconcileConfig, ReconcileReport, in_scope, reconcile_all
 from utils.graphql_ws import GraphQLWSError, subscribe
 from utils.logger import get_logger
@@ -72,6 +75,7 @@ class Worker:
         config: WorkerConfig,
         subscribe_fn: SubscribeFn = subscribe,
         now: Callable[[], float] = time.time,
+        notices: PilotNotices | None = None,
     ) -> None:
         if config.transport not in TRANSPORTS:
             raise ValueError(f"transport must be one of {TRANSPORTS}, got {config.transport!r}")
@@ -84,6 +88,7 @@ class Worker:
         self.config = config
         self.subscribe_fn = subscribe_fn
         self.now = now
+        self.notices = notices
         self._stop = asyncio.Event()
         self.ws_connected = False
         self.ws_connects = 0
@@ -122,15 +127,20 @@ class Worker:
         if self.config.transport in ("both", "ws"):
             loops.append(asyncio.create_task(self.ws_loop(), name="ws"))
         self._tasks = loops
-        heartbeat = asyncio.create_task(self.heartbeat_loop(), name="heartbeat")
+        helpers = [asyncio.create_task(self.heartbeat_loop(), name="heartbeat")]
+        if self.notices is not None:
+            # Not in self._tasks: a dead notifier must not trip the watchdog.
+            helpers.append(asyncio.create_task(self.notices.notifier.run(), name="notifier"))
+            if self.config.transport in ("both", "ws"):
+                self.notices.ws_disconnected(self.started_at, "not connected yet")
         notify("READY=1", f"STATUS=transport={self.config.transport}")
         try:
             await self._stop.wait()
         finally:
             notify("STOPPING=1")
-            for task in [*loops, heartbeat]:
+            for task in [*loops, *helpers]:
                 task.cancel()
-            await asyncio.gather(*loops, heartbeat, return_exceptions=True)
+            await asyncio.gather(*loops, *helpers, return_exceptions=True)
             await asyncio.to_thread(self.inbox.log, "worker_stopped", self.now())
 
     async def ws_loop(self) -> None:
@@ -151,6 +161,8 @@ class Worker:
                         self.ws_connects += 1
                         await asyncio.to_thread(self.inbox.log, "ws_connected", received_at)
                         _logger.info("WebSocket subscription live")
+                        if self.notices is not None:
+                            self.notices.ws_connected(received_at)
                     if payload.get("errors"):
                         raise GraphQLWSError(f"GraphQL errors in snapshot: {payload['errors']!r}")
                     await self._ingest_snapshot(payload, received_at)
@@ -169,6 +181,8 @@ class Worker:
             )
             if self._stop.is_set():
                 break
+            if self.notices is not None:
+                self.notices.ws_disconnected(disconnected_at, error)
             failures += 1
             delay = backoff_delay(failures, self.config.backoff_initial, self.config.backoff_max)
             delay *= random.uniform(0.8, 1.2)
@@ -183,6 +197,9 @@ class Worker:
         ingest_ms = (time.perf_counter() - clock) * 1000
         self.ws_messages += 1
         self.last_ws_message_at = received_at
+        if self.notices is not None:
+            await self.notices.new_events(SOURCE_WS, result.new_ids)
+            self.notices.snapshot_changes(result.changed_ids)
         if result.new or result.changed or result.restored:
             by_id = {str(r["id"]): r for r in rows}
             for event_id in result.new_ids:
@@ -222,7 +239,10 @@ class Worker:
                 report = ReconcileReport(started_at=started, error=f"{type(exc).__name__}: {exc}")
             self.last_reconcile = report
             self.last_reconcile_at = self.now()
-            self._log_reconcile(report, ws_was_connected and self.config.transport == "both")
+            ws_expected = ws_was_connected and self.config.transport == "both"
+            self._log_reconcile(report, ws_expected)
+            if self.notices is not None:
+                await self.notices.reconcile(report, ws_expected)
             await self._sleep(self.config.reconcile_interval - (self.now() - started))
 
     def _log_reconcile(self, report: ReconcileReport, ws_expected: bool) -> None:
@@ -304,9 +324,19 @@ class Worker:
                         chain["head_age_seconds"],
                     )
                     self._stalled.add(chain_id)
+                    if self.notices is not None:
+                        self.notices.stall_changed(chain_id, True, chain["indexed_head"], chain["head_age_seconds"])
                 elif not chain["stalled"] and chain_id in self._stalled:
                     _logger.info("chain %s indexed head advancing again", chain_id)
                     self._stalled.discard(chain_id)
+                    if self.notices is not None:
+                        self.notices.stall_changed(chain_id, False, chain["indexed_head"], 0.0)
+            if self.notices is not None:
+                self.notices.check_ws(health["at"])
+                try:
+                    await self.notices.maybe_daily_summary(health["at"])
+                except Exception:  # noqa: BLE001 - a report bug must not stop the heartbeat
+                    _logger.warning("daily summary failed", exc_info=True)
             if self.is_alive():
                 notify(
                     "WATCHDOG=1", f"STATUS=ws={'up' if self.ws_connected else 'down'} stalled={sorted(self._stalled)}"
