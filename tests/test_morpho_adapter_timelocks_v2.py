@@ -10,7 +10,7 @@ from web3 import Web3
 
 from protocols.morpho import adapter_timelocks_v2 as adapters
 from protocols.morpho._alerts import VaultDiff
-from protocols.morpho.adapter_timelocks_v2 import AdapterTimelockState, MarketBalance, PendingBurn
+from protocols.morpho.adapter_timelocks_v2 import AdapterTimelockState, PendingBurn
 from utils.alert import AlertSeverity
 from utils.chains import Chain
 
@@ -23,23 +23,12 @@ EXECUTABLE_AT = 2_000_000_000
 METADATA = {"name": "WETH/USDC", "loan_symbol": "USDC", "loan_decimals": 6, "lltv": 860000000000000000}
 
 
-def _state(
-    burns: list[PendingBurn] | None = None,
-    balances: list[MarketBalance] | None = None,
-    burn_timelock: int = 3 * 86400,
-) -> AdapterTimelockState:
-    return AdapterTimelockState(
-        adapter=ADAPTER, burn_timelock=burn_timelock, pending_burns=burns or [], balances=balances or []
-    )
+def _state(burns: list[PendingBurn] | None = None, burn_timelock: int = 3 * 86400) -> AdapterTimelockState:
+    return AdapterTimelockState(adapter=ADAPTER, burn_timelock=burn_timelock, pending_burns=burns or [])
 
 
 def _burn(shares: int, assets: int = 0, executable_at: int = EXECUTABLE_AT) -> PendingBurn:
     return PendingBurn(market_id=MARKET_A_HEX, executable_at=executable_at, shares=shares, assets=assets)
-
-
-def _balance(adapter_shares: int, morpho_shares: int) -> MarketBalance:
-    # 1e6 shares per asset unit, like a fresh Morpho Blue market.
-    return MarketBalance(MARKET_A_HEX, adapter_shares, morpho_shares, 10**12, 10**18)
 
 
 class _Cache:
@@ -122,39 +111,6 @@ class TestAdapterDiff(unittest.TestCase):
         again = self._run(_state([_burn(shares=5)]), now=EXECUTABLE_AT - 86400 * 3)
         self.assertEqual(again.alerts[0].severity, AlertSeverity.CRITICAL)
 
-    def test_balanced_accounting_is_silent(self) -> None:
-        self.assertEqual(self._run(_state(balances=[_balance(10**12, 10**12)])).alerts, [])
-
-    def test_executed_burn_is_caught_from_the_share_gap_once(self) -> None:
-        """Catches a burn submitted with padded calldata, which the pending check can't see."""
-        burned = _state(balances=[_balance(0, 3 * 10**12)])
-
-        first = self._run(burned)
-        again = self._run(burned)
-
-        self.assertEqual(len(first.alerts), 1)
-        alert = first.alerts[0]
-        self.assertEqual(alert.severity, AlertSeverity.CRITICAL)
-        self.assertTrue(alert.standalone)
-        self.assertIn("supply written off on market [WETH/USDC]", alert.body)
-        self.assertIn("3.00 USDC", alert.body)
-        self.assertIn("accounts for 0 shares but holds 3,000,000,000,000", alert.body)
-        self.assertEqual(again.alerts, [])
-
-    def test_a_larger_gap_alerts_again(self) -> None:
-        self._run(_state(balances=[_balance(2 * 10**12, 3 * 10**12)]))
-        bigger = self._run(_state(balances=[_balance(0, 3 * 10**12)]))
-
-        self.assertEqual([a.severity for a in bigger.alerts], [AlertSeverity.CRITICAL])
-
-    def test_markets_with_a_position_are_remembered(self) -> None:
-        empty = MarketBalance(Web3.to_hex(MARKET_B), 0, 0, 1, 1)
-        self._run(_state(balances=[_balance(0, 5), empty]))
-
-        read, _write = self.cache.patches()
-        with read:
-            self.assertEqual(adapters._known_markets(ADAPTER), {MARKET_A})
-
     def test_burn_timelock_seeds_silently_then_alerts_high_on_decrease(self) -> None:
         seed = self._run(_state(burn_timelock=3 * 86400))
         increase = self._run(_state(burn_timelock=7 * 86400))
@@ -191,8 +147,7 @@ class _FakeClient:
         functions = MagicMock(spec=list(names))
         for name in names:
             setattr(functions, name, self._bound(name))
-        blue_functions = MagicMock(spec=["position", "market"])
-        blue_functions.position = self._bound("position")
+        blue_functions = MagicMock(spec=["market"])
         blue_functions.market = self._bound("market")
         adapter = MagicMock(functions=functions, address=ADAPTER)
         blue = MagicMock(functions=blue_functions)
@@ -233,7 +188,6 @@ def _values(held: list[bytes], executable_at: dict[bytes, int], adapter_shares: 
     for market in (MARKET_A, MARKET_B):
         values[("executableAt", adapters.burn_shares_calldata(market))] = executable_at.get(market, 0)
         values[("supplyShares", market)] = adapter_shares.get(market, 0)
-        values[("position", market)] = (2 * 10**12, 0, 0)
         values[("market", market)] = (2 * 10**6, 2 * 10**12, 0, 0, 0, 0)
     return values
 
@@ -247,7 +201,7 @@ class TestLoadAdapterState(unittest.TestCase):
         with read, write:
             return adapters.load_adapter_state(client, ADAPTER, block_number=1)
 
-    def test_reads_pending_burns_and_balances_for_held_markets(self) -> None:
+    def test_reads_canonical_pending_burns_and_values_only_those(self) -> None:
         client = _FakeClient(
             _values([MARKET_A, MARKET_B], {MARKET_A: EXECUTABLE_AT}, {MARKET_A: 2 * 10**12, MARKET_B: 2 * 10**12})
         )
@@ -256,17 +210,15 @@ class TestLoadAdapterState(unittest.TestCase):
 
         self.assertEqual(state.burn_timelock, 259200)
         self.assertEqual(state.pending_burns, [PendingBurn(MARKET_A_HEX, EXECUTABLE_AT, 2 * 10**12, 2_000_000)])
-        self.assertEqual([b.unaccounted_shares for b in state.balances], [0, 0])
 
-    def test_remembered_market_is_still_checked_after_leaving_market_ids(self) -> None:
-        """A burned market drops out of marketIds once deallocated; its share gap must still be seen."""
-        self.cache.values[adapters._key(ADAPTER, "known", adapters.KNOWN_MARKETS_TYPE)] = MARKET_A.hex()
-        client = _FakeClient(_values([MARKET_B], {}, {MARKET_B: 2 * 10**12}))
+    def test_no_pending_burn_needs_no_valuation_calls(self) -> None:
+        values = _values([MARKET_A], {}, {})
+        del values[("morpho", None)]
+        client = _FakeClient(values)
 
         state = self._load(client)
 
-        gaps = {b.market_id: b.unaccounted_shares for b in state.balances}
-        self.assertEqual(gaps, {MARKET_A_HEX: 2 * 10**12, Web3.to_hex(MARKET_B): 0})
+        self.assertEqual(state.pending_burns, [])
 
     def test_burn_shares_calldata_matches_abi_encoding(self) -> None:
         self.assertEqual(
