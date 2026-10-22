@@ -11,6 +11,39 @@ Monitors all timelock contract types (TimelockController, Aave, Compound, Lido, 
 
 The script runs hourly via the [monitoring runner](../../automation/jobs.yaml).
 
+## Continuous Subscriber Pilot
+
+`event_subscriber.py` is a continuously running worker that observes the same `TimelockEvent` rows as `timelock_alerts.py` with lower latency ([#438](https://github.com/yearn/monitoring/issues/438), the first step of [#437](https://github.com/yearn/monitoring/issues/437)). It is an observation pilot: **it sends no alerts and changes nothing about current delivery**. The hourly task remains the only sender. It runs as the `monitoring-timelock-subscriber` systemd unit; operations are in the [runbook](../../deploy/runbook.md#timelock-event-subscriber-pilot).
+
+It runs two transports side by side and records which one saw each event first:
+
+- **WebSocket**: a `graphql-transport-ws` live query (`utils/graphql_ws.py`) over the newest 50 monitored events, filtered by monitored chains and addresses. Hasura resends the whole snapshot on every change, so most rows are repeats; the inbox deduplicates them. On disconnect the worker reconnects with capped exponential backoff (1s to 60s).
+- **HTTP reconciliation**, every 60s and also while the WebSocket is connected: for each chain, read `chain_metadata.latest_processed_block`, then fetch `(checkpoint - overlap, head]` in chunks of at most `MAX_BLOCK_SPAN` blocks, paginated in pages of 200 ordered by `(blockNumber, logIndex, id)`. This is the completeness guarantee.
+
+State lives in `$CACHE_DIR/timelock_subscriber.db` (SQLite, WAL), separate from the hourly monitor's state:
+
+- **Per-chain checkpoints** (`timelock_sub_checkpoints`): the highest block fully fetched over HTTP, never moved backwards. They are independent per chain and do not use `TIMELOCK_LAST_TS`, so a failing or lagging chain never holds back the others. A chain's first run starts at the indexed head unless `TIMELOCK_SUBSCRIBER_START_LOOKBACK_SECONDS` is set.
+- **Event provenance** (`timelock_sub_events`): one row per Envio event id (`<chainId>_<blockNumber>_<logIndex>`) with a content fingerprint, the first transport and time it was seen, first-seen times and observation counts per transport.
+- **Changes** (`timelock_sub_changes`): `changed` when a known id comes back with different content, `removed` when a fully fetched range no longer returns it, and `restored` when it reappears. The previous payload is kept.
+- **Worker log** (`timelock_sub_log`): WebSocket connects and disconnects, each reconcile with its duration and per-chain counts, and snapshot ingestion times.
+
+Edge cases:
+
+- **Duplicate snapshots** and the overlapping re-scan only increment observation counters.
+- **Equal timestamps**: ranges are bounded by block number per chain, not by a `blockTimestamp > last` cursor, so rows sharing a block or a timestamp are never skipped.
+- **Late indexing and reorgs**: each cycle re-reads about 15-20 minutes of blocks below the checkpoint (`REORG_OVERLAP_BLOCKS`). `TimelockEvent` has no block hash, so a replaced block shows as a changed fingerprint at the same id, or as a removed id.
+- **Restarts** resume from the stored checkpoints. A backlog drains in bounded chunks, at most 20 chunks per chain per cycle.
+
+Supervision: a heartbeat every 30s stores worker status, flags any chain whose indexed head has not advanced for 15 minutes, and pings the systemd watchdog only while reconciliation keeps completing. `event_subscriber.py health` exits 1 on a stale heartbeat, failed reconcile, WebSocket outage, or stalled chain.
+
+`event_subscriber.py report --hours N` prints the coverage/latency report used to choose the production transport:
+
+- WebSocket coverage of HTTP-confirmed events, plus WebSocket-only and HTTP-only counts.
+- Delay from block timestamp to first sighting per transport (p50/p95/max), and how far the WebSocket leads HTTP. Envio exposes no per-row index time, so the faster transport's delay is an upper bound on indexing delay.
+- WebSocket outages with the events that fell inside them, which transport recovered them, and how long it took.
+- Reconcile timing and errors, absorbed duplicates, and changed/removed rows.
+- A recommendation: `both` when the WebSocket saw at least 99% of confirmed events and was faster at p95, `http` otherwise, `undecided` with fewer than 5 events. Envio [fully supports hosted WebSockets only on Dedicated plans](https://docs.envio.dev/docs/HyperIndex/websockets), which the final decision must weigh.
+
 ## Stale Ready Operations
 
 `stale_operations.py` runs daily. An OpenZeppelin TimelockController operation never expires: once its delay passes, it stays executable until someone executes or cancels it. A forgotten operation can therefore land weeks later, and `timelock_alerts.py` reported it only once, when it was scheduled.
