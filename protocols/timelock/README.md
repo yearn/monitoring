@@ -23,7 +23,7 @@ It runs two transports side by side and records which one saw each event first:
 State lives in `$CACHE_DIR/timelock_subscriber.db` (SQLite, WAL), separate from the hourly monitor's state:
 
 - **Per-chain checkpoints** (`timelock_sub_checkpoints`): the highest block fully fetched over HTTP, never moved backwards. They are independent per chain and do not use `TIMELOCK_LAST_TS`, so a failing or lagging chain never holds back the others. A chain's first run starts at the indexed head unless `TIMELOCK_SUBSCRIBER_START_LOOKBACK_SECONDS` is set.
-- **Event provenance** (`timelock_sub_events`): one row per Envio event id (`<chainId>_<blockNumber>_<logIndex>`) with a content fingerprint, the first transport and time it was seen, first-seen times and observation counts per transport.
+- **Event provenance** (`timelock_sub_events`): one row per Envio event id (`<chainId>_<blockNumber>_<logIndex>`) with its block hash, a content fingerprint, the first transport and time it was seen, first-seen times and observation counts per transport.
 - **Changes** (`timelock_sub_changes`): `changed` when a known id comes back with different content, `removed` when a fully fetched range no longer returns it, and `restored` when it reappears. The previous payload is kept.
 - **Worker log** (`timelock_sub_log`): WebSocket connects and disconnects, each reconcile with its duration and per-chain counts, and snapshot ingestion times.
 
@@ -31,7 +31,7 @@ Edge cases:
 
 - **Duplicate snapshots** and the overlapping re-scan only increment observation counters.
 - **Equal timestamps**: ranges are bounded by block number per chain, not by a `blockTimestamp > last` cursor, so rows sharing a block or a timestamp are never skipped.
-- **Late indexing and reorgs**: each cycle re-reads about 15-20 minutes of blocks below the checkpoint (`REORG_OVERLAP_BLOCKS`). `TimelockEvent` has no block hash, so a replaced block shows as a changed fingerprint at the same id, or as a removed id.
+- **Late indexing and reorgs**: each cycle re-reads about 15-20 minutes of blocks below the checkpoint (`REORG_OVERLAP_BLOCKS`). The fingerprint includes `blockHash`, so a replaced block shows as a changed row at the same id (with the old payload kept), and a dropped log shows as a removed id.
 - **Restarts** resume from the stored checkpoints. A backlog drains in bounded chunks, at most 20 chunks per chain per cycle.
 
 Supervision: a heartbeat every 30s stores worker status, flags any chain whose indexed head has not advanced for 15 minutes, and pings the systemd watchdog only while reconciliation keeps completing. `event_subscriber.py health` exits 1 on a stale heartbeat, failed reconcile, WebSocket outage, or stalled chain.

@@ -18,7 +18,7 @@ from websockets.asyncio.server import serve
 from websockets.typing import Subprotocol
 
 from protocols.timelock.subscriber.inbox import SOURCE_HTTP, SOURCE_WS, EventInbox
-from protocols.timelock.subscriber.reconcile import ReconcileConfig
+from protocols.timelock.subscriber.reconcile import ReconcileConfig, reconcile_all
 from protocols.timelock.subscriber.report import PilotReport, _recommend, build_report, format_report, percentile
 from protocols.timelock.subscriber.worker import Worker, WorkerConfig
 from tests.timelock_subscriber_fakes import TIMELOCK, FakeEnvio, FakeWSServer, make_event
@@ -139,14 +139,17 @@ def test_ws_delivers_first_and_http_confirms(tmp_path: Path) -> None:
         server = FakeWSServer(envio)
         await server.start()
         inbox = EventInbox(str(tmp_path / "sub.db"))
-        # Slow reconcile so the subscription wins the race.
-        worker = Worker(envio.post, server.url, inbox, SCOPE, _config(reconcile_interval=0.5))
+        # The timed reconcile runs once at startup and then not again during the test,
+        # so the subscription sees the events first; HTTP confirms them on demand.
+        config = _config(reconcile_interval=60)
+        worker = Worker(envio.post, server.url, inbox, SCOPE, config)
 
         async def body() -> None:
             await _until(lambda: worker.ws_connected and worker.last_reconcile_at is not None)
             envio.add(_now_event(1, 10), _now_event(8453, 20))
             await _until(lambda: len(_rows(inbox)) == 2)
-            await _until(lambda: all(r["http_first_seen_at"] for r in _rows(inbox).values()))
+            report = await asyncio.to_thread(reconcile_all, envio.post, inbox, SCOPE, config.reconcile)
+            assert report.ok
 
         try:
             await _run_worker(worker, body)
@@ -267,6 +270,7 @@ def test_http_only_transport_needs_no_websocket(tmp_path: Path) -> None:
             await _until(lambda: worker.last_reconcile_at is not None)
             envio.add(_now_event(1, 3))
             await _until(lambda: "1_3_0" in _rows(inbox))
+            await _until(lambda: "heartbeat" in inbox.status())
 
         await _run_worker(worker, body)
         assert _rows(inbox)["1_3_0"]["first_source"] == SOURCE_HTTP
@@ -274,30 +278,22 @@ def test_http_only_transport_needs_no_websocket(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_heartbeat_reports_stalled_chain(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        envio = FakeEnvio()
-        _seed_heads(envio)
-        inbox = EventInbox(str(tmp_path / "sub.db"))
-        config = WorkerConfig(
-            transport="http", reconcile_interval=0.05, heartbeat_interval=0.05, head_stall_seconds=0.2
-        )
-        worker = Worker(envio.post, None, inbox, SCOPE, config)
+def test_health_reports_stalled_chain(tmp_path: Path) -> None:
+    clock = [1_000.0]
+    envio = FakeEnvio()
+    _seed_heads(envio)
+    inbox = EventInbox(str(tmp_path / "sub.db"))
+    config = WorkerConfig(transport="http", head_stall_seconds=900)
+    worker = Worker(envio.post, None, inbox, SCOPE, config, now=lambda: clock[0])
 
-        async def body() -> None:
-            await _until(lambda: worker.last_reconcile_at is not None)
-            await asyncio.sleep(0.3)
-            envio.set_head(1, 50)  # Mainnet advances, Base stays put
-            await asyncio.sleep(0.15)
-            await _until(lambda: "heartbeat" in inbox.status())
+    reconcile_all(envio.post, inbox, SCOPE, config.reconcile, now=lambda: clock[0])
+    clock[0] += 1_000
+    envio.set_head(1, 50)  # Mainnet advances, Base stays put
+    reconcile_all(envio.post, inbox, SCOPE, config.reconcile, now=lambda: clock[0])
 
-        await _run_worker(worker, body)
-        heartbeat, _ = inbox.status()["heartbeat"]
-        stalled = {c["chain_id"]: c["stalled"] for c in heartbeat["chains"]}
-        assert stalled == {1: False, 8453: True}
-        assert heartbeat["last_reconcile_ok"] is True
-
-    asyncio.run(scenario())
+    health = worker.health()
+    assert {c["chain_id"]: c["stalled"] for c in health["chains"]} == {1: False, 8453: True}
+    assert {c["chain_id"]: c["head_age_seconds"] for c in health["chains"]} == {1: 0.0, 8453: 1_000.0}
 
 
 def test_worker_rejects_bad_transport_config(tmp_path: Path) -> None:

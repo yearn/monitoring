@@ -4,8 +4,8 @@ Every ``TimelockEvent`` row the worker sees, from the WebSocket subscription or
 from HTTP reconciliation, is folded into one row per Envio event id
 (``<chainId>_<blockNumber>_<logIndex>``) with its provenance: which transport saw
 it first, when each transport first saw it, how often it was re-observed, and a
-fingerprint of its content. A row that comes back with different content (a
-reorg replaced the log at that position) or disappears from a reconciled range
+fingerprint of its content, including the block hash. A row that comes back
+with different content (a reorg replaced the block or the log at that position) or disappears from a reconciled range
 (a reorg dropped it) is recorded in ``timelock_sub_changes`` instead of silently
 overwritten.
 
@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS timelock_sub_events (
     chain_id                INTEGER NOT NULL,
     timelock_address        TEXT NOT NULL,
     block_number            INTEGER NOT NULL,
+    block_hash              TEXT,
     log_index               INTEGER NOT NULL,
     block_timestamp         INTEGER NOT NULL,
     transaction_hash        TEXT NOT NULL,
@@ -132,6 +133,10 @@ def event_fingerprint(event: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(normalized, sort_keys=True, default=str).encode()).hexdigest()
 
 
+def _lower(value: Any) -> str | None:
+    return str(value).lower() if value is not None else None
+
+
 def parse_log_index(event: dict[str, Any]) -> int:
     """Return the log index, from the row or from its ``<chain>_<block>_<logIndex>`` id."""
     if event.get("logIndex") is not None:
@@ -194,16 +199,17 @@ class EventInbox:
                     conn.execute(
                         f"""
                         INSERT INTO timelock_sub_events (
-                            event_id, chain_id, timelock_address, block_number, log_index, block_timestamp,
-                            transaction_hash, event_name, operation_id, fingerprint, payload_json,
+                            event_id, chain_id, timelock_address, block_number, block_hash, log_index,
+                            block_timestamp, transaction_hash, event_name, operation_id, fingerprint, payload_json,
                             first_seen_at, first_source, {seen_col}, {count_col}, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                         """,
                         (
                             event_id,
                             int(event["chainId"]),
                             str(event["timelockAddress"]).lower(),
                             int(event["blockNumber"]),
+                            _lower(event.get("blockHash")),
                             parse_log_index(event),
                             int(event["blockTimestamp"]),
                             str(event["transactionHash"]).lower(),
@@ -254,12 +260,14 @@ class EventInbox:
                         """
                         UPDATE timelock_sub_events SET
                             status = 'active', revision = revision + 1, fingerprint = ?, payload_json = ?,
-                            block_timestamp = ?, transaction_hash = ?, event_name = ?, operation_id = ?
+                            block_hash = ?, block_timestamp = ?, transaction_hash = ?, event_name = ?,
+                            operation_id = ?
                         WHERE event_id = ?
                         """,
                         (
                             fingerprint,
                             json.dumps(event, sort_keys=True, default=str),
+                            _lower(event.get("blockHash")),
                             int(event["blockTimestamp"]),
                             str(event["transactionHash"]).lower(),
                             event.get("eventName"),

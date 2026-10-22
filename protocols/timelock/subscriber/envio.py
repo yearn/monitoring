@@ -10,8 +10,9 @@ from eth_utils import to_checksum_address
 
 from utils.http_client import request_with_retry
 
-# The same selection the hourly monitor uses, plus logIndex, so a row from either
-# transport fingerprints identically.
+# The hourly monitor's selection plus logIndex and blockHash. Both transports use
+# it, so a row fingerprints identically whichever one fetched it, and a reorg that
+# replaces the block changes the fingerprint through blockHash.
 EVENT_FIELDS = """
         id
         timelockAddress
@@ -19,6 +20,7 @@ EVENT_FIELDS = """
         eventName
         chainId
         blockNumber
+        blockHash
         blockTimestamp
         logIndex
         transactionHash

@@ -217,14 +217,16 @@ def test_reorg_replaced_and_dropped_events_are_recorded(inbox: EventInbox) -> No
     envio.add(make_event(1, 20, 0), make_event(1, 20, 1), make_event(1, 21))
     reconcile_all(envio.post, inbox, SCOPE, CONFIG)
 
-    # Reorg: block 20's first log now comes from another tx; the second log is gone.
-    envio.add(make_event(1, 20, 0, transactionHash="0x" + "ee" * 32))
+    # Reorg: block 20 has a new hash and its first log comes from another tx; the second log is gone.
+    envio.add(make_event(1, 20, 0, blockHash="0x" + "dd" * 32, transactionHash="0x" + "ee" * 32))
     envio.remove("1_20_1")
     report = reconcile_all(envio.post, inbox, SCOPE, CONFIG)
     mainnet = next(c for c in report.chains if c.chain_id == 1)
     assert (mainnet.new, mainnet.changed, mainnet.removed) == (0, 1, 1)
 
-    statuses = {row["event_id"]: row["status"] for row in inbox.events_since(0)}
+    rows = {row["event_id"]: row for row in inbox.events_since(0)}
+    assert rows["1_20_0"]["block_hash"] == "0x" + "dd" * 32
+    statuses = {event_id: row["status"] for event_id, row in rows.items()}
     assert statuses == {"1_20_0": "active", "1_20_1": "removed", "1_21_0": "active"}
     kinds = sorted((c["event_id"], c["kind"]) for c in inbox.changes_since(0))
     assert kinds == [("1_20_0", "changed"), ("1_20_1", "removed")]

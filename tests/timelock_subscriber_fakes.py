@@ -26,6 +26,7 @@ def make_event(
         "eventName": "CallScheduled",
         "chainId": chain_id,
         "blockNumber": block,
+        "blockHash": "0x" + f"{block:064x}",
         "blockTimestamp": ts,
         "logIndex": log_index,
         "transactionHash": "0x" + f"{block:064x}",
@@ -175,8 +176,12 @@ class FakeWSServer:
         try:
             init = json.loads(await conn.recv())
             assert init["type"] == "connection_init"
+            # Envio's Hasura sends a keepalive ping before the ack.
+            await conn.send(json.dumps({"type": "ping", "payload": {"message": "keepalive"}}))
             await conn.send(json.dumps({"type": "connection_ack"}))
             sub = json.loads(await conn.recv())
+            while sub["type"] == "pong":
+                sub = json.loads(await conn.recv())
             assert sub["type"] == "subscribe"
             self.subscriptions += 1
             if self.ping_first:

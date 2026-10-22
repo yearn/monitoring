@@ -14,7 +14,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from websockets.asyncio.client import connect
+from websockets.asyncio.client import ClientConnection, connect
 from websockets.typing import Subprotocol
 
 SUBPROTOCOL = "graphql-transport-ws"
@@ -31,6 +31,22 @@ def http_to_ws_url(url: str) -> str:
     if url.startswith("http://"):
         return "ws://" + url.removeprefix("http://")
     return url
+
+
+async def _await_ack(ws: ClientConnection) -> None:
+    """Wait for ``connection_ack``, answering pings sent before it.
+
+    Envio's Hasura sends a keepalive ``ping`` before the ack.
+    """
+    while True:
+        message = json.loads(await ws.recv())
+        kind = message.get("type")
+        if kind == "connection_ack":
+            return
+        if kind == "ping":
+            await ws.send(json.dumps({"type": "pong"}))
+        elif kind != "pong":
+            raise GraphQLWSError(f"expected connection_ack, got {message!r}")
 
 
 async def subscribe(
@@ -63,9 +79,7 @@ async def subscribe(
         if ws.subprotocol != SUBPROTOCOL:
             raise GraphQLWSError(f"server negotiated subprotocol {ws.subprotocol!r}, expected {SUBPROTOCOL!r}")
         await ws.send(json.dumps({"type": "connection_init", "payload": {}}))
-        ack = json.loads(await asyncio.wait_for(ws.recv(), ack_timeout))
-        if ack.get("type") != "connection_ack":
-            raise GraphQLWSError(f"expected connection_ack, got {ack!r}")
+        await asyncio.wait_for(_await_ack(ws), ack_timeout)
 
         await ws.send(
             json.dumps({"id": "1", "type": "subscribe", "payload": {"query": query, "variables": variables or {}}})
