@@ -6,6 +6,7 @@ from web3 import Web3
 
 from protocols.morpho._alerts import REMINDER_WINDOW_SECONDS, VaultDiff, send_vault_alerts
 from protocols.morpho._shared import (
+    MORPHO_BLUE_ABI_PATH,
     PROTOCOL,
     MorphoMonitoringError,
     execute_graphql,
@@ -16,6 +17,7 @@ from protocols.morpho._shared import (
     format_ts,
     get_market_url,
     get_vault_url,
+    to_assets_down,
 )
 from protocols.morpho.config import VAULTS_V1_BY_CHAIN
 from utils.abi import load_abi
@@ -35,11 +37,7 @@ PENDING_CAP_TYPE = "pending_cap"
 REMOVABLE_AT_TYPE = "removable_at"
 REMOVAL_REMINDER_TYPE = "removable_at_reminder"
 ABI_MORPHO = load_abi("protocols/morpho/abi/morpho.json")
-ABI_MORPHO_BLUE = load_abi("protocols/morpho/abi/morpho_blue.json")
-
-# Morpho Blue SharesMathLib virtual offsets, used to convert supply shares to assets.
-VIRTUAL_SHARES = 10**6
-VIRTUAL_ASSETS = 1
+ABI_MORPHO_BLUE = load_abi(MORPHO_BLUE_ABI_PATH)
 
 
 @dataclass(frozen=True)
@@ -57,11 +55,6 @@ class MarketGovernanceState:
     supply_shares: int = 0
     supply_assets: int = 0
     vault_total_assets: int | None = None
-
-
-def to_assets_down(shares: int, total_assets: int, total_shares: int) -> int:
-    """Convert Morpho Blue supply shares to assets, rounding down like ``SharesMathLib``."""
-    return shares * (total_assets + VIRTUAL_ASSETS) // (total_shares + VIRTUAL_SHARES)
 
 
 def fetch_pending_cap_market_ids(vault_address: str, chain: Chain) -> list[str]:
@@ -171,14 +164,14 @@ def _load_market_governance_states(
     client: Any,
     block_number: int,
 ) -> list[MarketGovernanceState]:
-    """Batch pending-cap, config, and vault-supply reads for V1 vault markets."""
-    with client.batch_requests() as batch:
-        batch.add(morpho_contract.functions.MORPHO().call(block_identifier=block_number))
-        batch.add(morpho_contract.functions.totalAssets().call(block_identifier=block_number))
-        vault_responses = client.execute_batch(batch)
-    if len(vault_responses) != 2:
-        raise ValueError(f"Expected 2 MORPHO/totalAssets responses, got {len(vault_responses)}")
-    morpho_address, total_assets = vault_responses
+    """Batch pending-cap, config, and vault-supply reads for V1 vault markets.
+
+    None of these reads go through a market's IRM, so they can't revert on a broken
+    market. ``totalAssets`` does (it values every withdraw-queue market), so it is
+    read separately and only feeds the optional "% of vault" figure.
+    """
+    morpho_address = morpho_contract.functions.MORPHO().call(block_identifier=block_number)
+    total_assets = _try_total_assets(morpho_contract, block_number)
     blue = client.eth.contract(address=morpho_address, abi=ABI_MORPHO_BLUE)
 
     per_market = 4
@@ -214,6 +207,15 @@ def _load_market_governance_states(
             )
         )
     return states
+
+
+def _try_total_assets(morpho_contract: Any, block_number: int) -> int | None:
+    """Best-effort ``totalAssets()``; None when it reverts (e.g. a withdraw-queue market's IRM reverts)."""
+    try:
+        return int(morpho_contract.functions.totalAssets().call(block_identifier=block_number))
+    except Exception as e:
+        logger.warning("totalAssets() failed for vault %s, alerts omit the vault share: %s", morpho_contract.address, e)
+        return None
 
 
 def _vault_header(name: str, vault_address: str, chain: Chain) -> str:

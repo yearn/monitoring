@@ -83,6 +83,22 @@ def execute_graphql(
     raise error_type(f"Morpho GraphQL failed after {retries + 1} attempts for {context}")
 
 
+MORPHO_BLUE_ABI_PATH = "protocols/morpho/abi/morpho_blue.json"
+
+# Morpho Blue SharesMathLib virtual offsets, used to convert supply shares to assets.
+VIRTUAL_SHARES = 10**6
+VIRTUAL_ASSETS = 1
+
+
+def to_assets_down(shares: int, total_assets: int, total_shares: int) -> int:
+    """Convert Morpho Blue supply shares to assets, rounding down like ``SharesMathLib``.
+
+    Uses the market's stored totals rather than an IRM-accrued view, so it can't
+    revert on a market whose IRM reverts; it only omits interest since the last update.
+    """
+    return shares * (total_assets + VIRTUAL_ASSETS) // (total_shares + VIRTUAL_SHARES)
+
+
 def format_ts(ts: int) -> str:
     """Render a unix timestamp as local ``YYYY-MM-DD HH:MM:SS``."""
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")

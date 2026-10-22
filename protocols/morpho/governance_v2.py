@@ -75,9 +75,13 @@ REMOVE_ADAPTER_SELECTOR = selector_of("removeAdapter(address)")
 EXECUTED = -1
 REVOKED = 0
 
+# Morpho caps query complexity at 1,000,000 and the page size multiplies the cost
+# of every nested field: first: 200 measured 1,151,000, first: 100 measures 575,500.
+GOVERNANCE_PAGE_SIZE = 100
+
 _GOVERNANCE_QUERY = """
-query GovernanceV2($addresses: [String!]!, $chainIds: [Int!]!) {
-  vaultV2s(first: 200, where: { address_in: $addresses, chainId_in: $chainIds }) {
+query GovernanceV2($addresses: [String!]!, $chainIds: [Int!]!, $first: Int!) {
+  vaultV2s(first: $first, where: { address_in: $addresses, chainId_in: $chainIds }) {
     items {
       address
       name
@@ -88,7 +92,7 @@ query GovernanceV2($addresses: [String!]!, $chainIds: [Int!]!) {
       curator { address }
       sentinels { sentinel { address } }
       allocators { allocator { address } }
-      adapters { items { address type assets } }
+      adapters { items { address type assets creationBlockNumber } }
       pendingConfigs {
         items { validAt functionName data txHash }
       }
@@ -138,11 +142,16 @@ class V2GovernanceSnapshot:
     # Checksummed adapter address → assets it holds / GraphQL adapter type.
     adapter_assets: Dict[str, int] = field(default_factory=dict)
     adapter_types: Dict[str, str] = field(default_factory=dict)
+    adapter_creation_blocks: Dict[str, int] = field(default_factory=dict)
 
     @property
-    def market_v1_adapters(self) -> List[str]:
-        """Adapters with their own timelock (``MorphoMarketV1AdapterV2``)."""
-        return sorted(a for a, t in self.adapter_types.items() if t == "MorphoMarketV1")
+    def market_v1_adapters(self) -> Dict[str, int]:
+        """Adapters with their own timelock (``MorphoMarketV1AdapterV2``) → creation block."""
+        return {
+            a: self.adapter_creation_blocks.get(a, 0)
+            for a, t in sorted(self.adapter_types.items())
+            if t == "MorphoMarketV1"
+        }
 
 
 # ----------------------------------------------------------------------------
@@ -185,7 +194,7 @@ def fetch_governance_snapshots() -> Dict[Chain, List[V2GovernanceSnapshot]]:
 
     data = execute_graphql(
         _GOVERNANCE_QUERY,
-        {"addresses": addresses, "chainIds": chain_ids},
+        {"addresses": addresses, "chainIds": chain_ids, "first": GOVERNANCE_PAGE_SIZE},
         "Vault V2 governance",
         error_type=MorphoV2MonitoringError,
     )
@@ -233,6 +242,9 @@ def fetch_governance_snapshots() -> Dict[Chain, List[V2GovernanceSnapshot]]:
                 total_assets=_optional_int(item.get("totalAssets")),
                 adapter_assets={_checksum_or_empty(a["address"]): int(a.get("assets") or 0) for a in adapter_items},
                 adapter_types={_checksum_or_empty(a["address"]): a.get("type") or "" for a in adapter_items},
+                adapter_creation_blocks={
+                    _checksum_or_empty(a["address"]): int(a.get("creationBlockNumber") or 0) for a in adapter_items
+                },
             )
         )
 
@@ -593,6 +605,19 @@ def main() -> None:
             except Exception as e:
                 logger.exception("Failed to process governance for %s on %s", vault.address, chain.name)
                 failures.append(f"{vault.name} on {chain.name}: {type(e).__name__}: {e}")
+            # A Submit-log backfill that hasn't reached the head can miss a non-canonical
+            # burn submission; alerts above still went out, but coverage is incomplete.
+            for state in adapter_states or []:
+                if state.scan_error:
+                    failures.append(
+                        f"{vault.name} adapter {state.adapter} on {chain.name}: Submit log scan failed "
+                        f"({state.scan_error}); only canonical burnShares keys were checked"
+                    )
+                elif state.lag_blocks > 0:
+                    failures.append(
+                        f"{vault.name} adapter {state.adapter} on {chain.name}: Submit log scan "
+                        f"{state.lag_blocks} blocks behind head (resumes next run)"
+                    )
 
     if failures:
         raise MorphoV2MonitoringError("Failed Morpho Vault V2 governance checks: " + "; ".join(failures))

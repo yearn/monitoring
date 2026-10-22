@@ -2,7 +2,7 @@
 
 import unittest
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from protocols.morpho import governance
 from protocols.morpho._alerts import VaultDiff
@@ -175,6 +175,49 @@ class TestMorphoV1MarketRemovalLoss(unittest.TestCase):
 
         self.assertEqual(len(first.alerts), 1)
         self.assertEqual(second.alerts, [])
+
+
+class _V1Batch:
+    def __init__(self) -> None:
+        self.calls: list[Any] = []
+
+    def add(self, call: Any) -> None:
+        self.calls.append(call)
+
+
+class TestMorphoV1VaultReads(unittest.TestCase):
+    def test_reverting_total_assets_only_drops_the_vault_share(self) -> None:
+        """totalAssets() values every withdraw-queue market and can revert on a broken IRM;
+        the removal check must still see supply and stay CRITICAL."""
+        from contextlib import contextmanager
+
+        market_id = bytes.fromhex("ab" * 32)
+        vault = MagicMock(address=VAULT)
+        vault.functions.MORPHO.return_value.call.return_value = "0x" + "33" * 20
+        vault.functions.totalAssets.return_value.call.side_effect = ValueError("execution reverted")
+        vault.functions.pendingCap.return_value.call.return_value = (0, 0)
+        vault.functions.config.return_value.call.return_value = (0, True, 2_000_000_000)
+        blue = MagicMock()
+        blue.functions.position.return_value.call.return_value = (10**12, 0, 0)
+        blue.functions.market.return_value.call.return_value = (2 * 10**6, 2 * 10**12, 0, 0, 0, 0)
+        client = MagicMock()
+        client.eth.contract.return_value = blue
+
+        @contextmanager
+        def batch_requests() -> Any:
+            yield _V1Batch()
+
+        client.batch_requests.side_effect = batch_requests
+        client.execute_batch.side_effect = lambda batch: batch.calls
+
+        [state] = governance._load_market_governance_states(vault, [market_id], client, block_number=1)
+
+        self.assertIsNone(state.vault_total_assets)
+        self.assertEqual(
+            (state.supply_shares, state.supply_assets, state.removable_at), (10**12, 1_000_000, 2_000_000_000)
+        )
+        self.assertIn("1.00 USDC", governance.format_amount_at_risk(state.supply_assets, 6, "USDC", None))
+        self.assertNotIn("of vault", governance.format_amount_at_risk(state.supply_assets, 6, "USDC", None))
 
 
 class TestMorphoV1Timelock(unittest.TestCase):
