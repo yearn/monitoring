@@ -8,7 +8,6 @@ from web3 import Web3
 from protocols.morpho import governance_v2
 from protocols.morpho._alerts import LOSS_PREFIX
 from protocols.morpho._shared import MorphoV2MonitoringError
-from protocols.morpho.adapter_timelocks_v2 import AdapterTimelockState
 from protocols.morpho.governance_v2 import PendingConfig, V2GovernanceSnapshot
 from protocols.morpho.v2_decoders import submit_data_key
 from utils.alert import AlertSeverity
@@ -510,35 +509,9 @@ class TestMorphoV2GovernanceMainAdapters(unittest.TestCase):
         ):
             governance_v2.main()
 
-        load.assert_called_once_with(Chain.MAINNET, {ADAPTER: 0})
+        load.assert_called_once_with(Chain.MAINNET, [ADAPTER])
         # The GraphQL diff still ran, with the adapter diff skipped.
         self.assertEqual(diffed, [(snapshot, None)])
-
-    def test_incomplete_submit_log_backfill_fails_the_run_after_alerting(self) -> None:
-        snapshot = _loss_snapshot([], 1)
-        snapshot.adapter_creation_blocks = {ADAPTER: 7}
-        lagging = AdapterTimelockState(adapter=ADAPTER, burn_timelock=1, scanned_to_block=50, lag_blocks=950)
-        diffed: list[Any] = []
-
-        with (
-            patch(
-                "protocols.morpho.governance_v2.fetch_governance_snapshots",
-                return_value={Chain.MAINNET: [snapshot]},
-            ),
-            patch(
-                "protocols.morpho.governance_v2.adapter_timelocks_v2.load_adapter_states",
-                return_value=[lagging],
-            ) as load,
-            patch(
-                "protocols.morpho.governance_v2.diff_and_alert",
-                side_effect=lambda vault, states: diffed.append(states),
-            ),
-            self.assertRaisesRegex(MorphoV2MonitoringError, "Submit log scan 950 blocks behind head"),
-        ):
-            governance_v2.main()
-
-        load.assert_called_once_with(Chain.MAINNET, {ADAPTER: 7})
-        self.assertEqual(diffed, [[lagging]])
 
 
 class TestMorphoV2GovernanceQuery(unittest.TestCase):
@@ -547,25 +520,3 @@ class TestMorphoV2GovernanceQuery(unittest.TestCase):
         from protocols.morpho.config import VAULTS_V2_BY_CHAIN, iter_vaults
 
         self.assertLessEqual(len(list(iter_vaults(VAULTS_V2_BY_CHAIN))), governance_v2.GOVERNANCE_PAGE_SIZE)
-
-
-class TestMorphoV2GovernanceScanErrors(unittest.TestCase):
-    def test_log_scan_error_fails_the_run_after_alerting(self) -> None:
-        snapshot = _loss_snapshot([], 1)
-        failed = AdapterTimelockState(adapter=ADAPTER, burn_timelock=1, lag_blocks=10, scan_error="ValueError: range")
-
-        with (
-            patch(
-                "protocols.morpho.governance_v2.fetch_governance_snapshots",
-                return_value={Chain.MAINNET: [snapshot]},
-            ),
-            patch(
-                "protocols.morpho.governance_v2.adapter_timelocks_v2.load_adapter_states",
-                return_value=[failed],
-            ),
-            patch("protocols.morpho.governance_v2.diff_and_alert") as diff_and_alert,
-            self.assertRaisesRegex(MorphoV2MonitoringError, "Submit log scan failed \\(ValueError: range\\)"),
-        ):
-            governance_v2.main()
-
-        diff_and_alert.assert_called_once_with(snapshot, [failed])

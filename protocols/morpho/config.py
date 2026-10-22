@@ -113,20 +113,6 @@ VAULTS_V2_BY_CHAIN: dict[Chain, tuple[VaultConfig, ...]] = {
 }
 
 
-# Max eth_getLogs block span per request when scanning V2 adapter Submit events.
-# Mainnet and Katana providers accept full history; Robinhood's public RPC caps
-# spans at 10M blocks; Base providers are the most restrictive.
-SUBMIT_LOG_BLOCK_RANGE_BY_CHAIN: dict[Chain, int] = {
-    Chain.MAINNET: 2_000_000,
-    Chain.KATANA: 5_000_000,
-    Chain.ROBINHOOD: 5_000_000,
-    Chain.BASE: 10_000,
-}
-DEFAULT_SUBMIT_LOG_BLOCK_RANGE = 10_000
-# Per-adapter getLogs budget per run; a backfill that needs more resumes next run.
-MAX_SUBMIT_LOG_REQUESTS_PER_RUN = 1_000
-
-
 YV_COLLATERAL_MARKETS_BY_ASSET: dict[Chain, dict[str, tuple[str, ...]]] = {
     Chain.KATANA: {
         KATANA_USDC: ("0x6691cdcadd5d23ac68d2c1cf54dc97ab8242d2a888230de411094480252c2ed3",),

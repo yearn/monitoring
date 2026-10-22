@@ -297,7 +297,7 @@ protocols:
       - name: "V2 Governance"
         description: "Pending timelocked operations (CRITICAL for removeAdapter of a funded adapter), owner/curator changes, sentinel/allocator/adapter changes"
       - name: "V2 Adapter Share Burns"
-        description: "Pending MorphoMarketV1AdapterV2 burnShares (CRITICAL while the adapter holds the market) and burnShares timelock decreases, read on-chain"
+        description: "MorphoMarketV1AdapterV2 burnShares: pending (CRITICAL while the adapter holds the market), executed write-offs (adapter shares below its Morpho position), and burnShares timelock decreases, via eth_call"
       - name: "V2 Wrapped V1 Coverage"
         description: "V2 vault wrapping a v1 vault not in config.py:VAULTS_V1_BY_CHAIN"
       - name: "Safe Multisig"

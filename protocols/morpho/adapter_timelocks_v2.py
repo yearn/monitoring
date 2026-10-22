@@ -5,34 +5,30 @@ The adapter's ``burnShares(marketId)`` is the V2 equivalent of a V1
 that market, so ``realAssets`` drops and the vault takes the loss. It is
 timelocked on the adapter itself, which the Morpho GraphQL API does not expose.
 
-The adapter's ``executableAt`` mapping is keyed by the *exact* submitted
-calldata, but Solidity ignores trailing bytes when decoding ``burnShares``'s
-single ``bytes32`` argument. A burn can therefore be submitted under a
-non-canonical key (canonical calldata plus extra bytes), so reading only the
-canonical key is not enough. Pending burns are found two ways:
+Only batched ``eth_call`` reads are used, never ``eth_getLogs``:
 
-* **Submit logs** (``Submit(bytes4 indexed selector, bytes data, uint256)``
-  filtered to ``burnShares``), scanned incrementally from the adapter's creation
-  block with a cached cursor. Every discovered calldata is kept verbatim and
-  re-read via ``executableAt(data)`` until it resolves.
-* **Canonical keys** for every held market, a fast path that works even while a
-  log backfill is still catching up.
+* **Pending burns** — ``executableAt(abi.encodeCall(burnShares, (id)))`` for every
+  held market. Limitation: ``executableAt`` is keyed by the exact calldata and
+  Solidity ignores trailing bytes, so a burn submitted with padded calldata
+  can't be found before it executes without reading ``Submit`` events.
+* **Executed burns** — catch the effect, whatever calldata was used.
+  ``allocate``/``deallocate`` keep the adapter's ``supplyShares[id]`` exactly equal
+  to its Morpho Blue position; ``burnShares`` zeroes the former and leaves the
+  latter. Morpho shares the adapter no longer accounts for were written off (or,
+  rarely, donated by supplying on its behalf).
+* ``timelock(burnShares)`` — a shortened reaction window, after the fact.
 
-Assets at risk come from the adapter's stored ``supplyShares`` and Morpho
-Blue's stored market totals, never ``expectedSupplyAssets``: that goes through
-the market's IRM, which may revert, and burning shares of such a market is
-explicitly supported by the adapter.
-
-We also read ``timelock(burnShares)`` to catch a shortened window after the fact.
+Amounts use the adapter's stored shares and Morpho Blue's stored market totals,
+never ``expectedSupplyAssets``: that goes through the market's IRM, which may
+revert, and burning shares of such a market is explicitly supported.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, List
 
-from eth_abi import decode as abi_decode
 from web3 import Web3
 
 from protocols.morpho._alerts import REMINDER_WINDOW_SECONDS, VaultDiff
@@ -45,11 +41,6 @@ from protocols.morpho._shared import (
     format_ts,
     get_market_url,
     to_assets_down,
-)
-from protocols.morpho.config import (
-    DEFAULT_SUBMIT_LOG_BLOCK_RANGE,
-    MAX_SUBMIT_LOG_REQUESTS_PER_RUN,
-    SUBMIT_LOG_BLOCK_RANGE_BY_CHAIN,
 )
 from protocols.morpho.v2_decoders import selector_of
 from utils.abi import load_abi
@@ -64,46 +55,44 @@ logger = get_logger("morpho.adapter_timelocks_v2")
 ABI_MARKET_V1_ADAPTER_V2 = load_abi("protocols/morpho/abi/morpho_market_v1_adapter_v2.json")
 ABI_MORPHO_BLUE = load_abi(MORPHO_BLUE_ABI_PATH)
 BURN_SHARES_SELECTOR = selector_of("burnShares(bytes32)")
-SUBMIT_TOPIC = bytes(Web3.keccak(text="Submit(bytes4,bytes,uint256)"))
-# Indexed bytes4 topics are left-aligned and zero-padded to 32 bytes.
-BURN_SHARES_TOPIC = BURN_SHARES_SELECTOR + b"\x00" * 28
-# Shortest calldata ``burnShares`` can execute with: selector + one bytes32 word.
-BURN_SHARES_MIN_LENGTH = 36
-# Re-scan a few blocks below the cursor so a shallow reorg can't hide a Submit.
-LOG_OVERLAP_BLOCKS = 50
 
 # Cache value-type tags used with utils.cache.morpho_key.
 BURN_TIMELOCK_TYPE = "v2_adapter_burn_timelock"
 PENDING_BURN_TYPE = "v2_adapter_pending_burn"
 PENDING_BURN_REMINDER_TYPE = "v2_adapter_pending_burn_reminder"
 PENDING_BURN_INDEX_TYPE = "v2_adapter_pending_burn_index"
-TRACKED_BURN_DATA_TYPE = "v2_adapter_tracked_burn_data"
-SUBMIT_LOG_CURSOR_TYPE = "v2_adapter_submit_log_cursor"
+KNOWN_MARKETS_TYPE = "v2_adapter_known_markets"
+WRITTEN_OFF_TYPE = "v2_adapter_written_off_shares"
+
+
+@dataclass(frozen=True)
+class MarketBalance:
+    """The adapter's accounted shares vs. its actual Morpho Blue position in one market."""
+
+    market_id: str  # 0x-prefixed hex
+    adapter_shares: int  # adapter.supplyShares(id)
+    morpho_shares: int  # MorphoBlue.position(id, adapter).supplyShares
+    total_supply_assets: int
+    total_supply_shares: int
+
+    @property
+    def unaccounted_shares(self) -> int:
+        """Morpho shares the adapter no longer counts: written off by ``burnShares`` (or donated)."""
+        return max(self.morpho_shares - self.adapter_shares, 0)
+
+    def assets(self, shares: int) -> int:
+        """Value ``shares`` at the market's stored totals (no IRM call)."""
+        return to_assets_down(shares, self.total_supply_assets, self.total_supply_shares)
 
 
 @dataclass(frozen=True)
 class PendingBurn:
-    """A submitted, not yet executed ``burnShares``, keyed by its exact calldata."""
+    """A submitted, not yet executed canonical ``burnShares`` for one market."""
 
-    data: bytes
+    market_id: str  # 0x-prefixed hex
     executable_at: int
     shares: int  # the adapter's stored supply shares in the market
     assets: int  # those shares valued at Morpho Blue's stored market totals
-
-    @property
-    def market_id(self) -> str:
-        """0x-prefixed market id the calldata burns (its first argument word)."""
-        return Web3.to_hex(self.data[4:BURN_SHARES_MIN_LENGTH])
-
-    @property
-    def extra_bytes(self) -> int:
-        """Trailing bytes beyond canonical calldata; > 0 means a non-canonical key."""
-        return len(self.data) - BURN_SHARES_MIN_LENGTH
-
-    @property
-    def data_key(self) -> str:
-        """Stable cache key for this exact calldata."""
-        return bytes(Web3.keccak(self.data)).hex()
 
 
 @dataclass(frozen=True)
@@ -113,16 +102,11 @@ class AdapterTimelockState:
     adapter: str  # checksummed
     burn_timelock: int
     pending_burns: List[PendingBurn] = field(default_factory=list)
-    # Submit-log scan progress: last block scanned, and blocks still unscanned
-    # below the head (non-zero while a backfill is catching up).
-    scanned_to_block: int = 0
-    lag_blocks: int = 0
-    # Set when the Submit-log scan failed; canonical and tracked keys were still checked.
-    scan_error: str = ""
+    balances: List[MarketBalance] = field(default_factory=list)
 
 
 def burn_shares_calldata(market_id: bytes) -> bytes:
-    """Canonical calldata of ``burnShares(marketId)``."""
+    """Canonical calldata of ``burnShares(marketId)``, the key of the adapter's ``executableAt`` mapping."""
     return BURN_SHARES_SELECTOR + market_id
 
 
@@ -168,9 +152,9 @@ def _key(adapter: str, item: str, value_type: str) -> str:
     return str(morpho_key(adapter.lower(), item, value_type))
 
 
-def _tracked_data(adapter: str) -> set[bytes]:
-    """Calldata of burns seen pending on earlier runs (comma-joined hex in the cache)."""
-    raw = _read_str(_key(adapter, "tracked", TRACKED_BURN_DATA_TYPE))
+def _known_markets(adapter: str) -> set[bytes]:
+    """Markets the adapter held on earlier runs; a burned-then-deallocated market leaves ``marketIds``."""
+    raw = _read_str(_key(adapter, "known", KNOWN_MARKETS_TYPE))
     return {bytes.fromhex(item) for item in raw.split(",") if item}
 
 
@@ -179,109 +163,61 @@ def _tracked_data(adapter: str) -> set[bytes]:
 # ----------------------------------------------------------------------------
 
 
-def scan_submitted_burns(
-    client: Any,
-    chain: Chain,
-    adapter: str,
-    from_block: int,
-    to_block: int,
-) -> tuple[set[bytes], int]:
-    """Collect ``burnShares`` calldata from Submit logs in ``[from_block, to_block]``.
-
-    Scans in chain-sized chunks and stops after ``MAX_SUBMIT_LOG_REQUESTS_PER_RUN``
-    requests, returning the calldata found and the last block actually scanned so
-    the next run resumes there.
-    """
-    span = SUBMIT_LOG_BLOCK_RANGE_BY_CHAIN.get(chain, DEFAULT_SUBMIT_LOG_BLOCK_RANGE)
-    found: set[bytes] = set()
-    scanned_to = from_block - 1
-    for _ in range(MAX_SUBMIT_LOG_REQUESTS_PER_RUN):
-        if scanned_to >= to_block:
-            break
-        start = scanned_to + 1
-        end = min(start + span - 1, to_block)
-        logs = client.eth.get_logs(
-            {"address": adapter, "fromBlock": start, "toBlock": end, "topics": [SUBMIT_TOPIC, BURN_SHARES_TOPIC]}
-        )
-        for log in logs:
-            data, _executable_at = abi_decode(["bytes", "uint256"], bytes(log["data"]))
-            found.add(bytes(data))
-        scanned_to = end
-    return found, scanned_to
-
-
-def load_adapter_state(
-    client: Any,
-    chain: Chain,
-    adapter_address: str,
-    creation_block: int,
-    block_number: int,
-) -> AdapterTimelockState:
-    """Read ``timelock(burnShares)`` and every pending burn of one adapter."""
+def load_adapter_state(client: Any, adapter_address: str, block_number: int) -> AdapterTimelockState:
+    """Read the burn timelock, canonical pending burns, and share accounting of one adapter."""
     adapter = client.eth.contract(address=Web3.to_checksum_address(adapter_address), abi=ABI_MARKET_V1_ADAPTER_V2)
     fns = adapter.functions
     length, burn_timelock, morpho_address = _execute(
         client, [fns.marketIdsLength(), fns.timelock(BURN_SHARES_SELECTOR), fns.morpho()], block_number
     )
-    market_ids: List[bytes] = _execute(client, [fns.marketIds(i) for i in range(length)], block_number)
+    held: List[bytes] = _execute(client, [fns.marketIds(i) for i in range(length)], block_number)
+    markets = sorted(set(held) | _known_markets(adapter.address))
 
-    cursor = _read_int(_key(adapter.address, "cursor", SUBMIT_LOG_CURSOR_TYPE))
-    from_block = max(creation_block, cursor - LOG_OVERLAP_BLOCKS) if cursor else creation_block
-    scan_error = ""
-    try:
-        discovered, scanned_to = scan_submitted_burns(client, chain, adapter.address, from_block, block_number)
-    except Exception as e:
-        # Keep the canonical/tracked checks rather than losing the adapter entirely;
-        # the caller fails the run on ``scan_error``.
-        logger.exception("Submit log scan failed for adapter %s on %s", adapter.address, chain.name)
-        discovered, scanned_to = set(), (cursor or creation_block - 1)
-        scan_error = f"{type(e).__name__}: {str(e)[:200]}"
-
-    candidates = sorted(
-        {burn_shares_calldata(m) for m in market_ids} | _tracked_data(adapter.address) | discovered,
-    )
-    # Shorter calldata can't decode the bytes32 argument, so it can never execute.
-    candidates = [data for data in candidates if len(data) >= BURN_SHARES_MIN_LENGTH]
-    executable_at = _execute(client, [fns.executableAt(data) for data in candidates], block_number)
-    pending_data = [data for data, at in zip(candidates, executable_at) if at > 0]
-
-    burned_markets = sorted({data[4:BURN_SHARES_MIN_LENGTH] for data in pending_data})
     blue = client.eth.contract(address=morpho_address, abi=ABI_MORPHO_BLUE)
-    values = _execute(
+    per_market = 4
+    responses = _execute(
         client,
-        [f for m in burned_markets for f in (fns.supplyShares(m), blue.functions.market(m))],
+        [
+            f
+            for m in markets
+            for f in (
+                fns.executableAt(burn_shares_calldata(m)),
+                fns.supplyShares(m),
+                blue.functions.position(m, adapter.address),
+                blue.functions.market(m),
+            )
+        ],
         block_number,
     )
-    shares_by_market: Dict[bytes, tuple[int, int]] = {}
-    for index, market_id in enumerate(burned_markets):
-        shares, market = values[index * 2], values[index * 2 + 1]
-        shares_by_market[market_id] = (shares, to_assets_down(shares, market[0], market[1]))
 
-    pending = []
-    for data, at in zip(candidates, executable_at):
-        if at > 0:
-            shares, assets = shares_by_market[data[4:BURN_SHARES_MIN_LENGTH]]
-            pending.append(PendingBurn(data=data, executable_at=at, shares=shares, assets=assets))
+    pending: List[PendingBurn] = []
+    balances: List[MarketBalance] = []
+    for index, market_id in enumerate(markets):
+        executable_at, adapter_shares, position, market = responses[index * per_market : (index + 1) * per_market]
+        balance = MarketBalance(
+            market_id=Web3.to_hex(market_id),
+            adapter_shares=adapter_shares,
+            morpho_shares=position[0],
+            total_supply_assets=market[0],
+            total_supply_shares=market[1],
+        )
+        balances.append(balance)
+        if executable_at > 0:
+            pending.append(
+                PendingBurn(balance.market_id, executable_at, adapter_shares, balance.assets(adapter_shares))
+            )
     return AdapterTimelockState(
-        adapter=adapter.address,
-        burn_timelock=burn_timelock,
-        pending_burns=pending,
-        scanned_to_block=scanned_to,
-        lag_blocks=block_number - scanned_to,
-        scan_error=scan_error,
+        adapter=adapter.address, burn_timelock=burn_timelock, pending_burns=pending, balances=balances
     )
 
 
-def load_adapter_states(chain: Chain, adapters: Dict[str, int]) -> List[AdapterTimelockState]:
-    """Load every ``MorphoMarketV1AdapterV2`` of one vault, given ``{adapter: creation block}``."""
+def load_adapter_states(chain: Chain, adapters: List[str]) -> List[AdapterTimelockState]:
+    """Load the timelock state of every ``MorphoMarketV1AdapterV2`` of one vault."""
     if not adapters:
         return []
     client = ChainManager.get_client(chain)
     block_number = int(client.eth.block_number)
-    return [
-        load_adapter_state(client, chain, adapter, creation_block, block_number)
-        for adapter, creation_block in sorted(adapters.items())
-    ]
+    return [load_adapter_state(client, adapter, block_number) for adapter in adapters]
 
 
 # ----------------------------------------------------------------------------
@@ -294,6 +230,18 @@ def _address_link(address: str, chain: Chain) -> str:
     return f"[{address}]({base}/address/{address})" if base else address
 
 
+def _market_label(market_id: str, chain: Chain) -> tuple[str, int | None, str | None]:
+    """Return ``(markdown market link, loan decimals, loan symbol)``."""
+    metadata = fetch_market_metadata(market_id, chain)
+    if metadata:
+        return (
+            f"[{metadata['name']}]({get_market_url(market_id, chain)})",
+            metadata["loan_decimals"],
+            metadata["loan_symbol"],
+        )
+    return f"[{market_id}]({get_market_url(market_id, chain)})", None, None
+
+
 def _burn_body(
     chain: Chain,
     adapter: str,
@@ -302,30 +250,16 @@ def _burn_body(
     *,
     reminder: bool,
 ) -> str:
-    metadata = fetch_market_metadata(burn.market_id, chain)
-    if metadata:
-        market = f"[{metadata['name']}]({get_market_url(burn.market_id, chain)})"
-        decimals, symbol = metadata["loan_decimals"], metadata["loan_symbol"]
-    else:
-        market = f"[{burn.market_id}]({get_market_url(burn.market_id, chain)})"
-        decimals, symbol = None, None
+    market, decimals, symbol = _market_label(burn.market_id, chain)
     title = "⏳ Reminder: adapter share burn is close" if reminder else "🔴 Adapter share burn submitted"
-    lines = [
-        f"{title}: `burnShares` on market {market}",
-        f"🧩 Adapter: {_address_link(adapter, chain)}",
-        f"💸 At risk: {format_amount_at_risk(burn.assets, decimals, symbol, total_assets)}",
-        f"⏰ Executable at: {format_ts(burn.executable_at)} {format_countdown(burn.executable_at)}",
-    ]
-    if burn.extra_bytes > 0:
-        lines.append(
-            f"⚠️ Submitted with non-canonical calldata ({burn.extra_bytes} trailing bytes), "
-            f"so revoke must use the exact data: `0x{burn.data.hex()}`"
-        )
-    lines.append(
+    return (
+        f"{title}: `burnShares` on market {market}\n"
+        f"🧩 Adapter: {_address_link(adapter, chain)}\n"
+        f"💸 At risk: {format_amount_at_risk(burn.assets, decimals, symbol, total_assets)}\n"
+        f"⏰ Executable at: {format_ts(burn.executable_at)} {format_countdown(burn.executable_at)}\n"
         "Burning the shares writes off the adapter's supply in this market. "
         "If unintended, the curator or a sentinel can call `revoke(data)` on the adapter."
     )
-    return "\n".join(lines)
 
 
 def _diff_burn_timelock(chain: Chain, state: AdapterTimelockState, diff: VaultDiff) -> None:
@@ -345,11 +279,11 @@ def _diff_burn_timelock(chain: Chain, state: AdapterTimelockState, diff: VaultDi
 def _diff_pending_burns(chain: Chain, total_assets: int | None, state: AdapterTimelockState, diff: VaultDiff) -> None:
     """Alert on new pending burns (CRITICAL if the adapter holds shares), remind near the deadline, note resolutions."""
     now = int(datetime.now().timestamp())
-    current: Dict[str, str] = {}  # data key → market id
+    current: set[str] = set()
     for burn in state.pending_burns:
-        current[burn.data_key] = burn.market_id
-        cache_key = _key(state.adapter, burn.data_key, PENDING_BURN_TYPE)
-        reminder_key = _key(state.adapter, burn.data_key, PENDING_BURN_REMINDER_TYPE)
+        current.add(burn.market_id)
+        cache_key = _key(state.adapter, burn.market_id, PENDING_BURN_TYPE)
+        reminder_key = _key(state.adapter, burn.market_id, PENDING_BURN_REMINDER_TYPE)
         in_window = now >= burn.executable_at - REMINDER_WINDOW_SECONDS
         if _read_int(cache_key) == burn.executable_at:
             if burn.shares > 0 and in_window and _read_int(reminder_key) != burn.executable_at:
@@ -370,10 +304,9 @@ def _diff_pending_burns(chain: Chain, total_assets: int | None, state: AdapterTi
         diff.defer(_write, cache_key, burn.executable_at)
 
     index_key = _key(state.adapter, "pending_burns", PENDING_BURN_INDEX_TYPE)
-    previous = dict(item.split(":", 1) for item in _read_str(index_key).split(",") if ":" in item)
-    for data_key in sorted(set(previous) - set(current)):
-        market_id = previous[data_key]
-        cache_key = _key(state.adapter, data_key, PENDING_BURN_TYPE)
+    previous = {m for m in _read_str(index_key).split(",") if m}
+    for market_id in sorted(previous - current):
+        cache_key = _key(state.adapter, market_id, PENDING_BURN_TYPE)
         executable_at = _read_int(cache_key)
         verb = "executed" if 0 < executable_at <= now else "revoked"
         diff.alert(
@@ -384,16 +317,42 @@ def _diff_pending_burns(chain: Chain, total_assets: int | None, state: AdapterTi
         )
         # Clear the cursor so a later re-submit with the same executableAt still alerts.
         diff.defer(_write, cache_key, 0)
-    diff.defer(_write, index_key, ",".join(f"{k}:{m}" for k, m in sorted(current.items())))
+    diff.defer(_write, index_key, ",".join(sorted(current)))
 
-    # Keep every pending calldata verbatim so it is re-read even once its Submit
-    # log is behind the cursor or its market leaves the adapter's held list.
-    tracked = ",".join(sorted(burn.data.hex() for burn in state.pending_burns))
-    diff.defer(_write, _key(state.adapter, "tracked", TRACKED_BURN_DATA_TYPE), tracked)
-    diff.defer(_write, _key(state.adapter, "cursor", SUBMIT_LOG_CURSOR_TYPE), state.scanned_to_block)
+
+def _diff_written_off(chain: Chain, total_assets: int | None, state: AdapterTimelockState, diff: VaultDiff) -> None:
+    """Alert CRITICAL when the adapter stops accounting for Morpho shares it still holds.
+
+    This catches an executed ``burnShares`` whatever calldata it was submitted
+    with, including padded calldata the pending check can't see. Alerts once per
+    increase of the unaccounted amount.
+    """
+    for balance in state.balances:
+        cache_key = _key(state.adapter, balance.market_id, WRITTEN_OFF_TYPE)
+        last = _read_int(cache_key)
+        unaccounted = balance.unaccounted_shares
+        if unaccounted > last:
+            market, decimals, symbol = _market_label(balance.market_id, chain)
+            amount = format_amount_at_risk(balance.assets(unaccounted), decimals, symbol, total_assets)
+            diff.loss(
+                f"🔴 Adapter supply written off on market {market}\n"
+                f"🧩 Adapter: {_address_link(state.adapter, chain)}\n"
+                f"💸 Lost: {amount}\n"
+                f"The adapter accounts for {balance.adapter_shares:,} shares but holds {balance.morpho_shares:,} "
+                "on Morpho Blue: shares were burned (`burnShares` executed) or, rarely, donated to the adapter."
+            )
+        if unaccounted != last:
+            diff.defer(_write, cache_key, unaccounted)
+
+    # Remember every market with a position so a burned market stays checked after it leaves ``marketIds``.
+    known = sorted(
+        b.market_id.removeprefix("0x") for b in state.balances if b.adapter_shares > 0 or b.morpho_shares > 0
+    )
+    diff.defer(_write, _key(state.adapter, "known", KNOWN_MARKETS_TYPE), ",".join(known))
 
 
 def diff_adapter(chain: Chain, total_assets: int | None, state: AdapterTimelockState, diff: VaultDiff) -> None:
     """Diff one adapter's on-chain timelock state against the cache into the vault's ``diff``."""
     _diff_burn_timelock(chain, state, diff)
     _diff_pending_burns(chain, total_assets, state, diff)
+    _diff_written_off(chain, total_assets, state, diff)
