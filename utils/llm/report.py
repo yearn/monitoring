@@ -429,8 +429,10 @@ def _script_call_what(script_call: ScriptCall) -> str:
     """Short description of one Executor script call's function."""
     if script_call.decoded is not None:
         return f"`{script_call.decoded.signature}`"
-    if len(script_call.data) < 10:
+    if script_call.data == "0x":
         return "empty calldata (no function selector)"
+    if len(script_call.data) < 10:
+        return f"undecoded short payload `{script_call.data}` (no full selector)"
     return f"undecoded selector `{script_call.data[:10]}`"
 
 

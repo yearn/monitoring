@@ -1353,8 +1353,11 @@ def _format_script_calls(call: DecodedCall, label: str, labels: dict[str, str], 
             lines.append(rendered.replace(f"{nested_indent}Call 1:", f"{header}:", 1))
         elif script_call.decoded is not None:
             lines.append(f"{header}: {script_call.decoded.signature}")
-        elif len(script_call.data) < 10:
+        elif script_call.data == "0x":
             lines.append(f"{header}: empty calldata (no function selector)")
+        elif len(script_call.data) < 10:
+            # 1–3 bytes is still forwarded as calldata and can hit a different fallback path than an empty call.
+            lines.append(f"{header}: UNDECODED (short payload {script_call.data}, no full selector)")
         else:
             lines.append(f"{header}: UNDECODED (selector {script_call.data[:10]}, data {script_call.data})")
     return "\n".join(lines)

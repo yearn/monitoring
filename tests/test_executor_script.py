@@ -134,11 +134,29 @@ class TestScriptRendering(unittest.TestCase):
             self.decoded.function_name,
             self.decoded.signature,
             self.decoded.params,
-            (ScriptCall(TARGETS[0], "0x12345678", None), ScriptCall(TARGETS[1], "0x", None)),
+            (
+                ScriptCall(TARGETS[0], "0x12345678", None),
+                ScriptCall(TARGETS[1], "0x", None),
+                ScriptCall(TARGETS[2], "0x010203", None),
+            ),
         )
         rendered = _format_decoded_calls([call])
         self.assertIn(f"Script call 1 → {TARGETS[0]}: UNDECODED (selector 0x12345678", rendered)
         self.assertIn(f"Script call 2 → {TARGETS[1]}: empty calldata", rendered)
+        self.assertIn(f"Script call 3 → {TARGETS[2]}: UNDECODED (short payload 0x010203, no full selector)", rendered)
+
+    def test_report_keeps_short_payload_apart_from_empty_calldata(self) -> None:
+        call = DecodedCall(
+            self.decoded.function_name,
+            self.decoded.signature,
+            self.decoded.params,
+            (ScriptCall(TARGETS[0], "0x", None), ScriptCall(TARGETS[1], "0x010203", None)),
+        )
+        lines = _format_params(call, 1, {}, ["_script"], "")
+        self.assertTrue(lines[1].startswith("  - Script call 1: empty calldata (no function selector) on "))
+        self.assertTrue(
+            lines[2].startswith("  - Script call 2: undecoded short payload `0x010203` (no full selector) on ")
+        )
 
     def test_report_links_each_script_target(self) -> None:
         lines = _format_params(self.decoded, 1, {}, ["_script"], "")
