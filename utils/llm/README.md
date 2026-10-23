@@ -59,6 +59,8 @@ Converts raw hex calldata into a structured `DecodedCall`:
 
 Result: `DecodedCall(function_name="upgradeTo", signature="upgradeTo(address)", params=[("address", "0x...")])`
 
+A Yearn governance Executor `execute(bytes)` call also gets `script_calls`: its `_script` is packed (a 32-byte `target | calldata size` header per call, then the calldata), not ABI-encoded, so the generic nested-`bytes` decoding can't read it. `split_packed_script` (`utils/calldata/wrappers.py`) splits it the same way `Executor.execute` does and fails on any malformed script. Each inner call is then decoded against its own target's ABI. The prompt and the report's Call Flow list each script call with its target instead of the hex. Before this, the model sliced yChad nonce 2299's script one hex digit off, reported a nonexistent selector `0x4759be10` where the script actually made six `accept_management()` calls, and rated the batch HIGH because of "unresolved downstream calls". The system prompt now forbids reading selectors or targets off raw hex.
+
 ### 2. Verified Source Context (`utils/source_context.py`)
 
 For each `(target, function)` pair, fetches the verified source via the Etherscan v2 multichain API and extracts:
@@ -150,6 +152,7 @@ For the ProxyAdmin pattern, the tx target is the ProxyAdmin and the actual proxy
 | OpenZeppelin `TimelockController` | `schedule`, `scheduleBatch`, `execute`, `executeBatch` |
 | Compound-style `Timelock` | `queueTransaction`, `executeTransaction` (inner calldata = `selector(signature) ++ data` when `signature` is set) |
 | Maple `GovernorTimelock` | `scheduleProposals` |
+| Yearn governance `Executor` | `execute(bytes)` (packed script, see Calldata Decoding) |
 
 Without this, a Safe tx that schedules or executes a timelock batch of upgrades (the CAP multisig calling `executeBatch` on its `TimelockController`) was explained with no implementation diff at all, since only the outer `executeBatch` was checked. Safe alerts (`protocols/safe/main.py`) also print the same `🅿️ Proxy` / `🔄 Upgrade` / `📊 Diff` lines as timelock alerts, for direct, multisend and wrapped upgrades, all rendered by `format_upgrade_lines`.
 

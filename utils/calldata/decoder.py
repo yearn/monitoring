@@ -15,6 +15,7 @@ from eth_utils import to_checksum_address
 
 from utils.cache import cache_path
 from utils.calldata.known_selectors import KNOWN_SELECTORS
+from utils.calldata.wrappers import PACKED_SCRIPT_SIGNATURE, split_packed_script
 from utils.http_client import fetch_json
 from utils.logger import get_logger
 
@@ -64,12 +65,28 @@ _selector_cache: dict[str, str | None] = _load_selector_cache()
 
 
 @dataclass(frozen=True)
+class ScriptCall:
+    """One call packed inside a Yearn Executor ``execute(bytes)`` script."""
+
+    target: str  # checksummed
+    data: str  # 0x-prefixed calldata
+    decoded: "DecodedCall | None"
+
+
+@dataclass(frozen=True)
 class DecodedCall:
-    """Result of decoding a calldata hex string."""
+    """Result of decoding a calldata hex string.
+
+    ``script_calls`` holds the calls packed in a Yearn Executor
+    ``execute(bytes)`` script, in execution order; empty for every other call.
+    The script is not ABI-encoded calldata, so the generic nested-``bytes``
+    decoding can't see inside it.
+    """
 
     function_name: str
     signature: str
     params: list[tuple[str, Any]] = field(default_factory=list)
+    script_calls: tuple[ScriptCall, ...] = ()
 
 
 def is_selector_resolvable_offline(selector_hex: str) -> bool:
@@ -336,7 +353,34 @@ def decode_calldata(data_hex: str, chain_id: int | None = None, target: str | No
             except Exception:
                 logger.debug("Failed to decode params for %s with types %s", selector, param_types)
 
-    return DecodedCall(function_name=func_name, signature=signature, params=params)
+    script_calls = _decode_script_calls(signature, params, chain_id)
+    return DecodedCall(function_name=func_name, signature=signature, params=params, script_calls=script_calls)
+
+
+def _decode_script_calls(signature: str, params: list[tuple[str, Any]], chain_id: int | None) -> tuple[ScriptCall, ...]:
+    """Split and decode a Yearn Executor script; () for anything else.
+
+    Each inner call is decoded against its own target's verified ABI when
+    ``chain_id`` is known. Without it, only offline-resolvable selectors are
+    decoded so an unknown selector never costs a 4byte round trip.
+    """
+    if signature != PACKED_SCRIPT_SIGNATURE or len(params) != 1 or not isinstance(params[0][1], bytes):
+        return ()
+    try:
+        pairs = split_packed_script(params[0][1])
+    except ValueError as e:
+        logger.debug("execute(bytes) argument is not an Executor script: %s", e)
+        return ()
+
+    calls: list[ScriptCall] = []
+    for target, data in pairs:
+        target = to_checksum_address(target)
+        data_hex = "0x" + data.hex()
+        decoded: DecodedCall | None = None
+        if len(data) >= 4 and (chain_id is not None or is_selector_resolvable_offline(data_hex[:10])):
+            decoded = decode_calldata(data_hex, chain_id=chain_id, target=target)
+        calls.append(ScriptCall(target=target, data=data_hex, decoded=decoded))
+    return tuple(calls)
 
 
 # How many levels of `bytes` parameters holding inner calldata we unwrap. Two is

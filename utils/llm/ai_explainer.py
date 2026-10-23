@@ -110,6 +110,10 @@ Address hyperlink rule (applies to DETAIL only):
 - If an address is not in that section, write the full address in backticks unlinked.
 - The report already contains a code-generated Call Flow listing every call and
   argument, so do not re-list the raw calldata — explain what it means.
+- Never derive a function selector, target address, or argument by slicing raw hex
+  yourself. Nested calls the code decoded (↳ lines, Executor script calls) are the only
+  source for what a payload calls. A payload left as hex is undecoded: say so and treat
+  its effect as unverified, but do not name a selector or target read off the hex.
 
 Critical rules for parameter interpretation:
 - Do NOT assume the semantic meaning of a parameter from its function name. DeFi protocols
@@ -1074,6 +1078,10 @@ def _extract_address_args(decoded: DecodedCall, _depth: int = 0) -> list[str]:
             inner = try_decode_inner_calldata(value)
             if inner:
                 out.extend(_extract_address_args(inner, _depth + 1))
+    for script_call in decoded.script_calls:
+        out.append(script_call.target)
+        if script_call.decoded is not None and _depth < MAX_BYTES_RECURSION_DEPTH:
+            out.extend(_extract_address_args(script_call.decoded, _depth + 1))
     return out
 
 
@@ -1191,6 +1199,15 @@ def _label_mentions(base: str, name: str) -> bool:
     return bool(base_lower) and (name_lower in base_lower or base_lower in name_lower)
 
 
+def _with_script_calls(decoded_calls: list[DecodedCall]) -> list[DecodedCall]:
+    """The calls followed by every decoded Executor script call they carry, depth-first."""
+    out: list[DecodedCall] = []
+    for call in decoded_calls:
+        out.append(call)
+        out.extend(_with_script_calls([sc.decoded for sc in call.script_calls if sc.decoded is not None]))
+    return out
+
+
 def _collect_risk_anchors(decoded_calls: list[DecodedCall]) -> str:
     """Build the Risk Anchors prompt section for calls with known anchors.
 
@@ -1201,7 +1218,7 @@ def _collect_risk_anchors(decoded_calls: list[DecodedCall]) -> str:
     """
     seen: set[tuple[str, str]] = set()
     anchored: list[tuple[str, RiskAnchor]] = []
-    for call in decoded_calls:
+    for call in _with_script_calls(decoded_calls):
         # The decoder normalizes signatures to the 4byte-selector text form, so
         # we re-compute the selector locally rather than carrying it through.
         try:
@@ -1304,6 +1321,8 @@ def _format_decoded_calls(
                 else:
                     lines.append(f"{_indent}  {label}:")
                     lines.extend(f"{_indent}    - {_annotate_address(v, labels)}" for v in value)
+            elif type_str == "bytes" and call.script_calls:
+                lines.append(_format_script_calls(call, label, labels, _depth, _indent))
             elif type_str == "bytes" and _depth < MAX_BYTES_RECURSION_DEPTH:
                 inner = try_decode_inner_calldata(value)
                 if inner:
@@ -1315,6 +1334,30 @@ def _format_decoded_calls(
                 lines.append(f"{_indent}  {label}: {_render_prompt_value(value)}")
         parts.append("\n".join(lines))
     return "\n\n".join(parts)
+
+
+def _format_script_calls(call: DecodedCall, label: str, labels: dict[str, str], depth: int, indent: str) -> str:
+    """Prompt lines for a Yearn Executor script, one entry per packed call.
+
+    The script is packed (32-byte ``target | size`` header + calldata per call),
+    not ABI-encoded, so it is split by code here; the LLM must never slice it.
+    """
+    count = len(call.script_calls)
+    noun = "call" if count == 1 else "calls"
+    lines = [f"{indent}  {label}: ↳ Executor script, {count} {noun}; each is made by the Executor, not the sender"]
+    nested_indent = indent + "    "
+    for k, script_call in enumerate(call.script_calls, start=1):
+        header = f"{nested_indent}Script call {k} → {_annotate_address(script_call.target, labels)}"
+        if script_call.decoded is not None and depth < MAX_BYTES_RECURSION_DEPTH:
+            rendered = _format_decoded_calls([script_call.decoded], labels, _depth=depth + 1, _indent=nested_indent)
+            lines.append(rendered.replace(f"{nested_indent}Call 1:", f"{header}:", 1))
+        elif script_call.decoded is not None:
+            lines.append(f"{header}: {script_call.decoded.signature}")
+        elif len(script_call.data) < 10:
+            lines.append(f"{header}: empty calldata (no function selector)")
+        else:
+            lines.append(f"{header}: UNDECODED (selector {script_call.data[:10]}, data {script_call.data})")
+    return "\n".join(lines)
 
 
 def _format_prepared_calldata(
