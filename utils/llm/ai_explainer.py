@@ -183,9 +183,12 @@ Critical rules for parameter interpretation:
   no value leaves the protocol.
 - Base the risk tag on what this transaction executes. Missing context about something it
   does not execute — what a voted-on proposal would do, how a recipient later uses funds —
-  goes under `### Not verified` and does not raise the tag. A vote that moves no funds and
-  enacts nothing is LOW even when the proposal contents are unknown. This does not soften
-  the rules for unverified targets or undecoded payloads, which do execute here.
+  goes under `### Not verified` and does not raise the tag. This does not soften the rules
+  for unverified targets or undecoded payloads, which do execute here.
+- A call that only records a governance vote (any implementation) is LOW, even when the
+  proposal contents are unknown. Exceptions: the vote itself executes the proposal (e.g. an
+  Aragon-style `_executesIfDecided` flag set to true, or auto-execution on quorum) — judge
+  what executes; delegating voting power is not a vote.
 - When a Risk Anchors section is provided, treat it as a typical floor/ceiling, not a
   verdict. Adjust up or down based on the specific parameters (e.g. grantRole of a
   minor role can be LOW; an upgrade to fresh-bytecode code can be CRITICAL).

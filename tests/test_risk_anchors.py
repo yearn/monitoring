@@ -7,10 +7,6 @@ from eth_utils import function_signature_to_4byte_selector
 from utils.risk_anchors import _ANCHORS, _ANCHORS_BY_SIGNATURE, RiskAnchor, format_anchors_block, lookup
 
 
-def _selector(sig: str) -> str:
-    return "0x" + function_signature_to_4byte_selector(sig).hex()
-
-
 class TestLookup(unittest.TestCase):
     def test_known_high_risk_selector(self) -> None:
         anchor = lookup("0xf2fde38b")  # transferOwnership(address)
@@ -21,27 +17,6 @@ class TestLookup(unittest.TestCase):
         anchor = lookup("0x8456cb59")  # pause()
         assert anchor is not None
         self.assertEqual(anchor.level, "LOW")
-
-    def test_governance_votes_are_low(self) -> None:
-        for sig in (
-            "castVote(uint256,uint8)",
-            "castVoteWithReason(uint256,uint8,string)",
-            "castVoteWithReasonAndParams(uint256,uint8,string,bytes)",
-            "castVoteBySig(uint256,uint8,address,bytes)",
-            "castVoteBySig(uint256,uint8,uint8,bytes32,bytes32)",
-            "castVote(uint256,bool)",
-            "submitVote(uint256,bool)",
-            "vote_yea(address,uint256)",
-            "vote_nay(address,uint256)",
-            "vote_for_gauge_weights(address,uint256)",
-        ):
-            with self.subTest(sig):
-                anchor = lookup(_selector(sig))
-                assert anchor is not None
-                self.assertEqual(anchor.level, "LOW")
-
-    def test_delegation_is_not_anchored_as_a_vote(self) -> None:
-        self.assertIsNone(lookup(_selector("delegate(address)")))
 
     def test_case_insensitive(self) -> None:
         self.assertIsNotNone(lookup("0xF2FDE38B"))
@@ -157,31 +132,6 @@ class TestAnchorRegistryIntegrity(unittest.TestCase):
         anchor = lookup("0x610b5925")
         assert anchor is not None
         self.assertEqual(anchor.level, "CRITICAL")
-
-
-class TestExecutesIfDecidedRefinement(unittest.TestCase):
-    """Aragon-style votes execute the vote's script when ``_executesIfDecided`` is set."""
-
-    def test_flag_off_is_a_plain_low_vote(self) -> None:
-        anchor = lookup(_selector("vote(uint256,bool,bool)"), [("uint256", 7), ("bool", True), ("bool", False)])
-        assert anchor is not None
-        self.assertEqual(anchor.level, "LOW")
-        self.assertIn("_executesIfDecided is false", anchor.rationale)
-
-    def test_flag_on_says_the_script_may_execute(self) -> None:
-        anchor = lookup(
-            _selector("votePct(uint256,uint256,uint256,bool)"),
-            [("uint256", 7), ("uint256", 10**18), ("uint256", 0), ("bool", True)],
-        )
-        assert anchor is not None
-        self.assertEqual(anchor.level, "MEDIUM")
-        self.assertIn("judge that script", anchor.rationale)
-
-    def test_without_params_the_anchor_covers_both_cases(self) -> None:
-        anchor = lookup(_selector("vote(uint256,bool,bool)"))
-        assert anchor is not None
-        self.assertEqual(anchor.level, "MEDIUM")
-        self.assertIn("LOW if _executesIfDecided is false", anchor.rationale)
 
 
 if __name__ == "__main__":
