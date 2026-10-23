@@ -4,14 +4,20 @@ from typing import Any
 
 from web3 import Web3
 
-from protocols.morpho._alerts import VaultDiff, send_vault_alerts
+from protocols.morpho._alerts import REMINDER_WINDOW_SECONDS, VaultDiff, send_vault_alerts
 from protocols.morpho._shared import (
+    MORPHO_BLUE_ABI_PATH,
     PROTOCOL,
     MorphoMonitoringError,
     execute_graphql,
     fetch_market_metadata,
+    format_amount_at_risk,
+    format_countdown,
+    format_timelock,
+    format_ts,
     get_market_url,
     get_vault_url,
+    to_assets_down,
 )
 from protocols.morpho.config import VAULTS_V1_BY_CHAIN
 from utils.abi import load_abi
@@ -29,7 +35,9 @@ logger = get_logger("morpho.governance")
 
 PENDING_CAP_TYPE = "pending_cap"
 REMOVABLE_AT_TYPE = "removable_at"
+REMOVAL_REMINDER_TYPE = "removable_at_reminder"
 ABI_MORPHO = load_abi("protocols/morpho/abi/morpho.json")
+ABI_MORPHO_BLUE = load_abi(MORPHO_BLUE_ABI_PATH)
 
 
 @dataclass(frozen=True)
@@ -42,6 +50,11 @@ class MarketGovernanceState:
     pending_cap_timestamp: int
     current_cap: int
     removable_at: int
+    # The vault's own supply in the market on Morpho Blue. A removal that executes
+    # while this is non-zero writes the position off and the vault takes the loss.
+    supply_shares: int = 0
+    supply_assets: int = 0
+    vault_total_assets: int | None = None
 
 
 def fetch_pending_cap_market_ids(vault_address: str, chain: Chain) -> list[str]:
@@ -151,20 +164,35 @@ def _load_market_governance_states(
     client: Any,
     block_number: int,
 ) -> list[MarketGovernanceState]:
-    """Batch pending-cap and config reads for V1 vault markets."""
+    """Batch pending-cap, config, and vault-supply reads for V1 vault markets.
+
+    None of these reads go through a market's IRM, so they can't revert on a broken
+    market. ``totalAssets`` does (it values every withdraw-queue market), so it is
+    read separately and only feeds the optional "% of vault" figure.
+    """
+    morpho_address = morpho_contract.functions.MORPHO().call(block_identifier=block_number)
+    total_assets = _try_total_assets(morpho_contract, block_number)
+    blue = client.eth.contract(address=morpho_address, abi=ABI_MORPHO_BLUE)
+
+    per_market = 4
     with client.batch_requests() as batch:
         for market_id in market_ids:
             batch.add(morpho_contract.functions.pendingCap(market_id).call(block_identifier=block_number))
             batch.add(morpho_contract.functions.config(market_id).call(block_identifier=block_number))
+            batch.add(blue.functions.position(market_id, morpho_contract.address).call(block_identifier=block_number))
+            batch.add(blue.functions.market(market_id).call(block_identifier=block_number))
         responses = client.execute_batch(batch)
-    expected_count = len(market_ids) * 2
+    expected_count = len(market_ids) * per_market
     if len(responses) != expected_count:
-        raise ValueError(f"Expected {expected_count} pendingCap/config responses, got {len(responses)}")
+        raise ValueError(f"Expected {expected_count} pendingCap/config/position/market responses, got {len(responses)}")
 
     states = []
     for index, market_id in enumerate(market_ids):
-        pending_cap, pending_timestamp = responses[index * 2]
-        config = responses[index * 2 + 1]
+        offset = index * per_market
+        pending_cap, pending_timestamp = responses[offset]
+        config = responses[offset + 1]
+        supply_shares = responses[offset + 2][0]
+        market = responses[offset + 3]
         states.append(
             MarketGovernanceState(
                 vault_address=morpho_contract.address,
@@ -173,9 +201,21 @@ def _load_market_governance_states(
                 pending_cap_timestamp=pending_timestamp,
                 current_cap=config[0],
                 removable_at=config[2],
+                supply_shares=supply_shares,
+                supply_assets=to_assets_down(supply_shares, market[0], market[1]),
+                vault_total_assets=total_assets,
             )
         )
     return states
+
+
+def _try_total_assets(morpho_contract: Any, block_number: int) -> int | None:
+    """Best-effort ``totalAssets()``; None when it reverts (e.g. a withdraw-queue market's IRM reverts)."""
+    try:
+        return int(morpho_contract.functions.totalAssets().call(block_identifier=block_number))
+    except Exception as e:
+        logger.warning("totalAssets() failed for vault %s, alerts omit the vault share: %s", morpho_contract.address, e)
+        return None
 
 
 def _vault_header(name: str, vault_address: str, chain: Chain) -> str:
@@ -220,8 +260,35 @@ def _check_pending_cap(name: str, state: MarketGovernanceState, chain: Chain, di
     )
 
 
+def _removal_loss_body(state: MarketGovernanceState, chain: Chain, *, reminder: bool) -> str:
+    """Render the CRITICAL section for a queued removal of a market the vault still supplies."""
+    market_url = get_market_url(state.market_id, chain)
+    metadata = fetch_market_metadata(state.market_id, chain)
+    if metadata:
+        market_label = f"{metadata['name']} ({metadata['lltv'] / 1e18 * 100:.2f}%)"
+        decimals, symbol = metadata["loan_decimals"], metadata["loan_symbol"]
+    else:
+        market_label, decimals, symbol = state.market_id, None, None
+    at_risk = format_amount_at_risk(state.supply_assets, decimals, symbol, state.vault_total_assets)
+    title = "⏳ Reminder: market removal is close" if reminder else "🔴 Market removal queued with funds still supplied"
+    return (
+        f"{title}\n"
+        f"Market: [{market_label}]({market_url})\n"
+        f"💸 At risk: {at_risk}\n"
+        f"⏰ Removable at: {format_ts(state.removable_at)} {format_countdown(state.removable_at)}\n"
+        "Removing the market writes off the remaining supply. Withdraw it before the removal, "
+        "or have the guardian/curator call `revokePendingMarketRemoval`."
+    )
+
+
 def _check_market_removal(state: MarketGovernanceState, chain: Chain, diff: VaultDiff) -> None:
-    """Buffer a section for a newly queued V1 market removal."""
+    """Buffer a section for a queued V1 market removal.
+
+    A removal of a market the vault still supplies is CRITICAL, for any amount:
+    once ``removableAt`` passes, ``updateWithdrawQueue`` can drop the market and the
+    supply leaves ``totalAssets``. It is re-alerted once inside the reminder window.
+    A removal of an empty market is routine cleanup and stays MEDIUM.
+    """
     if state.removable_at <= 0:
         return
     last_timestamp = get_last_executed_morpho_from_file(
@@ -229,21 +296,31 @@ def _check_market_removal(state: MarketGovernanceState, chain: Chain, diff: Vaul
         state.market_id,
         REMOVABLE_AT_TYPE,
     )
+    at_risk = state.supply_shares > 0
     if state.removable_at <= last_timestamp:
-        logger.info(
-            "Skipping previously alerted market removal for vault %s market %s",
-            state.vault_address,
-            state.market_id,
-        )
+        if at_risk:
+            _check_removal_reminder(state, chain, diff)
+        else:
+            logger.info(
+                "Skipping previously alerted market removal for vault %s market %s",
+                state.vault_address,
+                state.market_id,
+            )
         return
 
-    market_url = get_market_url(state.market_id, chain)
-    market_name, _ = fetch_market_info(state.market_id, chain)
-    removable_at = datetime.fromtimestamp(state.removable_at).strftime("%Y-%m-%d %H:%M:%S")
-    diff.alert(
-        AlertSeverity.MEDIUM,
-        f"➖ Queued to remove market [{market_name}]({market_url}) at {removable_at}",
-    )
+    if at_risk:
+        diff.loss(_removal_loss_body(state, chain, reminder=False))
+        if _in_reminder_window(state.removable_at):
+            # The first alert already lands inside the window; don't remind right after it.
+            _defer_reminder_write(state, diff)
+    else:
+        market_url = get_market_url(state.market_id, chain)
+        market_name, _ = fetch_market_info(state.market_id, chain)
+        diff.alert(
+            AlertSeverity.MEDIUM,
+            f"➖ Queued to remove market [{market_name}]({market_url}) at {format_ts(state.removable_at)} "
+            "(no vault supply in the market)",
+        )
     diff.defer(
         write_last_executed_morpho_to_file,
         state.vault_address,
@@ -251,6 +328,31 @@ def _check_market_removal(state: MarketGovernanceState, chain: Chain, diff: Vaul
         REMOVABLE_AT_TYPE,
         state.removable_at,
     )
+
+
+def _in_reminder_window(deadline: int) -> bool:
+    return int(datetime.now().timestamp()) >= deadline - REMINDER_WINDOW_SECONDS
+
+
+def _defer_reminder_write(state: MarketGovernanceState, diff: VaultDiff) -> None:
+    diff.defer(
+        write_last_executed_morpho_to_file,
+        state.vault_address,
+        state.market_id,
+        REMOVAL_REMINDER_TYPE,
+        state.removable_at,
+    )
+
+
+def _check_removal_reminder(state: MarketGovernanceState, chain: Chain, diff: VaultDiff) -> None:
+    """Re-alert once when an already-alerted removal with supply nears ``removableAt``."""
+    if not _in_reminder_window(state.removable_at):
+        return
+    reminded_at = get_last_executed_morpho_from_file(state.vault_address, state.market_id, REMOVAL_REMINDER_TYPE)
+    if state.removable_at <= reminded_at:
+        return
+    diff.loss(_removal_loss_body(state, chain, reminder=True))
+    _defer_reminder_write(state, diff)
 
 
 def check_market_governance_state(name: str, state: MarketGovernanceState, chain: Chain, diff: VaultDiff) -> None:
@@ -279,11 +381,22 @@ def check_pending_role_change(
     role_type: str,
     timestamp: int,
     diff: VaultDiff,
+    message: str | None = None,
 ) -> None:
+    """Alert HIGH once per pending ``role_type`` change, keyed by its ``validAt`` timestamp."""
     market_id = ""  # use empty string for all markets because the value is used per vault
     if timestamp > get_last_executed_morpho_from_file(morpho_contract.address, market_id, role_type):
-        diff.alert(AlertSeverity.HIGH, f"🚨 {role_type.capitalize()} is changing")
+        diff.alert(AlertSeverity.HIGH, message or f"🚨 {role_type.capitalize()} is changing")
         diff.defer(write_last_executed_morpho_to_file, morpho_contract.address, market_id, role_type, timestamp)
+
+
+def format_timelock_decrease(current: int, new: int, valid_at: int) -> str:
+    """Render a pending V1 timelock change; only decreases are ever pending on V1."""
+    return (
+        f"🚨 Timelock decrease: {format_timelock(current)} → {format_timelock(new)}\n"
+        f"⏰ Executable at: {format_ts(valid_at)} {format_countdown(valid_at)}\n"
+        "A shorter timelock shrinks the window to react to cap changes and market removals."
+    )
 
 
 def check_timelock_and_guardian(
@@ -295,15 +408,20 @@ def check_timelock_and_guardian(
     with morpho_contract.w3.batch_requests() as batch:
         batch.add(morpho_contract.functions.pendingTimelock().call(block_identifier=block_number))
         batch.add(morpho_contract.functions.pendingGuardian().call(block_identifier=block_number))
+        batch.add(morpho_contract.functions.timelock().call(block_identifier=block_number))
         responses = client.execute_batch(batch)
-        if len(responses) != 2:
-            raise ValueError(f"Expected 2 responses from batch, got {len(responses)}")
+        if len(responses) != 3:
+            raise ValueError(f"Expected 3 responses from batch, got {len(responses)}")
 
-        timelock = responses[0][1]  # [1] to get the timestamp
-        guardian = responses[1][1]  # [1] to get the timestamp
+    pending_timelock_value, timelock_valid_at = responses[0]
+    guardian_valid_at = responses[1][1]  # [1] to get the timestamp
+    current_timelock = responses[2]
 
-    check_pending_role_change(morpho_contract, "timelock", timelock, diff)
-    check_pending_role_change(morpho_contract, "guardian", guardian, diff)
+    timelock_message = None
+    if timelock_valid_at > 0:
+        timelock_message = format_timelock_decrease(current_timelock, pending_timelock_value, timelock_valid_at)
+    check_pending_role_change(morpho_contract, "timelock", timelock_valid_at, diff, timelock_message)
+    check_pending_role_change(morpho_contract, "guardian", guardian_valid_at, diff)
 
 
 def get_data_for_chain(chain: Chain) -> None:

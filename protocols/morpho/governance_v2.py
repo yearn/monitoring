@@ -13,10 +13,14 @@ Detected and alerted:
 * **Owner / curator changes** — instant, no timelock.
 * **Sentinels / allocators / adapters** — added or removed.
 
-NOT covered: ``MorphoMarketV1AdapterV2``'s own internal timelock system. The
-GraphQL API does not surface adapter-internal pending operations; replaying
-their Submit/Accept/Revoke events would reintroduce the RPC cost we're
-explicitly avoiding. Phase-2 candidate.
+Pending operations that can write off vault funds are CRITICAL and sent as their
+own message (see ``_alerts.LOSS_PREFIX``), then re-alerted once near their
+execution time: ``removeAdapter`` of an adapter that still holds assets, and
+``decreaseTimelock(removeAdapter)`` while any adapter holds assets. Other
+timelock decreases and ``abdicate`` are HIGH.
+
+``MorphoMarketV1AdapterV2``'s own timelock (``burnShares``) is not exposed by the
+GraphQL API; ``adapter_timelocks_v2`` reads it on-chain with a few batched calls.
 """
 
 from __future__ import annotations
@@ -27,16 +31,21 @@ from typing import Any, Dict, List
 
 from web3 import Web3
 
-from protocols.morpho._alerts import VaultDiff, send_vault_alerts
+from protocols.morpho import adapter_timelocks_v2
+from protocols.morpho._alerts import REMINDER_WINDOW_SECONDS, VaultDiff, send_vault_alerts
 from protocols.morpho._shared import (
     PROTOCOL,
     MorphoV2MonitoringError,
     execute_graphql,
+    format_amount_at_risk,
+    format_countdown,
+    format_ts,
     get_vault_url,
     require_configured_keys,
 )
+from protocols.morpho.adapter_timelocks_v2 import AdapterTimelockState
 from protocols.morpho.config import VAULTS_V2_BY_CHAIN, get_vault_query_config
-from protocols.morpho.v2_decoders import decode_submit, submit_data_key
+from protocols.morpho.v2_decoders import decode_call, decode_submit, selector_of, submit_data_key
 from utils.alert import AlertSeverity
 from utils.cache import (
     get_last_value_for_key_from_file,
@@ -55,6 +64,9 @@ PENDING_INDEX_TYPE = "v2_pending_index"
 PENDING_FUNCTION_TYPE = "v2_pending_function"
 ROLE_TYPE = "v2_role"
 SET_TYPE = "v2_set"
+PENDING_REMINDER_TYPE = "v2_pending_reminder"
+
+REMOVE_ADAPTER_SELECTOR = selector_of("removeAdapter(address)")
 
 # Sentinel cache values for pending operations:
 # * positive int: validAt of the latest pending submission we've alerted on
@@ -63,19 +75,24 @@ SET_TYPE = "v2_set"
 EXECUTED = -1
 REVOKED = 0
 
+# Morpho caps query complexity at 1,000,000 and the page size multiplies the cost
+# of every nested field: first: 200 measured 1,151,000, first: 100 measures 575,500.
+GOVERNANCE_PAGE_SIZE = 100
+
 _GOVERNANCE_QUERY = """
-query GovernanceV2($addresses: [String!]!, $chainIds: [Int!]!) {
-  vaultV2s(first: 200, where: { address_in: $addresses, chainId_in: $chainIds }) {
+query GovernanceV2($addresses: [String!]!, $chainIds: [Int!]!, $first: Int!) {
+  vaultV2s(first: $first, where: { address_in: $addresses, chainId_in: $chainIds }) {
     items {
       address
       name
       chain { id }
+      totalAssets
       asset { symbol decimals }
       owner { address }
       curator { address }
       sentinels { sentinel { address } }
       allocators { allocator { address } }
-      adapters { items { address type } }
+      adapters { items { address type assets } }
       pendingConfigs {
         items { validAt functionName data txHash }
       }
@@ -121,6 +138,15 @@ class V2GovernanceSnapshot:
     # The vault's own asset — denominates absolute caps in decoded operations.
     asset_symbol: str = ""
     asset_decimals: int | None = None
+    total_assets: int | None = None
+    # Checksummed adapter address → assets it holds / GraphQL adapter type.
+    adapter_assets: Dict[str, int] = field(default_factory=dict)
+    adapter_types: Dict[str, str] = field(default_factory=dict)
+
+    @property
+    def market_v1_adapters(self) -> List[str]:
+        """Adapters with their own timelock (``MorphoMarketV1AdapterV2``)."""
+        return sorted(a for a, t in self.adapter_types.items() if t == "MorphoMarketV1")
 
 
 # ----------------------------------------------------------------------------
@@ -138,6 +164,10 @@ def _asset_decimals(item: Dict[str, Any]) -> int | None:
     """Return the vault asset's decimals, or None when the API omits them."""
     raw = (item.get("asset") or {}).get("decimals")
     return int(raw) if raw is not None else None
+
+
+def _optional_int(value: Any) -> int | None:
+    return int(value) if value is not None else None
 
 
 def _checksum_or_empty(value: str) -> str:
@@ -159,7 +189,7 @@ def fetch_governance_snapshots() -> Dict[Chain, List[V2GovernanceSnapshot]]:
 
     data = execute_graphql(
         _GOVERNANCE_QUERY,
-        {"addresses": addresses, "chainIds": chain_ids},
+        {"addresses": addresses, "chainIds": chain_ids, "first": GOVERNANCE_PAGE_SIZE},
         "Vault V2 governance",
         error_type=MorphoV2MonitoringError,
     )
@@ -179,7 +209,8 @@ def fetch_governance_snapshots() -> Dict[Chain, List[V2GovernanceSnapshot]]:
 
         sentinels = [_checksum_or_empty(s["sentinel"]["address"]) for s in (item.get("sentinels") or [])]
         allocators = [_checksum_or_empty(a["allocator"]["address"]) for a in (item.get("allocators") or [])]
-        adapters = [_checksum_or_empty(a["address"]) for a in ((item.get("adapters") or {}).get("items") or [])]
+        adapter_items = (item.get("adapters") or {}).get("items") or []
+        adapters = [_checksum_or_empty(a["address"]) for a in adapter_items]
         pending = [
             PendingConfig(
                 valid_at=int(pc["validAt"]),
@@ -203,6 +234,9 @@ def fetch_governance_snapshots() -> Dict[Chain, List[V2GovernanceSnapshot]]:
                 pending_configs=pending,
                 asset_symbol=(item.get("asset") or {}).get("symbol") or "",
                 asset_decimals=_asset_decimals(item),
+                total_assets=_optional_int(item.get("totalAssets")),
+                adapter_assets={_checksum_or_empty(a["address"]): int(a.get("assets") or 0) for a in adapter_items},
+                adapter_types={_checksum_or_empty(a["address"]): a.get("type") or "" for a in adapter_items},
             )
         )
 
@@ -236,27 +270,6 @@ def _write(key: str, value: Any) -> None:
 # ----------------------------------------------------------------------------
 # Alerting
 # ----------------------------------------------------------------------------
-
-
-def _format_ts(ts: int) -> str:
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _format_countdown(ts: int) -> str:
-    """Human-friendly time remaining until ``ts``, e.g. ``(3 days)``."""
-    seconds = ts - int(datetime.now().timestamp())
-    if seconds <= 0:
-        return "(now)"
-    days = seconds / 86400
-    if days >= 1:
-        n = round(days)
-        return f"({n} day{'s' if n != 1 else ''})"
-    hours = seconds / 3600
-    if hours >= 1:
-        n = round(hours)
-        return f"({n} hour{'s' if n != 1 else ''})"
-    n = max(round(seconds / 60), 1)
-    return f"({n} minute{'s' if n != 1 else ''})"
 
 
 def _explorer_link(chain: Chain, tx_hash: str) -> str:
@@ -295,10 +308,70 @@ def _vault_header(snapshot: V2GovernanceSnapshot) -> str:
     return f"V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) on {snapshot.chain.name}"
 
 
+def _held_assets(snapshot: V2GovernanceSnapshot) -> int:
+    return sum(snapshot.adapter_assets.values())
+
+
+def classify_pending(snapshot: V2GovernanceSnapshot, pc: PendingConfig) -> tuple[AlertSeverity, int | None]:
+    """Return the severity of a pending operation and, for potential losses, the assets at risk.
+
+    * ``removeAdapter(a)`` while ``a`` holds assets → CRITICAL: ``totalAssets`` is
+      the sum of adapter ``realAssets``, so removing it writes those assets off.
+    * ``decreaseTimelock(removeAdapter, …)`` while any adapter holds assets →
+      CRITICAL: it shrinks the window to react to such a removal.
+    * Other timelock decreases and ``abdicate`` (irreversible) → HIGH.
+    * Everything else → MEDIUM.
+    """
+    decoded = decode_call(pc.data)
+    if decoded is None:
+        return AlertSeverity.MEDIUM, None
+    name, args = decoded
+    if name == "removeAdapter":
+        assets = snapshot.adapter_assets.get(str(Web3.to_checksum_address(args[0])), 0)
+        return (AlertSeverity.CRITICAL, assets) if assets > 0 else (AlertSeverity.MEDIUM, None)
+    if name == "decreaseTimelock":
+        held = _held_assets(snapshot)
+        if bytes(args[0]) == REMOVE_ADAPTER_SELECTOR and held > 0:
+            return AlertSeverity.CRITICAL, held
+        return AlertSeverity.HIGH, None
+    if name == "abdicate":
+        return AlertSeverity.HIGH, None
+    return AlertSeverity.MEDIUM, None
+
+
+def _loss_body(
+    snapshot: V2GovernanceSnapshot,
+    pc: PendingConfig,
+    operation_label: str,
+    at_risk: int,
+    *,
+    reminder: bool,
+) -> str:
+    title = "⏳ Reminder: loss-causing operation is close" if reminder else "🔴 Submitted loss-causing operation"
+    amount = format_amount_at_risk(
+        at_risk, snapshot.asset_decimals, snapshot.asset_symbol or None, snapshot.total_assets
+    )
+    return (
+        f"{title}: {operation_label}\n"
+        f"💸 At risk: {amount}\n"
+        f"⏰ Executable at: {format_ts(pc.valid_at)} {format_countdown(pc.valid_at)}\n"
+        f"🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}\n"
+        f"{_loss_reason(pc)} If unintended, the curator or a sentinel can call `revoke(data)`."
+    )
+
+
+def _loss_reason(pc: PendingConfig) -> str:
+    decoded = decode_call(pc.data)
+    if decoded and decoded[0] == "decreaseTimelock":
+        return "Shortens the timelock on `removeAdapter` while adapters hold assets."
+    return "Removing an adapter that still holds assets writes them off; deallocate first."
+
+
 def _alert_pending_new(
     snapshot: V2GovernanceSnapshot,
     pending: List[tuple[PendingConfig, str]],
     diff: VaultDiff,
+    severity: AlertSeverity = AlertSeverity.MEDIUM,
 ) -> None:
     """Buffer a section for newly-submitted timelocked operation(s) on one vault.
 
@@ -313,9 +386,9 @@ def _alert_pending_new(
     if len(pending) == 1:
         pc, operation_label = pending[0]
         diff.alert(
-            AlertSeverity.MEDIUM,
+            severity,
             f"📥 Submitted: {operation_label}\n"
-            f"⏰ Executable at: {_format_ts(pc.valid_at)} {_format_countdown(pc.valid_at)}\n"
+            f"⏰ Executable at: {format_ts(pc.valid_at)} {format_countdown(pc.valid_at)}\n"
             f"🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}",
         )
         return
@@ -327,15 +400,15 @@ def _alert_pending_new(
         for _, operation_label in pending:
             lines.append(f"  • {operation_label}")
         pc0 = pending[0][0]
-        lines.append(f"⏰ Executable at: {_format_ts(pc0.valid_at)} {_format_countdown(pc0.valid_at)}")
+        lines.append(f"⏰ Executable at: {format_ts(pc0.valid_at)} {format_countdown(pc0.valid_at)}")
         lines.append(f"🔗 Tx: {_explorer_link(snapshot.chain, pc0.tx_hash)}")
     else:
         for pc, operation_label in pending:
             lines.append(f"  • {operation_label}")
-            lines.append(f"     ⏰ Executable at: {_format_ts(pc.valid_at)} {_format_countdown(pc.valid_at)}")
+            lines.append(f"     ⏰ Executable at: {format_ts(pc.valid_at)} {format_countdown(pc.valid_at)}")
             lines.append(f"     🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}")
 
-    diff.alert(AlertSeverity.MEDIUM, "\n".join(lines))
+    diff.alert(severity, "\n".join(lines))
 
 
 def _alert_pending_resolved(
@@ -356,7 +429,7 @@ def _alert_pending_resolved(
     operation = f"`{function_name}()`" if function_name else f"`{data_hash[:10]}…`"
     diff.alert(
         AlertSeverity.LOW,
-        f"{icon} Pending operation {operation} was {verb} (was due {_format_ts(last_valid_at)}).",
+        f"{icon} Pending operation {operation} was {verb} (was due {format_ts(last_valid_at)}).",
     )
 
 
@@ -385,20 +458,37 @@ def _diff_pending(snapshot: V2GovernanceSnapshot, diff: VaultDiff) -> None:
 
     current_keys: set[str] = set()
     new_pending: List[tuple[PendingConfig, str]] = []
+    group_severity = AlertSeverity.MEDIUM
+    now = int(datetime.now().timestamp())
     for pc in snapshot.pending_configs:
         current_keys.add(pc.data_hash)
         operation_label = _operation_label(snapshot, pc)
         diff.defer(_write, _pending_function_key(snapshot, pc.data_hash), _operation_function_name(pc, operation_label))
+        severity, at_risk = classify_pending(snapshot, pc)
         cache_key = morpho_key(addr, pc.data_hash, PENDING_TYPE)
+        reminder_key = morpho_key(addr, pc.data_hash, PENDING_REMINDER_TYPE)
+        in_window = now >= pc.valid_at - REMINDER_WINDOW_SECONDS
         last = _read_int(cache_key)
-        # Already alerted at this validAt, or marked executed.
-        if last == pc.valid_at or last == EXECUTED:
+        if last == EXECUTED:
+            continue
+        if last == pc.valid_at:
+            # Already alerted; a still-pending loss gets one reminder near its deadline.
+            if at_risk is not None and in_window and _read_int(reminder_key) != pc.valid_at:
+                diff.loss(_loss_body(snapshot, pc, operation_label, at_risk, reminder=True))
+                diff.defer(_write, reminder_key, pc.valid_at)
+            continue
+        diff.defer(_write, cache_key, pc.valid_at)
+        if at_risk is not None:
+            diff.loss(_loss_body(snapshot, pc, operation_label, at_risk, reminder=False))
+            if in_window:
+                diff.defer(_write, reminder_key, pc.valid_at)
             continue
         new_pending.append((pc, operation_label))
-        diff.defer(_write, cache_key, pc.valid_at)
+        if severity == AlertSeverity.HIGH:
+            group_severity = AlertSeverity.HIGH
 
-    # Group all newly-submitted operations for this vault into one section.
-    _alert_pending_new(snapshot, new_pending, diff)
+    # Group all other newly-submitted operations for this vault into one section.
+    _alert_pending_new(snapshot, new_pending, diff, group_severity)
 
     # Detect resolved entries: anything in last-run's index that isn't in the
     # current pending list. Reading a function-name key here is safe despite the
@@ -444,7 +534,10 @@ def _diff_set(snapshot: V2GovernanceSnapshot, set_name: str, current: List[str],
     diff.defer(_write, cache_key, ",".join(sorted(current_set)))
 
 
-def diff_and_alert(snapshot: V2GovernanceSnapshot) -> None:
+def diff_and_alert(
+    snapshot: V2GovernanceSnapshot,
+    adapter_states: List[AdapterTimelockState] | None = None,
+) -> None:
     """Diff a vault's snapshot against persisted state and emit one grouped alert.
 
     Every diff category (pending, owner/curator, sentinels/allocators/adapters)
@@ -457,6 +550,9 @@ def diff_and_alert(snapshot: V2GovernanceSnapshot) -> None:
     than treating them as delivered. A partial send (part 1 of 2 lands, part 2
     fails) therefore repeats the whole group next run — duplicates beat a
     governance change nobody ever sees.
+
+    ``adapter_states`` are the on-chain adapter timelock reads; ``None`` skips the
+    adapter diff (e.g. when the RPC read failed) so its cache is left untouched.
     """
     diff = VaultDiff()
     _diff_pending(snapshot, diff)
@@ -465,6 +561,8 @@ def diff_and_alert(snapshot: V2GovernanceSnapshot) -> None:
     _diff_set(snapshot, "sentinels", snapshot.sentinels, diff)
     _diff_set(snapshot, "allocators", snapshot.allocators, diff)
     _diff_set(snapshot, "adapters", snapshot.adapters, diff)
+    for state in adapter_states or []:
+        adapter_timelocks_v2.diff_adapter(snapshot.chain, snapshot.total_assets, state, diff)
     send_vault_alerts(_vault_header(snapshot), diff.alerts, PROTOCOL)
     diff.commit()
 
@@ -487,8 +585,15 @@ def main() -> None:
         if not vaults:
             continue
         for vault in vaults:
+            adapter_states: List[AdapterTimelockState] | None = None
             try:
-                diff_and_alert(vault)
+                adapter_states = adapter_timelocks_v2.load_adapter_states(vault.chain, vault.market_v1_adapters)
+            except Exception as e:
+                # Still run the GraphQL diff; the adapter cache is left untouched until a read succeeds.
+                logger.exception("Failed to read adapter timelocks for %s on %s", vault.address, chain.name)
+                failures.append(f"{vault.name} adapters on {chain.name}: {type(e).__name__}: {e}")
+            try:
+                diff_and_alert(vault, adapter_states)
             except Exception as e:
                 logger.exception("Failed to process governance for %s on %s", vault.address, chain.name)
                 failures.append(f"{vault.name} on {chain.name}: {type(e).__name__}: {e}")

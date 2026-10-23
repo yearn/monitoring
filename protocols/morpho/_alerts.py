@@ -34,12 +34,26 @@ SECTION_SEPARATOR = "\n\n---\n\n"
 _MESSAGE_OVERHEAD = 64
 
 
+# Header prefix for findings that can write off vault funds (market removal,
+# adapter removal, share burn). They are sent as their own message so they never
+# drown in a routine grouped diff.
+LOSS_PREFIX = "🚨 POTENTIAL VAULT LOSS"
+
+# Pending loss operations are re-alerted once when their execution time is this close.
+REMINDER_WINDOW_SECONDS = 24 * 60 * 60
+
+
 @dataclass
 class VaultAlert:
-    """One section of a vault's grouped Telegram message."""
+    """One section of a vault's grouped Telegram message.
+
+    ``standalone`` sections are sent as their own message with ``LOSS_PREFIX``
+    instead of being grouped with the vault's other findings.
+    """
 
     severity: AlertSeverity
     body: str
+    standalone: bool = False
 
 
 @dataclass
@@ -52,6 +66,10 @@ class VaultDiff:
     def alert(self, severity: AlertSeverity, body: str) -> None:
         """Buffer one section of the vault's grouped message."""
         self.alerts.append(VaultAlert(severity, body))
+
+    def loss(self, body: str) -> None:
+        """Buffer a CRITICAL potential-loss finding, sent as its own message."""
+        self.alerts.append(VaultAlert(AlertSeverity.CRITICAL, body, standalone=True))
 
     def defer(self, write: Callable[..., Any], *args: Any) -> None:
         """Buffer a cache write to apply once the alert is delivered."""
@@ -111,7 +129,18 @@ def send_vault_alerts(header: str, alerts: List[VaultAlert], protocol: str) -> N
     No-op when ``alerts`` is empty so callers don't have to guard. Every part
     carries the same header and the highest severity of the whole group, so a
     LOW section bundled with an owner change still pings the channel.
+
+    Standalone (potential-loss) sections go out first, one message each, under a
+    ``LOSS_PREFIX`` header; the remaining sections are grouped as usual.
     """
+    for alert in alerts:
+        if alert.standalone:
+            _send_group(f"{LOSS_PREFIX} — {header}", [alert], protocol)
+    _send_group(header, [a for a in alerts if not a.standalone], protocol)
+
+
+def _send_group(header: str, alerts: List[VaultAlert], protocol: str) -> None:
+    """Send sections under one header at their highest severity, split into parts if long."""
     if not alerts:
         return
     severity = max((a.severity for a in alerts), key=_SEVERITY_ORDER.index)
