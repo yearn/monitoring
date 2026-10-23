@@ -18,6 +18,18 @@ class TestLookup(unittest.TestCase):
         assert anchor is not None
         self.assertEqual(anchor.level, "LOW")
 
+    def test_governance_votes_are_low(self) -> None:
+        for sig in (
+            "vote_yea(address,uint256)",
+            "vote_nay(address,uint256)",
+            "castVote(uint256,uint8)",
+            "castVoteWithReason(uint256,uint8,string)",
+        ):
+            with self.subTest(sig):
+                anchor = lookup("0x" + function_signature_to_4byte_selector(sig).hex())
+                assert anchor is not None
+                self.assertEqual(anchor.level, "LOW")
+
     def test_case_insensitive(self) -> None:
         self.assertIsNotNone(lookup("0xF2FDE38B"))
 

@@ -181,6 +181,11 @@ Critical rules for parameter interpretation:
   only by a privileged manual update_debt (outside the default queue and the DebtAllocator),
   limits depositors' withdrawals — say so in the TLDR and rate it at least MEDIUM, even when
   no value leaves the protocol.
+- Base the risk tag on what this transaction executes. Missing context about something it
+  does not execute — what a voted-on proposal would do, how a recipient later uses funds —
+  goes under `### Not verified` and does not raise the tag. A vote that moves no funds and
+  enacts nothing is LOW even when the proposal contents are unknown. This does not soften
+  the rules for unverified targets or undecoded payloads, which do execute here.
 - When a Risk Anchors section is provided, treat it as a typical floor/ceiling, not a
   verdict. Adjust up or down based on the specific parameters (e.g. grantRole of a
   minor role can be LOW; an upgrade to fresh-bytecode code can be CRITICAL).

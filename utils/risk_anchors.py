@@ -73,6 +73,20 @@ _ANCHORS_BY_SIGNATURE: dict[str, RiskAnchor] = {
     "diamondCut((address,uint8,bytes4[])[],address,bytes)": RiskAnchor(
         "HIGH", "diamondCut(): replaces/adds/removes selectors — bytecode-level change"
     ),
+    # Governance votes — record a ballot only; a passed proposal still needs its own execute()
+    # call, which is judged on its actions when it is queued.
+    "vote_yea(address,uint256)": RiskAnchor(
+        "LOW", "vote_yea() via Yearn Voter: records a yes vote; moves no funds and executes nothing"
+    ),
+    "vote_nay(address,uint256)": RiskAnchor(
+        "LOW", "vote_nay() via Yearn Voter: records a no vote; moves no funds and executes nothing"
+    ),
+    "castVote(uint256,uint8)": RiskAnchor(
+        "LOW", "castVote() on a Governor: records a vote; moves no funds and executes nothing"
+    ),
+    "castVoteWithReason(uint256,uint8,string)": RiskAnchor(
+        "LOW", "castVoteWithReason() on a Governor: records a vote; moves no funds and executes nothing"
+    ),
     # Gnosis Safe self-administration — changes who/what can move the multisig's funds
     "addOwnerWithThreshold(address,uint256)": RiskAnchor("HIGH", "addOwnerWithThreshold(): adds a Safe signer"),
     "removeOwner(address,address,uint256)": RiskAnchor("HIGH", "removeOwner(): removes a Safe signer"),
