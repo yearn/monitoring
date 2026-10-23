@@ -11,6 +11,7 @@ to a known multisig isn't HIGH; an upgrade of a vault to a fresh-bytecode
 implementation isn't LOW.
 
 Skipped intentionally:
+- delegate(address) — hands voting power to someone else; not a vote.
 - ERC20 transfer/approve — too context-dependent (rewards distribution vs
   exit liquidity look identical).
 - Generic timelock schedule/execute — the inner call is the thing being
@@ -73,20 +74,6 @@ _ANCHORS_BY_SIGNATURE: dict[str, RiskAnchor] = {
     "diamondCut((address,uint8,bytes4[])[],address,bytes)": RiskAnchor(
         "HIGH", "diamondCut(): replaces/adds/removes selectors — bytecode-level change"
     ),
-    # Governance votes — record a ballot only; a passed proposal still needs its own execute()
-    # call, which is judged on its actions when it is queued.
-    "vote_yea(address,uint256)": RiskAnchor(
-        "LOW", "vote_yea() via Yearn Voter: records a yes vote; moves no funds and executes nothing"
-    ),
-    "vote_nay(address,uint256)": RiskAnchor(
-        "LOW", "vote_nay() via Yearn Voter: records a no vote; moves no funds and executes nothing"
-    ),
-    "castVote(uint256,uint8)": RiskAnchor(
-        "LOW", "castVote() on a Governor: records a vote; moves no funds and executes nothing"
-    ),
-    "castVoteWithReason(uint256,uint8,string)": RiskAnchor(
-        "LOW", "castVoteWithReason() on a Governor: records a vote; moves no funds and executes nothing"
-    ),
     # Gnosis Safe self-administration — changes who/what can move the multisig's funds
     "addOwnerWithThreshold(address,uint256)": RiskAnchor("HIGH", "addOwnerWithThreshold(): adds a Safe signer"),
     "removeOwner(address,address,uint256)": RiskAnchor("HIGH", "removeOwner(): removes a Safe signer"),
@@ -97,6 +84,46 @@ _ANCHORS_BY_SIGNATURE: dict[str, RiskAnchor] = {
     "setGuard(address)": RiskAnchor("HIGH", "setGuard(): a guard can permit or block every Safe transaction"),
     "setFallbackHandler(address)": RiskAnchor("MEDIUM", "setFallbackHandler(): changes the Safe's fallback behavior"),
 }
+
+# Governance votes record a ballot and nothing else: a passed proposal still needs its
+# own execute() call, which is judged on its actions when it is queued. Delegation
+# (`delegate(address)`) is deliberately absent — it hands voting power to someone else.
+_VOTE_RATIONALE = "records a governance vote; moves no funds and executes nothing"
+_VOTE_SIGNATURES = (
+    # OpenZeppelin Governor / Compound GovernorBravo
+    "castVote(uint256,uint8)",
+    "castVoteWithReason(uint256,uint8,string)",
+    "castVoteWithReasonAndParams(uint256,uint8,string,bytes)",
+    "castVoteBySig(uint256,uint8,address,bytes)",
+    "castVoteBySig(uint256,uint8,uint8,bytes32,bytes32)",
+    # Compound GovernorAlpha
+    "castVote(uint256,bool)",
+    # Aave governance v2
+    "submitVote(uint256,bool)",
+    # Yearn Voter
+    "vote_yea(address,uint256)",
+    "vote_nay(address,uint256)",
+)
+_ANCHORS_BY_SIGNATURE.update(
+    {sig: RiskAnchor("LOW", f"{sig.split('(')[0]}(): {_VOTE_RATIONALE}") for sig in _VOTE_SIGNATURES}
+)
+_ANCHORS_BY_SIGNATURE["vote_for_gauge_weights(address,uint256)"] = RiskAnchor(
+    "LOW", "vote_for_gauge_weights(): shifts future gauge emissions; moves no funds from the voter"
+)
+
+# Aragon-style votes (Aragon Voting, Curve DAO) whose trailing bool `_executesIfDecided`
+# runs the vote's EVM script in this same transaction when this vote decides it.
+# Signature → index of that bool; `_refine_execute_if_decided_anchor` picks the level.
+_EXECUTES_IF_DECIDED_SIGNATURES: dict[str, int] = {
+    "vote(uint256,bool,bool)": 2,
+    "votePct(uint256,uint256,uint256,bool)": 3,
+}
+for _sig in _EXECUTES_IF_DECIDED_SIGNATURES:
+    _ANCHORS_BY_SIGNATURE[_sig] = RiskAnchor(
+        "MEDIUM",
+        f"{_sig.split('(')[0]}() Aragon-style vote: LOW if _executesIfDecided is false; if true and this "
+        "vote decides it, the vote's script executes now — judge that script",
+    )
 
 # Selector → RiskAnchor. Lowercase, with 0x prefix to match the decoder's format.
 _ANCHORS: dict[str, RiskAnchor] = {
@@ -109,6 +136,12 @@ _UPGRADE_AND_CALL_SELECTORS = frozenset(
     "0x" + function_signature_to_4byte_selector(sig).hex()
     for sig in ("upgradeToAndCall(address,bytes)", "upgradeAndCall(address,address,bytes)")
 )
+
+
+_EXECUTES_IF_DECIDED_INDEX: dict[str, int] = {
+    "0x" + function_signature_to_4byte_selector(sig).hex(): index
+    for sig, index in _EXECUTES_IF_DECIDED_SIGNATURES.items()
+}
 
 
 def lookup(selector_hex: str, params: list[tuple[str, Any]] | None = None) -> RiskAnchor | None:
@@ -125,7 +158,28 @@ def lookup(selector_hex: str, params: list[tuple[str, Any]] | None = None) -> Ri
         return anchor
     if selector_hex.lower() in _UPGRADE_AND_CALL_SELECTORS:
         return _refine_upgrade_anchor(anchor, params)
+    if selector_hex.lower() in _EXECUTES_IF_DECIDED_INDEX:
+        return _refine_execute_if_decided_anchor(anchor, params, _EXECUTES_IF_DECIDED_INDEX[selector_hex.lower()])
     return anchor
+
+
+def _refine_execute_if_decided_anchor(anchor: RiskAnchor, params: list[tuple[str, Any]], index: int) -> RiskAnchor:
+    """Rate an Aragon-style vote by its ``_executesIfDecided`` flag.
+
+    With the flag off the call only records a vote. With it on, a deciding vote
+    executes the proposal's script in this transaction, so the vote is only as
+    safe as that script.
+    """
+    if index >= len(params) or params[index][0] != "bool":
+        return anchor
+    name = anchor.rationale.split("(")[0]
+    if not params[index][1]:
+        return RiskAnchor("LOW", f"{name}(): {_VOTE_RATIONALE} (_executesIfDecided is false)")
+    return RiskAnchor(
+        "MEDIUM",
+        f"{name}(): _executesIfDecided is true — if this vote decides it, the vote's script executes "
+        "in this transaction; judge that script",
+    )
 
 
 def _refine_upgrade_anchor(anchor: RiskAnchor, params: list[tuple[str, Any]]) -> RiskAnchor:
