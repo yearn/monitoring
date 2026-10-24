@@ -8,7 +8,6 @@ from utils.chains import Chain
 KATANA_USDC = "0x203A662b0BD271A6ed5a60EdFbd04bFce608FD36"
 KATANA_USDT = "0x2DCa96907fde857dd3D816880A0df407eeB2D2F2"
 KATANA_WETH = "0xEE7D8BCFb72bC1880D0Cf19822eB0A2e6577aB62"
-KATANA_WBTC = "0x0913DA6Da4b42f538B445599b46Bb4622342Cf52"
 
 
 @dataclass(frozen=True)
@@ -94,7 +93,6 @@ YV_COLLATERAL_MARKETS_BY_ASSET: dict[Chain, dict[str, tuple[str, ...]]] = {
         KATANA_USDC: ("0x6691cdcadd5d23ac68d2c1cf54dc97ab8242d2a888230de411094480252c2ed3",),
         KATANA_USDT: ("0xcdaf57d98c2f75bffb8f0d3f7aa79bbacda4a479c47e316aab14af1ca6d85ffc",),
         KATANA_WETH: ("0x08f67ef41398456dbc5ff72d43c8b6f7917abfd01498a9fc6c89dabe6eb78b8c",),
-        KATANA_WBTC: ("0x3a22063bd258f3f75e3135cac4ec53435dfa5b47b3d5173bb8fd5278e6c1b305",),
     },
 }
 

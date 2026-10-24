@@ -15,7 +15,11 @@ from protocols.morpho._shared import (
     MorphoV2MonitoringError,
     get_vault_url,
 )
-from protocols.morpho.config import VaultConfig
+from protocols.morpho.config import (
+    YV_COLLATERAL_MARKETS_BY_ASSET,
+    VaultConfig,
+    get_collateral_vaults_by_asset,
+)
 from protocols.morpho.markets import (
     YV_COLLATERAL_AT_RISK_POINTS,
     YV_COLLATERAL_STABLE_PRICE_SHOCK,
@@ -60,6 +64,16 @@ def _sample_metrics(market_id: str, asset_address: str = "0x" + "22" * 20) -> Ma
 
 
 class TestMorphoV2Configuration(unittest.TestCase):
+    def test_collateral_markets_have_configured_liquidity_vaults(self) -> None:
+        """Every watched collateral asset needs a vault to supply its liquidity group."""
+        for chain, markets_by_asset in YV_COLLATERAL_MARKETS_BY_ASSET.items():
+            v1_assets = get_collateral_vaults_by_asset(chain, version=1)
+            v2_assets = get_collateral_vaults_by_asset(chain, version=2)
+            configured_assets = v1_assets.keys() | v2_assets.keys()
+            for asset_address in markets_by_asset:
+                with self.subTest(chain=chain.name, asset=asset_address):
+                    self.assertIn(asset_address.lower(), configured_assets)
+
     def test_discovery_fails_if_api_omits_configured_vaults(self) -> None:
         response = MagicMock()
         response.json.return_value = {"data": {"vaultV2s": {"items": []}}}
