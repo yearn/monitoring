@@ -74,6 +74,8 @@ Only `TimelockController` timelocks are checked. Compound-style queues expire af
 
 Alerts show the timelock, full operation ID in inline code for copying into `getTimestamp(id)` or other state queries, schedule transaction link, readiness date, and call details.
 
+Each alert also includes the AI summary and a "Full details" report link, generated the same way as in the scheduled alert. The analysis is run again, so it reflects the chain state at the time of the reminder. It is skipped for the same protocols (`SKIP_AI_SUMMARY_PROTOCOLS`). If the explainer fails, the alert goes out without the summary. The summary is never truncated; when space runs short, call lines are dropped first.
+
 ## GraphQL Schema
 
 The script queries the unified `TimelockEvent` type from the Envio indexer. The query fetches all timelock types (TimelockController, Aave, Compound, Lido, Maple) for monitored addresses.

@@ -13,7 +13,8 @@ state with ``getTimestamp(id)``: 0 is unset or cancelled, 1 is executed, and
 anything else is the time it became ready. Envio indexes only CallScheduled, so
 the state comes from the chain. Operations ready for longer than
 ``TIMELOCK_STALE_DAYS`` (default 7) are reported once each, silently, to the
-protocol's channel.
+protocol's channel, with the same AI summary and full report link the scheduled
+alert carries.
 """
 
 import os
@@ -24,15 +25,18 @@ from datetime import UTC, datetime
 from eth_utils import to_checksum_address
 
 from protocols.timelock.timelock_alerts import (
+    SKIP_AI_SUMMARY_PROTOCOLS,
     TIMELOCKS,
     YEARN_TIMELOCK_INTERNAL_PROTOCOL,
     TimelockConfig,
     alert_history_protocol,
+    get_ai_explanation,
     load_events,
 )
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.calldata.decoder import decode_calldata
 from utils.chains import EXPLORER_URLS, Chain
+from utils.llm.ai_explainer import format_explanation_line
 from utils.logger import get_logger
 from utils.telegram import MAX_MESSAGE_LENGTH, escape_markdown, send_envio_error_message, send_telegram_message
 from utils.web3_wrapper import ChainManager
@@ -71,6 +75,7 @@ class Operation:
     scheduled_at: int
     transaction_hash: str
     calls: tuple[tuple[str, str], ...]  # (target, calldata)
+    values: tuple[str, ...] = ()  # wei sent with each call, aligned with ``calls``
 
 
 def load_scheduled_operations(since_ts: int) -> list[Operation] | None:
@@ -109,6 +114,7 @@ def load_scheduled_operations(since_ts: int) -> list[Operation] | None:
                 scheduled_at=int(events[0]["blockTimestamp"]),
                 transaction_hash=events[0]["transactionHash"],
                 calls=tuple((event.get("target") or "", event.get("data") or "0x") for event in events),
+                values=tuple(str(event.get("value") or "0") for event in events),
             )
         )
     return operations
@@ -192,8 +198,21 @@ def _format_calls(operation: Operation, budget: int) -> str:
     return "\n".join(lines)
 
 
-def format_operation(operation: Operation, ready_at: int, now: int) -> str:
-    """Alert text for one stale operation."""
+def explain_operation(operation: Operation) -> str:
+    """AI summary line (with the full report link) for an operation, or "" when skipped or failed."""
+    if operation.timelock.protocol.upper() in SKIP_AI_SUMMARY_PROTOCOLS:
+        return ""
+    values = operation.values or ("0",) * len(operation.calls)
+    events = [
+        {"target": target, "data": data, "value": value}
+        for (target, data), value in zip(operation.calls, values, strict=True)
+    ]
+    explanation = get_ai_explanation(events, operation.timelock, operation.timelock.chain_id)
+    return format_explanation_line(explanation) if explanation else ""
+
+
+def format_operation(operation: Operation, ready_at: int, now: int, ai_line: str = "") -> str:
+    """Alert text for one stale operation; ``ai_line`` follows the calls and is never truncated."""
     chain_id = operation.timelock.chain_id
     explorer = EXPLORER_URLS.get(chain_id)
     address = to_checksum_address(operation.timelock.address)
@@ -210,8 +229,8 @@ def format_operation(operation: Operation, ready_at: int, now: int) -> str:
         f"Ready since {_date(ready_at)} ({(now - ready_at) // DAY} days)\n"
         "Calls:\n"
     )
-    budget = MAX_MESSAGE_LENGTH - len(_HEADER) - len(_footer()) - len(prefix)
-    return prefix + _format_calls(operation, budget)
+    budget = MAX_MESSAGE_LENGTH - len(_HEADER) - len(_footer()) - len(prefix) - len(ai_line)
+    return prefix + _format_calls(operation, budget) + ai_line
 
 
 _HEADER = "⏳ *Timelock operations ready but not executed*\n\n"
@@ -280,7 +299,7 @@ def main() -> None:
         if str(get_last_value_for_key_from_file(cache_filename, key)) == "1":
             continue
         by_protocol.setdefault(operation.timelock.protocol, []).append(
-            (key, format_operation(operation, ready_at, now))
+            (key, format_operation(operation, ready_at, now, explain_operation(operation)))
         )
 
     for protocol, entries in by_protocol.items():

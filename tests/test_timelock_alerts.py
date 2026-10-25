@@ -45,7 +45,7 @@ TIMELOCK_INFO = TimelockConfig(
 class TestBuildAlertMessageTruncation(unittest.TestCase):
     """Test that build_alert_message respects MAX_MESSAGE_LENGTH and priority."""
 
-    @patch("protocols.timelock.timelock_alerts._get_ai_explanation", return_value=None)
+    @patch("protocols.timelock.timelock_alerts.get_ai_explanation", return_value=None)
     def test_short_message_no_truncation(self, _mock_ai: object) -> None:
         """A simple message should not be truncated."""
         events = [_make_event()]
@@ -54,7 +54,7 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         self.assertIn("TIMELOCK: New Operation Scheduled", msg)
         self.assertIn("Test Timelock", msg)
 
-    @patch("protocols.timelock.timelock_alerts._get_ai_explanation", return_value=None)
+    @patch("protocols.timelock.timelock_alerts.get_ai_explanation", return_value=None)
     def test_batch_calls_are_numbered_from_one(self, _mock_ai: object) -> None:
         """Telegram numbering must match the AI report's 1-based call flow."""
         events = [_make_event(index=i, target=f"0x{i + 1:040x}", data="0x8456cb59") for i in range(2)]
@@ -63,7 +63,7 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         self.assertIn("--- Call 2 ---", msg)
         self.assertNotIn("--- Call 0 ---", msg)
 
-    @patch("protocols.timelock.timelock_alerts._get_ai_explanation", return_value=None)
+    @patch("protocols.timelock.timelock_alerts.get_ai_explanation", return_value=None)
     def test_long_call_details_truncated(self, _mock_ai: object) -> None:
         """When call details are very long, they should be truncated to fit."""
         events = [
@@ -78,7 +78,7 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         self.assertLessEqual(len(msg), MAX_MESSAGE_LENGTH)
         self.assertIn("truncated", msg)
 
-    @patch("protocols.timelock.timelock_alerts._get_ai_explanation", return_value=None)
+    @patch("protocols.timelock.timelock_alerts.get_ai_explanation", return_value=None)
     def test_truncation_keeps_markdown_entities_balanced(self, _mock_ai: object) -> None:
         """Truncating call details must not sever a `signature` mid-entity.
 
@@ -103,7 +103,7 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         self.assertEqual(msg.count("["), msg.count("]"), "unbalanced link brackets")
 
     @patch("protocols.timelock.timelock_alerts.format_explanation_line")
-    @patch("protocols.timelock.timelock_alerts._get_ai_explanation")
+    @patch("protocols.timelock.timelock_alerts.get_ai_explanation")
     def test_ai_summary_preserved_over_call_details(self, mock_ai: MagicMock, mock_format: MagicMock) -> None:
         """AI summary must be preserved even when call details are long."""
         from utils.llm.ai_explainer import Explanation
@@ -132,7 +132,7 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         self.assertIn("truncated", msg)
 
     @patch("protocols.timelock.timelock_alerts.format_explanation_line")
-    @patch("protocols.timelock.timelock_alerts._get_ai_explanation")
+    @patch("protocols.timelock.timelock_alerts.get_ai_explanation")
     def test_message_under_limit_with_ai(self, mock_ai: MagicMock, mock_format: MagicMock) -> None:
         """When everything fits, nothing should be truncated."""
         from utils.llm.ai_explainer import Explanation
@@ -148,7 +148,7 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         self.assertIn("Short summary.", msg)
         self.assertNotIn("...", msg)
 
-    @patch("protocols.timelock.timelock_alerts._get_ai_explanation")
+    @patch("protocols.timelock.timelock_alerts.get_ai_explanation")
     def test_ai_skipped_for_governance_protocol(self, mock_ai: MagicMock) -> None:
         """Protocols with dedicated governance monitoring skip the AI summary entirely."""
         aave_info = TimelockConfig(
@@ -164,7 +164,7 @@ class TestBuildAlertMessageTruncation(unittest.TestCase):
         self.assertIn("TIMELOCK: New Operation Scheduled", msg)
 
 
-@patch("protocols.timelock.timelock_alerts._get_ai_explanation", return_value=None)
+@patch("protocols.timelock.timelock_alerts.get_ai_explanation", return_value=None)
 class TestOperationIdLine(unittest.TestCase):
     """The scheduled alert shows the same copyable Operation ID as the stale-operation alert."""
 
@@ -364,39 +364,39 @@ class TestAiExplanationCallGates(unittest.TestCase):
 
     @patch("protocols.timelock.timelock_alerts.explain_transaction")
     def test_empty_calldata_single_call_reaches_explainer(self, mock_explain: unittest.mock.MagicMock) -> None:
-        from protocols.timelock.timelock_alerts import _get_ai_explanation
+        from protocols.timelock.timelock_alerts import get_ai_explanation
 
         mock_explain.return_value = None
         event = _make_event(data="0x", value="1000")
-        _get_ai_explanation([event], TIMELOCK_INFO, 1)
+        get_ai_explanation([event], TIMELOCK_INFO, 1)
         mock_explain.assert_called_once()
         self.assertEqual(mock_explain.call_args.kwargs["calldata"], "0x")
         self.assertEqual(mock_explain.call_args.kwargs["value"], 1000)
 
     @patch("protocols.timelock.timelock_alerts.explain_transaction")
     def test_null_value_does_not_crash_explainer(self, mock_explain: unittest.mock.MagicMock) -> None:
-        from protocols.timelock.timelock_alerts import _get_ai_explanation
+        from protocols.timelock.timelock_alerts import get_ai_explanation
 
         mock_explain.return_value = None
         event = _make_event(data="0x8456cb59")
         event["value"] = None
-        _get_ai_explanation([event], TIMELOCK_INFO, 1)
+        get_ai_explanation([event], TIMELOCK_INFO, 1)
         mock_explain.assert_called_once()
         self.assertEqual(mock_explain.call_args.kwargs["value"], 0)
 
     @patch("protocols.timelock.timelock_alerts.explain_transaction")
     def test_short_calldata_single_call_reaches_explainer(self, mock_explain: unittest.mock.MagicMock) -> None:
-        from protocols.timelock.timelock_alerts import _get_ai_explanation
+        from protocols.timelock.timelock_alerts import get_ai_explanation
 
         mock_explain.return_value = None
         event = _make_event(data="0x12")
-        _get_ai_explanation([event], TIMELOCK_INFO, 1)
+        get_ai_explanation([event], TIMELOCK_INFO, 1)
         mock_explain.assert_called_once()
         self.assertEqual(mock_explain.call_args.kwargs["calldata"], "0x12")
 
     @patch("protocols.timelock.timelock_alerts.explain_batch_transaction")
     def test_mixed_batch_keeps_empty_and_short_entries(self, mock_batch: unittest.mock.MagicMock) -> None:
-        from protocols.timelock.timelock_alerts import _get_ai_explanation
+        from protocols.timelock.timelock_alerts import get_ai_explanation
 
         mock_batch.return_value = None
         events = [
@@ -404,7 +404,7 @@ class TestAiExplanationCallGates(unittest.TestCase):
             _make_event(data="0x", target="0x" + "22" * 20, value="1"),
             _make_event(data="0x12", target="0x" + "33" * 20),
         ]
-        _get_ai_explanation(events, TIMELOCK_INFO, 1)
+        get_ai_explanation(events, TIMELOCK_INFO, 1)
         mock_batch.assert_called_once()
         calls = mock_batch.call_args.kwargs["calls"]
         self.assertEqual([c["data"] for c in calls], ["0x8456cb59", "0x", "0x12"])
@@ -415,9 +415,9 @@ class TestAiExplanationCallGates(unittest.TestCase):
     def test_events_without_target_are_skipped(
         self, mock_batch: unittest.mock.MagicMock, mock_single: unittest.mock.MagicMock
     ) -> None:
-        from protocols.timelock.timelock_alerts import _get_ai_explanation
+        from protocols.timelock.timelock_alerts import get_ai_explanation
 
-        result = _get_ai_explanation([_make_event(target="", data="0x8456cb59")], TIMELOCK_INFO, 1)
+        result = get_ai_explanation([_make_event(target="", data="0x8456cb59")], TIMELOCK_INFO, 1)
         self.assertIsNone(result)
         mock_batch.assert_not_called()
         mock_single.assert_not_called()
