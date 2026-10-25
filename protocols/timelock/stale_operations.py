@@ -212,7 +212,12 @@ def explain_operation(operation: Operation) -> str:
 
 
 def format_operation(operation: Operation, ready_at: int, now: int, ai_line: str = "") -> str:
-    """Alert text for one stale operation; ``ai_line`` follows the calls and is never truncated."""
+    """Alert text for one stale operation.
+
+    ``ai_line`` follows the calls and is never truncated: call lines are dropped
+    to make room. A summary too long to fit even with every call dropped is left
+    out, so the operation still gets a plain alert instead of failing the run.
+    """
     chain_id = operation.timelock.chain_id
     explorer = EXPLORER_URLS.get(chain_id)
     address = to_checksum_address(operation.timelock.address)
@@ -229,8 +234,17 @@ def format_operation(operation: Operation, ready_at: int, now: int, ai_line: str
         f"Ready since {_date(ready_at)} ({(now - ready_at) // DAY} days)\n"
         "Calls:\n"
     )
-    budget = MAX_MESSAGE_LENGTH - len(_HEADER) - len(_footer()) - len(prefix) - len(ai_line)
-    return prefix + _format_calls(operation, budget) + ai_line
+    budget = _entry_budget() - len(prefix)
+    if ai_line:
+        text = prefix + _format_calls(operation, budget - len(ai_line)) + ai_line
+        if len(text) <= _entry_budget():
+            return text
+        logger.warning(
+            "AI summary for %s is too long for the alert (%s chars); sending without it",
+            operation.operation_id,
+            len(ai_line),
+        )
+    return prefix + _format_calls(operation, budget)
 
 
 _HEADER = "⏳ *Timelock operations ready but not executed*\n\n"
@@ -244,13 +258,18 @@ def _footer() -> str:
     )
 
 
+def _entry_budget() -> int:
+    """Characters one operation's text may use in a message, after the header and footer."""
+    return MAX_MESSAGE_LENGTH - len(_HEADER) - len(_footer())
+
+
 def chunk_entries(entries: list[tuple[str, str]]) -> list[list[tuple[str, str]]]:
     """Group (cache_key, text) entries into messages that fit Telegram's limit.
 
     send_telegram_message truncates an oversized message and still succeeds, so
     an operation in a cut-off tail would be cached as alerted without being sent.
     """
-    budget = MAX_MESSAGE_LENGTH - len(_HEADER) - len(_footer())
+    budget = _entry_budget()
     chunks: list[list[tuple[str, str]]] = []
     size = 0
     for entry in entries:

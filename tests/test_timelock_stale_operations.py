@@ -284,6 +284,15 @@ class TestExplainOperation(unittest.TestCase):
         self.assertTrue(text.endswith(ai_line))
         self.assertIn("more calls (see the schedule tx)", text)
 
+    @patch.object(stale_operations, "decode_calldata", return_value=None)
+    def test_oversized_ai_line_falls_back_to_plain_alert(self, _decode: MagicMock) -> None:
+        ai_line = "\n🤖 *AI Summary:*\n" + "x" * 3500 + "\n[Full details](https://gist.wavey.info/abc)"
+        operation = replace(_operation(), calls=((RATE_MANAGER, "0x12345678"),) * 6)
+        text = format_operation(operation, NOW - 20 * DAY, NOW, ai_line)
+        self.assertNotIn("AI Summary", text)
+        self.assertEqual(text, format_operation(operation, NOW - 20 * DAY, NOW))
+        self.assertEqual(len(stale_operations.chunk_entries([("k", text)])), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
