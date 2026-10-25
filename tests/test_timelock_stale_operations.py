@@ -273,8 +273,8 @@ class TestExplainOperation(unittest.TestCase):
     def test_load_keeps_call_values(self) -> None:
         event = {**_event("a", "0x" + "11" * 32, 0), "value": "7"}
         with patch.object(stale_operations, "load_events", return_value={"data": {"TimelockEvent": [event]}}):
-            operations = load_scheduled_operations(0)
-        self.assertEqual(operations[0].values, ("7",))
+            (operation,) = load_scheduled_operations(0) or []
+        self.assertEqual(operation.values, ("7",))
 
     @patch.object(stale_operations, "decode_calldata", return_value=None)
     def test_ai_line_follows_calls_and_shrinks_call_budget(self, _decode: MagicMock) -> None:
