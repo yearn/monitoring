@@ -10,6 +10,10 @@ The overlap re-reads recent blocks every cycle. That catches rows Envio indexed
 late, rows a reorg replaced (same id, new fingerprint), and rows a reorg dropped
 (missing from a fully fetched range). The checkpoint advances only past chunks
 that were fetched completely.
+
+Every stream reconciles against its own inbox and checkpoints. Streams in one
+process pass a shared ``heads`` reader so ``chain_metadata`` is read once per
+cycle, not once per stream.
 """
 
 import time
@@ -17,11 +21,12 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from protocols.timelock.subscriber.envio import ChainHead, EnvioQueryError, GraphQLPost, fetch_chain_heads, fetch_range
-from protocols.timelock.subscriber.inbox import SOURCE_HTTP, EventInbox
 from utils.logger import get_logger
+from utils.subscriber.envio import ChainHead, EnvioQueryError, GraphQLPost, fetch_chain_heads, fetch_range
+from utils.subscriber.inbox import SOURCE_HTTP, EventInbox
+from utils.subscriber.stream import EventStream
 
-_logger = get_logger("timelock.subscriber.reconcile")
+_logger = get_logger("subscriber.reconcile")
 
 # Blocks re-read below the checkpoint on every cycle, about 15-20 minutes per
 # chain: deeper than any reorg seen on these chains, and long enough to cover an
@@ -29,6 +34,8 @@ _logger = get_logger("timelock.subscriber.reconcile")
 REORG_OVERLAP_BLOCKS: dict[int, int] = {
     1: 64,
     137: 512,
+    999: 1200,  # HyperEVM, ~1s blocks
+    4663: 10_000,  # Robinhood Chain, ~0.1s blocks
     8453: 600,
     42161: 4800,
     747474: 1200,
@@ -41,6 +48,8 @@ DEFAULT_REORG_OVERLAP_BLOCKS = 1000
 MAX_BLOCK_SPAN: dict[int, int] = {
     1: 50_000,
     137: 300_000,
+    999: 600_000,
+    4663: 6_000_000,
     8453: 300_000,
     42161: 2_400_000,
     747474: 600_000,
@@ -101,21 +110,21 @@ class ReconcileReport:
         return self.error is None and all(c.error is None for c in self.chains)
 
 
-def build_scope(timelocks: Iterable[Any]) -> dict[int, set[str]]:
-    """Map chain id to the lowercase timelock addresses monitored on it."""
+def build_scope(contracts: Iterable[Any]) -> dict[int, set[str]]:
+    """Map chain id to the lowercase addresses monitored on it (objects with ``address`` and ``chain_id``)."""
     scope: dict[int, set[str]] = {}
-    for timelock in timelocks:
-        scope.setdefault(int(timelock.chain_id), set()).add(str(timelock.address).lower())
+    for contract in contracts:
+        scope.setdefault(int(contract.chain_id), set()).add(str(contract.address).lower())
     return scope
 
 
-def in_scope(event: dict[str, Any], scope: dict[int, set[str]]) -> bool:
-    """True when the row's (chain, timelock) pair is monitored.
+def in_scope(event: dict[str, Any], scope: dict[int, set[str]], stream: EventStream) -> bool:
+    """True when the row's (chain, contract) pair is monitored.
 
     The same address is monitored on some chains only, so a query filtered by
     address and chain separately can return pairs outside the scope.
     """
-    return str(event.get("timelockAddress", "")).lower() in scope.get(int(event.get("chainId", -1)), set())
+    return str(event.get(stream.address_field, "")).lower() in scope.get(int(event.get("chainId", -1)), set())
 
 
 def reconcile_chain(
@@ -142,7 +151,15 @@ def reconcile_chain(
         if config.start_lookback_seconds > 0:
             since_ts = int(now()) - config.start_lookback_seconds
             rows, pages = fetch_range(
-                post, chain_id, addresses, -1, head_block, config.page_size, config.max_pages, since_ts=since_ts
+                post,
+                inbox.stream,
+                chain_id,
+                addresses,
+                -1,
+                head_block,
+                config.page_size,
+                config.max_pages,
+                since_ts=since_ts,
             )
             _fold(inbox, rows, result, pages, now())
         inbox.set_checkpoint(chain_id, head_block, head_block, now())
@@ -164,7 +181,9 @@ def reconcile_chain(
     lower = start
     for _ in range(config.max_chunks_per_cycle):
         upper = min(head_block, cursor + span)
-        rows, pages = fetch_range(post, chain_id, addresses, lower, upper, config.page_size, config.max_pages)
+        rows, pages = fetch_range(
+            post, inbox.stream, chain_id, addresses, lower, upper, config.page_size, config.max_pages
+        )
         observed_at = now()
         seen = _fold(inbox, rows, result, pages, observed_at)
         removed = inbox.mark_missing(chain_id, lower + 1, upper, seen, SOURCE_HTTP, observed_at)
@@ -201,23 +220,28 @@ def reconcile_all(
     scope: dict[int, set[str]],
     config: ReconcileConfig,
     now: Callable[[], float] = time.time,
+    heads: Callable[[], dict[int, ChainHead]] | None = None,
 ) -> ReconcileReport:
-    """Run one reconcile cycle over every monitored chain and log its timing.
+    """Run one reconcile cycle over every monitored chain of ``inbox``'s stream and log its timing.
 
     A failure on one chain is recorded and the others still run, so each chain's
     checkpoint advances on its own.
+
+    Args:
+        heads: Chain-head reader shared with other streams (``SharedChainHeads``);
+            defaults to reading ``chain_metadata`` for this cycle alone.
     """
     report = ReconcileReport(started_at=now())
     clock = time.perf_counter()
     try:
-        heads = fetch_chain_heads(post)
+        chain_heads = heads() if heads is not None else fetch_chain_heads(post)
     except EnvioQueryError as exc:
         report.error = str(exc)
-        heads = {}
+        chain_heads = {}
 
     if report.error is None:
         for chain_id in sorted(scope):
-            head = heads.get(chain_id)
+            head = chain_heads.get(chain_id)
             if head is None:
                 report.chains.append(ChainReconcileResult(chain_id=chain_id, error="no chain_metadata row"))
                 continue

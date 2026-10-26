@@ -1,6 +1,6 @@
-"""Continuous timelock event worker: WebSocket subscription, HTTP reconciliation, heartbeat.
+"""Continuous event worker: WebSocket subscription, HTTP reconciliation, heartbeat.
 
-Three asyncio tasks share one ``EventInbox``:
+One ``Worker`` follows one event stream. Three asyncio tasks share its ``EventInbox``:
 
 - ``ws``: holds a ``graphql-transport-ws`` live query over the newest monitored
   events and folds every snapshot into the inbox, reconnecting with capped
@@ -10,6 +10,12 @@ Three asyncio tasks share one ``EventInbox``:
 - ``heartbeat``: writes worker status, flags chains whose indexed head stopped
   advancing, and pings the systemd watchdog only while reconciliation keeps
   completing, so a wedged worker is restarted.
+
+``run_workers`` runs several streams in one process: one set of signal handlers,
+one systemd ``READY``, and a watchdog ping only while every stream is alive, so a
+wedged stream restarts the process instead of hiding behind a healthy one. The
+streams share the HTTP poster and a ``SharedChainHeads`` reader, and each keeps
+its own WebSocket connection, inbox, and checkpoints.
 
 The pilot sends no alerts. With an optional ``PilotNotices`` it posts diagnostic
 notices to the internal errors chat from a background queue (see ``notices.py``);
@@ -22,17 +28,18 @@ import signal
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any
 
-from protocols.timelock.subscriber.envio import GraphQLPost, address_variants, live_subscription
-from protocols.timelock.subscriber.inbox import SOURCE_HTTP, SOURCE_WS, EventInbox
-from protocols.timelock.subscriber.notices import PilotNotices
-from protocols.timelock.subscriber.reconcile import ReconcileConfig, ReconcileReport, in_scope, reconcile_all
 from utils.graphql_ws import GraphQLWSError, subscribe
 from utils.logger import get_logger
 from utils.sd_notify import notify
+from utils.subscriber.envio import ChainHead, GraphQLPost, address_variants, live_subscription
+from utils.subscriber.inbox import SOURCE_HTTP, SOURCE_WS, EventInbox
+from utils.subscriber.notices import PilotNotices
+from utils.subscriber.reconcile import ReconcileConfig, ReconcileReport, in_scope, reconcile_all
 
-_logger = get_logger("timelock.subscriber.worker")
+_logger = get_logger("subscriber.worker")
 
 TRANSPORTS = ("both", "ws", "http")
 
@@ -64,7 +71,7 @@ class WorkerConfig:
 
 
 class Worker:
-    """Runs the subscriber loops until ``stop()`` (or SIGTERM/SIGINT)."""
+    """Runs one stream's subscriber loops until ``stop()`` (or SIGTERM/SIGINT)."""
 
     def __init__(
         self,
@@ -76,6 +83,7 @@ class Worker:
         subscribe_fn: SubscribeFn = subscribe,
         now: Callable[[], float] = time.time,
         notices: PilotNotices | None = None,
+        heads: Callable[[], dict[int, ChainHead]] | None = None,
     ) -> None:
         if config.transport not in TRANSPORTS:
             raise ValueError(f"transport must be one of {TRANSPORTS}, got {config.transport!r}")
@@ -89,6 +97,10 @@ class Worker:
         self.subscribe_fn = subscribe_fn
         self.now = now
         self.notices = notices
+        self.heads = heads
+        self.stream = inbox.stream
+        # False when ``run_workers`` owns signals and systemd notifications for the process.
+        self.supervised = True
         self._stop = asyncio.Event()
         self.ws_connected = False
         self.ws_connects = 0
@@ -98,6 +110,7 @@ class Worker:
         self.last_reconcile: ReconcileReport | None = None
         self._stalled: set[int] = set()
         self.started_at: float | None = None
+        self._heartbeat_progress_monotonic: float | None = None
         self._tasks: list[asyncio.Task[None]] = []
 
     def stop(self) -> None:
@@ -113,13 +126,10 @@ class Worker:
 
     async def run(self) -> None:
         """Run the configured loops until stopped."""
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            try:
-                loop.add_signal_handler(sig, self.stop)
-            except NotImplementedError, RuntimeError:
-                pass
+        if self.supervised:
+            _install_signal_handlers(self.stop)
         self.started_at = self.now()
+        self._heartbeat_progress_monotonic = monotonic()
         await asyncio.to_thread(self.inbox.log, "worker_started", self.started_at, transport=self.config.transport)
         if self.notices is not None:
             # Before any loop runs, so the first WebSocket snapshot is judged against it.
@@ -129,18 +139,21 @@ class Worker:
             loops.append(asyncio.create_task(self.reconcile_loop(), name="reconcile"))
         if self.config.transport in ("both", "ws"):
             loops.append(asyncio.create_task(self.ws_loop(), name="ws"))
+        loops.append(asyncio.create_task(self.heartbeat_loop(), name="heartbeat"))
         self._tasks = loops
-        helpers = [asyncio.create_task(self.heartbeat_loop(), name="heartbeat")]
+        helpers: list[asyncio.Task[None]] = []
         if self.notices is not None:
             # Not in self._tasks: a dead notifier must not trip the watchdog.
             helpers.append(asyncio.create_task(self.notices.notifier.run(), name="notifier"))
             if self.config.transport in ("both", "ws"):
                 self.notices.ws_disconnected(self.started_at, "not connected yet")
-        notify("READY=1", f"STATUS=transport={self.config.transport}")
+        if self.supervised:
+            notify("READY=1", f"STATUS=transport={self.config.transport}")
         try:
             await self._stop.wait()
         finally:
-            notify("STOPPING=1")
+            if self.supervised:
+                notify("STOPPING=1")
             for task in [*loops, *helpers]:
                 task.cancel()
             await asyncio.gather(*loops, *helpers, return_exceptions=True)
@@ -149,7 +162,7 @@ class Worker:
     async def ws_loop(self) -> None:
         """Hold the live subscription, reconnecting with capped exponential backoff."""
         addresses = address_variants({a for addrs in self.scope.values() for a in addrs})
-        query = live_subscription(self.config.snapshot_limit, sorted(self.scope))
+        query = live_subscription(self.stream, self.config.snapshot_limit, sorted(self.scope))
         failures = 0
         while not self._stop.is_set():
             connected_at: float | None = None
@@ -163,7 +176,7 @@ class Worker:
                         self.ws_connected = True
                         self.ws_connects += 1
                         await asyncio.to_thread(self.inbox.log, "ws_connected", received_at)
-                        _logger.info("WebSocket subscription live")
+                        _logger.info("%s WebSocket subscription live", self.stream.name)
                         if self.notices is not None:
                             self.notices.ws_connected(received_at)
                     if payload.get("errors"):
@@ -189,12 +202,14 @@ class Worker:
             failures += 1
             delay = backoff_delay(failures, self.config.backoff_initial, self.config.backoff_max)
             delay *= random.uniform(0.8, 1.2)
-            _logger.warning("WebSocket disconnected (%s); reconnecting in %.1fs", error, delay)
+            _logger.warning("%s WebSocket disconnected (%s); reconnecting in %.1fs", self.stream.name, error, delay)
             await self._sleep(delay)
 
     async def _ingest_snapshot(self, payload: dict[str, Any], received_at: float) -> None:
         """Fold one live-query snapshot into the inbox and log first sightings."""
-        rows = [r for r in (payload.get("data") or {}).get("TimelockEvent") or [] if in_scope(r, self.scope)]
+        rows = [
+            r for r in (payload.get("data") or {}).get(self.stream.entity) or [] if in_scope(r, self.scope, self.stream)
+        ]
         clock = time.perf_counter()
         result = await asyncio.to_thread(self.inbox.observe, rows, SOURCE_WS, received_at)
         ingest_ms = (time.perf_counter() - clock) * 1000
@@ -208,10 +223,11 @@ class Worker:
             for event_id in result.new_ids:
                 row = by_id[event_id]
                 _logger.info(
-                    "ws new event %s chain=%s timelock=%s %s latency=%.1fs",
+                    "%s ws new event %s chain=%s contract=%s %s latency=%.1fs",
+                    self.stream.name,
                     event_id,
                     row.get("chainId"),
-                    row.get("timelockAddress"),
+                    row.get(self.stream.address_field),
                     row.get("eventName"),
                     received_at - int(row["blockTimestamp"]),
                 )
@@ -233,12 +249,12 @@ class Worker:
             ws_was_connected = self.ws_connected
             try:
                 report = await asyncio.to_thread(
-                    reconcile_all, self.post, self.inbox, self.scope, self.config.reconcile, self.now
+                    reconcile_all, self.post, self.inbox, self.scope, self.config.reconcile, self.now, self.heads
                 )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - an unexpected bug must not end reconciliation
-                _logger.exception("reconcile cycle crashed")
+                _logger.exception("%s reconcile cycle crashed", self.stream.name)
                 report = ReconcileReport(started_at=started, error=f"{type(exc).__name__}: {exc}")
             self.last_reconcile = report
             self.last_reconcile_at = self.now()
@@ -249,19 +265,21 @@ class Worker:
             await self._sleep(self.config.reconcile_interval - (self.now() - started))
 
     def _log_reconcile(self, report: ReconcileReport, ws_expected: bool) -> None:
+        """Log one reconcile cycle's errors, WebSocket misses, and new events."""
+        name = self.stream.name
         if report.error:
-            _logger.error("reconcile failed: %s", report.error)
+            _logger.error("%s reconcile failed: %s", name, report.error)
         for chain in report.chains:
             if chain.error:
-                _logger.error("reconcile chain %s failed: %s", chain.chain_id, chain.error)
+                _logger.error("%s reconcile chain %s failed: %s", name, chain.chain_id, chain.error)
             if chain.new and ws_expected:
                 # HTTP found rows first although the subscription was up: a WS miss.
                 _logger.warning(
-                    "chain %s: HTTP found %s events before WS: %s", chain.chain_id, chain.new, chain.new_ids
+                    "%s chain %s: HTTP found %s events before WS: %s", name, chain.chain_id, chain.new, chain.new_ids
                 )
             elif chain.new:
-                _logger.info("chain %s: %s new events via %s", chain.chain_id, chain.new, SOURCE_HTTP)
-        _logger.info("reconcile done in %.0fms (ok=%s)", report.duration_ms, report.ok)
+                _logger.info("%s chain %s: %s new events via %s", name, chain.chain_id, chain.new, SOURCE_HTTP)
+        _logger.info("%s reconcile done in %.0fms (ok=%s)", name, report.duration_ms, report.ok)
 
     def health(self) -> dict[str, Any]:
         """Return the worker's current health snapshot (also written as the heartbeat)."""
@@ -283,6 +301,7 @@ class Worker:
         last = self.last_reconcile
         return {
             "at": now,
+            "stream": self.stream.name,
             "transport": self.config.transport,
             "ws_connected": self.ws_connected,
             "ws_connects": self.ws_connects,
@@ -297,13 +316,17 @@ class Worker:
         }
 
     def is_alive(self) -> bool:
-        """True while every loop task runs and reconcile cycles keep completing.
+        """True while required tasks run and heartbeat/reconcile cycles keep completing.
 
-        A loop task that ended (it should only end on stop) makes the worker dead. The
-        reconcile deadline counts from the worker's start until the first cycle
-        completes, so a first cycle that hangs is caught too.
+        A loop task that ended (it should only end on stop) makes the worker dead.
+        Deadlines count from the worker's start until the first cycle completes,
+        so a first cycle that hangs is caught too. Heartbeat progress uses a
+        monotonic clock so wall-clock adjustments cannot hide a stalled loop.
         """
         if any(task.done() for task in self._tasks):
+            return False
+        heartbeat = self._heartbeat_progress_monotonic
+        if heartbeat is not None and monotonic() >= heartbeat + 3 * self.config.heartbeat_interval + 120:
             return False
         if self.config.transport == "ws":
             return True
@@ -321,7 +344,8 @@ class Worker:
                 chain_id = chain["chain_id"]
                 if chain["stalled"] and chain_id not in self._stalled:
                     _logger.warning(
-                        "chain %s indexed head %s has not advanced for %.0fs",
+                        "%s chain %s indexed head %s has not advanced for %.0fs",
+                        self.stream.name,
                         chain_id,
                         chain["indexed_head"],
                         chain["head_age_seconds"],
@@ -330,7 +354,7 @@ class Worker:
                     if self.notices is not None:
                         self.notices.stall_changed(chain_id, True, chain["indexed_head"], chain["head_age_seconds"])
                 elif not chain["stalled"] and chain_id in self._stalled:
-                    _logger.info("chain %s indexed head advancing again", chain_id)
+                    _logger.info("%s chain %s indexed head advancing again", self.stream.name, chain_id)
                     self._stalled.discard(chain_id)
                     if self.notices is not None:
                         self.notices.stall_changed(chain_id, False, chain["indexed_head"], 0.0)
@@ -340,12 +364,66 @@ class Worker:
                     await self.notices.maybe_daily_summary(health["at"])
                 except Exception:  # noqa: BLE001 - a report bug must not stop the heartbeat
                     _logger.warning("daily summary failed", exc_info=True)
-            if self.is_alive():
-                notify(
-                    "WATCHDOG=1", f"STATUS=ws={'up' if self.ws_connected else 'down'} stalled={sorted(self._stalled)}"
-                )
-            else:
-                _logger.error(
-                    "a worker loop stopped or reconcile has not completed recently; withholding watchdog ping"
-                )
+            self._heartbeat_progress_monotonic = monotonic()
+            # Under run_workers the supervisor pings the watchdog for the whole process.
+            if self.supervised and self.is_alive():
+                notify("WATCHDOG=1", f"STATUS={self.status_line()}")
+            elif self.supervised:
+                _logger.error("a worker loop stopped or heartbeat/reconcile is stale; withholding watchdog ping")
             await self._sleep(self.config.heartbeat_interval)
+
+    def status_line(self) -> str:
+        """Short systemd ``STATUS`` text for this stream."""
+        return f"ws={'up' if self.ws_connected else 'down'} stalled={sorted(self._stalled)}"
+
+
+def _install_signal_handlers(stop: Callable[[], None]) -> None:
+    """Call ``stop`` on SIGTERM/SIGINT where the event loop supports it."""
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, stop)
+        except NotImplementedError, RuntimeError:
+            pass
+
+
+async def run_workers(workers: list[Worker], watchdog_interval: float = 30.0) -> None:
+    """Run several stream workers in one process until any of them stops or a signal arrives.
+
+    Signals stop every worker. systemd gets one ``READY`` and a ``WATCHDOG`` ping only
+    while every worker is alive, so one wedged stream restarts the whole unit.
+    """
+    if not workers:
+        raise ValueError("run_workers needs at least one worker")
+    for worker in workers:
+        worker.supervised = False
+
+    def stop_all() -> None:
+        for worker in workers:
+            worker.stop()
+
+    _install_signal_handlers(stop_all)
+    runs = [asyncio.create_task(worker.run(), name=f"worker-{worker.stream.name}") for worker in workers]
+    notify("READY=1", "STATUS=" + " ".join(f"{w.stream.name}:transport={w.config.transport}" for w in workers))
+
+    async def watchdog() -> None:
+        while True:
+            if all(worker.is_alive() for worker in workers):
+                notify("WATCHDOG=1", "STATUS=" + " ".join(f"{w.stream.name}:{w.status_line()}" for w in workers))
+            else:
+                dead = [w.stream.name for w in workers if not w.is_alive()]
+                _logger.error("streams %s stopped or heartbeat/reconcile is stale; withholding watchdog ping", dead)
+            await asyncio.sleep(watchdog_interval)
+
+    pinger = asyncio.create_task(watchdog(), name="watchdog")
+    try:
+        # A worker only returns once stopped (or crashed); stop the rest with it.
+        await asyncio.wait(runs, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        notify("STOPPING=1")
+        stop_all()
+        pinger.cancel()
+        results = await asyncio.gather(*runs, pinger, return_exceptions=True)
+    for result in results[: len(runs)]:
+        if isinstance(result, Exception):
+            raise result  # surface a crashed stream to run_with_alert

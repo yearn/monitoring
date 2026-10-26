@@ -1,4 +1,4 @@
-"""Coverage and latency report for the timelock subscriber pilot.
+"""Coverage and latency report for one stream of the event subscriber pilot.
 
 Answers the pilot's questions from the inbox alone:
 
@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from protocols.timelock.subscriber.inbox import EventInbox
+from utils.subscriber.inbox import EventInbox
 
 # Below this many events the latency percentiles mean little; keep collecting.
 MIN_EVENTS_FOR_DECISION = 5
@@ -59,6 +59,8 @@ class PilotReport:
 
     window_start: float
     window_end: float
+    # Noun of the stream the report covers ("timelock", "Morpho governance").
+    stream: str = ""
     events: int = 0
     confirmed_by_http: int = 0
     pending_http: int = 0
@@ -178,7 +180,7 @@ def build_report(inbox: EventInbox, hours: float, now: float | None = None) -> P
     """Compute the pilot report over events with block timestamps in the last ``hours``."""
     end = now if now is not None else time.time()
     start = end - hours * 3600
-    report = PilotReport(window_start=start, window_end=end)
+    report = PilotReport(window_start=start, window_end=end, stream=inbox.stream.noun)
     checkpoints = {cp.chain_id: cp.block_number for cp in inbox.checkpoints()}
 
     ws_delays: list[float] = []
@@ -278,7 +280,7 @@ def format_report(report: PilotReport) -> str:
         f"{time.strftime('%Y-%m-%d %H:%M', time.gmtime(report.window_end))} UTC"
     )
     lines = [
-        f"Timelock subscriber pilot report ({window})",
+        f"{report.stream[:1].upper()}{report.stream[1:]} subscriber pilot report ({window})",
         "",
         "Coverage",
         f"  events: {report.events} (confirmed by HTTP {report.confirmed_by_http}, pending HTTP {report.pending_http})",

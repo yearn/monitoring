@@ -243,8 +243,8 @@ cat <<NEXT
        sudo systemctl enable --now monitoring-api
        systemctl status monitoring-api
 
-     Optional timelock event subscriber pilot (no alerts; TIMELOCK_SUBSCRIBER_NOTIFY=errors
-     posts diagnostics to the errors chat):
+     Optional event subscriber pilot (no alerts; EVENT_SUBSCRIBER_STREAMS picks timelock and/or
+     morpho; TIMELOCK_SUBSCRIBER_NOTIFY=errors posts diagnostics to the errors chat):
        sudo systemctl enable --now monitoring-timelock-subscriber
        systemctl status monitoring-timelock-subscriber
 

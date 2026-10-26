@@ -7,19 +7,19 @@ from unittest.mock import patch
 
 import pytest
 
-from protocols.timelock.subscriber.inbox import SOURCE_HTTP, SOURCE_WS, EventInbox
-from protocols.timelock.subscriber.notices import NoticeConfig, PilotNotices
-from protocols.timelock.subscriber.notifier import (
+from protocols.timelock.event_stream import TIMELOCK_STREAM
+from protocols.timelock.timelock_alerts import TimelockConfig
+from tests.timelock_subscriber_fakes import TIMELOCK, FakeEnvio, FakeWSServer, make_event
+from utils.subscriber.inbox import SOURCE_HTTP, SOURCE_WS, EventInbox
+from utils.subscriber.notices import NoticeConfig, PilotNotices
+from utils.subscriber.notifier import (
     ALERT_PROTOCOL,
-    NOTIFY_LABEL,
     Notifier,
     build_notifier,
     send_to_errors_chat,
 )
-from protocols.timelock.subscriber.reconcile import ChainReconcileResult, ReconcileConfig, ReconcileReport
-from protocols.timelock.subscriber.worker import Worker, WorkerConfig
-from protocols.timelock.timelock_alerts import TimelockConfig
-from tests.timelock_subscriber_fakes import TIMELOCK, FakeEnvio, FakeWSServer, make_event
+from utils.subscriber.reconcile import ChainReconcileResult, ReconcileConfig, ReconcileReport
+from utils.subscriber.worker import Worker, WorkerConfig
 
 TIMELOCKS = {(TIMELOCK, 1): TimelockConfig(TIMELOCK, 1, "YEARN_TIMELOCK", "Yearn TimelockController")}
 SCOPE = {1: {TIMELOCK}, 8453: {TIMELOCK}}
@@ -38,7 +38,7 @@ class RecordingNotifier(Notifier):
 
 @pytest.fixture
 def inbox(tmp_path: Path) -> EventInbox:
-    return EventInbox(str(tmp_path / "sub.db"))
+    return EventInbox(TIMELOCK_STREAM, str(tmp_path / "sub.db"))
 
 
 @pytest.fixture
@@ -101,18 +101,20 @@ def test_notifier_splits_batches_over_budget_and_drops_when_full() -> None:
 
 
 def test_build_notifier_requires_errors_chat(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert build_notifier("none") is None
-    assert build_notifier("errors") is None  # conftest strips TELEGRAM_*: no errors chat
+    assert build_notifier("none", "timelock") is None
+    assert build_notifier("errors", "timelock") is None  # conftest strips TELEGRAM_*: no errors chat
     monkeypatch.setenv("TELEGRAM_CHAT_ID_ERRORS", "-100123")
-    assert isinstance(build_notifier("errors"), Notifier)
+    assert isinstance(build_notifier("errors", "timelock"), Notifier)
     with pytest.raises(ValueError, match="notify mode"):
-        build_notifier("public")
+        build_notifier("public", "timelock")
 
 
 def test_send_to_errors_chat_is_labelled_and_internal() -> None:
-    with patch("protocols.timelock.subscriber.notifier.send_error_message") as send:
-        send_to_errors_chat("hello")
-    send.assert_called_once_with("hello", NOTIFY_LABEL, source="timelock_subscriber", alert_protocol=ALERT_PROTOCOL)
+    with patch("utils.subscriber.notifier.send_error_message") as send:
+        send_to_errors_chat("hello", "timelock-subscriber")
+    send.assert_called_once_with(
+        "hello", "timelock-subscriber", source="timelock_subscriber", alert_protocol=ALERT_PROTOCOL
+    )
     assert ALERT_PROTOCOL == "yearn-internal"
 
 
@@ -233,7 +235,7 @@ def test_worker_posts_each_event_once_and_ws_outage_notices(tmp_path: Path) -> N
         server = FakeWSServer(envio)
         await server.start()
         sent: list[str] = []
-        inbox = EventInbox(str(tmp_path / "sub.db"))
+        inbox = EventInbox(TIMELOCK_STREAM, str(tmp_path / "sub.db"))
         notices = PilotNotices(
             Notifier(send=sent.append, min_interval=0), inbox, TIMELOCKS, NoticeConfig(ws_down_seconds=0.2)
         )
@@ -306,7 +308,7 @@ def test_baseline_is_persisted_across_restarts(inbox: EventInbox) -> None:
 
 def test_fresh_pilot_stays_quiet_about_history_and_restart_announces_downtime_events(tmp_path: Path) -> None:
     async def run_for(envio: FakeEnvio, server: FakeWSServer, path: str, sent: list[str], body) -> None:  # noqa: ANN001
-        inbox = EventInbox(path)
+        inbox = EventInbox(TIMELOCK_STREAM, path)
         notices = PilotNotices(Notifier(send=sent.append, min_interval=0), inbox, TIMELOCKS)
         config = WorkerConfig(reconcile_interval=60, heartbeat_interval=0.05, reconcile=ReconcileConfig())
         worker = Worker(envio.post, server.url, inbox, SCOPE, config, notices=notices)

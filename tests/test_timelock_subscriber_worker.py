@@ -18,13 +18,14 @@ import pytest
 from websockets.asyncio.server import serve
 from websockets.typing import Subprotocol
 
-from protocols.timelock.subscriber.inbox import SOURCE_HTTP, SOURCE_WS, EventInbox
-from protocols.timelock.subscriber.reconcile import ReconcileConfig, reconcile_all
-from protocols.timelock.subscriber.report import PilotReport, _recommend, build_report, format_report, percentile
-from protocols.timelock.subscriber.worker import Worker, WorkerConfig, backoff_delay
+from protocols.timelock.event_stream import TIMELOCK_STREAM
 from tests.timelock_subscriber_fakes import TIMELOCK, FakeEnvio, FakeWSServer, make_event
 from utils.graphql_ws import GraphQLWSError, http_to_ws_url, subscribe
 from utils.sd_notify import notify
+from utils.subscriber.inbox import SOURCE_HTTP, SOURCE_WS, EventInbox
+from utils.subscriber.reconcile import ReconcileConfig, reconcile_all
+from utils.subscriber.report import PilotReport, _recommend, build_report, format_report, percentile
+from utils.subscriber.worker import Worker, WorkerConfig, backoff_delay
 
 SCOPE = {1: {TIMELOCK}, 8453: {TIMELOCK}}
 
@@ -139,7 +140,7 @@ def test_ws_delivers_first_and_http_confirms(tmp_path: Path) -> None:
         _seed_heads(envio)
         server = FakeWSServer(envio)
         await server.start()
-        inbox = EventInbox(str(tmp_path / "sub.db"))
+        inbox = EventInbox(TIMELOCK_STREAM, str(tmp_path / "sub.db"))
         # The timed reconcile runs once at startup and then not again during the test,
         # so the subscription sees the events first; HTTP confirms them on demand.
         config = _config(reconcile_interval=60)
@@ -176,7 +177,7 @@ def test_disconnect_backlog_is_recovered_without_duplicates(tmp_path: Path) -> N
         # the WebSocket on reconnect and must come from HTTP reconciliation.
         server = FakeWSServer(envio, limit=3)
         await server.start()
-        inbox = EventInbox(str(tmp_path / "sub.db"))
+        inbox = EventInbox(TIMELOCK_STREAM, str(tmp_path / "sub.db"))
         worker = Worker(envio.post, server.url, inbox, SCOPE, _config(reconcile_interval=0.3))
 
         async def body() -> None:
@@ -226,19 +227,19 @@ def test_worker_restart_resumes_and_recovers_events_from_downtime(tmp_path: Path
         server = FakeWSServer(envio, limit=2)
         await server.start()
         try:
-            first = Worker(envio.post, server.url, EventInbox(path), SCOPE, _config())
+            first = Worker(envio.post, server.url, EventInbox(TIMELOCK_STREAM, path), SCOPE, _config())
 
             async def before() -> None:
                 await _until(lambda: first.ws_connected and first.last_reconcile_at is not None)
                 envio.add(_now_event(1, 10))
-                await _until(lambda: "1_10_0" in _rows(EventInbox(path)))
+                await _until(lambda: "1_10_0" in _rows(EventInbox(TIMELOCK_STREAM, path)))
 
             await _run_worker(first, before)
 
             # Indexed while no worker runs.
             envio.add(*(_now_event(1, b) for b in range(11, 21)), _now_event(8453, 7))
 
-            inbox = EventInbox(path)
+            inbox = EventInbox(TIMELOCK_STREAM, path)
             second = Worker(envio.post, server.url, inbox, SCOPE, _config())
 
             async def after() -> None:
@@ -264,7 +265,7 @@ def test_http_only_transport_needs_no_websocket(tmp_path: Path) -> None:
     async def scenario() -> None:
         envio = FakeEnvio()
         _seed_heads(envio)
-        inbox = EventInbox(str(tmp_path / "sub.db"))
+        inbox = EventInbox(TIMELOCK_STREAM, str(tmp_path / "sub.db"))
         worker = Worker(envio.post, None, inbox, SCOPE, _config(transport="http", reconcile_interval=0.05))
 
         async def body() -> None:
@@ -283,7 +284,7 @@ def test_health_reports_stalled_chain(tmp_path: Path) -> None:
     clock = [1_000.0]
     envio = FakeEnvio()
     _seed_heads(envio)
-    inbox = EventInbox(str(tmp_path / "sub.db"))
+    inbox = EventInbox(TIMELOCK_STREAM, str(tmp_path / "sub.db"))
     config = WorkerConfig(transport="http", head_stall_seconds=900)
     worker = Worker(envio.post, None, inbox, SCOPE, config, now=lambda: clock[0])
 
@@ -298,7 +299,7 @@ def test_health_reports_stalled_chain(tmp_path: Path) -> None:
 
 
 def test_worker_rejects_bad_transport_config(tmp_path: Path) -> None:
-    inbox = EventInbox(str(tmp_path / "sub.db"))
+    inbox = EventInbox(TIMELOCK_STREAM, str(tmp_path / "sub.db"))
     with pytest.raises(ValueError, match="transport"):
         Worker(FakeEnvio().post, "ws://x", inbox, SCOPE, WorkerConfig(transport="carrier-pigeon"))
     with pytest.raises(ValueError, match="WebSocket URL"):
@@ -328,7 +329,7 @@ def test_recommendation_rules() -> None:
 
 
 def test_report_counts_ws_only_rows_that_http_scanned_but_did_not_return(tmp_path: Path) -> None:
-    inbox = EventInbox(str(tmp_path / "sub.db"))
+    inbox = EventInbox(TIMELOCK_STREAM, str(tmp_path / "sub.db"))
     now = time.time()
     inbox.observe([make_event(1, 10, ts=int(now) - 10)], SOURCE_WS, now)
     inbox.observe([make_event(1, 99, ts=int(now) - 5)], SOURCE_WS, now)
@@ -369,7 +370,7 @@ def test_reconcile_loop_survives_unexpected_errors(tmp_path: Path) -> None:
                 raise sqlite3.IntegrityError("simulated bug")  # not an EnvioQueryError
             return envio.post(query, variables)
 
-        inbox = EventInbox(str(tmp_path / "sub.db"))
+        inbox = EventInbox(TIMELOCK_STREAM, str(tmp_path / "sub.db"))
         worker = Worker(flaky_post, None, inbox, SCOPE, _config(transport="http", reconcile_interval=0.05))
 
         async def body() -> None:
@@ -388,7 +389,7 @@ def test_watchdog_deadline_covers_a_hung_first_reconcile(tmp_path: Path) -> None
     worker = Worker(
         FakeEnvio().post,
         None,
-        EventInbox(str(tmp_path / "sub.db")),
+        EventInbox(TIMELOCK_STREAM, str(tmp_path / "sub.db")),
         SCOPE,
         _config(transport="http"),
         now=lambda: clock[0],
@@ -403,7 +404,13 @@ def test_watchdog_deadline_covers_a_hung_first_reconcile(tmp_path: Path) -> None
 
 def test_watchdog_withheld_when_a_loop_task_ended(tmp_path: Path) -> None:
     async def scenario() -> None:
-        worker = Worker(FakeEnvio().post, None, EventInbox(str(tmp_path / "sub.db")), SCOPE, _config(transport="http"))
+        worker = Worker(
+            FakeEnvio().post,
+            None,
+            EventInbox(TIMELOCK_STREAM, str(tmp_path / "sub.db")),
+            SCOPE,
+            _config(transport="http"),
+        )
         worker.started_at = worker.now()
 
         async def crashed() -> None:
@@ -418,7 +425,7 @@ def test_watchdog_withheld_when_a_loop_task_ended(tmp_path: Path) -> None:
 
 
 def test_report_includes_outage_that_began_before_the_window(tmp_path: Path) -> None:
-    inbox = EventInbox(str(tmp_path / "sub.db"))
+    inbox = EventInbox(TIMELOCK_STREAM, str(tmp_path / "sub.db"))
     inbox.log("worker_started", 0.0, transport="both")
     inbox.log("ws_connected", 10.0)
     inbox.log("ws_disconnected", 500.0, error="ConnectionClosedError: boom")
@@ -438,7 +445,7 @@ def test_report_includes_outage_that_began_before_the_window(tmp_path: Path) -> 
 
 
 def test_report_ignores_closed_outage_before_the_window(tmp_path: Path) -> None:
-    inbox = EventInbox(str(tmp_path / "sub.db"))
+    inbox = EventInbox(TIMELOCK_STREAM, str(tmp_path / "sub.db"))
     inbox.log("worker_started", 0.0, transport="both")
     inbox.log("ws_connected", 10.0)
     report = build_report(inbox, hours=1, now=7_200.0)
