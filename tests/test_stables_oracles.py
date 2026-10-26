@@ -14,7 +14,6 @@ from protocols.stables.oracles import (
 )
 from utils.alert import AlertSeverity
 from utils.chainlink import FeedReading, RoundData
-from utils.dispatch import DISPATCHABLE_PROTOCOLS
 from utils.pegged_assets import ChainlinkFeed, PeggedAsset, PegTarget, RateOracle, get_asset
 
 NOW = 2_000_000
@@ -230,13 +229,20 @@ class TestRateOracle(unittest.TestCase):
 class TestDispatchRouting(unittest.TestCase):
     """Alerts must carry the asset's logical protocol so emergency dispatch can fire."""
 
-    def test_owned_asset_uses_dispatchable_protocol(self):
-        usde = get_asset("USDe")  # owner "ethena", peg USD, 3% tolerance
-        feed = usde.chainlink_feed
-        assert feed is not None
+    def test_alert_protocol_is_asset_owner_not_channel(self):
+        feed_address = "0x" + "22" * 20
+        asset = PeggedAsset(
+            name="fakeUSD",
+            defillama_key="ethereum:0x" + "11" * 20,
+            protocol="owner",
+            peg=PegTarget.USD,
+            depeg_pct=Decimal("0.03"),
+            chainlink_feed=ChainlinkFeed(address=feed_address, heartbeat=HEARTBEAT),
+            channel="pegs",
+        )
         obs = OracleObservation(
-            asset=usde,
-            reading=_reading(feed.address, 90 * 10**6),  # $0.90 -> off peg
+            asset=asset,
+            reading=_reading(feed_address, 90 * 10**6),  # $0.90 -> off peg
             peg_price_usd=Decimal("1"),
             quote_price_usd=Decimal("1"),
             now=NOW,
@@ -245,8 +251,7 @@ class TestDispatchRouting(unittest.TestCase):
         alert = check_peg_deviation(obs)
         assert alert is not None
         # protocol (not channel) carries the owner; dispatch keys off alert.protocol.
-        self.assertEqual(alert.protocol, "ethena")
-        self.assertIn(alert.protocol, DISPATCHABLE_PROTOCOLS)
+        self.assertEqual(alert.protocol, "owner")
 
 
 class TestRoundMetadataGate(unittest.TestCase):

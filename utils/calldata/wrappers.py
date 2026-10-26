@@ -14,6 +14,9 @@ Supported wrappers:
       (the inner calldata is ``selector(signature) ++ data`` when ``signature``
       is non-empty, else ``data`` as-is)
     - Maple GovernorTimelock: ``scheduleProposals``
+    - Yearn governance Executor: ``execute(bytes)``, whose script packs each call
+      as a 32-byte header ``target (160 bits) | calldata size (96 bits)`` followed
+      by the calldata
 """
 
 from collections.abc import Callable
@@ -62,6 +65,58 @@ def _maple(values: tuple) -> list[tuple[str, bytes]]:
     return list(zip(values[0], values[1]))
 
 
+# Yearn governance Executor (Executor.vy) script limits.
+_SCRIPT_HEADER_BYTES = 32
+_SCRIPT_SIZE_BITS = 96
+_SCRIPT_MAX_CALLS = 64
+
+# Signature of the Executor entrypoint whose single ``bytes`` argument is a packed script.
+PACKED_SCRIPT_SIGNATURE = "execute(bytes)"
+
+
+def split_packed_script(script: bytes) -> list[tuple[str, bytes]]:
+    """Split a Yearn Executor script into its ``(target, calldata)`` pairs.
+
+    Mirrors ``Executor.execute``: each call is a 32-byte header holding the
+    target in the high 160 bits and the calldata size in the low 96 bits,
+    followed by that many calldata bytes. The script must be consumed exactly.
+
+    Args:
+        script: The raw ``_script`` bytes.
+
+    Returns:
+        The calls in execution order.
+
+    Raises:
+        ValueError: If the bytes are not a well-formed, non-empty script.
+    """
+    pairs: list[tuple[str, bytes]] = []
+    offset = 0
+    while offset < len(script):
+        if len(pairs) == _SCRIPT_MAX_CALLS:
+            raise ValueError(f"script has more than {_SCRIPT_MAX_CALLS} calls")
+        if offset + _SCRIPT_HEADER_BYTES > len(script):
+            raise ValueError(f"truncated script header at byte {offset}")
+        header = int.from_bytes(script[offset : offset + _SCRIPT_HEADER_BYTES], "big")
+        offset += _SCRIPT_HEADER_BYTES
+        size = header & ((1 << _SCRIPT_SIZE_BITS) - 1)
+        target = header >> _SCRIPT_SIZE_BITS
+        if target == 0:
+            raise ValueError("script call targets the zero address")
+        if offset + size > len(script):
+            raise ValueError(f"script call at byte {offset} overruns the script")
+        pairs.append(("0x" + target.to_bytes(20, "big").hex(), script[offset : offset + size]))
+        offset += size
+    if not pairs:
+        raise ValueError("empty script")
+    return pairs
+
+
+def _packed_script(values: tuple) -> list[tuple[str, bytes]]:
+    """(script,) — Yearn governance Executor.execute."""
+    return split_packed_script(values[0])
+
+
 # signature → how to pull (target, calldata) pairs out of the decoded values
 _WRAPPER_SIGNATURES: dict[str, _Extractor] = {
     "schedule(address,uint256,bytes,bytes32,bytes32,uint256)": _single,
@@ -71,6 +126,7 @@ _WRAPPER_SIGNATURES: dict[str, _Extractor] = {
     "queueTransaction(address,uint256,string,bytes,uint256)": _compound,
     "executeTransaction(address,uint256,string,bytes,uint256)": _compound,
     "scheduleProposals(address[],bytes[])": _maple,
+    PACKED_SCRIPT_SIGNATURE: _packed_script,
 }
 
 

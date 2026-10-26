@@ -344,7 +344,7 @@ def _explainer_calls_from_events(events: list[dict]) -> list[dict[str, str]]:
     return calls
 
 
-def _get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain_id: int) -> Explanation | None:
+def get_ai_explanation(events: list[dict], timelock_info: TimelockConfig, chain_id: int) -> Explanation | None:
     """Generate AI explanation for timelock events. Returns None on any failure."""
     try:
         # Maple's ProposalScheduled event only carries an opaque proposalId — the
@@ -524,7 +524,7 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
     # governance proposals are already monitored by a dedicated script.
     ai_line = ""
     if timelock_info.protocol.upper() not in SKIP_AI_SUMMARY_PROTOCOLS:
-        explanation = _get_ai_explanation(events, timelock_info, chain_id)
+        explanation = get_ai_explanation(events, timelock_info, chain_id)
         if explanation:
             ai_line = format_explanation_line(explanation)
 

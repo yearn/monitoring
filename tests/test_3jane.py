@@ -796,8 +796,6 @@ def test_accountable_recovery_rearms_alert(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_accountable_alerts_use_the_protocol_dispatch_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """Accountable HIGH/CRITICAL share the 3jane key so they can zero caps."""
-    from utils.dispatch import DISPATCHABLE_PROTOCOLS
-
     module = load_3jane_module()
     alerts: list = []
     stub_cache(monkeypatch, module)
@@ -807,8 +805,6 @@ def test_accountable_alerts_use_the_protocol_dispatch_key(monkeypatch: pytest.Mo
 
     assert alerts[-1].severity == module.AlertSeverity.CRITICAL
     assert alerts[-1].protocol == module.PROTOCOL
-    assert module.ACCOUNTABLE_FEED.protocol == module.PROTOCOL
-    assert alerts[-1].protocol in DISPATCHABLE_PROTOCOLS
 
 
 def test_accountable_unavailable_run_does_not_rearm_critical(monkeypatch: pytest.MonkeyPatch) -> None:

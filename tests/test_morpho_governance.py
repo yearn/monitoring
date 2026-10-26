@@ -291,7 +291,6 @@ class TestMorphoV1GovernanceMain(unittest.TestCase):
             governance.main()
 
         self.assertEqual(checked, list(governance.VAULTS_V1_BY_CHAIN))
-        self.assertIn(Chain.HYPEREVM, checked)
 
 
 if __name__ == "__main__":

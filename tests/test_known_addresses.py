@@ -31,28 +31,18 @@ class TestKnownAddressesLookup(unittest.TestCase):
             # Different chain → no chain-specific entry, falls through to "".
             self.assertEqual(known_addresses.lookup(8453, addr), "")
 
-    def test_watched_yearn_safe_label_from_safe_config(self) -> None:
-        self.assertEqual(
-            known_addresses.lookup(1, "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52"),
-            "yChad (Yearn multisig/daddy)",
-        )
+    def test_watched_safe_labels_from_safe_config(self) -> None:
+        safes = [
+            ["YEARN_MS", "mainnet", "0x" + "AA" * 20, "yChad"],
+            ["LIDO", "base-main", "0x" + "BB" * 20],
+            ["OTHER", "unknown-network", "0x" + "CC" * 20],
+        ]
+        with patch("protocols.safe.addresses.ALL_SAFE_ADDRESSES", safes):
+            labels = known_addresses._watched_safe_labels()
 
-    def test_yearn_proposer_bot_label_is_chain_agnostic(self) -> None:
         self.assertEqual(
-            known_addresses.lookup(8453, "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"),
-            "Yearn yChad proposer bot",
-        )
-
-    def test_safe_utility_label_is_chain_agnostic(self) -> None:
-        self.assertEqual(
-            known_addresses.lookup(42161, "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D"),
-            "Safe MultiSendCallOnly",
-        )
-
-    def test_operator_supplied_timelock_label(self) -> None:
-        self.assertEqual(
-            known_addresses.lookup(1, "0x88Ba032be87d5EF1fbE87336B7090767F367BF73"),
-            "Yearn TimelockController",
+            labels,
+            {(1, "0x" + "aa" * 20): "yChad", (8453, "0x" + "bb" * 20): "LIDO Safe"},
         )
 
 

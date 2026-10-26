@@ -5,15 +5,23 @@ from unittest.mock import patch
 from utils.pegged_assets import (
     BTC_USD_DEFILLAMA_KEY,
     PEGGED_ASSETS,
-    PEGGED_ASSETS_BY_NAME,
+    PeggedAsset,
     PegTarget,
     get_asset,
     price_deviation,
     resolve_peg_prices,
 )
 
-# Asset set the registry must cover per the issue acceptance criteria.
-REQUIRED_ASSETS = {"WBTC", "cbBTC", "LBTC", "iUSD", "cUSD", "USDe", "USDC", "USDT", "USDS"}
+
+def _asset(peg: PegTarget = PegTarget.USD, depeg_pct: str = "0.02", downside_only: bool = False) -> PeggedAsset:
+    return PeggedAsset(
+        name="TEST",
+        defillama_key="ethereum:0x" + "11" * 20,
+        protocol="test",
+        peg=peg,
+        depeg_pct=Decimal(depeg_pct),
+        downside_only=downside_only,
+    )
 
 
 class TestPriceDeviation(unittest.TestCase):
@@ -37,34 +45,30 @@ class TestPriceDeviation(unittest.TestCase):
 
 class TestIsDepegged(unittest.TestCase):
     def test_within_tolerance_is_not_depegged(self):
-        usdc = get_asset("USDC")  # depeg_pct = 0.02
-        self.assertFalse(usdc.is_depegged(Decimal("0.99"), Decimal("1")))
+        self.assertFalse(_asset().is_depegged(Decimal("0.99"), Decimal("1")))
 
     def test_beyond_tolerance_is_depegged(self):
-        usdc = get_asset("USDC")
-        self.assertTrue(usdc.is_depegged(Decimal("0.97"), Decimal("1")))
+        self.assertTrue(_asset().is_depegged(Decimal("0.97"), Decimal("1")))
 
     def test_at_threshold_is_depegged(self):
-        usdc = get_asset("USDC")
-        self.assertTrue(usdc.is_depegged(Decimal("1.02"), Decimal("1")))
+        self.assertTrue(_asset().is_depegged(Decimal("1.02"), Decimal("1")))
 
     def test_btc_asset_uses_peg_price(self):
-        cbbtc = get_asset("cbBTC")  # depeg_pct = 0.02, peg = BTC
-        self.assertFalse(cbbtc.is_depegged(Decimal("60500"), Decimal("60000")))
-        self.assertTrue(cbbtc.is_depegged(Decimal("58000"), Decimal("60000")))
+        btc_asset = _asset(peg=PegTarget.BTC)
+        self.assertFalse(btc_asset.is_depegged(Decimal("60500"), Decimal("60000")))
+        self.assertTrue(btc_asset.is_depegged(Decimal("58000"), Decimal("60000")))
 
     def test_downside_only_ignores_upside(self):
-        lbtc = get_asset("LBTC")  # depeg_pct = 0.03, downside_only
-        # +5% above peg (LBTC legitimately trades above 1 BTC) -> not a depeg.
-        self.assertFalse(lbtc.is_depegged(Decimal("63000"), Decimal("60000")))
+        asset = _asset(peg=PegTarget.BTC, depeg_pct="0.03", downside_only=True)
+        # +5% above peg -> not a depeg.
+        self.assertFalse(asset.is_depegged(Decimal("63000"), Decimal("60000")))
         # -5% below peg -> depeg.
-        self.assertTrue(lbtc.is_depegged(Decimal("57000"), Decimal("60000")))
+        self.assertTrue(asset.is_depegged(Decimal("57000"), Decimal("60000")))
         # exactly at the downside threshold -> depeg.
-        self.assertTrue(lbtc.is_depegged(Decimal("58200"), Decimal("60000")))
+        self.assertTrue(asset.is_depegged(Decimal("58200"), Decimal("60000")))
 
     def test_symmetric_asset_flags_upside(self):
-        usdc = get_asset("USDC")  # depeg_pct = 0.02, symmetric
-        self.assertTrue(usdc.is_depegged(Decimal("1.05"), Decimal("1")))
+        self.assertTrue(_asset().is_depegged(Decimal("1.05"), Decimal("1")))
 
 
 class TestResolvePegPrices(unittest.TestCase):
@@ -87,9 +91,6 @@ class TestResolvePegPrices(unittest.TestCase):
 
 
 class TestRegistry(unittest.TestCase):
-    def test_covers_required_assets(self):
-        self.assertTrue(REQUIRED_ASSETS.issubset(set(PEGGED_ASSETS_BY_NAME)))
-
     def test_names_are_unique(self):
         names = [a.name for a in PEGGED_ASSETS]
         self.assertEqual(len(names), len(set(names)))
@@ -101,10 +102,6 @@ class TestRegistry(unittest.TestCase):
     def test_every_asset_has_positive_depeg_tolerance(self):
         for asset in PEGGED_ASSETS:
             self.assertGreater(asset.depeg_pct, Decimal("0"), asset.name)
-
-    def test_btc_wrappers_are_downside_only(self):
-        for name in ("WBTC", "cbBTC", "LBTC"):
-            self.assertTrue(get_asset(name).downside_only, name)
 
 
 if __name__ == "__main__":

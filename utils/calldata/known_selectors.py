@@ -41,6 +41,11 @@ KNOWN_SELECTORS: dict[str, str] = {
     # Maple GovernorTimelock
     "0xd9ab9270": "scheduleProposals(address[],bytes[])",
     "0x2d6e853c": "proposeRoleUpdates(bytes32[],address[],bool[])",
+    # Yearn governance Executor (Executor.vy) and the two-step management roles it takes over
+    "0x09c5eabe": "execute(bytes)",
+    "0x0fe42159": "set_operator(address,bool)",
+    "0xfd066ecc": "set_management(address)",
+    "0x759be10c": "accept_management()",
     # Safe (Gnosis)
     "0x6a761202": "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)",
     # Initializers — frequently appear as the inner payload of upgradeToAndCall / upgradeAndCall

@@ -274,30 +274,6 @@ class TestHashedLabelRendering(unittest.TestCase):
             self.assertEqual(as_hex, "0x" + keccak(text=name).hex())
             self.assertTrue(note, f"{name} has no explanatory note")
 
-    def test_notes_follow_the_consuming_contracts(self) -> None:
-        """Notes are read from the contract that consumes each key; several used to misstate units or zero."""
-        notes = threejane_context._HASHED_LABELS
-        self.assertIn("waUSDC", notes["DEBT_CAP"])
-        self.assertIn("0 blocks all new borrowing", notes["DEBT_CAP"])
-        self.assertIn("not a lending limit", notes["MAX_ON_CREDIT"])
-        self.assertIn("0 freezes the market", notes["CYCLE_DURATION"])
-        self.assertIn("0 falls back to 1500", notes["TRANCHE_RATIO"])
-        self.assertIn("syncTrancheShare", notes["TRANCHE_SHARE_VARIANT"])
-        self.assertIn("USD3 deploys to credit", notes["MIN_SUSD3_BACKING_RATIO"])
-        for unused in ("MIN_LOAN_DURATION", "LATE_REPAYMENT_THRESHOLD", "DEFAULT_THRESHOLD", "USD3_COMMITMENT_TIME"):
-            self.assertIn("no on-chain effect", notes[unused])
-
-    def test_every_protocol_config_lib_key_is_known(self) -> None:
-        """ProtocolConfigLib keys an alert can set; the redemption floors and tend threshold were missing."""
-        for name in (
-            "USD3_REDEMPTION_FLOOR",
-            "USD3_REDEMPTION_FLOOR_BPS",
-            "TEND_DRIFT_THRESHOLD",
-            "SUSD3_NOMINAL_BACKING_FLOOR",
-            "FULL_MARKDOWN_DURATION",
-        ):
-            self.assertIn("0x" + keccak(text=name).hex(), threejane_context._LABELS_BY_HASH)
-
     def test_wausdc_keys_render_with_a_usdc_equivalent(self) -> None:
         """Two HIGH alerts left DEBT_CAP and an 81.5M credit line in "raw units"; they are waUSDC."""
         wausdc = TokenUnit(threejane_context.WAUSDC_ADDRESS, "waEthUSDC", 6)

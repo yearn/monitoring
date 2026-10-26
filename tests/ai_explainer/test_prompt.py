@@ -84,6 +84,13 @@ class TestBuildPromptWithSourceContext(unittest.TestCase):
         self.assertIn("Do NOT assume the semantic meaning", SYSTEM_INSTRUCTIONS)
         self.assertIn("source context", SYSTEM_INSTRUCTIONS.lower())
 
+    def test_votes_are_rated_low_by_a_general_rule(self) -> None:
+        # One implementation-agnostic rule instead of per-signature anchors, with the
+        # cases where a "vote" does more than record a ballot called out.
+        self.assertIn("only records a governance vote (any implementation) is LOW", SYSTEM_INSTRUCTIONS)
+        self.assertIn("_executesIfDecided", SYSTEM_INSTRUCTIONS)
+        self.assertIn("delegating voting power is not a vote", SYSTEM_INSTRUCTIONS)
+
     def test_context_note_appears_in_prompt(self) -> None:
         calls = [DecodedCall(function_name="swapOwner", signature="swapOwner(address,address,address)")]
         result = _build_prompt(

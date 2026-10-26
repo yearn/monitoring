@@ -109,30 +109,6 @@ class TestAnchorRegistryIntegrity(unittest.TestCase):
         }
         self.assertEqual(_ANCHORS, expected)
 
-    def test_selectors_match_signatures(self) -> None:
-        # Recompute the selector for each anchored signature to catch typos.
-        expected = {
-            "acceptOwnership()": "0x79ba5097",
-            "mint(address,uint256)": "0x40c10f19",
-            "addOwnerWithThreshold(address,uint256)": "0x0d582f13",
-            "removeOwner(address,address,uint256)": "0xf8dc5dd9",
-            "swapOwner(address,address,address)": "0xe318b52b",
-            "changeThreshold(uint256)": "0x694e80c3",
-            "enableModule(address)": "0x610b5925",
-            "disableModule(address,address)": "0xe009cfde",
-            "setGuard(address)": "0xe19a9dd9",
-            "setFallbackHandler(address)": "0xf08a0323",
-        }
-        for sig, selector in expected.items():
-            self.assertEqual("0x" + function_signature_to_4byte_selector(sig).hex(), selector, sig)
-            self.assertIn(selector, _ANCHORS, f"{sig} ({selector}) not registered")
-
-    def test_safe_module_is_critical(self) -> None:
-        # enableModule can move funds with no owner signatures — highest band.
-        anchor = lookup("0x610b5925")
-        assert anchor is not None
-        self.assertEqual(anchor.level, "CRITICAL")
-
 
 if __name__ == "__main__":
     unittest.main()

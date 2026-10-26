@@ -230,6 +230,78 @@ directly.
 
 ---
 
+## Timelock event subscriber (pilot)
+
+`monitoring-timelock-subscriber` is the continuous timelock event worker from
+[#438](https://github.com/yearn/monitoring/issues/438). It runs alongside the
+hourly `timelock-alerts` task, which still sends every timelock alert. The pilot
+sends no alerts: it records what it observes in `/srv/cache/timelock_subscriber.db`
+and journald. With `TIMELOCK_SUBSCRIBER_NOTIFY=errors` it also posts diagnostic
+notices (new events, WebSocket outages, stalls, failures, a daily summary) to the
+internal errors chat; see the timelock README for the list. Stopping it has no effect on alerting. Design notes are in
+[`protocols/timelock/README.md`](../protocols/timelock/README.md#continuous-subscriber-pilot).
+
+```sh
+sudo systemctl enable --now monitoring-timelock-subscriber
+systemctl status monitoring-timelock-subscriber
+journalctl -u monitoring-timelock-subscriber -f
+```
+
+It is a long-running process, so the 10-minute code sync does not reload it.
+Restart it after a change to `protocols/timelock/` or `utils/graphql_ws.py`:
+`sudo systemctl restart monitoring-timelock-subscriber`.
+
+Check health and read the coverage/latency report:
+
+```sh
+cd /srv/monitoring
+CACHE_DIR=/srv/cache uv run python protocols/timelock/event_subscriber.py health      # exit 1 when unhealthy
+CACHE_DIR=/srv/cache uv run python protocols/timelock/event_subscriber.py report --hours 168
+CACHE_DIR=/srv/cache uv run python protocols/timelock/event_subscriber.py report --hours 168 --json
+```
+
+`health` fails when the heartbeat is older than three intervals, the last
+reconcile failed, the WebSocket is down, or a chain's indexed head has not
+advanced for `TIMELOCK_SUBSCRIBER_STALL_SECONDS` (default 900).
+
+Supervision: the unit is `Type=notify` with `WatchdogSec=120`. The heartbeat pings
+the watchdog only while HTTP reconciliation keeps completing, so a wedged worker
+is killed and restarted. `Restart=always` also covers a crash, after which
+`run_with_alert` posts to the internal errors feed and exits 0.
+
+### Controlled recovery tests
+
+Run each test, then confirm with `report` that the events from the test window
+are present, each once, with `changed: 0` unless a reorg happened.
+
+- **Restart:** `sudo systemctl restart monitoring-timelock-subscriber`. The worker
+  resumes from its per-chain checkpoints; the outage appears in the report.
+- **Backlog:** `sudo systemctl stop monitoring-timelock-subscriber`, wait at least
+  an hour (ideally across a known timelock event), then start it. HTTP
+  reconciliation drains the gap in chunks of at most `MAX_BLOCK_SPAN` blocks.
+- **Disconnect:** kill the WebSocket without stopping the worker:
+  `sudo ss -K dst "$(getent hosts indexer.hyperindex.xyz | awk '{print $1}')" dport = 443`.
+  The journal shows `WebSocket disconnected ... reconnecting`, then
+  `WebSocket subscription live`.
+
+### Settings
+
+Set in `/etc/monitoring/.env`, then restart the unit:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TIMELOCK_SUBSCRIBER_TRANSPORT` | `both` | `both`, `ws`, or `http` |
+| `TIMELOCK_SUBSCRIBER_NOTIFY` | `none` | `errors` posts pilot notices to the internal errors chat (needs `TELEGRAM_TOPIC_ID_ERRORS` or `TELEGRAM_CHAT_ID_ERRORS`) |
+| `TIMELOCK_SUBSCRIBER_RECONCILE_SECONDS` | `60` | HTTP reconcile interval |
+| `TIMELOCK_SUBSCRIBER_STALL_SECONDS` | `900` | Indexed head age that counts as stalled |
+| `TIMELOCK_SUBSCRIBER_START_LOOKBACK_SECONDS` | `0` | History to backfill on a chain's first run |
+| `ENVIO_GRAPHQL_WS_URL` | derived | WebSocket URL; defaults to `ENVIO_GRAPHQL_URL` with `wss://` |
+
+To start the pilot over, stop the unit and delete
+`/srv/cache/timelock_subscriber.db*`. Checkpoints start again at the indexed head.
+
+---
+
 ## SQLite state and cache migration
 
 Alert history and migrated monitor state live in `/srv/cache/monitoring.db`.
@@ -278,6 +350,7 @@ Remove the variable and restart to return to SQLite-backed cache state.
 | Telegram suddenly silent | Is `TELEGRAM_BOT_TOKEN_DEFAULT` valid? `LOG_LEVEL=DEBUG` skips sends. | Bot revoked, chat removed bot, or LOG_LEVEL left at DEBUG. |
 | One profile never runs | `uv run python -m automation render-crontab` — is its line present? | Profile/task `enabled: false` in jobs.yaml, or its `flock` lock is stuck held by a hung run (restart clears it). |
 | `ModuleNotFoundError` / `SyntaxError` after a deploy | `journalctl -u monitoring \| grep 'pre-run uv sync'` | Auto `uv sync` failed or hasn't ticked yet; run `uv sync --frozen --extra ai` by hand. |
+| Timelock subscriber restarting in a loop | `journalctl -u monitoring-timelock-subscriber -n 100` | Envio GraphQL unreachable is logged, not fatal; a loop usually means a missing `ENVIO_GRAPHQL_URL` or a watchdog timeout from a hung reconcile. |
 | Cache/dedupe acting up | `ls -l /srv/cache` | Wrong perms (must be writable by the runner user) or a corrupt cache file — safe to delete; it re-seeds. |
 
 ---
@@ -293,8 +366,11 @@ Remove the variable and restart to return to SQLite-backed cache state.
 - SQLite database: `/srv/cache/monitoring.db` plus WAL/shm sidecars.
 - Env file: `/etc/monitoring/.env` (mode 0640, root:<deploy-user>;
   operator-supplied, not in git).
-- systemd units: `/etc/systemd/system/monitoring.service` and
-  `/etc/systemd/system/monitoring-api.service`.
+- systemd units: `/etc/systemd/system/monitoring.service`,
+  `/etc/systemd/system/monitoring-api.service`, and
+  `/etc/systemd/system/monitoring-timelock-subscriber.service`.
+- Timelock subscriber inbox: `/srv/cache/timelock_subscriber.db` plus WAL/shm
+  sidecars.
 - Rendered crontab: `/tmp/crontab` (per-service `PrivateTmp`; regenerated on
   every start).
 - Code sync: no separate unit — the `ten_minute` profile's pre-run `git fetch

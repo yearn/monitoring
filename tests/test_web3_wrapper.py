@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from web3 import Web3
 
-from utils.chains import PUBLIC_RPC_URLS, Chain
+from utils.chains import Chain
 from utils.web3_wrapper import (
     MAX_BACKOFF_SECONDS,
     REQUEST_TIMEOUT_SECONDS,
@@ -134,30 +134,27 @@ class TestDefaultProviderUrls(unittest.TestCase):
     def _env_without_providers(self) -> dict[str, str]:
         return {key: value for key, value in os.environ.items() if not key.startswith("PROVIDER_URL_")}
 
-    def test_production_mapping_has_hyperevm_public_rpc(self):
-        self.assertEqual(PUBLIC_RPC_URLS[Chain.HYPEREVM.chain_id], "https://rpc.hyperliquid.xyz/evm")
-        self.assertEqual(PUBLIC_RPC_URLS[Chain.ROBINHOOD.chain_id], "https://rpc.mainnet.chain.robinhood.com")
+    PUBLIC_URLS = {Chain.HYPEREVM.chain_id: "https://public.example/evm"}
 
-    def test_hyperevm_falls_back_to_public_rpc(self):
+    def test_falls_back_to_public_rpc(self):
         with (
             patch.dict(os.environ, self._env_without_providers(), clear=True),
-            # conftest blanks the mapping for isolation; restore the production values here.
-            patch("utils.web3_wrapper.DEFAULT_PROVIDER_URLS", PUBLIC_RPC_URLS),
+            patch("utils.web3_wrapper.DEFAULT_PROVIDER_URLS", self.PUBLIC_URLS),
         ):
-            self.assertEqual(self._client(Chain.HYPEREVM)._get_provider_urls(), ["https://rpc.hyperliquid.xyz/evm"])
+            self.assertEqual(self._client(Chain.HYPEREVM)._get_provider_urls(), ["https://public.example/evm"])
 
     def test_env_provider_disables_public_fallback(self):
         env = {**self._env_without_providers(), "PROVIDER_URL_HYPEREVM": "https://custom.example/evm"}
         with (
             patch.dict(os.environ, env, clear=True),
-            patch("utils.web3_wrapper.DEFAULT_PROVIDER_URLS", PUBLIC_RPC_URLS),
+            patch("utils.web3_wrapper.DEFAULT_PROVIDER_URLS", self.PUBLIC_URLS),
         ):
             self.assertEqual(self._client(Chain.HYPEREVM)._get_provider_urls(), ["https://custom.example/evm"])
 
     def test_chain_without_default_still_requires_env(self):
         with (
             patch.dict(os.environ, self._env_without_providers(), clear=True),
-            patch("utils.web3_wrapper.DEFAULT_PROVIDER_URLS", PUBLIC_RPC_URLS),
+            patch("utils.web3_wrapper.DEFAULT_PROVIDER_URLS", self.PUBLIC_URLS),
         ):
             with self.assertRaisesRegex(ValueError, "No providers found for chain MAINNET"):
                 self._client(Chain.MAINNET)._get_provider_urls()

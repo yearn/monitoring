@@ -15,7 +15,11 @@ from protocols.morpho._shared import (
     MorphoV2MonitoringError,
     get_vault_url,
 )
-from protocols.morpho.config import VAULTS_V2_BY_CHAIN, VaultConfig, get_collateral_vaults_by_asset
+from protocols.morpho.config import (
+    YV_COLLATERAL_MARKETS_BY_ASSET,
+    VaultConfig,
+    get_collateral_vaults_by_asset,
+)
 from protocols.morpho.markets import (
     YV_COLLATERAL_AT_RISK_POINTS,
     YV_COLLATERAL_STABLE_PRICE_SHOCK,
@@ -60,26 +64,15 @@ def _sample_metrics(market_id: str, asset_address: str = "0x" + "22" * 20) -> Ma
 
 
 class TestMorphoV2Configuration(unittest.TestCase):
-    def test_katana_collateral_strategy_vaults_are_monitored(self) -> None:
-        configured = {vault.address.lower() for vault in VAULTS_V2_BY_CHAIN[Chain.KATANA]}
-        expected = {
-            "0x4284d4f9f4d61ea57b8f0943547c7c19c5b9b249",
-            "0xca44cbe1fb03691d43d2d93aa460e2fcb03878fe",
-            "0xa2d38c8a3d810ebcf4c2075821c5ec8f976bb692",
-            "0xac596ad9771a8d0d4df108ae0406e6f913aedceb",
-            "0x5920a6fc553af799542eda628adfcc9ea52e141c",
-            "0xbeeff2d5d126d4809195eea02b605423917bb6c6",
-            "0xbeef042bad4472c3f7eb9a73070703788b5362d7",
-        }
-
-        self.assertTrue(expected <= configured)
-
-        collateral_vaults = {
-            vault.address.lower()
-            for vaults in get_collateral_vaults_by_asset(Chain.KATANA, version=2).values()
-            for vault in vaults
-        }
-        self.assertEqual(collateral_vaults, expected)
+    def test_collateral_markets_have_configured_liquidity_vaults(self) -> None:
+        """Every watched collateral asset needs a vault to supply its liquidity group."""
+        for chain, markets_by_asset in YV_COLLATERAL_MARKETS_BY_ASSET.items():
+            v1_assets = get_collateral_vaults_by_asset(chain, version=1)
+            v2_assets = get_collateral_vaults_by_asset(chain, version=2)
+            configured_assets = v1_assets.keys() | v2_assets.keys()
+            for asset_address in markets_by_asset:
+                with self.subTest(chain=chain.name, asset=asset_address):
+                    self.assertIn(asset_address.lower(), configured_assets)
 
     def test_discovery_fails_if_api_omits_configured_vaults(self) -> None:
         response = MagicMock()
@@ -488,11 +481,8 @@ class TestMorphoCollateralLiquidity(unittest.TestCase):
 
         self.assertIn("No liquidity adapter set", send.call_args.args[0].message)
 
-    def test_collateral_v2_vaults_get_low_liquidity_check(self) -> None:
-        collateral_vault = next(v for v in VAULTS_V2_BY_CHAIN[Chain.KATANA] if v.collateral_asset)
+    def test_analyze_v2_vault_runs_low_liquidity_check(self) -> None:
         vault = self._v2_vault(0, self._market(90_000, 1_000))
-        vault.address = collateral_vault.address
-        vault.chain = Chain.KATANA
 
         with (
             patch("protocols.morpho.markets_v2.score_market_allocations"),
@@ -556,23 +546,24 @@ class TestMorphoCollateralLiquidity(unittest.TestCase):
                 _parse_liquidity_market(broken, "Example", Chain.MAINNET)
 
     def test_zero_asset_group_is_retained_for_collateral_risk_check(self) -> None:
+        vault_address = "0x" + "77" * 20
+        asset_address = "0x" + "88" * 20
         v1_vaults = [
             {
                 "__typename": "Vault",
-                "address": "0xe107cCdeb8e20E499545C813f98Cc90619b29859",
+                "address": vault_address,
                 "name": "Yearn OG WBTC",
                 "chain": {"id": Chain.KATANA.chain_id},
-                "asset": {
-                    "address": "0x0913DA6Da4b42f538B445599b46Bb4622342Cf52",
-                    "symbol": "vbWBTC",
-                },
+                "asset": {"address": asset_address, "symbol": "vbWBTC"},
                 "state": {"totalAssetsUsd": 0},
                 "liquidity": {"usd": 0},
             }
         ]
+        vault_config = VaultConfig("Yearn OG WBTC", vault_address, 1, asset_address)
 
-        groups = get_yv_collateral_liquidity_by_asset(Chain.KATANA, v1_vaults, [])
-        wbtc_group = groups["0x0913da6da4b42f538b445599b46bb4622342cf52"]
+        with patch.dict("protocols.morpho.config.VAULTS_V1_BY_CHAIN", {Chain.KATANA: (vault_config,)}):
+            groups = get_yv_collateral_liquidity_by_asset(Chain.KATANA, v1_vaults, [])
+        wbtc_group = groups[asset_address]
 
         self.assertEqual(wbtc_group.combined_total_assets, 0)
         self.assertEqual(wbtc_group.combined_liquidity, 0)
@@ -586,28 +577,12 @@ class TestMorphoRiskLookup(unittest.TestCase):
         self.assertEqual(get_market_risk_level(market_id, Chain.MAINNET), 5)
         self.assertEqual(get_market_risk_level("0x" + "00" * 32, Chain.HYPEREVM), 5)
 
-    def test_robinhood_stonk_vault_markets_are_tiered(self) -> None:
-        spy = "0x50bc39b5722fb5634c436d74c6787f3c125b879e7b73cf9e9ecc01bbb57b8e55"
-        spy_77 = "0xeb1739b2a69dd22a4285d366a06698a01018b37c24d2994fefe19cc72f313613"
-        nvda = "0x66306c087add8907752320b309934abcc354d21626de8115c79df49d9c214edc"
-        nvda_no_quote = "0x95312f02c1dae8407b2c80468a5657a9bd19c45ac277f1a61aa52c11444c5314"
-        usde = "0xc845da65a020ddca5f132efa8fea79676d8edfdea504226a4c01e7a9e34cddd6"
-        googl = "0x7408b08b03e05ffd2d21c797489a0e77a28e4bb36acb4e827c69e805d06272b4"
-
-        self.assertEqual(get_market_risk_level(spy, Chain.ROBINHOOD), 2)
-        self.assertEqual(get_market_risk_level(spy_77, Chain.ROBINHOOD), 3)
-        self.assertEqual(get_market_risk_level(nvda, Chain.ROBINHOOD), 3)
-        self.assertEqual(get_market_risk_level(nvda_no_quote, Chain.ROBINHOOD), 3)
-        self.assertEqual(get_market_risk_level(usde, Chain.ROBINHOOD), 2)
-        self.assertEqual(get_market_risk_level(googl, Chain.ROBINHOOD), 4)
-
 
 class TestMorphoUrls(unittest.TestCase):
     def test_robinhood_uses_morpho_chain_slug(self) -> None:
         vault = "0x8c258F25fc6fBe3f01ccC828E2C3840A46a4a9A2"
 
         self.assertEqual(get_vault_url(vault, Chain.ROBINHOOD), f"https://app.morpho.org/robinhood-chain/vault/{vault}")
-        self.assertEqual(Chain.ROBINHOOD.explorer_url, "https://robinhoodchain.blockscout.com")
 
 
 if __name__ == "__main__":

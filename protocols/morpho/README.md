@@ -71,6 +71,8 @@ For vaults that are used as collateral in Yearn v3 strategies (YV collateral vau
 
 **Configuration:** YV collateral strategy vaults set `collateral_asset` in [config.py](./config.py). Keep both generations configured while liquidity migrates from V1 to V2. Watched direct YV-collateral markets are defined in `YV_COLLATERAL_MARKETS_BY_ASSET` in the same file.
 
+Each watched collateral asset must have at least one configured V1 or V2 strategy vault on the same chain. When removing the last vault for an asset, also remove its direct collateral market entries. Katana unwind coverage currently watches USDC, USDT, and WETH; WBTC was removed with its strategy vaults.
+
 **Thresholds:**
 
 - **Regular vaults:** `LIQUIDITY_THRESHOLD` (V1, 2%) and `V2_LIQUIDITY_THRESHOLD` (V2, 2%; also applied to YV-collateral V2 vaults) in [risk.py](./risk.py).

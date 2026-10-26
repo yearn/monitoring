@@ -227,11 +227,19 @@ class TestYearnMirror(unittest.TestCase):
     @patch.object(stale_operations, "write_last_value_to_file")
     @patch.object(stale_operations, "send_telegram_message")
     @patch.object(stale_operations, "get_last_value_for_key_from_file", return_value=0)
+    @patch.object(stale_operations, "explain_operation", return_value="")
     @patch.object(stale_operations, "format_operation", return_value="op")
     @patch.object(stale_operations, "ready_times", return_value={})
     @patch.object(stale_operations, "load_scheduled_operations")
     def test_yearn_alert_is_mirrored_internally(
-        self, load: MagicMock, _ready: MagicMock, _fmt: MagicMock, _cached: MagicMock, send: MagicMock, _w: MagicMock
+        self,
+        load: MagicMock,
+        _ready: MagicMock,
+        _fmt: MagicMock,
+        _explain: MagicMock,
+        _cached: MagicMock,
+        send: MagicMock,
+        _w: MagicMock,
     ) -> None:
         yearn = TIMELOCKS[("0x88ba032be87d5ef1fbe87336b7090767f367bf73", 1)]
         operation = Operation(yearn, "0x" + "cc" * 32, NOW, "0x" + "ab" * 32, ())
@@ -240,6 +248,50 @@ class TestYearnMirror(unittest.TestCase):
             stale_operations.main()
         self.assertEqual([call.args[1] for call in send.call_args_list], ["YEARN_TIMELOCK", "YEARN_TIMELOCK_INTERNAL"])
         self.assertEqual(send.call_args_list[0].kwargs["origin_protocol"], "yearn")
+
+
+class TestExplainOperation(unittest.TestCase):
+    @patch.object(stale_operations, "format_explanation_line", return_value="\n🤖 *AI Summary:*\nsummary")
+    @patch.object(stale_operations, "get_ai_explanation")
+    def test_passes_calls_with_values_to_explainer(self, explain: MagicMock, _fmt: MagicMock) -> None:
+        operation = replace(_operation(), values=("5",))
+        self.assertEqual(stale_operations.explain_operation(operation), "\n🤖 *AI Summary:*\nsummary")
+        events, timelock, chain_id = explain.call_args.args
+        self.assertEqual(events, [{"target": RATE_MANAGER, "data": SET_RATE, "value": "5"}])
+        self.assertEqual((timelock, chain_id), (SHORT, 1))
+
+    @patch.object(stale_operations, "get_ai_explanation", return_value=None)
+    def test_failed_explanation_returns_empty_line(self, _explain: MagicMock) -> None:
+        self.assertEqual(stale_operations.explain_operation(_operation()), "")
+
+    @patch.object(stale_operations, "get_ai_explanation")
+    def test_skipped_protocols_are_not_explained(self, explain: MagicMock) -> None:
+        operation = replace(_operation(), timelock=replace(SHORT, protocol="FLUID"))
+        self.assertEqual(stale_operations.explain_operation(operation), "")
+        explain.assert_not_called()
+
+    def test_load_keeps_call_values(self) -> None:
+        event = {**_event("a", "0x" + "11" * 32, 0), "value": "7"}
+        with patch.object(stale_operations, "load_events", return_value={"data": {"TimelockEvent": [event]}}):
+            (operation,) = load_scheduled_operations(0) or []
+        self.assertEqual(operation.values, ("7",))
+
+    @patch.object(stale_operations, "decode_calldata", return_value=None)
+    def test_ai_line_follows_calls_and_shrinks_call_budget(self, _decode: MagicMock) -> None:
+        ai_line = "\n🤖 *AI Summary:*\n" + "x" * 3000
+        operation = replace(_operation(), calls=((RATE_MANAGER, "0x12345678"),) * 10)
+        text = format_operation(operation, NOW - 20 * DAY, NOW, ai_line)
+        self.assertTrue(text.endswith(ai_line))
+        self.assertIn("more calls (see the schedule tx)", text)
+
+    @patch.object(stale_operations, "decode_calldata", return_value=None)
+    def test_oversized_ai_line_falls_back_to_plain_alert(self, _decode: MagicMock) -> None:
+        ai_line = "\n🤖 *AI Summary:*\n" + "x" * 3500 + "\n[Full details](https://gist.wavey.info/abc)"
+        operation = replace(_operation(), calls=((RATE_MANAGER, "0x12345678"),) * 6)
+        text = format_operation(operation, NOW - 20 * DAY, NOW, ai_line)
+        self.assertNotIn("AI Summary", text)
+        self.assertEqual(text, format_operation(operation, NOW - 20 * DAY, NOW))
+        self.assertEqual(len(stale_operations.chunk_entries([("k", text)])), 1)
 
 
 if __name__ == "__main__":

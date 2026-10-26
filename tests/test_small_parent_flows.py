@@ -20,6 +20,16 @@ VAULT = {
     "asset_decimals": 6,
 }
 
+EXCLUDED_INITIATOR = "0x" + "e9" * 20
+
+
+@pytest.fixture(autouse=True)
+def _excluded_initiators(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exclude a fake Katana initiator so tests don't depend on the real config."""
+    monkeypatch.setattr(
+        monitor, "IGNORED_TRANSACTION_SENDERS", {Chain.KATANA.chain_id: frozenset({EXCLUDED_INITIATOR})}
+    )
+
 
 def make_event(
     *,
@@ -127,7 +137,7 @@ def test_process_event_raises_without_alert_sender() -> None:
 @pytest.mark.parametrize("flow_type", ["deposit", "withdrawal"])
 @pytest.mark.parametrize(
     "initiator",
-    ["0xe9312419edc29e7784ac2f5aa2fd2ac0f38ff2af", "0xe9312419edc29E7784AC2F5AA2Fd2ac0f38fF2Af"],
+    [EXCLUDED_INITIATOR, "0x" + "E9" * 20],
 )
 def test_process_event_excludes_katana_initiator(flow_type: str, initiator: str) -> None:
     """Excluded initiators do not consume aggregate capacity or emit summaries."""
@@ -147,7 +157,7 @@ def test_process_event_excludes_katana_initiator(flow_type: str, initiator: str)
 def test_process_event_exclusion_is_chain_scoped() -> None:
     """The same address remains monitored outside Katana."""
     event = make_event(chain_id=Chain.MAINNET.chain_id)
-    event["transactionFrom"] = "0xe9312419edc29E7784AC2F5AA2Fd2ac0f38fF2Af"
+    event["transactionFrom"] = EXCLUDED_INITIATOR
     records: list[monitor.SmallFlowRecord] = []
 
     assert monitor.process_event(event, {"0xparent": VAULT}, 10_000, records.append)
@@ -160,7 +170,7 @@ def test_process_event_does_not_exclude_other_participants(initiator: str | None
     event = make_event(flow_type="withdrawal", chain_id=Chain.KATANA.chain_id)
     event["transactionFrom"] = initiator
     for field in ("sender", "owner", "receiver"):
-        event[field] = "0xe9312419edc29E7784AC2F5AA2Fd2ac0f38fF2Af"
+        event[field] = EXCLUDED_INITIATOR
     records: list[monitor.SmallFlowRecord] = []
 
     assert monitor.process_event(event, {"0xparent": VAULT}, 10_000, records.append)
@@ -172,7 +182,7 @@ def test_monitor_flow_type_advances_past_excluded_events(monkeypatch: pytest.Mon
     """Excluded events advance the cursor without preventing later flows from alerting."""
     chain_id = Chain.KATANA.chain_id
     first = make_event(flow_type=flow_type, chain_id=chain_id)
-    first["transactionFrom"] = "0xe9312419edc29E7784AC2F5AA2Fd2ac0f38fF2Af"
+    first["transactionFrom"] = EXCLUDED_INITIATOR
     second = make_event(flow_type=flow_type, chain_id=chain_id, block_number=101)
     third = {**first, "blockNumber": 102}
     pages = iter([[first], [second], [third], []])

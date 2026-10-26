@@ -22,6 +22,7 @@ from eth_utils import to_checksum_address
 from utils.calldata.decoder import (
     MAX_BYTES_RECURSION_DEPTH,
     DecodedCall,
+    ScriptCall,
     split_top_level_types,
     try_decode_inner_calldata,
 )
@@ -410,6 +411,9 @@ def _format_params(
     for i, (type_str, value) in enumerate(call.params):
         name = param_names[i] if param_names is not None and i < len(param_names) else None
         hint_token = token if is_token_amount_param(call.signature, i, name, token) else None
+        if call.script_calls and type_str == "bytes":
+            lines.extend(_render_script_calls(call, _param_label(type_str, name), chain_id, labels, indent, depth))
+            continue
         rendered = _render_param(
             _param_label(type_str, name), type_str, value, chain_id, labels, indent, depth, hint_token
         )
@@ -418,6 +422,37 @@ def _format_params(
             if role:
                 rendered = [f"{rendered[0]} — role **{role}**"]
         lines.extend(rendered)
+    return lines
+
+
+def _script_call_what(script_call: ScriptCall) -> str:
+    """Short description of one Executor script call's function."""
+    if script_call.decoded is not None:
+        return f"`{script_call.decoded.signature}`"
+    if script_call.data == "0x":
+        return "empty calldata (no function selector)"
+    if len(script_call.data) < 10:
+        return f"undecoded short payload `{script_call.data}` (no full selector)"
+    return f"undecoded selector `{script_call.data[:10]}`"
+
+
+def _render_script_calls(
+    call: DecodedCall,
+    label: str,
+    chain_id: int,
+    labels: dict[str, str],
+    indent: str,
+    depth: int,
+) -> list[str]:
+    """Render a Yearn Executor script as its inner calls instead of packed hex."""
+    count = len(call.script_calls)
+    noun = "call" if count == 1 else "calls"
+    lines = [f"{indent}- {label}: ↳ Executor script, {count} {noun} made by the Executor"]
+    for k, script_call in enumerate(call.script_calls, start=1):
+        target = address_link(script_call.target, chain_id, labels)
+        lines.append(f"{indent}  - Script call {k}: {_script_call_what(script_call)} on {target}")
+        if script_call.decoded is not None and depth < MAX_BYTES_RECURSION_DEPTH:
+            lines.extend(_format_params(script_call.decoded, chain_id, labels, None, indent + "    ", depth + 1))
     return lines
 
 
@@ -517,6 +552,10 @@ def _iter_reference_arguments(call: DecodedCall, depth: int = 0) -> Iterator[str
         if depth < MAX_BYTES_RECURSION_DEPTH:
             for inner in _iter_inner_calldata(type_str, value):
                 yield from _iter_reference_arguments(inner, depth + 1)
+    for script_call in call.script_calls:
+        yield script_call.target
+        if script_call.decoded is not None and depth < MAX_BYTES_RECURSION_DEPTH:
+            yield from _iter_reference_arguments(script_call.decoded, depth + 1)
 
 
 def format_reference_table(ctx: ReportContext, shown: str = "") -> str:

@@ -215,6 +215,13 @@ sed -e "s|__MONITOR_USER__|${TARGET_USER}|g" \
   "${REPO_DIR}/deploy/systemd/monitoring-api.service" \
   > /etc/systemd/system/monitoring-api.service
 chmod 0644 /etc/systemd/system/monitoring-api.service
+sed -e "s|__MONITOR_USER__|${TARGET_USER}|g" \
+    -e "s|__REPO_DIR__|${REPO_DIR}|g" \
+    -e "s|__ETC_DIR__|${ETC_DIR}|g" \
+    -e "s|__CACHE_DIR__|${CACHE_DIR}|g" \
+  "${REPO_DIR}/deploy/systemd/monitoring-timelock-subscriber.service" \
+  > /etc/systemd/system/monitoring-timelock-subscriber.service
+chmod 0644 /etc/systemd/system/monitoring-timelock-subscriber.service
 systemctl daemon-reload
 
 cat <<NEXT
@@ -235,6 +242,11 @@ cat <<NEXT
      Optional alerts API, bound to localhost:
        sudo systemctl enable --now monitoring-api
        systemctl status monitoring-api
+
+     Optional timelock event subscriber pilot (no alerts; TIMELOCK_SUBSCRIBER_NOTIFY=errors
+     posts diagnostics to the errors chat):
+       sudo systemctl enable --now monitoring-timelock-subscriber
+       systemctl status monitoring-timelock-subscriber
 
      Existing legacy cache files are imported into ${CACHE_DIR}/monitoring.db by
      install.sh. To rerun manually:

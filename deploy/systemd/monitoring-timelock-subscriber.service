@@ -1,0 +1,74 @@
+# Drop in /etc/systemd/system/monitoring-timelock-subscriber.service then:
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now monitoring-timelock-subscriber
+#   sudo systemctl status monitoring-timelock-subscriber
+#
+# Continuous timelock event subscriber (observation pilot, issue #438). It runs
+# alongside the hourly timelock-alerts task and never replaces it: it records
+# what it sees in __CACHE_DIR__/timelock_subscriber.db and journald, and sends no
+# alerts. TIMELOCK_SUBSCRIBER_NOTIFY=errors in the env file adds diagnostic
+# notices to the internal errors chat. See protocols/timelock/README.md and
+# deploy/runbook.md.
+#
+# Type=notify + WatchdogSec: the worker sends READY=1 once its loops start and
+# WATCHDOG=1 from its heartbeat only while HTTP reconciliation keeps completing,
+# so a wedged worker is killed and restarted instead of idling silently.
+
+[Unit]
+Description=yearn monitoring timelock event subscriber (pilot)
+Documentation=https://github.com/yearn/monitoring/issues/438
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=__MONITOR_USER__
+Group=__MONITOR_USER__
+WorkingDirectory=__REPO_DIR__
+
+Environment=REPO_ROOT=__REPO_DIR__
+Environment=PATH=__REPO_DIR__/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LOG_LEVEL=INFO
+Environment=PYTHONUNBUFFERED=1
+Environment=CACHE_DIR=__CACHE_DIR__
+
+ExecStartPre=+/bin/bash -c '\
+  install -m 750 -o root -g __MONITOR_USER__ -d __ETC_DIR__; \
+  if [ ! -f __ETC_DIR__/.env ]; then \
+    echo "monitoring-timelock-subscriber: __ETC_DIR__/.env missing" >&2; \
+    exit 1; \
+  fi'
+
+# ENVIO_GRAPHQL_URL comes from here; TIMELOCK_SUBSCRIBER_* override the defaults.
+EnvironmentFile=__ETC_DIR__/.env
+ExecStart=__REPO_DIR__/.venv/bin/python protocols/timelock/event_subscriber.py run
+
+# The heartbeat pings every 30s; three missed pings means the loop is wedged.
+WatchdogSec=120
+# run_with_alert exits 0 after a crash alert, so restart on any exit, not only failures.
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__CACHE_DIR__
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=monitoring-timelock-subscriber
+
+[Install]
+WantedBy=multi-user.target
