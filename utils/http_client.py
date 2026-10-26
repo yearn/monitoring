@@ -18,6 +18,7 @@ def request_with_retry(
     backoff_factor: float | None = None,
     timeout: int | None = None,
     log_errors: bool = True,
+    session: requests.Session | None = None,
     **kwargs: Any,
 ) -> requests.Response:
     """Make an HTTP request with exponential backoff retry on transient errors.
@@ -32,6 +33,8 @@ def request_with_retry(
         backoff_factor: Multiplier for exponential backoff. Defaults to Config.get_backoff_factor().
         timeout: Request timeout in seconds. Defaults to Config.get_request_timeout().
         log_errors: Log terminal failures. Disable when the caller reports its own failure.
+        session: Send through this session to reuse its pooled connections. A session
+            must not be shared across threads.
         **kwargs: Additional arguments passed to requests.request().
 
     Returns:
@@ -50,7 +53,7 @@ def request_with_retry(
     last_exception: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            response = requests.request(method, url, timeout=timeout, **kwargs)
+            response = (session or requests).request(method, url, timeout=timeout, **kwargs)
             response.raise_for_status()
             return response
         except requests.exceptions.HTTPError as e:

@@ -7,10 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from protocols.timelock.subscriber.envio import EnvioQueryError, fetch_range, range_query
-from protocols.timelock.subscriber.inbox import SCHEMA_VERSION, SOURCE_HTTP, SOURCE_WS, EventInbox, event_fingerprint
-from protocols.timelock.subscriber.reconcile import ReconcileConfig, build_scope, in_scope, reconcile_all
+from protocols.timelock.event_stream import TIMELOCK_STREAM
 from tests.timelock_subscriber_fakes import OTHER_TIMELOCK, TIMELOCK, FakeEnvio, make_event
+from utils.subscriber.envio import EnvioQueryError, fetch_range, range_query
+from utils.subscriber.inbox import SCHEMA_VERSION, SOURCE_HTTP, SOURCE_WS, EventInbox, event_fingerprint
+from utils.subscriber.reconcile import ReconcileConfig, build_scope, in_scope, reconcile_all
 
 SCOPE = {1: {TIMELOCK}, 8453: {TIMELOCK}}
 CONFIG = ReconcileConfig(
@@ -23,7 +24,7 @@ CONFIG = ReconcileConfig(
 
 @pytest.fixture
 def inbox(tmp_path: Path) -> EventInbox:
-    return EventInbox(str(tmp_path / "sub.db"))
+    return EventInbox(TIMELOCK_STREAM, str(tmp_path / "sub.db"))
 
 
 def _event_ids(inbox: EventInbox) -> list[str]:
@@ -86,13 +87,13 @@ def test_checkpoint_never_moves_backwards(inbox: EventInbox) -> None:
 
 def test_scope_filters_address_per_chain() -> None:
     scope = build_scope([type("T", (), {"address": TIMELOCK.upper().replace("0X", "0x"), "chain_id": 1})()])
-    assert in_scope(make_event(1, 1), scope)
-    assert not in_scope(make_event(8453, 1), scope)
-    assert not in_scope(make_event(1, 1, address=OTHER_TIMELOCK), scope)
+    assert in_scope(make_event(1, 1), scope, TIMELOCK_STREAM)
+    assert not in_scope(make_event(8453, 1), scope, TIMELOCK_STREAM)
+    assert not in_scope(make_event(1, 1, address=OTHER_TIMELOCK), scope, TIMELOCK_STREAM)
 
 
 def test_range_query_inlines_numbers_and_orders_totally() -> None:
-    query = range_query(1, 10, 20, 50, 100, since_ts=None)
+    query = range_query(TIMELOCK_STREAM, 1, 10, 20, 50, 100, since_ts=None)
     assert "chainId: { _eq: 1 }" in query
     assert "blockNumber: { _gt: 10, _lte: 20 }" in query
     assert "order_by: [{ blockNumber: asc }, { logIndex: asc }, { id: asc }]" in query
@@ -103,7 +104,7 @@ def test_fetch_range_refuses_unbounded_ranges() -> None:
     envio = FakeEnvio()
     envio.add(*(make_event(1, b) for b in range(1, 31)))
     with pytest.raises(EnvioQueryError, match="exceeds 2 pages"):
-        fetch_range(envio.post, 1, {TIMELOCK}, 0, 30, page_size=10, max_pages=2)
+        fetch_range(envio.post, TIMELOCK_STREAM, 1, {TIMELOCK}, 0, 30, page_size=10, max_pages=2)
 
 
 # ── reconcile ──────────────────────────────────────────────────────────
@@ -242,14 +243,14 @@ def test_reorg_replaced_and_dropped_events_are_recorded(inbox: EventInbox) -> No
 def test_restart_resumes_from_persisted_checkpoints(tmp_path: Path) -> None:
     path = str(tmp_path / "sub.db")
     envio = FakeEnvio()
-    _seed(envio, EventInbox(path))
+    _seed(envio, EventInbox(TIMELOCK_STREAM, path))
     envio.add(make_event(1, 30), make_event(8453, 40))
-    reconcile_all(envio.post, EventInbox(path), SCOPE, CONFIG)
+    reconcile_all(envio.post, EventInbox(TIMELOCK_STREAM, path), SCOPE, CONFIG)
 
     # "Restart": a fresh inbox object on the same file, with more events indexed meanwhile.
     envio.add(make_event(1, 35), make_event(8453, 45))
     envio.queries.clear()
-    restarted = EventInbox(path)
+    restarted = EventInbox(TIMELOCK_STREAM, path)
     report = reconcile_all(envio.post, restarted, SCOPE, CONFIG)
     assert report.ok
     froms = {q["chain_id"]: q["from"] for q in envio.queries if q["offset"] == 0}
@@ -346,13 +347,16 @@ def _v0_database(path: Path) -> dict:
 def test_v0_database_is_migrated_in_place(tmp_path: Path) -> None:
     path = tmp_path / "sub.db"
     _v0_database(path)
-    inbox = EventInbox(str(path))
+    inbox = EventInbox(TIMELOCK_STREAM, str(path))
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-        assert "block_hash" in {r[1] for r in conn.execute("PRAGMA table_info(timelock_sub_events)")}
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(timelock_sub_events)")}
+    assert "block_hash" in columns
+    assert "contract_address" in columns and "timelock_address" not in columns
     (row,) = inbox.events_since(0)
     assert row["event_id"] == "1_10_0" and row["block_hash"] is None and row["first_seen_at"] == 5.0
+    assert row["contract_address"] == TIMELOCK
     assert _checkpoint(inbox, 1) == 10
 
     # Re-observing it with the wider selection is a duplicate, not a reorg.
@@ -364,15 +368,30 @@ def test_v0_database_is_migrated_in_place(tmp_path: Path) -> None:
     assert rows["1_10_0"]["revision"] == 0 and rows["1_10_0"]["ws_first_seen_at"] == 20.0
 
     # Reopening is a no-op, and a real change is still detected afterwards.
-    reopened = EventInbox(str(path))
+    reopened = EventInbox(TIMELOCK_STREAM, str(path))
     replaced = make_event(1, 10, blockHash="0x" + "dd" * 32)
     assert reopened.observe([replaced], SOURCE_HTTP, 30.0).changed == 1
+
+
+def test_v1_database_renames_the_address_column_and_keeps_its_rows(tmp_path: Path) -> None:
+    """v1 (the deployed pilot) had block_hash already; v2 only renames timelock_address."""
+    path = tmp_path / "sub.db"
+    _v0_database(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE timelock_sub_events ADD COLUMN block_hash TEXT")
+        conn.execute("PRAGMA user_version = 1")
+
+    inbox = EventInbox(TIMELOCK_STREAM, str(path))
+
+    (row,) = inbox.events_since(0)
+    assert row["contract_address"] == TIMELOCK and _checkpoint(inbox, 1) == 10
+    assert inbox.observe([make_event(1, 11)], SOURCE_HTTP, 20.0).new == 1
 
 
 def test_widened_selection_does_not_hide_a_real_change(tmp_path: Path) -> None:
     path = tmp_path / "sub.db"
     _v0_database(path)
-    inbox = EventInbox(str(path))
+    inbox = EventInbox(TIMELOCK_STREAM, str(path))
     # New field present AND the tx changed: a reorg, even though blockHash is new.
     result = inbox.observe([make_event(1, 10, transactionHash="0x" + "ee" * 32)], SOURCE_HTTP, 20.0)
     assert result.changed == 1

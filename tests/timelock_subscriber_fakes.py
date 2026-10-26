@@ -9,10 +9,19 @@ from typing import Any
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.typing import Subprotocol
 
-from protocols.timelock.subscriber.envio import EnvioQueryError
+from utils.subscriber.envio import EnvioQueryError
 
 TIMELOCK = "0x88ba032be87d5ef1fbe87336b7090767f367bf73"
 OTHER_TIMELOCK = "0xd8236031d8279d82e615af2bfab5fc0127a329ab"
+MORPHO_VAULT = "0x68aea7b82df6ccdf76235d46445ed83f85f845a3"  # Yearn USDC V1, mainnet
+
+# Envio entity -> field holding the monitored contract.
+ADDRESS_FIELDS = {"TimelockEvent": "timelockAddress", "MorphoGovernanceEvent": "vaultAddress"}
+
+
+def entity_of(row: dict[str, Any]) -> str:
+    """Return the Envio entity a fake row belongs to."""
+    return next(entity for entity, field in ADDRESS_FIELDS.items() if field in row)
 
 
 def make_event(
@@ -47,13 +56,41 @@ def make_event(
     return row
 
 
+def make_morpho_event(
+    chain_id: int,
+    block: int,
+    log_index: int = 0,
+    ts: int = 1_700_000_000,
+    address: str = MORPHO_VAULT,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Return a MorphoGovernanceEvent row shaped like Envio's response."""
+    row: dict[str, Any] = {
+        "id": f"{chain_id}_{block}_{log_index}",
+        "vaultAddress": address,
+        "vaultVersion": 1,
+        "eventName": "SubmitMarketRemoval",
+        "chainId": chain_id,
+        "blockNumber": block,
+        "blockHash": "0x" + f"{block:064x}",
+        "blockTimestamp": ts,
+        "logIndex": log_index,
+        "transactionHash": "0x" + f"{block:064x}",
+        "transactionIndex": 0,
+        "transactionFrom": "0x" + "cd" * 20,
+        "argsJson": '{"caller":"0x' + "cd" * 20 + '","id":"0x' + "ab" * 32 + '"}',
+    }
+    row.update(extra)
+    return row
+
+
 def _int(pattern: str, text: str) -> int | None:
     match = re.search(pattern, text)
     return int(match.group(1)) if match else None
 
 
 class FakeEnvio:
-    """Serves ``chain_metadata`` and ``TimelockEvent`` range pages from in-memory rows."""
+    """Serves ``chain_metadata`` and range pages of every entity in ``ADDRESS_FIELDS`` from in-memory rows."""
 
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, Any]] = {}
@@ -63,6 +100,7 @@ class FakeEnvio:
         # chain_id -> remaining failures for range queries on that chain
         self.fail_chain: dict[int, int] = {}
         self.fail_metadata = 0
+        self.metadata_reads = 0
         # Rebound to the WebSocket server's event loop by FakeWSServer.start().
         self.changed = asyncio.Event()
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -91,6 +129,7 @@ class FakeEnvio:
     def post(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
             if "chain_metadata" in query:
+                self.metadata_reads += 1
                 if self.fail_metadata:
                     self.fail_metadata -= 1
                     raise EnvioQueryError("metadata down")
@@ -102,6 +141,8 @@ class FakeEnvio:
                         ]
                     }
                 }
+            entity = next(e for e in ADDRESS_FIELDS if f"{e}(" in query)
+            address_field = ADDRESS_FIELDS[entity]
             chain_id = _int(r"chainId: \{ _eq: (\d+) \}", query)
             assert chain_id is not None
             if self.fail_chain.get(chain_id):
@@ -113,25 +154,30 @@ class FakeEnvio:
             limit = _int(r"limit: (\d+)", query)
             offset = _int(r"offset: (\d+)", query)
             assert lo is not None and hi is not None and limit is not None and offset is not None
-            self.queries.append({"chain_id": chain_id, "from": lo, "to": hi, "offset": offset, "since": since})
+            self.queries.append(
+                {"entity": entity, "chain_id": chain_id, "from": lo, "to": hi, "offset": offset, "since": since}
+            )
             addresses = set(variables["addresses"])
             matched = sorted(
                 (
                     r
                     for r in self.rows.values()
-                    if r["chainId"] == chain_id
-                    and r["timelockAddress"] in addresses
+                    if entity_of(r) == entity
+                    and r["chainId"] == chain_id
+                    and r[address_field] in addresses
                     and lo < r["blockNumber"] <= hi
                     and (since is None or r["blockTimestamp"] >= since)
                 ),
                 key=lambda r: (r["blockNumber"], r["logIndex"], r["id"]),
             )
-            return {"data": {"TimelockEvent": [dict(r) for r in matched[offset : offset + limit]]}}
+            return {"data": {entity: [dict(r) for r in matched[offset : offset + limit]]}}
 
-    def snapshot(self, limit: int) -> list[dict[str, Any]]:
+    def snapshot(self, limit: int, entity: str = "TimelockEvent") -> list[dict[str, Any]]:
         with self.lock:
             rows = sorted(
-                self.rows.values(), key=lambda r: (r["blockTimestamp"], r["blockNumber"], r["logIndex"]), reverse=True
+                (r for r in self.rows.values() if entity_of(r) == entity),
+                key=lambda r: (r["blockTimestamp"], r["blockNumber"], r["logIndex"]),
+                reverse=True,
             )
             return [dict(r) for r in rows[:limit]]
 
@@ -183,16 +229,18 @@ class FakeWSServer:
             while sub["type"] == "pong":
                 sub = json.loads(await conn.recv())
             assert sub["type"] == "subscribe"
+            # A bare test query names no entity: serve timelock rows.
+            entity = next((e for e in ADDRESS_FIELDS if f"{e}(" in sub["payload"]["query"]), "TimelockEvent")
             self.subscriptions += 1
             if self.ping_first:
                 await conn.send(json.dumps({"type": "ping"}))
             sent = None
             while True:
                 self.envio.changed.clear()
-                snapshot = self.envio.snapshot(self.limit)
+                snapshot = self.envio.snapshot(self.limit, entity)
                 if snapshot != sent:
                     await conn.send(
-                        json.dumps({"id": sub["id"], "type": "next", "payload": {"data": {"TimelockEvent": snapshot}}})
+                        json.dumps({"id": sub["id"], "type": "next", "payload": {"data": {entity: snapshot}}})
                     )
                     sent = snapshot
                 waiter = asyncio.create_task(self.envio.changed.wait())

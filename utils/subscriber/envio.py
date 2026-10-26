@@ -1,6 +1,8 @@
-"""Envio GraphQL queries for the timelock subscriber: chain heads, ranges, and the live subscription."""
+"""Envio GraphQL queries for the event subscriber: chain heads, ranges, and the live subscription."""
 
 import json
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -9,34 +11,7 @@ import requests
 from eth_utils import to_checksum_address
 
 from utils.http_client import request_with_retry
-
-# The hourly monitor's selection plus logIndex and blockHash. Both transports use
-# it, so a row fingerprints identically whichever one fetched it, and a reorg that
-# replaces the block changes the fingerprint through blockHash.
-EVENT_FIELDS = """
-        id
-        timelockAddress
-        timelockType
-        eventName
-        chainId
-        blockNumber
-        blockHash
-        blockTimestamp
-        logIndex
-        transactionHash
-        operationId
-        index
-        target
-        value
-        data
-        predecessor
-        delay
-        signature
-        creator
-        metadata
-        votesFor
-        votesAgainst
-"""
+from utils.subscriber.stream import EventStream
 
 CHAIN_METADATA_QUERY = "{ chain_metadata { chain_id latest_processed_block block_height } }"
 
@@ -64,12 +39,26 @@ GraphQLPost = Callable[[str, dict[str, Any]], dict[str, Any]]
 
 
 def http_poster(url: str, timeout: int = 30) -> GraphQLPost:
-    """Return a GraphQL POST function bound to ``url`` with retries on transient errors."""
+    """Return a GraphQL POST function bound to ``url`` with retries on transient errors.
+
+    Requests go through one persistent ``requests.Session`` per calling thread, so
+    every stream's reconcile cycle reuses pooled TCP/TLS connections without
+    sharing a session across threads.
+    """
+    local = threading.local()
 
     def post(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        session = getattr(local, "session", None)
+        if session is None:
+            session = local.session = requests.Session()
         try:
             response = request_with_retry(
-                "post", url, timeout=timeout, log_errors=False, json={"query": query, "variables": variables}
+                "post",
+                url,
+                timeout=timeout,
+                log_errors=False,
+                session=session,
+                json={"query": query, "variables": variables},
             )
             return response.json()
         except (requests.RequestException, ValueError) as exc:
@@ -105,7 +94,39 @@ def fetch_chain_heads(post: GraphQLPost) -> dict[int, ChainHead]:
     return heads
 
 
-def range_query(chain_id: int, from_block: int, to_block: int, limit: int, offset: int, since_ts: int | None) -> str:
+class SharedChainHeads:
+    """``fetch_chain_heads`` shared by every stream's reconcile cycle.
+
+    Streams reconcile on the same cadence, so a read younger than ``max_age``
+    seconds is reused instead of querying ``chain_metadata`` once per stream. A
+    slightly old head only means a cycle stops a few blocks short; the next one
+    catches up.
+    """
+
+    def __init__(self, post: GraphQLPost, max_age: float = 10.0, clock: Callable[[], float] = time.monotonic) -> None:
+        self.post = post
+        self.max_age = max_age
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._heads: dict[int, ChainHead] | None = None
+        self._fetched_at = 0.0
+
+    def __call__(self) -> dict[int, ChainHead]:
+        """Return chain heads, fetching them when the cached read is too old.
+
+        Raises:
+            EnvioQueryError: The fetch failed; the next call retries.
+        """
+        with self._lock:
+            if self._heads is None or self.clock() - self._fetched_at > self.max_age:
+                self._heads = fetch_chain_heads(self.post)
+                self._fetched_at = self.clock()
+            return self._heads
+
+
+def range_query(
+    stream: EventStream, chain_id: int, from_block: int, to_block: int, limit: int, offset: int, since_ts: int | None
+) -> str:
     """Build a page query for one chain's events in the block range ``(from_block, to_block]``.
 
     Numbers are inlined rather than passed as ``Int!`` variables: Hasura rejects an
@@ -115,23 +136,24 @@ def range_query(chain_id: int, from_block: int, to_block: int, limit: int, offse
     """
     since = f", blockTimestamp: {{ _gte: {int(since_ts)} }}" if since_ts is not None else ""
     return f"""
-    query TimelockEventRange($addresses: [String!]!) {{
-      TimelockEvent(
+    query {stream.entity}Range($addresses: [String!]!) {{
+      {stream.entity}(
         where: {{
           chainId: {{ _eq: {int(chain_id)} }}
-          timelockAddress: {{ _in: $addresses }}
+          {stream.address_field}: {{ _in: $addresses }}
           blockNumber: {{ _gt: {int(from_block)}, _lte: {int(to_block)} }}{since}
         }}
         order_by: [{{ blockNumber: asc }}, {{ logIndex: asc }}, {{ id: asc }}]
         limit: {int(limit)}
         offset: {int(offset)}
-      ) {{{EVENT_FIELDS}      }}
+      ) {{{stream.fields}      }}
     }}
     """
 
 
 def fetch_range(
     post: GraphQLPost,
+    stream: EventStream,
     chain_id: int,
     addresses: set[str],
     from_block: int,
@@ -152,8 +174,8 @@ def fetch_range(
     variables = {"addresses": address_variants(addresses)}
     rows: list[dict[str, Any]] = []
     for page in range(max_pages):
-        query = range_query(chain_id, from_block, to_block, page_size, page * page_size, since_ts)
-        batch = _data(post(query, variables)).get("TimelockEvent") or []
+        query = range_query(stream, chain_id, from_block, to_block, page_size, page * page_size, since_ts)
+        batch = _data(post(query, variables)).get(stream.entity) or []
         rows.extend(batch)
         if len(batch) < page_size:
             return rows, page + 1
@@ -163,7 +185,7 @@ def fetch_range(
     )
 
 
-def live_subscription(limit: int, chain_ids: list[int]) -> str:
+def live_subscription(stream: EventStream, limit: int, chain_ids: list[int]) -> str:
     """Live query over the newest monitored events across chains.
 
     Hasura re-sends the full snapshot whenever the result changes, so every message
@@ -173,11 +195,11 @@ def live_subscription(limit: int, chain_ids: list[int]) -> str:
     """
     chains = ", ".join(str(int(c)) for c in sorted(chain_ids))
     return f"""
-    subscription TimelockEventLive($addresses: [String!]!) {{
-      TimelockEvent(
-        where: {{ timelockAddress: {{ _in: $addresses }}, chainId: {{ _in: [{chains}] }} }}
+    subscription {stream.entity}Live($addresses: [String!]!) {{
+      {stream.entity}(
+        where: {{ {stream.address_field}: {{ _in: $addresses }}, chainId: {{ _in: [{chains}] }} }}
         order_by: [{{ blockTimestamp: desc }}, {{ blockNumber: desc }}, {{ logIndex: desc }}]
         limit: {int(limit)}
-      ) {{{EVENT_FIELDS}      }}
+      ) {{{stream.fields}      }}
     }}
     """

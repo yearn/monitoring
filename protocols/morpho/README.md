@@ -199,6 +199,14 @@ Both scripts share `MORPHO_FILENAME` (default `cache-id.txt`). New key types add
 | `v2_role` | `owner` / `curator` | lowercase address | Last-known instant-role address |
 | `v2_set` | `sentinels` / `allocators` / `adapters` | comma-joined lowercase addresses | Last-known role set |
 
+### Continuous governance event stream (pilot)
+
+[`governance_stream.py`](./governance_stream.py) defines the `morpho` stream of the continuous event subscriber ([#447](https://github.com/yearn/monitoring/issues/447), part of [#437](https://github.com/yearn/monitoring/issues/437)). It follows `MorphoGovernanceEvent`, which [yearn-envio#71](https://github.com/yearn/yearn-envio/pull/71) indexes for every V1 and V2 vault in [`config.py`](./config.py): V1 `SubmitCap`, `SubmitMarketRemoval`, `SubmitTimelock`; V2 `Submit`, `Accept`, `SetOwner`, `SetCurator`, `AddAdapter`, `RemoveAdapter`. Adapter-internal timelocks (`burnShares`) are not indexed.
+
+It runs in the timelock subscriber's process with `EVENT_SUBSCRIBER_STREAMS=timelock,morpho` and uses the same WebSocket + HTTP reconciliation, per-chain checkpoints, reorg tracking, health, and report (see the [timelock README](../timelock/README.md#continuous-subscriber-pilot)); its inbox is `$CACHE_DIR/morpho_subscriber.db`. It is observation only: **it sends no alerts**, and the daily `governance.py` / `governance_v2.py` jobs remain the alerting path. With notices enabled, each new event is posted to the internal errors chat as `[morpho-subscriber]` with the vault, its generation, the sender, and the ABI-named arguments. Lifecycle rules and grouped delivery are [#448](https://github.com/yearn/monitoring/issues/448); comparing with the daily snapshots is [#449](https://github.com/yearn/monitoring/issues/449).
+
+Enable it only once the Envio deployment serves `MorphoGovernanceEvent` and has backfilled all five chains; until then its reconcile cycles and WebSocket fail with `field 'MorphoGovernanceEvent' not found` (without affecting the timelock stream). Its first reconcile starts at each chain's indexed head, so history is never announced.
+
 ### Limitations
 
 `MorphoMarketV1AdapterV2` has its own internal timelock system (`setSkimRecipient`, `burnShares`, `increaseTimelock`, etc.). The Morpho GraphQL API does **not** expose adapter-internal pending operations, and replaying `Submit` events on each adapter would reintroduce the RPC cost we're explicitly avoiding. Phase-2 candidate.

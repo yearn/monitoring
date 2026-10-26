@@ -15,12 +15,21 @@ The script runs hourly via the [monitoring runner](../../automation/jobs.yaml).
 
 `event_subscriber.py` is a continuously running worker that observes the same `TimelockEvent` rows as `timelock_alerts.py` with lower latency ([#438](https://github.com/yearn/monitoring/issues/438), the first step of [#437](https://github.com/yearn/monitoring/issues/437)). It is an observation pilot: **it sends no alerts and changes nothing about current delivery**. The hourly task remains the only sender to protocol groups. Optionally it posts diagnostic notices to the internal errors chat (see [Pilot notices](#pilot-notices)). It runs as the `monitoring-timelock-subscriber` systemd unit; operations are in the [runbook](../../deploy/runbook.md#timelock-event-subscriber-pilot).
 
-It runs two transports side by side and records which one saw each event first:
+The worker follows **named event streams** ([#447](https://github.com/yearn/monitoring/issues/447)). The shared code lives in [`utils/subscriber/`](../../utils/subscriber/); each stream is an `EventStream` that names its Envio entity, the field holding the monitored contract, its field selection, and its own SQLite file and table prefix:
+
+| Stream | Entity | Defined in | Inbox |
+|---|---|---|---|
+| `timelock` (default) | `TimelockEvent` | [`event_stream.py`](./event_stream.py) | `timelock_subscriber.db`, tables `timelock_sub_*` |
+| `morpho` | `MorphoGovernanceEvent` | [`protocols/morpho/governance_stream.py`](../morpho/governance_stream.py) | `morpho_subscriber.db`, tables `morpho_sub_*` |
+
+`EVENT_SUBSCRIBER_STREAMS` (or `--streams`, before the subcommand) picks the streams, e.g. `timelock,morpho`; the default is `timelock` alone, so an existing deployment keeps its behavior. All selected streams run in one process (`run_workers`): one HTTP poster with a persistent session per thread, one `chain_metadata` read per cycle shared by every stream (`SharedChainHeads`), one WebSocket connection and one reconcile loop per stream, and a systemd watchdog ping only while every stream is alive. A stream's failure (for example an entity the Envio deployment does not serve yet) shows in its own log, checkpoints, and health, and never blocks another stream. The `run`, `reconcile-once`, `report`, and `health` subcommands cover every selected stream.
+
+Each stream runs two transports side by side and records which one saw each event first:
 
 - **WebSocket**: a `graphql-transport-ws` live query (`utils/graphql_ws.py`) over the newest 50 monitored events, filtered by monitored chains and addresses. Hasura resends the whole snapshot on every change, so most rows are repeats; the inbox deduplicates them. On disconnect the worker reconnects with capped exponential backoff (1s to 60s).
 - **HTTP reconciliation**, every 60s and also while the WebSocket is connected: for each chain, read `chain_metadata.latest_processed_block`, then fetch `(checkpoint - overlap, head]` in chunks of at most `MAX_BLOCK_SPAN` blocks, paginated in pages of 200 ordered by `(blockNumber, logIndex, id)`. This is the completeness guarantee.
 
-State lives in `$CACHE_DIR/timelock_subscriber.db` (SQLite, WAL), separate from the hourly monitor's state. The schema is versioned (`PRAGMA user_version`); a database from an earlier revision is migrated in place on open, keeping observations, changes, and checkpoints. A row stored before the event selection grew (e.g. before `blockHash`) is upgraded silently on its next observation, not recorded as a change.
+State lives in the stream's file under `$CACHE_DIR` (SQLite, WAL), separate from the scheduled monitors' state. The tables below are named for the timelock stream; other streams use their own prefix. The schema is versioned (`PRAGMA user_version`); a database from an earlier revision is migrated in place on open, keeping observations, changes, and checkpoints (v1 → v2 renamed `timelock_address` to `contract_address`). A row stored before the event selection grew (e.g. before `blockHash`) is upgraded silently on its next observation, not recorded as a change.
 
 - **Per-chain checkpoints** (`timelock_sub_checkpoints`): the highest block fully fetched over HTTP, never moved backwards. They are independent per chain and do not use `TIMELOCK_LAST_TS`, so a failing or lagging chain never holds back the others. A chain's first run starts at the indexed head unless `TIMELOCK_SUBSCRIBER_START_LOOKBACK_SECONDS` is set.
 - **Event provenance** (`timelock_sub_events`): one row per Envio event id (`<chainId>_<blockNumber>_<logIndex>`) with its block hash, a content fingerprint, the first transport and time it was seen, first-seen times and observation counts per transport.
@@ -36,7 +45,7 @@ Edge cases:
 
 Supervision: a heartbeat every 30s stores worker status, flags any chain whose indexed head has not advanced for 15 minutes, and pings the systemd watchdog only while reconciliation keeps completing. `event_subscriber.py health` exits 1 on a stale heartbeat, failed reconcile, WebSocket outage, or stalled chain.
 
-`event_subscriber.py report --hours N` prints the coverage/latency report used to choose the production transport:
+`event_subscriber.py report --hours N` prints each selected stream's coverage/latency report, used to choose the production transport:
 
 - WebSocket coverage of HTTP-confirmed events, plus WebSocket-only and HTTP-only counts.
 - Delay from block timestamp to first sighting per transport (p50/p95/max), and how far the WebSocket leads HTTP. Envio exposes no per-row index time, so the faster transport's delay is an upper bound on indexing delay.
@@ -46,7 +55,7 @@ Supervision: a heartbeat every 30s stores worker status, flags any chain whose i
 
 ### Pilot notices
 
-With `TIMELOCK_SUBSCRIBER_NOTIFY=errors` (or `run --notify errors`), the worker posts plain-text diagnostics to the internal errors chat (`TELEGRAM_TOPIC_ID_ERRORS` or `TELEGRAM_CHAT_ID_ERRORS`), labelled `[timelock-subscriber]` and stored in alert history under `yearn-internal`. They are for comparing the pilot with the hourly alerts, not alerts themselves. Notices stay off unless an errors chat is configured: `send_error_message` would otherwise fall back to a protocol group.
+With `TIMELOCK_SUBSCRIBER_NOTIFY=errors` (or `run --notify errors`), the worker posts plain-text diagnostics to the internal errors chat (`TELEGRAM_TOPIC_ID_ERRORS` or `TELEGRAM_CHAT_ID_ERRORS`), labelled `[timelock-subscriber]` and stored in alert history under `yearn-internal`. Each stream posts under its own label (`[timelock-subscriber]`, `[morpho-subscriber]`), and its texts name the stream ("New Morpho governance event"). They are for comparing the pilot with the scheduled alerts, not alerts themselves. Notices stay off unless an errors chat is configured: `send_error_message` would otherwise fall back to a protocol group.
 
 | Notice | When |
 |---|---|

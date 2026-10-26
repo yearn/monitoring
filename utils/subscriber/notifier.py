@@ -8,34 +8,38 @@ burst. A failed send is logged and dropped. Ingestion never waits on Telegram.
 
 import asyncio
 from collections.abc import Callable
+from functools import partial
 
 from utils.logger import get_logger
 from utils.telegram import MAX_MESSAGE_LENGTH, error_channel_configured, send_error_message
 
-_logger = get_logger("timelock.subscriber.notifier")
+_logger = get_logger("subscriber.notifier")
 
-# Label shown as "[timelock-subscriber]" in the errors chat.
-NOTIFY_LABEL = "timelock-subscriber"
 # Alert-history key: internal-only, so pilot notices stay off public protocol pages.
 ALERT_PROTOCOL = "yearn-internal"
 NOTIFY_MODES = ("none", "errors")
 
 _SEPARATOR = "\n\n"
-# Room for the "[timelock-subscriber] " prefix and Markdown escaping of the text.
+# Room for the "[<stream>-subscriber] " prefix and Markdown escaping of the text.
 _MAX_BATCH_CHARS = MAX_MESSAGE_LENGTH // 2
 
 SendFn = Callable[[str], None]
 
 
-def send_to_errors_chat(text: str) -> None:
-    """Send one plain-text notice to the internal errors chat, silently."""
-    send_error_message(text, NOTIFY_LABEL, source="timelock_subscriber", alert_protocol=ALERT_PROTOCOL)
+def notice_label(stream_name: str) -> str:
+    """Return the errors-chat label for a stream's notices, e.g. ``[timelock-subscriber]``."""
+    return f"{stream_name}-subscriber"
+
+
+def send_to_errors_chat(text: str, label: str) -> None:
+    """Send one plain-text notice to the internal errors chat under ``[label]``, silently."""
+    send_error_message(text, label, source=label.replace("-", "_"), alert_protocol=ALERT_PROTOCOL)
 
 
 class Notifier:
     """Queue of notices drained by one background sender task."""
 
-    def __init__(self, send: SendFn = send_to_errors_chat, max_queue: int = 200, min_interval: float = 1.0) -> None:
+    def __init__(self, send: SendFn, max_queue: int = 200, min_interval: float = 1.0) -> None:
         self.send = send
         self.min_interval = min_interval
         self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=max_queue)
@@ -81,8 +85,8 @@ class Notifier:
             await asyncio.sleep(self.min_interval)
 
 
-def build_notifier(mode: str) -> Notifier | None:
-    """Return a notifier for ``mode``, or None when notices are off or cannot be routed safely.
+def build_notifier(mode: str, stream_name: str) -> Notifier | None:
+    """Return a notifier for one stream's notices, or None when notices are off or cannot be routed safely.
 
     ``errors`` requires a configured errors chat: ``send_error_message`` would
     otherwise fall back to a protocol channel, and pilot notices must never reach one.
@@ -92,6 +96,6 @@ def build_notifier(mode: str) -> Notifier | None:
     if mode == "none":
         return None
     if not error_channel_configured():
-        _logger.warning("TIMELOCK_SUBSCRIBER_NOTIFY=errors but no errors chat is configured; notices disabled")
+        _logger.warning("subscriber notices set to errors but no errors chat is configured; notices disabled")
         return None
-    return Notifier()
+    return Notifier(send=partial(send_to_errors_chat, label=notice_label(stream_name)))

@@ -235,8 +235,9 @@ directly.
 `monitoring-timelock-subscriber` is the continuous timelock event worker from
 [#438](https://github.com/yearn/monitoring/issues/438). It runs alongside the
 hourly `timelock-alerts` task, which still sends every timelock alert. The pilot
-sends no alerts: it records what it observes in `/srv/cache/timelock_subscriber.db`
-and journald. With `TIMELOCK_SUBSCRIBER_NOTIFY=errors` it also posts diagnostic
+sends no alerts: it records what it observes in one SQLite inbox per stream
+(`/srv/cache/timelock_subscriber.db`, and `/srv/cache/morpho_subscriber.db` once
+the `morpho` stream is enabled) and journald. With `TIMELOCK_SUBSCRIBER_NOTIFY=errors` it also posts diagnostic
 notices (new events, WebSocket outages, stalls, failures, a daily summary) to the
 internal errors chat; see the timelock README for the list. Stopping it has no effect on alerting. Design notes are in
 [`protocols/timelock/README.md`](../protocols/timelock/README.md#continuous-subscriber-pilot).
@@ -248,7 +249,8 @@ journalctl -u monitoring-timelock-subscriber -f
 ```
 
 It is a long-running process, so the 10-minute code sync does not reload it.
-Restart it after a change to `protocols/timelock/` or `utils/graphql_ws.py`:
+Restart it after a change to `protocols/timelock/`, `utils/subscriber/`,
+`protocols/morpho/governance_stream.py`, or `utils/graphql_ws.py`:
 `sudo systemctl restart monitoring-timelock-subscriber`.
 
 Check health and read the coverage/latency report:
@@ -260,9 +262,33 @@ CACHE_DIR=/srv/cache uv run python protocols/timelock/event_subscriber.py report
 CACHE_DIR=/srv/cache uv run python protocols/timelock/event_subscriber.py report --hours 168 --json
 ```
 
-`health` fails when the heartbeat is older than three intervals, the last
-reconcile failed, the WebSocket is down, or a chain's indexed head has not
-advanced for `TIMELOCK_SUBSCRIBER_STALL_SECONDS` (default 900).
+`health` and `report` cover every stream in `EVENT_SUBSCRIBER_STREAMS` (or
+`--streams timelock,morpho` before the subcommand). `health` fails when any
+stream's heartbeat is older than three intervals, its last reconcile failed, its
+WebSocket is down, or one of its chains' indexed head has not advanced for
+`TIMELOCK_SUBSCRIBER_STALL_SECONDS` (default 900).
+
+### Enabling the Morpho governance stream
+
+The `morpho` stream ([#447](https://github.com/yearn/monitoring/issues/447)) observes
+`MorphoGovernanceEvent` in the same process. It sends no alerts. Enable it only after
+the Envio deployment serves the entity and has backfilled all five chains:
+
+```sh
+cd /srv/monitoring
+# 1. The entity exists and every chain is indexed (Mainnet, Base, Katana, HyperEVM 999, Robinhood 4663):
+CACHE_DIR=/srv/cache uv run python protocols/timelock/event_subscriber.py --streams morpho reconcile-once
+# 2. Add the stream and restart:
+echo 'EVENT_SUBSCRIBER_STREAMS=timelock,morpho' | sudo tee -a /etc/monitoring/.env
+sudo systemctl restart monitoring-timelock-subscriber
+CACHE_DIR=/srv/cache uv run python protocols/timelock/event_subscriber.py health
+```
+
+`reconcile-once` exits 1 while the entity is missing (`field 'MorphoGovernanceEvent'
+not found`) or a chain has no `chain_metadata` row. A first run only sets checkpoints
+at each chain's indexed head; rerun it to confirm the range queries succeed. To
+disable the stream, drop it from `EVENT_SUBSCRIBER_STREAMS` and restart; its inbox is
+kept.
 
 Supervision: the unit is `Type=notify` with `WatchdogSec=120`. The heartbeat pings
 the watchdog only while HTTP reconciliation keeps completing, so a wedged worker
@@ -290,7 +316,8 @@ Set in `/etc/monitoring/.env`, then restart the unit:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TIMELOCK_SUBSCRIBER_TRANSPORT` | `both` | `both`, `ws`, or `http` |
+| `EVENT_SUBSCRIBER_STREAMS` | `timelock` | Streams to follow: `timelock`, `morpho`, comma-separated |
+| `TIMELOCK_SUBSCRIBER_TRANSPORT` | `both` | `both`, `ws`, or `http` (every stream) |
 | `TIMELOCK_SUBSCRIBER_NOTIFY` | `none` | `errors` posts pilot notices to the internal errors chat (needs `TELEGRAM_TOPIC_ID_ERRORS` or `TELEGRAM_CHAT_ID_ERRORS`) |
 | `TIMELOCK_SUBSCRIBER_RECONCILE_SECONDS` | `60` | HTTP reconcile interval |
 | `TIMELOCK_SUBSCRIBER_STALL_SECONDS` | `900` | Indexed head age that counts as stalled |
@@ -298,7 +325,8 @@ Set in `/etc/monitoring/.env`, then restart the unit:
 | `ENVIO_GRAPHQL_WS_URL` | derived | WebSocket URL; defaults to `ENVIO_GRAPHQL_URL` with `wss://` |
 
 To start the pilot over, stop the unit and delete
-`/srv/cache/timelock_subscriber.db*`. Checkpoints start again at the indexed head.
+`/srv/cache/timelock_subscriber.db*` (or `/srv/cache/morpho_subscriber.db*` for
+the Morpho stream alone). Checkpoints start again at the indexed head.
 
 ---
 

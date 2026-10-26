@@ -20,11 +20,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from protocols.timelock.subscriber import messages
-from protocols.timelock.subscriber.inbox import EventInbox
-from protocols.timelock.subscriber.notifier import Notifier
-from protocols.timelock.subscriber.reconcile import ReconcileReport
-from protocols.timelock.subscriber.report import build_report
+from utils.subscriber import messages
+from utils.subscriber.inbox import EventInbox
+from utils.subscriber.notifier import Notifier
+from utils.subscriber.reconcile import ReconcileReport
+from utils.subscriber.report import build_report
 
 SUMMARY_STATUS_KEY = "last_summary_at"
 # When notices were first enabled on this inbox. Events from blocks before it are
@@ -45,23 +45,25 @@ class NoticeConfig:
 
 
 def _chain_of(event_id: str) -> int:
+    """Return the chain id prefix of an Envio event id."""
     return int(event_id.split("_", 1)[0])
 
 
 class PilotNotices:
-    """Notice state and policy for one worker run."""
+    """Notice state and policy for one stream's worker run."""
 
     def __init__(
         self,
         notifier: Notifier,
         inbox: EventInbox,
-        timelocks: Mapping[tuple[str, int], Any],
+        labels: Mapping[tuple[str, int], Any],
         config: NoticeConfig = NoticeConfig(),
         now: Callable[[], float] = time.time,
     ) -> None:
         self.notifier = notifier
         self.inbox = inbox
-        self.timelocks = timelocks
+        self.stream = inbox.stream
+        self.labels = labels
         self.config = config
         self.ws_down_since: float | None = None
         self.ws_last_error: str | None = None
@@ -107,10 +109,10 @@ class PilotNotices:
             for event_id in event_ids:
                 by_chain.setdefault(_chain_of(event_id), []).append(event_id)
             for chain_id, ids in sorted(by_chain.items()):
-                self.notifier.post(messages.format_event_burst(chain_id, source, ids))
+                self.notifier.post(messages.format_event_burst(chain_id, source, ids, self.stream))
             return
         for row in await asyncio.to_thread(self.inbox.get_events, event_ids):
-            self.notifier.post(messages.format_new_event(row, self.timelocks))
+            self.notifier.post(messages.format_new_event(row, self.labels, self.stream))
 
     def snapshot_changes(self, changed_ids: list[str] | tuple[str, ...]) -> None:
         """Post one notice per chain for rows a WebSocket snapshot showed changed or restored."""
@@ -118,7 +120,9 @@ class PilotNotices:
         for event_id in changed_ids:
             by_chain[_chain_of(event_id)] = by_chain.get(_chain_of(event_id), 0) + 1
         for chain_id, count in sorted(by_chain.items()):
-            self.notifier.post(messages.format_changes(chain_id, "ws", changed=count, restored=0, removed=0))
+            self.notifier.post(
+                messages.format_changes(chain_id, "ws", changed=count, restored=0, removed=0, stream=self.stream)
+            )
 
     async def reconcile(self, report: ReconcileReport, ws_expected: bool) -> None:
         """Post notices for one reconcile cycle: new events, WS misses, reorgs, failure streaks."""
@@ -132,7 +136,9 @@ class PilotNotices:
                     self.notifier.post(messages.format_ws_miss(chain.chain_id, missed))
             if chain.changed or chain.restored or chain.removed:
                 self.notifier.post(
-                    messages.format_changes(chain.chain_id, "http", chain.changed, chain.restored, chain.removed)
+                    messages.format_changes(
+                        chain.chain_id, "http", chain.changed, chain.restored, chain.removed, self.stream
+                    )
                 )
 
         if report.ok:
@@ -190,5 +196,5 @@ class PilotNotices:
         if now - float(last) < self.config.summary_interval:
             return
         report = await asyncio.to_thread(build_report, self.inbox, self.config.summary_interval / 3600, now)
-        self.notifier.post(messages.format_daily_summary(report))
+        self.notifier.post(messages.format_daily_summary(report, self.stream))
         await asyncio.to_thread(self.inbox.set_status, SUMMARY_STATUS_KEY, now, now)

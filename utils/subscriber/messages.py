@@ -1,7 +1,8 @@
 """Plain-text notices the subscriber pilot posts to the internal errors chat.
 
-They are diagnostics for comparing the pilot with the hourly monitor, not alerts:
-short, plain text, with full addresses and explorer links.
+They are diagnostics for comparing the pilot with the scheduled monitors, not
+alerts: short, plain text, with full addresses and explorer links. Text that
+names the event kind uses the stream's noun ("timelock", "Morpho governance").
 """
 
 import json
@@ -9,9 +10,10 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from protocols.timelock.subscriber.report import LatencyStats, PilotReport
 from utils.chains import EXPLORER_URLS, Chain
 from utils.formatting import format_duration
+from utils.subscriber.report import LatencyStats, PilotReport
+from utils.subscriber.stream import EventStream
 
 
 def chain_name(chain_id: int) -> str:
@@ -23,40 +25,45 @@ def chain_name(chain_id: int) -> str:
 
 
 def _address_line(label: str, address: str, chain_id: int) -> str:
+    """Render ``label: address`` with an explorer link when the chain has one."""
     explorer = EXPLORER_URLS.get(chain_id)
     return f"{label}: {address}" + (f" {explorer}/address/{address}" if explorer else "")
 
 
-def format_new_event(row: sqlite3.Row, timelocks: Mapping[tuple[str, int], Any]) -> str:
+def format_new_event(row: sqlite3.Row, labels: Mapping[tuple[str, int], Any], stream: EventStream) -> str:
     """Describe one newly observed event: what, where, which transport, and how late.
 
     Args:
-        row: An inbox row (``timelock_sub_events``).
-        timelocks: ``(lowercase address, chain id)`` → config with ``protocol`` and ``label``.
+        row: An inbox row (``<prefix>_events``).
+        labels: ``(lowercase address, chain id)`` → object with ``protocol`` and ``label``.
+        stream: The stream the row belongs to.
     """
     chain_id = int(row["chain_id"])
-    address = str(row["timelock_address"])
-    config = timelocks.get((address.lower(), chain_id))
-    name = f"{config.label} ({config.protocol})" if config else "Unknown timelock"
+    address = str(row["contract_address"])
+    config = labels.get((address.lower(), chain_id))
+    name = f"{config.label} ({config.protocol})" if config else f"Unknown {stream.address_label.lower()}"
     payload = json.loads(row["payload_json"])
     delay = row["first_seen_at"] - row["block_timestamp"]
     explorer = EXPLORER_URLS.get(chain_id)
     tx = str(payload.get("transactionHash") or row["transaction_hash"])
     lines = [
-        f"🛰️ New timelock event via {str(row['first_source']).upper()}, {format_duration(int(delay))} after its block",
+        f"🛰️ New {stream.noun} event via {str(row['first_source']).upper()}, "
+        f"{format_duration(int(delay))} after its block",
         f"{name} on {chain_name(chain_id)}: {row['event_name']} {row['event_id']}",
-        _address_line("Timelock", address, chain_id),
+        _address_line(stream.address_label, address, chain_id),
         f"Tx: {tx}" + (f" {explorer}/tx/{tx}" if explorer else ""),
     ]
     if row["operation_id"]:
         lines.append(f"Operation ID: {row['operation_id']}")
+    if stream.describe is not None:
+        lines.extend(stream.describe(payload))
     return "\n".join(lines)
 
 
-def format_event_burst(chain_id: int, source: str, event_ids: Sequence[str]) -> str:
+def format_event_burst(chain_id: int, source: str, event_ids: Sequence[str], stream: EventStream) -> str:
     """Summarize many new events at once (a backlog) instead of one notice each."""
     shown = ", ".join(event_ids[:20]) + (f" … (+{len(event_ids) - 20})" if len(event_ids) > 20 else "")
-    return f"🛰️ {len(event_ids)} new timelock events on {chain_name(chain_id)} via {source.upper()}: {shown}"
+    return f"🛰️ {len(event_ids)} new {stream.noun} events on {chain_name(chain_id)} via {source.upper()}: {shown}"
 
 
 def format_ws_miss(chain_id: int, event_ids: Sequence[str]) -> str:
@@ -67,11 +74,11 @@ def format_ws_miss(chain_id: int, event_ids: Sequence[str]) -> str:
     )
 
 
-def format_changes(chain_id: int, source: str, changed: int, restored: int, removed: int) -> str:
+def format_changes(chain_id: int, source: str, changed: int, restored: int, removed: int, stream: EventStream) -> str:
     """Indexed rows changed, vanished, or came back: a reorg or an indexer rewrite."""
     return (
-        f"🔀 Indexed timelock events changed on {chain_name(chain_id)} (seen via {source.upper()}): "
-        f"{changed} changed, {removed} removed, {restored} restored. Details: timelock_sub_changes."
+        f"🔀 Indexed {stream.noun} events changed on {chain_name(chain_id)} (seen via {source.upper()}): "
+        f"{changed} changed, {removed} removed, {restored} restored. Details: {stream.table('changes')}."
     )
 
 
@@ -106,15 +113,16 @@ def format_reconcile_recovered(failures: int) -> str:
 
 
 def _lat(stats: LatencyStats) -> str:
+    """Render latency percentiles, or n/a without samples."""
     return "n/a" if not stats.count else f"p50 {stats.p50}s / p95 {stats.p95}s (n={stats.count})"
 
 
-def format_daily_summary(report: PilotReport) -> str:
+def format_daily_summary(report: PilotReport, stream: EventStream) -> str:
     """Condense a pilot report to a few lines."""
     coverage = "n/a" if report.ws_coverage is None else f"{report.ws_coverage:.1%}"
     return "\n".join(
         [
-            "📊 Timelock subscriber, last 24h",
+            f"📊 {stream.noun[:1].upper()}{stream.noun[1:]} subscriber, last 24h",
             f"Events {report.events} (HTTP-confirmed {report.confirmed_by_http}), WS coverage {coverage}, "
             f"WS-only {report.ws_only}, HTTP-only {report.http_only}",
             f"Delay WS {_lat(report.ws_latency)}; HTTP {_lat(report.http_latency)}; WS lead {_lat(report.ws_lead)}",
