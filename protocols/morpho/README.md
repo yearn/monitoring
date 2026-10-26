@@ -12,7 +12,7 @@ The script checks if there are any new values pending in the timelock for a give
 - Changing guardian address.
 - Changing supply caps, only to higher value than the current one, for both supply and withdraw markets.
 - Removing of a market from the vault (`submitMarketRemoval`). Once `removableAt` passes, `updateWithdrawQueue` can drop the market **even if the vault still supplies it**, writing that supply off. The monitor reads the vault's Morpho Blue position in the market:
-  - any non-zero supply → **CRITICAL** potential-loss alert with the amount at risk and its share of `totalAssets` (omitted if `totalAssets()` reverts, e.g. on a broken IRM — the check itself still runs), re-alerted once within 24h of `removableAt`;
+  - any non-zero supply → **HIGH** potential-loss alert with the amount at risk and its share of `totalAssets` (omitted if `totalAssets()` reverts, e.g. on a broken IRM — the check itself still runs), re-alerted once within 24h of `removableAt`. A removal first seen on an empty market escalates to this alert as soon as the vault supplies it;
   - no supply → MEDIUM (routine cleanup).
 
 ### How to Add a New Vault
@@ -156,13 +156,13 @@ Morpho's [Vault V2](https://github.com/morpho-org/vault-v2) replaces the v1 sing
 
 - [`governance_v2.py`](./governance_v2.py) — daily, pulls a per-vault governance **snapshot** from Morpho's GraphQL API (`vaultV2s.pendingConfigs` + `owner` / `curator` / `sentinels` / `allocators` / `adapters`) and diffs it against the persisted cache. Mirrors v1's pull-based approach (`pendingTimelock` / `pendingGuardian` / `pendingCap`) so RPC usage stays bounded. Alerts on: new pending timelocked operations, executed or revoked operations, owner / curator changes, sentinel / allocator / adapter set changes.
 - [`markets_v2.py`](./markets_v2.py) — hourly, GraphQL-only (no RPC): one `vaultV2s` query loads TVL, liquidity, and `MorphoMarketV1` adapter positions for every configured vault, then one `markets` query per chain loads state/bad debt. Applies the shared [risk.py](./risk.py) policy using each position's `supplyAssetsUsd`, and checks withdrawable liquidity (idle plus the vault's position in the liquidity adapter's market, capped by market cash) against the 2% V2 threshold for every vault, including YV-collateral ones, which `markets.py` also covers with the combined collateral-at-risk check. Non-`MorphoMarketV1` adapters fail the run (configured vaults are market-adapter only).
-- [`adapter_timelocks_v2.py`](./adapter_timelocks_v2.py) — run by `governance_v2.py`, reads each `MorphoMarketV1AdapterV2`'s own timelock on-chain with batched `eth_call`s (no `eth_getLogs`), since the Morpho GraphQL API has no adapter-level timelock data. A pending `burnShares(marketId)` writes off the adapter's supply in that market (the V2 analogue of a V1 market removal): `executableAt(burnShares(marketId))` is read for every held market → CRITICAL with the amount at risk (stored shares at Morpho Blue market totals, never the IRM, which may revert). A drop in `timelock(burnShares)` → HIGH. A failed RPC read still lets the GraphQL diff run, then fails the job.
+- [`adapter_timelocks_v2.py`](./adapter_timelocks_v2.py) — run by `governance_v2.py`, reads each `MorphoMarketV1AdapterV2`'s own timelock on-chain with batched `eth_call`s (no `eth_getLogs`), since the Morpho GraphQL API has no adapter-level timelock data. A pending `burnShares(marketId)` writes off the adapter's supply in that market (the V2 analogue of a V1 market removal): `executableAt(burnShares(marketId))` is read for every held market → HIGH with the amount at risk (stored shares at Morpho Blue market totals, never the IRM, which may revert); a burn on a market with no shares is LOW. A drop in `timelock(burnShares)` → MEDIUM. A failed RPC read still lets the GraphQL diff run, then fails the job.
   - **TODO:** a burn submitted with non-canonical calldata (canonical + trailing bytes; Solidity ignores them, but `executableAt` is keyed by the exact bytes) is not detected. It needs the adapter's `Submit` events, which the Morpho API does not expose.
 - [`v2_decoders.py`](./v2_decoders.py) — selector→signature map and decoders for every v2 timelocked function (and the three `idData` tag prefixes used by `increaseAbsoluteCap`/`increaseRelativeCap`). Absolute caps are denominated in the *vault's* asset whatever id they are keyed by, so the decoder takes the vault's asset decimals/symbol; `type(uint128).max` renders as `unlimited`.
 
 ### Potential vault loss alerts
 
-Operations that can write off vault funds are **CRITICAL** for any non-zero amount, sent as their own message prefixed `🚨 POTENTIAL VAULT LOSS` (never bundled into the grouped diff), and re-alerted once when within 24 hours of execution:
+Operations that can write off vault funds are **HIGH** for any non-zero amount, sent as their own message prefixed `🚨 POTENTIAL VAULT LOSS` (never bundled into the grouped diff), and re-alerted once when within 24 hours of execution. The loss alert is tracked separately from the "pending operation seen" cursor, so an operation first seen with nothing at risk escalates as soon as funds arrive instead of waiting for the reminder:
 
 | Vault | Operation | Condition |
 |---|---|---|
@@ -171,7 +171,7 @@ Operations that can write off vault funds are **CRITICAL** for any non-zero amou
 | V2 | `decreaseTimelock(removeAdapter, …)` | any adapter holds assets |
 | V2 adapter | `burnShares(marketId)` | the adapter holds assets in the market |
 
-Other V2 timelock decreases and `abdicate` (irreversible) are HIGH; remaining pending operations stay MEDIUM. Pending V2 operations can be cancelled by the curator or a sentinel with `revoke(data)`; V1 removals by the curator or guardian with `revokePendingMarketRemoval`.
+Other pending V2 operations, including other timelock decreases and `abdicate`, stay MEDIUM. Pending V2 operations can be cancelled by the curator or a sentinel with `revoke(data)`; V1 removals by the curator or guardian with `revokePendingMarketRemoval`.
 
 ### Grouped alerts
 

@@ -97,17 +97,18 @@ class TestMorphoV1MarketRemovalLoss(unittest.TestCase):
             patch("protocols.morpho.governance.fetch_market_info", return_value=("WETH/USDC (86.00%)", 6)),
             patch("protocols.morpho.governance.datetime") as fake_datetime,
             patch("protocols.morpho._shared.datetime") as shared_datetime,
+            patch("protocols.morpho._alerts.datetime") as alerts_datetime,
         ):
             from datetime import datetime as real_datetime
 
-            for fake in (fake_datetime, shared_datetime):
+            for fake in (fake_datetime, shared_datetime, alerts_datetime):
                 fake.now.return_value = real_datetime.fromtimestamp(now)
                 fake.fromtimestamp.side_effect = real_datetime.fromtimestamp
             governance.check_market_governance_state("Example", state, Chain.MAINNET, diff)
             diff.commit()
         return diff
 
-    def test_removal_with_supply_is_a_standalone_critical_loss_alert(self) -> None:
+    def test_removal_with_supply_is_a_standalone_high_loss_alert(self) -> None:
         removable_at = 2_000_000_000
         state = _state(
             "0x" + "ab" * 32,
@@ -121,18 +122,18 @@ class TestMorphoV1MarketRemovalLoss(unittest.TestCase):
 
         self.assertEqual(len(diff.alerts), 1)
         alert = diff.alerts[0]
-        self.assertEqual(alert.severity, AlertSeverity.CRITICAL)
+        self.assertEqual(alert.severity, AlertSeverity.HIGH)
         self.assertTrue(alert.standalone)
         self.assertIn("funds still supplied", alert.body)
         self.assertIn("1.50M USDC (15.00% of vault)", alert.body)
         self.assertIn("revokePendingMarketRemoval", alert.body)
         self.assertIn("(3 days)", alert.body)
 
-    def test_any_non_zero_supply_is_critical_and_dust_shows_raw_units(self) -> None:
+    def test_any_non_zero_supply_is_high_and_dust_shows_raw_units(self) -> None:
         state = _state("0x" + "ab" * 32, **REMOVAL_STATE, removable_at=2_000_000_000, supply_shares=1, supply_assets=1)
         diff = self._run(state, _Cache(), now=1_000_000_000)
 
-        self.assertEqual(diff.alerts[0].severity, AlertSeverity.CRITICAL)
+        self.assertEqual(diff.alerts[0].severity, AlertSeverity.HIGH)
         self.assertIn("1 raw units USDC", diff.alerts[0].body)
 
     def test_removal_of_empty_market_stays_medium(self) -> None:
@@ -159,7 +160,7 @@ class TestMorphoV1MarketRemovalLoss(unittest.TestCase):
         self.assertEqual(len(first.alerts), 1)
         self.assertEqual(quiet.alerts, [])
         self.assertEqual(len(reminder.alerts), 1)
-        self.assertEqual(reminder.alerts[0].severity, AlertSeverity.CRITICAL)
+        self.assertEqual(reminder.alerts[0].severity, AlertSeverity.HIGH)
         self.assertIn("Reminder", reminder.alerts[0].body)
         self.assertEqual(after.alerts, [])
 
@@ -176,6 +177,27 @@ class TestMorphoV1MarketRemovalLoss(unittest.TestCase):
         self.assertEqual(len(first.alerts), 1)
         self.assertEqual(second.alerts, [])
 
+    def test_removal_first_seen_empty_escalates_once_the_vault_supplies_it(self) -> None:
+        removable_at = 2_000_000_000
+        empty = _state("0x" + "ab" * 32, **REMOVAL_STATE, removable_at=removable_at)
+        supplied = _state(
+            "0x" + "ab" * 32, **REMOVAL_STATE, removable_at=removable_at, supply_shares=5, supply_assets=5 * 10**6
+        )
+        cache = _Cache()
+
+        first = self._run(empty, cache, now=removable_at - 3 * 86400)
+        escalated = self._run(supplied, cache, now=removable_at - 2 * 86400)
+        repeat = self._run(supplied, cache, now=removable_at - 2 * 86400 + 3600)
+        emptied = self._run(empty, cache, now=removable_at - 2 * 86400 + 7200)
+
+        self.assertEqual([a.severity for a in first.alerts], [AlertSeverity.MEDIUM])
+        self.assertEqual(len(escalated.alerts), 1)
+        self.assertEqual(escalated.alerts[0].severity, AlertSeverity.HIGH)
+        self.assertTrue(escalated.alerts[0].standalone)
+        self.assertNotIn("Reminder", escalated.alerts[0].body)
+        self.assertEqual(repeat.alerts, [])
+        self.assertEqual(emptied.alerts, [])
+
 
 class _V1Batch:
     def __init__(self) -> None:
@@ -188,7 +210,7 @@ class _V1Batch:
 class TestMorphoV1VaultReads(unittest.TestCase):
     def test_reverting_total_assets_only_drops_the_vault_share(self) -> None:
         """totalAssets() values every withdraw-queue market and can revert on a broken IRM;
-        the removal check must still see supply and stay CRITICAL."""
+        the removal check must still see supply and stay a loss alert."""
         from contextlib import contextmanager
 
         market_id = bytes.fromhex("ab" * 32)

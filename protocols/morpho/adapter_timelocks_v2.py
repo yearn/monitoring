@@ -30,7 +30,7 @@ from typing import Any, List
 
 from web3 import Web3
 
-from protocols.morpho._alerts import REMINDER_WINDOW_SECONDS, VaultDiff
+from protocols.morpho._alerts import VaultDiff, due_loss_notice
 from protocols.morpho._shared import (
     MORPHO_BLUE_ABI_PATH,
     fetch_market_metadata,
@@ -58,6 +58,7 @@ BURN_SHARES_SELECTOR = selector_of("burnShares(bytes32)")
 # Cache value-type tags used with utils.cache.morpho_key.
 BURN_TIMELOCK_TYPE = "v2_adapter_burn_timelock"
 PENDING_BURN_TYPE = "v2_adapter_pending_burn"
+PENDING_BURN_LOSS_TYPE = "v2_adapter_pending_burn_loss"
 PENDING_BURN_REMINDER_TYPE = "v2_adapter_pending_burn_reminder"
 PENDING_BURN_INDEX_TYPE = "v2_adapter_pending_burn_index"
 
@@ -208,12 +209,12 @@ def _burn_body(
 
 
 def _diff_burn_timelock(chain: Chain, state: AdapterTimelockState, diff: VaultDiff) -> None:
-    """Alert HIGH when ``timelock(burnShares)`` drops; the first run seeds the cache silently."""
+    """Alert MEDIUM when ``timelock(burnShares)`` drops; the first run seeds the cache silently."""
     cache_key = _key(state.adapter, "burn_timelock", BURN_TIMELOCK_TYPE)
     last = _read_str(cache_key)
     if last and state.burn_timelock < int(last):
         diff.alert(
-            AlertSeverity.HIGH,
+            AlertSeverity.MEDIUM,
             f"🚨 Adapter {_address_link(state.adapter, chain)} `burnShares` timelock decreased: "
             f"{format_timelock(int(last))} → {format_timelock(state.burn_timelock)}",
         )
@@ -221,32 +222,42 @@ def _diff_burn_timelock(chain: Chain, state: AdapterTimelockState, diff: VaultDi
         diff.defer(_write, cache_key, state.burn_timelock)
 
 
+def _check_burn_loss(chain: Chain, total_assets: int | None, adapter: str, burn: PendingBurn, diff: VaultDiff) -> None:
+    """Alert once on a pending burn of held shares, then once more near ``executableAt``."""
+    loss_key = _key(adapter, burn.market_id, PENDING_BURN_LOSS_TYPE)
+    reminder_key = _key(adapter, burn.market_id, PENDING_BURN_REMINDER_TYPE)
+    notice = due_loss_notice(burn.executable_at, _read_int(loss_key), _read_int(reminder_key))
+    if notice is None:
+        return
+    diff.loss(_burn_body(chain, adapter, burn, total_assets, reminder=notice.reminder))
+    diff.defer(_write, loss_key, burn.executable_at)
+    if notice.in_window:
+        diff.defer(_write, reminder_key, burn.executable_at)
+
+
 def _diff_pending_burns(chain: Chain, total_assets: int | None, state: AdapterTimelockState, diff: VaultDiff) -> None:
-    """Alert on new pending burns (CRITICAL if the adapter holds shares), remind near the deadline, note resolutions."""
+    """Alert on new pending burns (HIGH if the adapter holds shares), remind near the deadline, note resolutions.
+
+    The loss alert is tracked on its own key, so a burn first seen with no shares
+    (LOW) escalates as soon as the adapter holds shares in that market.
+    """
     now = int(datetime.now().timestamp())
     current: set[str] = set()
     for burn in state.pending_burns:
         current.add(burn.market_id)
         cache_key = _key(state.adapter, burn.market_id, PENDING_BURN_TYPE)
-        reminder_key = _key(state.adapter, burn.market_id, PENDING_BURN_REMINDER_TYPE)
-        in_window = now >= burn.executable_at - REMINDER_WINDOW_SECONDS
-        if _read_int(cache_key) == burn.executable_at:
-            if burn.shares > 0 and in_window and _read_int(reminder_key) != burn.executable_at:
-                diff.loss(_burn_body(chain, state.adapter, burn, total_assets, reminder=True))
-                diff.defer(_write, reminder_key, burn.executable_at)
-            continue
+        seen = _read_int(cache_key) == burn.executable_at
         if burn.shares > 0:
-            diff.loss(_burn_body(chain, state.adapter, burn, total_assets, reminder=False))
-            if in_window:
-                diff.defer(_write, reminder_key, burn.executable_at)
-        else:
+            _check_burn_loss(chain, total_assets, state.adapter, burn, diff)
+        elif not seen:
             diff.alert(
-                AlertSeverity.MEDIUM,
+                AlertSeverity.LOW,
                 f"🔥 Adapter {_address_link(state.adapter, chain)} submitted `burnShares` on market "
                 f"[{burn.market_id}]({get_market_url(burn.market_id, chain)}) with no shares in it; "
                 f"executable at {format_ts(burn.executable_at)} {format_countdown(burn.executable_at)}",
             )
-        diff.defer(_write, cache_key, burn.executable_at)
+        if not seen:
+            diff.defer(_write, cache_key, burn.executable_at)
 
     index_key = _key(state.adapter, "pending_burns", PENDING_BURN_INDEX_TYPE)
     previous = {m for m in _read_str(index_key).split(",") if m}
@@ -260,8 +271,9 @@ def _diff_pending_burns(chain: Chain, total_assets: int | None, state: AdapterTi
             f"[{market_id}]({get_market_url(market_id, chain)}) of adapter "
             f"{_address_link(state.adapter, chain)} was {verb}.",
         )
-        # Clear the cursor so a later re-submit with the same executableAt still alerts.
-        diff.defer(_write, cache_key, 0)
+        # Clear the cursors so a later re-submit with the same executableAt still alerts.
+        for value_type in (PENDING_BURN_TYPE, PENDING_BURN_LOSS_TYPE, PENDING_BURN_REMINDER_TYPE):
+            diff.defer(_write, _key(state.adapter, market_id, value_type), 0)
     diff.defer(_write, index_key, ",".join(sorted(current)))
 
 

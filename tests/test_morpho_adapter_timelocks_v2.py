@@ -62,13 +62,15 @@ class TestAdapterDiff(unittest.TestCase):
             write,
             patch("protocols.morpho.adapter_timelocks_v2.fetch_market_metadata", return_value=METADATA),
             patch("protocols.morpho.adapter_timelocks_v2.datetime") as fake_datetime,
+            patch("protocols.morpho._alerts.datetime") as alerts_datetime,
         ):
             fake_datetime.now.return_value = datetime.fromtimestamp(now)
+            alerts_datetime.now.return_value = datetime.fromtimestamp(now)
             adapters.diff_adapter(Chain.MAINNET, 10_000_000 * 10**6, state, diff)
             diff.commit()
         return diff
 
-    def test_pending_burn_with_shares_is_critical_then_reminded_once(self) -> None:
+    def test_pending_burn_with_shares_is_high_then_reminded_once(self) -> None:
         state = _state([_burn(shares=10**12, assets=2_500_000 * 10**6)])
 
         first = self._run(state, now=EXECUTABLE_AT - 3 * 86400)
@@ -78,7 +80,7 @@ class TestAdapterDiff(unittest.TestCase):
 
         self.assertEqual(len(first.alerts), 1)
         alert = first.alerts[0]
-        self.assertEqual(alert.severity, AlertSeverity.CRITICAL)
+        self.assertEqual(alert.severity, AlertSeverity.HIGH)
         self.assertTrue(alert.standalone)
         self.assertIn("`burnShares` on market [WETH/USDC]", alert.body)
         self.assertIn("2.50M USDC (25.00% of vault)", alert.body)
@@ -88,17 +90,34 @@ class TestAdapterDiff(unittest.TestCase):
         self.assertIn("Reminder", reminder.alerts[0].body)
         self.assertEqual(after.alerts, [])
 
-    def test_shares_worth_zero_assets_are_still_critical(self) -> None:
-        """Criticality follows shares, so a stale/zero valuation can't downgrade a real burn."""
+    def test_shares_worth_zero_assets_are_still_a_loss(self) -> None:
+        """The loss alert follows shares, so a stale/zero valuation can't downgrade a real burn."""
         diff = self._run(_state([_burn(shares=1, assets=0)]))
 
-        self.assertEqual(diff.alerts[0].severity, AlertSeverity.CRITICAL)
+        self.assertEqual(diff.alerts[0].severity, AlertSeverity.HIGH)
 
-    def test_pending_burn_without_shares_is_medium(self) -> None:
+    def test_pending_burn_without_shares_is_low(self) -> None:
         diff = self._run(_state([_burn(shares=0)]))
 
-        self.assertEqual([a.severity for a in diff.alerts], [AlertSeverity.MEDIUM])
+        self.assertEqual([a.severity for a in diff.alerts], [AlertSeverity.LOW])
         self.assertFalse(diff.alerts[0].standalone)
+
+    def test_pending_burn_escalates_when_shares_go_from_zero_to_positive(self) -> None:
+        """A burn first seen without shares must escalate as soon as the adapter holds shares,
+        not wait for the reminder window (PR #436 review)."""
+        first = self._run(_state([_burn(shares=0)]), now=EXECUTABLE_AT - 3 * 86400)
+        escalated = self._run(_state([_burn(shares=10**12, assets=2_500_000 * 10**6)]), now=EXECUTABLE_AT - 2 * 86400)
+        repeat = self._run(_state([_burn(shares=10**12, assets=2_500_000 * 10**6)]), now=EXECUTABLE_AT - 2 * 86400 + 60)
+        reminder = self._run(_state([_burn(shares=10**12, assets=2_500_000 * 10**6)]), now=EXECUTABLE_AT - 3600)
+
+        self.assertEqual([a.severity for a in first.alerts], [AlertSeverity.LOW])
+        self.assertEqual(len(escalated.alerts), 1)
+        self.assertEqual(escalated.alerts[0].severity, AlertSeverity.HIGH)
+        self.assertTrue(escalated.alerts[0].standalone)
+        self.assertNotIn("Reminder", escalated.alerts[0].body)
+        self.assertEqual(repeat.alerts, [])
+        self.assertEqual(len(reminder.alerts), 1)
+        self.assertIn("Reminder", reminder.alerts[0].body)
 
     def test_resolved_burn_reports_executed_and_clears_its_cursor(self) -> None:
         self._run(_state([_burn(shares=5)]), now=EXECUTABLE_AT - 86400 * 3)
@@ -109,9 +128,9 @@ class TestAdapterDiff(unittest.TestCase):
         self.assertIn("was executed", diff.alerts[0].body)
         # A re-submit with the same executableAt alerts again.
         again = self._run(_state([_burn(shares=5)]), now=EXECUTABLE_AT - 86400 * 3)
-        self.assertEqual(again.alerts[0].severity, AlertSeverity.CRITICAL)
+        self.assertEqual(again.alerts[0].severity, AlertSeverity.HIGH)
 
-    def test_burn_timelock_seeds_silently_then_alerts_high_on_decrease(self) -> None:
+    def test_burn_timelock_seeds_silently_then_alerts_medium_on_decrease(self) -> None:
         seed = self._run(_state(burn_timelock=3 * 86400))
         increase = self._run(_state(burn_timelock=7 * 86400))
         decrease = self._run(_state(burn_timelock=0))
@@ -119,7 +138,7 @@ class TestAdapterDiff(unittest.TestCase):
         self.assertEqual(seed.alerts, [])
         self.assertEqual(increase.alerts, [])
         self.assertEqual(len(decrease.alerts), 1)
-        self.assertEqual(decrease.alerts[0].severity, AlertSeverity.HIGH)
+        self.assertEqual(decrease.alerts[0].severity, AlertSeverity.MEDIUM)
         self.assertIn("7d → 0s", decrease.alerts[0].body)
 
 

@@ -16,6 +16,7 @@ a message it has already recorded.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import partial
 from typing import Any, Callable, List
 
@@ -43,6 +44,37 @@ LOSS_PREFIX = "🚨 POTENTIAL VAULT LOSS"
 REMINDER_WINDOW_SECONDS = 24 * 60 * 60
 
 
+@dataclass(frozen=True)
+class LossNotice:
+    """A potential-loss alert that is due for one pending operation."""
+
+    reminder: bool  # render as the near-deadline reminder rather than the first alert
+    in_window: bool  # the deadline is inside the reminder window, so mark the reminder as sent too
+
+
+def due_loss_notice(deadline: int, loss_alerted_at: int, reminded_at: int) -> LossNotice | None:
+    """Decide whether a pending operation that puts funds at risk needs a loss alert now.
+
+    The loss alert is tracked separately from the "pending operation seen" cursor,
+    so an operation first seen with nothing at risk (sent at a lower severity) still
+    escalates once funds arrive, instead of waiting for the reminder window.
+
+    Args:
+        deadline: When the operation becomes executable; also the cache value.
+        loss_alerted_at: Cached deadline of the last loss alert sent for it.
+        reminded_at: Cached deadline of the last reminder sent for it.
+
+    Returns:
+        The notice to send, or None if both the alert and the reminder already went out.
+    """
+    in_window = int(datetime.now().timestamp()) >= deadline - REMINDER_WINDOW_SECONDS
+    if loss_alerted_at != deadline:
+        return LossNotice(reminder=False, in_window=in_window)
+    if in_window and reminded_at != deadline:
+        return LossNotice(reminder=True, in_window=True)
+    return None
+
+
 @dataclass
 class VaultAlert:
     """One section of a vault's grouped Telegram message.
@@ -68,8 +100,8 @@ class VaultDiff:
         self.alerts.append(VaultAlert(severity, body))
 
     def loss(self, body: str) -> None:
-        """Buffer a CRITICAL potential-loss finding, sent as its own message."""
-        self.alerts.append(VaultAlert(AlertSeverity.CRITICAL, body, standalone=True))
+        """Buffer a HIGH potential-loss finding, sent as its own message."""
+        self.alerts.append(VaultAlert(AlertSeverity.HIGH, body, standalone=True))
 
     def defer(self, write: Callable[..., Any], *args: Any) -> None:
         """Buffer a cache write to apply once the alert is delivered."""

@@ -13,11 +13,11 @@ Detected and alerted:
 * **Owner / curator changes** — instant, no timelock.
 * **Sentinels / allocators / adapters** — added or removed.
 
-Pending operations that can write off vault funds are CRITICAL and sent as their
+Pending operations that can write off vault funds are HIGH and sent as their
 own message (see ``_alerts.LOSS_PREFIX``), then re-alerted once near their
 execution time: ``removeAdapter`` of an adapter that still holds assets, and
-``decreaseTimelock(removeAdapter)`` while any adapter holds assets. Other
-timelock decreases and ``abdicate`` are HIGH.
+``decreaseTimelock(removeAdapter)`` while any adapter holds assets. An operation
+first seen with nothing at risk escalates once funds arrive.
 
 ``MorphoMarketV1AdapterV2``'s own timelock (``burnShares``) is not exposed by the
 GraphQL API; ``adapter_timelocks_v2`` reads it on-chain with a few batched calls.
@@ -32,7 +32,7 @@ from typing import Any, Dict, List
 from web3 import Web3
 
 from protocols.morpho import adapter_timelocks_v2
-from protocols.morpho._alerts import REMINDER_WINDOW_SECONDS, VaultDiff, send_vault_alerts
+from protocols.morpho._alerts import VaultDiff, due_loss_notice, send_vault_alerts
 from protocols.morpho._shared import (
     PROTOCOL,
     MorphoV2MonitoringError,
@@ -64,6 +64,7 @@ PENDING_INDEX_TYPE = "v2_pending_index"
 PENDING_FUNCTION_TYPE = "v2_pending_function"
 ROLE_TYPE = "v2_role"
 SET_TYPE = "v2_set"
+PENDING_LOSS_TYPE = "v2_pending_loss"
 PENDING_REMINDER_TYPE = "v2_pending_reminder"
 
 REMOVE_ADAPTER_SELECTOR = selector_of("removeAdapter(address)")
@@ -312,41 +313,39 @@ def _held_assets(snapshot: V2GovernanceSnapshot) -> int:
     return sum(snapshot.adapter_assets.values())
 
 
-def classify_pending(snapshot: V2GovernanceSnapshot, pc: PendingConfig) -> tuple[AlertSeverity, int | None]:
-    """Return the severity of a pending operation and, for potential losses, the assets at risk.
+def pending_loss(snapshot: V2GovernanceSnapshot, pc: PendingConfig) -> tuple[int, str] | None:
+    """Return ``(assets at risk, reason)`` for a pending operation that can write off funds, else None.
 
-    * ``removeAdapter(a)`` while ``a`` holds assets → CRITICAL: ``totalAssets`` is
-      the sum of adapter ``realAssets``, so removing it writes those assets off.
-    * ``decreaseTimelock(removeAdapter, …)`` while any adapter holds assets →
-      CRITICAL: it shrinks the window to react to such a removal.
-    * Other timelock decreases and ``abdicate`` (irreversible) → HIGH.
-    * Everything else → MEDIUM.
+    * ``removeAdapter(a)`` while ``a`` holds assets: ``totalAssets`` is the sum of
+      adapter ``realAssets``, so removing it writes those assets off.
+    * ``decreaseTimelock(removeAdapter, …)`` while any adapter holds assets: it
+      shrinks the window to react to such a removal.
     """
     decoded = decode_call(pc.data)
     if decoded is None:
-        return AlertSeverity.MEDIUM, None
+        return None
     name, args = decoded
     if name == "removeAdapter":
         assets = snapshot.adapter_assets.get(str(Web3.to_checksum_address(args[0])), 0)
-        return (AlertSeverity.CRITICAL, assets) if assets > 0 else (AlertSeverity.MEDIUM, None)
-    if name == "decreaseTimelock":
+        if assets > 0:
+            return assets, "Removing an adapter that still holds assets writes them off; deallocate first."
+    if name == "decreaseTimelock" and bytes(args[0]) == REMOVE_ADAPTER_SELECTOR:
         held = _held_assets(snapshot)
-        if bytes(args[0]) == REMOVE_ADAPTER_SELECTOR and held > 0:
-            return AlertSeverity.CRITICAL, held
-        return AlertSeverity.HIGH, None
-    if name == "abdicate":
-        return AlertSeverity.HIGH, None
-    return AlertSeverity.MEDIUM, None
+        if held > 0:
+            return held, "Shortens the timelock on `removeAdapter` while adapters hold assets."
+    return None
 
 
 def _loss_body(
     snapshot: V2GovernanceSnapshot,
     pc: PendingConfig,
     operation_label: str,
-    at_risk: int,
+    loss: tuple[int, str],
     *,
     reminder: bool,
 ) -> str:
+    """Render the potential-loss section for a pending operation."""
+    at_risk, reason = loss
     title = "⏳ Reminder: loss-causing operation is close" if reminder else "🔴 Submitted loss-causing operation"
     amount = format_amount_at_risk(
         at_risk, snapshot.asset_decimals, snapshot.asset_symbol or None, snapshot.total_assets
@@ -356,22 +355,34 @@ def _loss_body(
         f"💸 At risk: {amount}\n"
         f"⏰ Executable at: {format_ts(pc.valid_at)} {format_countdown(pc.valid_at)}\n"
         f"🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}\n"
-        f"{_loss_reason(pc)} If unintended, the curator or a sentinel can call `revoke(data)`."
+        f"{reason} If unintended, the curator or a sentinel can call `revoke(data)`."
     )
 
 
-def _loss_reason(pc: PendingConfig) -> str:
-    decoded = decode_call(pc.data)
-    if decoded and decoded[0] == "decreaseTimelock":
-        return "Shortens the timelock on `removeAdapter` while adapters hold assets."
-    return "Removing an adapter that still holds assets writes them off; deallocate first."
+def _check_pending_loss(
+    snapshot: V2GovernanceSnapshot,
+    pc: PendingConfig,
+    operation_label: str,
+    loss: tuple[int, str],
+    diff: VaultDiff,
+) -> None:
+    """Alert once on a pending operation that puts funds at risk, then once more near ``validAt``."""
+    addr = snapshot.address.lower()
+    loss_key = morpho_key(addr, pc.data_hash, PENDING_LOSS_TYPE)
+    reminder_key = morpho_key(addr, pc.data_hash, PENDING_REMINDER_TYPE)
+    notice = due_loss_notice(pc.valid_at, _read_int(loss_key), _read_int(reminder_key))
+    if notice is None:
+        return
+    diff.loss(_loss_body(snapshot, pc, operation_label, loss, reminder=notice.reminder))
+    diff.defer(_write, loss_key, pc.valid_at)
+    if notice.in_window:
+        diff.defer(_write, reminder_key, pc.valid_at)
 
 
 def _alert_pending_new(
     snapshot: V2GovernanceSnapshot,
     pending: List[tuple[PendingConfig, str]],
     diff: VaultDiff,
-    severity: AlertSeverity = AlertSeverity.MEDIUM,
 ) -> None:
     """Buffer a section for newly-submitted timelocked operation(s) on one vault.
 
@@ -386,7 +397,7 @@ def _alert_pending_new(
     if len(pending) == 1:
         pc, operation_label = pending[0]
         diff.alert(
-            severity,
+            AlertSeverity.MEDIUM,
             f"📥 Submitted: {operation_label}\n"
             f"⏰ Executable at: {format_ts(pc.valid_at)} {format_countdown(pc.valid_at)}\n"
             f"🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}",
@@ -408,7 +419,7 @@ def _alert_pending_new(
             lines.append(f"     ⏰ Executable at: {format_ts(pc.valid_at)} {format_countdown(pc.valid_at)}")
             lines.append(f"     🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}")
 
-    diff.alert(severity, "\n".join(lines))
+    diff.alert(AlertSeverity.MEDIUM, "\n".join(lines))
 
 
 def _alert_pending_resolved(
@@ -458,37 +469,26 @@ def _diff_pending(snapshot: V2GovernanceSnapshot, diff: VaultDiff) -> None:
 
     current_keys: set[str] = set()
     new_pending: List[tuple[PendingConfig, str]] = []
-    group_severity = AlertSeverity.MEDIUM
-    now = int(datetime.now().timestamp())
     for pc in snapshot.pending_configs:
         current_keys.add(pc.data_hash)
         operation_label = _operation_label(snapshot, pc)
         diff.defer(_write, _pending_function_key(snapshot, pc.data_hash), _operation_function_name(pc, operation_label))
-        severity, at_risk = classify_pending(snapshot, pc)
         cache_key = morpho_key(addr, pc.data_hash, PENDING_TYPE)
-        reminder_key = morpho_key(addr, pc.data_hash, PENDING_REMINDER_TYPE)
-        in_window = now >= pc.valid_at - REMINDER_WINDOW_SECONDS
         last = _read_int(cache_key)
         if last == EXECUTED:
             continue
-        if last == pc.valid_at:
-            # Already alerted; a still-pending loss gets one reminder near its deadline.
-            if at_risk is not None and in_window and _read_int(reminder_key) != pc.valid_at:
-                diff.loss(_loss_body(snapshot, pc, operation_label, at_risk, reminder=True))
-                diff.defer(_write, reminder_key, pc.valid_at)
-            continue
-        diff.defer(_write, cache_key, pc.valid_at)
-        if at_risk is not None:
-            diff.loss(_loss_body(snapshot, pc, operation_label, at_risk, reminder=False))
-            if in_window:
-                diff.defer(_write, reminder_key, pc.valid_at)
-            continue
-        new_pending.append((pc, operation_label))
-        if severity == AlertSeverity.HIGH:
-            group_severity = AlertSeverity.HIGH
+        # A loss is tracked on its own key, so an operation first seen with nothing
+        # at risk still escalates once funds arrive.
+        loss = pending_loss(snapshot, pc)
+        if loss is not None:
+            _check_pending_loss(snapshot, pc, operation_label, loss, diff)
+        elif last != pc.valid_at:
+            new_pending.append((pc, operation_label))
+        if last != pc.valid_at:
+            diff.defer(_write, cache_key, pc.valid_at)
 
     # Group all other newly-submitted operations for this vault into one section.
-    _alert_pending_new(snapshot, new_pending, diff, group_severity)
+    _alert_pending_new(snapshot, new_pending, diff)
 
     # Detect resolved entries: anything in last-run's index that isn't in the
     # current pending list. Reading a function-name key here is safe despite the
@@ -506,6 +506,8 @@ def _diff_pending(snapshot: V2GovernanceSnapshot, diff: VaultDiff) -> None:
             continue
         _alert_pending_resolved(data_hash, last, _read_str(_pending_function_key(snapshot, data_hash)), diff)
         diff.defer(_write, cache_key, EXECUTED if last <= int(datetime.now().timestamp()) else REVOKED)
+        for value_type in (PENDING_LOSS_TYPE, PENDING_REMINDER_TYPE):
+            diff.defer(_write, morpho_key(addr, data_hash, value_type), 0)
 
     diff.defer(_write, index_key, ",".join(sorted(current_keys)))
 

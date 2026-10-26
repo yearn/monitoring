@@ -408,28 +408,29 @@ def _pc(sig: str, types: list[str], values: list[Any], valid_at: int = 2_000_000
 
 
 class TestMorphoV2LossClassification(unittest.TestCase):
-    def test_remove_adapter_holding_assets_is_critical_with_amount(self) -> None:
+    def test_remove_adapter_holding_assets_is_a_loss_with_amount(self) -> None:
         pc = _pc("removeAdapter(address)", ["address"], [ADAPTER])
-        severity, at_risk = governance_v2.classify_pending(_loss_snapshot([pc], 1), pc)
-        self.assertEqual((severity, at_risk), (AlertSeverity.CRITICAL, 1))
+        loss = governance_v2.pending_loss(_loss_snapshot([pc], 1), pc)
+        assert loss is not None
+        self.assertEqual(loss[0], 1)
 
-    def test_remove_empty_adapter_stays_medium(self) -> None:
+    def test_remove_empty_adapter_is_not_a_loss(self) -> None:
         pc = _pc("removeAdapter(address)", ["address"], [ADAPTER])
-        self.assertEqual(governance_v2.classify_pending(_loss_snapshot([pc], 0), pc), (AlertSeverity.MEDIUM, None))
+        self.assertIsNone(governance_v2.pending_loss(_loss_snapshot([pc], 0), pc))
 
-    def test_decrease_remove_adapter_timelock_with_held_assets_is_critical(self) -> None:
+    def test_decrease_remove_adapter_timelock_with_held_assets_is_a_loss(self) -> None:
         pc = _pc("decreaseTimelock(bytes4,uint256)", ["bytes4", "uint256"], [_selector("removeAdapter(address)"), 0])
-        self.assertEqual(
-            governance_v2.classify_pending(_loss_snapshot([pc], 5), pc),
-            (AlertSeverity.CRITICAL, 5),
-        )
+        loss = governance_v2.pending_loss(_loss_snapshot([pc], 5), pc)
+        assert loss is not None
+        self.assertEqual(loss[0], 5)
+        self.assertIn("Shortens the timelock", loss[1])
 
-    def test_other_timelock_decrease_and_abdicate_are_high(self) -> None:
+    def test_other_timelock_decrease_and_abdicate_are_not_losses(self) -> None:
         decrease = _pc("decreaseTimelock(bytes4,uint256)", ["bytes4", "uint256"], [_selector("addAdapter(address)"), 0])
         abdicate = _pc("abdicate(bytes4)", ["bytes4"], [_selector("setIsAllocator(address,bool)")])
         snapshot = _loss_snapshot([], 5)
-        self.assertEqual(governance_v2.classify_pending(snapshot, decrease), (AlertSeverity.HIGH, None))
-        self.assertEqual(governance_v2.classify_pending(snapshot, abdicate), (AlertSeverity.HIGH, None))
+        self.assertIsNone(governance_v2.pending_loss(snapshot, decrease))
+        self.assertIsNone(governance_v2.pending_loss(snapshot, abdicate))
 
 
 class TestMorphoV2LossDelivery(unittest.TestCase):
@@ -448,8 +449,10 @@ class TestMorphoV2LossDelivery(unittest.TestCase):
             ),
             patch("protocols.morpho._alerts.send_alert", side_effect=sent.append),
             patch("protocols.morpho.governance_v2.datetime") as fake_datetime,
+            patch("protocols.morpho._alerts.datetime") as alerts_datetime,
         ):
             fake_datetime.now.return_value = real_datetime.fromtimestamp(now)
+            alerts_datetime.now.return_value = real_datetime.fromtimestamp(now)
             governance_v2.diff_and_alert(snapshot)
         return sent
 
@@ -467,7 +470,7 @@ class TestMorphoV2LossDelivery(unittest.TestCase):
 
         # The loss goes out on its own, ahead of the grouped routine message.
         self.assertEqual(len(first), 2)
-        self.assertEqual(first[0].severity, AlertSeverity.CRITICAL)
+        self.assertEqual(first[0].severity, AlertSeverity.HIGH)
         self.assertTrue(first[0].message.startswith(LOSS_PREFIX))
         self.assertIn(f"removeAdapter([{ADAPTER}]", first[0].message)
         self.assertIn("1.00M USDC (25.00% of vault)", first[0].message)
@@ -478,12 +481,30 @@ class TestMorphoV2LossDelivery(unittest.TestCase):
         self.assertIn("Reminder", reminder[0].message)
         self.assertEqual(after, [])
 
-    def test_high_operation_raises_the_grouped_severity(self) -> None:
+    def test_remove_adapter_escalates_when_the_adapter_gets_funded(self) -> None:
+        """An operation first sent as MEDIUM (empty adapter) must escalate once the
+        adapter holds assets, not wait for the reminder window (PR #436 review)."""
+        valid_at = 2_000_000_000
+        remove = _pc("removeAdapter(address)", ["address"], [ADAPTER], valid_at)
+        state: dict[str, str] = {}
+
+        first = self._run(_loss_snapshot([remove], 0), state, now=valid_at - 3 * 86400)
+        escalated = self._run(_loss_snapshot([remove], 10**6), state, now=valid_at - 2 * 86400)
+        repeat = self._run(_loss_snapshot([remove], 10**6), state, now=valid_at - 2 * 86400 + 60)
+
+        self.assertEqual([a.severity for a in first], [AlertSeverity.MEDIUM])
+        self.assertEqual(len(escalated), 1)
+        self.assertEqual(escalated[0].severity, AlertSeverity.HIGH)
+        self.assertTrue(escalated[0].message.startswith(LOSS_PREFIX))
+        self.assertNotIn("Reminder", escalated[0].message)
+        self.assertEqual(repeat, [])
+
+    def test_abdicate_is_grouped_at_medium(self) -> None:
         abdicate = _pc("abdicate(bytes4)", ["bytes4"], [_selector("setIsAllocator(address,bool)")])
         sent = self._run(_loss_snapshot([abdicate], 0), {}, now=1_000_000_000)
 
         self.assertEqual(len(sent), 1)
-        self.assertEqual(sent[0].severity, AlertSeverity.HIGH)
+        self.assertEqual(sent[0].severity, AlertSeverity.MEDIUM)
         self.assertNotIn("POTENTIAL VAULT LOSS", sent[0].message)
 
 

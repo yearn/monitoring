@@ -4,7 +4,7 @@ from typing import Any
 
 from web3 import Web3
 
-from protocols.morpho._alerts import REMINDER_WINDOW_SECONDS, VaultDiff, send_vault_alerts
+from protocols.morpho._alerts import VaultDiff, due_loss_notice, send_vault_alerts
 from protocols.morpho._shared import (
     MORPHO_BLUE_ABI_PATH,
     PROTOCOL,
@@ -35,6 +35,7 @@ logger = get_logger("morpho.governance")
 
 PENDING_CAP_TYPE = "pending_cap"
 REMOVABLE_AT_TYPE = "removable_at"
+REMOVAL_LOSS_TYPE = "removable_at_loss"
 REMOVAL_REMINDER_TYPE = "removable_at_reminder"
 ABI_MORPHO = load_abi("protocols/morpho/abi/morpho.json")
 ABI_MORPHO_BLUE = load_abi(MORPHO_BLUE_ABI_PATH)
@@ -261,7 +262,7 @@ def _check_pending_cap(name: str, state: MarketGovernanceState, chain: Chain, di
 
 
 def _removal_loss_body(state: MarketGovernanceState, chain: Chain, *, reminder: bool) -> str:
-    """Render the CRITICAL section for a queued removal of a market the vault still supplies."""
+    """Render the potential-loss section for a queued removal of a market the vault still supplies."""
     market_url = get_market_url(state.market_id, chain)
     metadata = fetch_market_metadata(state.market_id, chain)
     if metadata:
@@ -284,10 +285,12 @@ def _removal_loss_body(state: MarketGovernanceState, chain: Chain, *, reminder: 
 def _check_market_removal(state: MarketGovernanceState, chain: Chain, diff: VaultDiff) -> None:
     """Buffer a section for a queued V1 market removal.
 
-    A removal of a market the vault still supplies is CRITICAL, for any amount:
-    once ``removableAt`` passes, ``updateWithdrawQueue`` can drop the market and the
-    supply leaves ``totalAssets``. It is re-alerted once inside the reminder window.
-    A removal of an empty market is routine cleanup and stays MEDIUM.
+    A removal of a market the vault still supplies is a HIGH potential loss, for
+    any amount: once ``removableAt`` passes, ``updateWithdrawQueue`` can drop the
+    market and the supply leaves ``totalAssets``. It is re-alerted once inside the
+    reminder window, and a removal first seen on an empty market escalates as soon
+    as the vault supplies it. A removal of an empty market is routine cleanup and
+    stays MEDIUM.
     """
     if state.removable_at <= 0:
         return
@@ -296,24 +299,10 @@ def _check_market_removal(state: MarketGovernanceState, chain: Chain, diff: Vaul
         state.market_id,
         REMOVABLE_AT_TYPE,
     )
-    at_risk = state.supply_shares > 0
-    if state.removable_at <= last_timestamp:
-        if at_risk:
-            _check_removal_reminder(state, chain, diff)
-        else:
-            logger.info(
-                "Skipping previously alerted market removal for vault %s market %s",
-                state.vault_address,
-                state.market_id,
-            )
-        return
-
-    if at_risk:
-        diff.loss(_removal_loss_body(state, chain, reminder=False))
-        if _in_reminder_window(state.removable_at):
-            # The first alert already lands inside the window; don't remind right after it.
-            _defer_reminder_write(state, diff)
-    else:
+    seen = state.removable_at <= last_timestamp
+    if state.supply_shares > 0:
+        _check_removal_loss(state, chain, diff)
+    elif not seen:
         market_url = get_market_url(state.market_id, chain)
         market_name, _ = fetch_market_info(state.market_id, chain)
         diff.alert(
@@ -321,38 +310,36 @@ def _check_market_removal(state: MarketGovernanceState, chain: Chain, diff: Vaul
             f"➖ Queued to remove market [{market_name}]({market_url}) at {format_ts(state.removable_at)} "
             "(no vault supply in the market)",
         )
-    diff.defer(
-        write_last_executed_morpho_to_file,
-        state.vault_address,
-        state.market_id,
-        REMOVABLE_AT_TYPE,
+    else:
+        logger.info(
+            "Skipping previously alerted market removal for vault %s market %s",
+            state.vault_address,
+            state.market_id,
+        )
+    if not seen:
+        diff.defer(
+            write_last_executed_morpho_to_file,
+            state.vault_address,
+            state.market_id,
+            REMOVABLE_AT_TYPE,
+            state.removable_at,
+        )
+
+
+def _check_removal_loss(state: MarketGovernanceState, chain: Chain, diff: VaultDiff) -> None:
+    """Alert once on a queued removal of a supplied market, then once more near ``removableAt``."""
+    vault, market = state.vault_address, state.market_id
+    notice = due_loss_notice(
         state.removable_at,
+        get_last_executed_morpho_from_file(vault, market, REMOVAL_LOSS_TYPE),
+        get_last_executed_morpho_from_file(vault, market, REMOVAL_REMINDER_TYPE),
     )
-
-
-def _in_reminder_window(deadline: int) -> bool:
-    return int(datetime.now().timestamp()) >= deadline - REMINDER_WINDOW_SECONDS
-
-
-def _defer_reminder_write(state: MarketGovernanceState, diff: VaultDiff) -> None:
-    diff.defer(
-        write_last_executed_morpho_to_file,
-        state.vault_address,
-        state.market_id,
-        REMOVAL_REMINDER_TYPE,
-        state.removable_at,
-    )
-
-
-def _check_removal_reminder(state: MarketGovernanceState, chain: Chain, diff: VaultDiff) -> None:
-    """Re-alert once when an already-alerted removal with supply nears ``removableAt``."""
-    if not _in_reminder_window(state.removable_at):
+    if notice is None:
         return
-    reminded_at = get_last_executed_morpho_from_file(state.vault_address, state.market_id, REMOVAL_REMINDER_TYPE)
-    if state.removable_at <= reminded_at:
-        return
-    diff.loss(_removal_loss_body(state, chain, reminder=True))
-    _defer_reminder_write(state, diff)
+    diff.loss(_removal_loss_body(state, chain, reminder=notice.reminder))
+    diff.defer(write_last_executed_morpho_to_file, vault, market, REMOVAL_LOSS_TYPE, state.removable_at)
+    if notice.in_window:
+        diff.defer(write_last_executed_morpho_to_file, vault, market, REMOVAL_REMINDER_TYPE, state.removable_at)
 
 
 def check_market_governance_state(name: str, state: MarketGovernanceState, chain: Chain, diff: VaultDiff) -> None:
