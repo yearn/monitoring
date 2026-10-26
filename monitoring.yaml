@@ -415,7 +415,7 @@ protocols:
   timelock:
     display_name: "Timelock Alerts"
     description: "Cross-protocol timelock event monitoring"
-    cadence: "Every 30 minutes / Daily"
+    cadence: "Every 30 minutes (stale operations: daily)"
     tasks:
       - protocols/timelock/timelock_alerts.py
       - protocols/timelock/stale_operations.py
