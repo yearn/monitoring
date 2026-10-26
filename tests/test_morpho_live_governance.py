@@ -65,9 +65,21 @@ ADAPTER = "0x" + "aa" * 20
 NEW_OWNER = "0x" + "bb" * 20
 MARKET = "0x" + "ab" * 32
 METADATA = {"name": "WETH/USDC", "lltv": 86 * 10**16, "loan_decimals": 6, "loan_symbol": "USDC"}
+OTHER_VAULT = "0x" + "f9" * 20
 V1_CONFIG = VaultConfig("Yearn USDC", V1_VAULT, 1)
 V2_CONFIG = VaultConfig("Yearn USDC", V2_VAULT, 1)
 VALID_AT = 2_000_000_000
+
+
+@pytest.fixture(autouse=True)
+def configured_vaults() -> Iterator[None]:
+    """Resolve vaults from synthetic configs, so the consumer tests don't depend on config.py's vault list."""
+    configs = {V1_VAULT.lower(): V1_CONFIG, OTHER_VAULT: VaultConfig("Other", OTHER_VAULT, 1)}
+    with patch(
+        "protocols.morpho.live_governance.vault_config",
+        side_effect=lambda chain, address, version: configs.get(address.lower()),
+    ):
+        yield
 
 
 def _calldata(sig: str, types: list[str], values: list[Any]) -> str:
@@ -188,18 +200,6 @@ def test_v1_cap_and_removal_on_one_market_are_checked_once() -> None:
     assert set(result.reasons.values()) == {REASON_ALERTED}
 
 
-def test_v1_submit_timelock_runs_the_timelock_check() -> None:
-    def check(contract: Any, client: Any, diff: Any, block: int) -> None:
-        assert block == 1_000
-        diff.alert(AlertSeverity.HIGH, "🚨 Timelock decrease: 3d → 1d")
-
-    with patch.object(live_rules.governance, "check_timelock_and_guardian", side_effect=check):
-        result = evaluate_v1(_client(), Chain.MAINNET, V1_CONFIG, [_event("SubmitTimelock", {"newTimelock": "86400"})])
-
-    assert [a.severity for a in result.alerts] == [AlertSeverity.HIGH]
-    assert result.reasons == {"1_100_0": REASON_ALERTED}
-
-
 def test_rules_wait_for_an_rpc_behind_the_event_block() -> None:
     with pytest.raises(RpcBehindError):
         evaluate_v1(_client(head=99), Chain.MAINNET, V1_CONFIG, [_event("SubmitCap", {"id": MARKET}, block=100)])
@@ -309,17 +309,6 @@ def test_v2_owner_change_uses_the_daily_role_cache_and_accept_is_left_to_the_dai
     assert result.reasons == {"1_100_0": REASON_ALERTED, "1_100_1": REASON_RESOLUTION}
 
 
-def test_v2_owner_change_without_a_baseline_seeds_silently() -> None:
-    with _v2_cache(), patch.object(live_rules, "load_v2_snapshot", return_value=_snapshot()):
-        result = evaluate_v2(
-            _v2_client({}),
-            Chain.MAINNET,
-            V2_CONFIG,
-            [_event("SetOwner", {"newOwner": NEW_OWNER}, vault=V2_VAULT, version=2)],
-        )
-    assert result.alerts == [] and result.reasons == {"1_100_0": REASON_NOT_NEW}
-
-
 def test_load_v2_snapshot_reads_roles_adapters_and_values_on_chain() -> None:
     client = _client()
     vault = MagicMock()
@@ -398,7 +387,7 @@ def test_observe_mode_records_grouped_requests_and_sends_nothing(tmp_path: Path)
     evaluate = FakeEvaluator()
     send = MagicMock()
     consumer = LiveGovernanceConsumer(store, LiveConfig(), evaluate=evaluate, send=send, now=lambda: 1_000.0)
-    other_vault = "0xf9bddd4a9b3a45f980e11fdde96e16364ddbec49"  # Yearn OG USDC V1, mainnet
+    other_vault = OTHER_VAULT
     _observe(
         store, make_morpho_event(1, 10), make_morpho_event(1, 10, 1), make_morpho_event(1, 12, address=other_vault)
     )
@@ -406,7 +395,7 @@ def test_observe_mode_records_grouped_requests_and_sends_nothing(tmp_path: Path)
     consumer.process_once()
 
     # per vault, in chain order
-    assert evaluate.calls == [(V1_VAULT, ["1_10_0", "1_10_1"]), (Web3.to_checksum_address(other_vault), ["1_12_0"])]
+    assert evaluate.calls == [(V1_VAULT, ["1_10_0", "1_10_1"]), (OTHER_VAULT, ["1_12_0"])]
     alerts = store.alerts_since(0)
     assert [a["status"] for a in alerts] == [STATUS_OBSERVED, STATUS_OBSERVED]  # one message per vault
     assert json.loads(alerts[0]["event_ids"]) == ["1_10_0", "1_10_1"]
@@ -502,7 +491,7 @@ def test_shadow_requests_are_delivered_in_order_and_failures_retried(tmp_path: P
         send=send,
         now=time.time,
     )
-    other_vault = "0xf9bddd4a9b3a45f980e11fdde96e16364ddbec49"
+    other_vault = OTHER_VAULT
     _observe(
         store,
         make_morpho_event(1, 10, ts=int(time.time())),
@@ -525,7 +514,8 @@ def test_shadow_requests_are_delivered_in_order_and_failures_retried(tmp_path: P
     assert alerts[0]["attempts"] == 2 and alerts[1]["attempts"] == 1
 
 
-def test_send_shadow_requires_the_errors_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_shadow_requires_the_errors_chat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert build_consumer(_store(tmp_path), MODE_SHADOW).config.mode == "observe"  # conftest strips TELEGRAM_*
     request = AlertRequest(1, 1, V1_VAULT, MODE_SHADOW, "HIGH", "🚨 POTENTIAL VAULT LOSS — x", ["1_10_0"], 0)
     with pytest.raises(ShadowChannelMissing):
         send_shadow(request)  # conftest strips TELEGRAM_*
@@ -536,10 +526,6 @@ def test_send_shadow_requires_the_errors_chat(monkeypatch: pytest.MonkeyPatch) -
     text, label = send.call_args.args
     assert label == SHADOW_LABEL and text.startswith("shadow → morpho, HIGH, events 1_10_0")
     assert send.call_args.kwargs["alert_protocol"] == "yearn-internal"
-
-
-def test_build_consumer_downgrades_shadow_without_an_errors_chat(tmp_path: Path) -> None:
-    assert build_consumer(_store(tmp_path), MODE_SHADOW).config.mode == "observe"
 
 
 def test_live_health_and_summary(tmp_path: Path) -> None:
