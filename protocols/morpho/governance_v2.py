@@ -32,7 +32,7 @@ from typing import Any, Dict, List
 from web3 import Web3
 
 from protocols.morpho import adapter_timelocks_v2
-from protocols.morpho._alerts import VaultDiff, due_loss_notice, send_vault_alerts
+from protocols.morpho._alerts import VaultDiff, due_loss_notice, governance_lock, send_vault_alerts
 from protocols.morpho._shared import (
     PROTOCOL,
     MorphoV2MonitoringError,
@@ -577,17 +577,19 @@ def diff_and_alert(
     ``adapter_states`` are the on-chain adapter timelock reads; ``None`` skips the
     adapter diff (e.g. when the RPC read failed) so its cache is left untouched.
     """
-    diff = VaultDiff()
-    _diff_pending(snapshot, diff)
-    diff_single_role(snapshot, "owner", snapshot.owner, diff)
-    diff_single_role(snapshot, "curator", snapshot.curator, diff)
-    diff_set(snapshot, "sentinels", snapshot.sentinels, diff)
-    diff_set(snapshot, "allocators", snapshot.allocators, diff)
-    diff_set(snapshot, "adapters", snapshot.adapters, diff)
-    for state in adapter_states or []:
-        adapter_timelocks_v2.diff_adapter(snapshot.chain, snapshot.total_assets, state, diff)
-    send_vault_alerts(vault_header(snapshot), diff.alerts, PROTOCOL)
-    diff.commit()
+    # The lock keeps the live consumer from alerting the same change in between.
+    with governance_lock(snapshot.address):
+        diff = VaultDiff()
+        _diff_pending(snapshot, diff)
+        diff_single_role(snapshot, "owner", snapshot.owner, diff)
+        diff_single_role(snapshot, "curator", snapshot.curator, diff)
+        diff_set(snapshot, "sentinels", snapshot.sentinels, diff)
+        diff_set(snapshot, "allocators", snapshot.allocators, diff)
+        diff_set(snapshot, "adapters", snapshot.adapters, diff)
+        for state in adapter_states or []:
+            adapter_timelocks_v2.diff_adapter(snapshot.chain, snapshot.total_assets, state, diff)
+        send_vault_alerts(vault_header(snapshot), diff.alerts, PROTOCOL)
+        diff.commit()
 
 
 # ----------------------------------------------------------------------------

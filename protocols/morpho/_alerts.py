@@ -15,12 +15,14 @@ a message it has already recorded.
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
 from typing import Any, Callable, List
 
 from utils.alert import Alert, AlertSeverity, send_alert
+from utils.file_lock import file_lock
 from utils.telegram import MAX_MESSAGE_LENGTH
 
 # Ascending severity — a grouped alert is sent at the highest of its sections.
@@ -42,6 +44,16 @@ LOSS_PREFIX = "🚨 POTENTIAL VAULT LOSS"
 
 # Pending loss operations are re-alerted once when their execution time is this close.
 REMINDER_WINDOW_SECONDS = 24 * 60 * 60
+
+
+def governance_lock(vault_address: str) -> AbstractContextManager[None]:
+    """Lock one vault's governance check → send → cache-write sequence across processes.
+
+    The daily jobs and the live consumer's production mode read and write the
+    same cache keys; holding this lock around the whole sequence keeps them from
+    both treating one change as new and alerting it twice.
+    """
+    return file_lock(f"morpho_governance_{vault_address.lower()}")
 
 
 @dataclass(frozen=True)

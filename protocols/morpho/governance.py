@@ -4,7 +4,7 @@ from typing import Any
 
 from web3 import Web3
 
-from protocols.morpho._alerts import VaultDiff, due_loss_notice, send_vault_alerts
+from protocols.morpho._alerts import VaultDiff, due_loss_notice, governance_lock, send_vault_alerts
 from protocols.morpho._shared import (
     MORPHO_BLUE_ABI_PATH,
     PROTOCOL,
@@ -422,19 +422,21 @@ def get_data_for_chain(chain: Chain) -> None:
     for vault in vaults:
         morpho_contract = client.eth.contract(address=vault.address, abi=ABI_MORPHO)
         # Buffer every finding for this vault, then send them as one message and
-        # only then record them as alerted.
-        diff = VaultDiff()
-        check_markets_pending_cap(
-            vault.name,
-            morpho_contract,
-            chain,
-            client,
-            diff,
-            block_number=block_number,
-        )
-        check_timelock_and_guardian(morpho_contract, client, diff, block_number)
-        send_vault_alerts(vault_header(vault.name, vault.address, chain), diff.alerts, PROTOCOL)
-        diff.commit()
+        # only then record them as alerted. The lock keeps the live consumer from
+        # alerting the same change in between.
+        with governance_lock(vault.address):
+            diff = VaultDiff()
+            check_markets_pending_cap(
+                vault.name,
+                morpho_contract,
+                chain,
+                client,
+                diff,
+                block_number=block_number,
+            )
+            check_timelock_and_guardian(morpho_contract, client, diff, block_number)
+            send_vault_alerts(vault_header(vault.name, vault.address, chain), diff.alerts, PROTOCOL)
+            diff.commit()
 
 
 def main() -> None:

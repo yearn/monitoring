@@ -290,12 +290,20 @@ at each chain's indexed head; rerun it to confirm the range queries succeed. To
 disable the stream, drop it from `EVENT_SUBSCRIBER_STREAMS` and restart; its inbox is
 kept.
 
-The stream's live consumer starts in `observe` mode: it records what the daily
-governance jobs would alert for each new event (`report` shows the summary) and
-sends nothing. To compare with the daily jobs in the errors chat, set
-`MORPHO_LIVE_DELIVERY=shadow` and restart. The daily jobs keep alerting the Morpho
-group in both modes. Events from before the consumer's first run are recorded as
-history and never alerted.
+The stream's live consumer starts in `shadow` mode: for each new event it posts what
+the daily governance jobs would alert to the internal errors chat as
+`[morpho-live-shadow]` (`report` shows the summary), for comparison with the daily
+alerts. Without an errors chat it only records them (`observe`, also selectable with
+`MORPHO_LIVE_DELIVERY=observe`). The daily jobs keep alerting the Morpho group in both
+modes. Events from before the consumer's first run are recorded as history and never
+alerted.
+
+**Cutover to production** ([#450](https://github.com/yearn/monitoring/issues/450)): once a
+shadow period matched the daily Morpho alerts, set `MORPHO_LIVE_DELIVERY=production`
+and restart. Live alerts then go to the Morpho channel within seconds of the event.
+The daily jobs keep running: both paths take the same per-vault lock in
+`/srv/cache` and share the cache that records what was alerted, so each change is
+alerted once, by whichever path sees it first. To roll back, set `shadow` and restart.
 
 Supervision: the unit is `Type=notify` with `WatchdogSec=120`. The heartbeat pings
 the watchdog only while HTTP reconciliation keeps completing, so a wedged worker
@@ -324,7 +332,7 @@ Set in `/etc/monitoring/.env`, then restart the unit:
 | Variable | Default | Meaning |
 |---|---|---|
 | `EVENT_SUBSCRIBER_STREAMS` | `timelock` | Streams to follow: `timelock`, `morpho`, comma-separated |
-| `MORPHO_LIVE_DELIVERY` | `observe` | Live Morpho governance decisions: `observe` records them only; `shadow` also posts them to the internal errors chat (needs it configured) |
+| `MORPHO_LIVE_DELIVERY` | `shadow` | Live Morpho governance decisions: `shadow` posts them to the internal errors chat (records only without one); `observe` records them only; `production` sends them to the Morpho channel |
 | `TIMELOCK_SUBSCRIBER_TRANSPORT` | `both` | `both`, `ws`, or `http` (every stream) |
 | `TIMELOCK_SUBSCRIBER_NOTIFY` | `none` | `errors` posts pilot notices to the internal errors chat (needs `TELEGRAM_TOPIC_ID_ERRORS` or `TELEGRAM_CHAT_ID_ERRORS`) |
 | `TIMELOCK_SUBSCRIBER_RECONCILE_SECONDS` | `60` | HTTP reconcile interval |

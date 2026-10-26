@@ -9,10 +9,11 @@ daily jobs' content, severity, grouping, loss classification, and dedup cache
 (an operation the daily job already alerted is not alerted again), and an
 operation revoked or executed before the read is simply not pending anymore.
 
-Cache writes buffered by those checks are never committed here: in observation
-and shadow mode the daily jobs stay the only writers, so they keep alerting
-exactly as before. Resolutions (``Accept``; executed/revoked LOW notes) are left
-to the daily jobs.
+Cache writes buffered by those checks are returned as ``VaultEvaluation.commit``
+and never applied here. In observation and shadow mode nobody calls it, so the
+daily jobs stay the only writers and keep alerting exactly as before; production
+mode calls it once the alert is delivered, like the daily jobs do. Resolutions
+(``Accept``; executed/revoked LOW notes) are left to the daily jobs.
 
 V1: ``SubmitCap`` / ``SubmitMarketRemoval`` → that market's pending cap and
 removal checks; ``SubmitTimelock`` → the timelock (and guardian) check.
@@ -98,6 +99,8 @@ class VaultEvaluation:
     alerts: list[VaultAlert] = field(default_factory=list)
     # event_id -> REASON_* explaining the event's outcome
     reasons: dict[str, str] = field(default_factory=dict)
+    # Applies the daily jobs' cache writes for these alerts; call only after delivery.
+    commit: Callable[[], None] = field(default=lambda: None, compare=False)
 
 
 def vault_config(chain: Chain, address: str, version: int) -> VaultConfig | None:
@@ -158,6 +161,7 @@ def evaluate_v1(client: Any, chain: Chain, vault: VaultConfig, events: list[Gove
         _attribute(diff, before, timelock_ids, result.reasons)
 
     result.alerts = diff.alerts
+    result.commit = diff.commit
     return result
 
 
@@ -183,6 +187,15 @@ def load_v2_snapshot(client: Any, chain: Chain, vault: VaultConfig, block: int) 
                 batch.add(contract.functions.adapters(index).call(block_identifier=block))
             adapters = [str(Web3.to_checksum_address(a)) for a in client.execute_batch(batch)]
 
+    # Adapter valuations decide whether a removal is a potential loss, so a failed
+    # read must not look like an empty adapter: it raises, and the vault is retried.
+    adapter_assets: dict[str, int] = {}
+    if adapters:
+        with client.batch_requests() as batch:
+            for adapter in adapters:
+                batch.add(_adapter(client, adapter).functions.realAssets().call(block_identifier=block))
+            adapter_assets = {a: int(v) for a, v in zip(adapters, client.execute_batch(batch), strict=True)}
+
     metadata = fetch_erc20_metadata(chain.chain_id, str(asset))
     return V2GovernanceSnapshot(
         name=vault.name,
@@ -196,7 +209,7 @@ def load_v2_snapshot(client: Any, chain: Chain, vault: VaultConfig, block: int) 
         asset_symbol=metadata.symbol if metadata else "",
         asset_decimals=metadata.decimals if metadata else None,
         total_assets=_try_call(contract.functions.totalAssets(), block),
-        adapter_assets={a: _try_call(_adapter(client, a).functions.realAssets(), block) or 0 for a in adapters},
+        adapter_assets=adapter_assets,
     )
 
 
@@ -206,7 +219,7 @@ def _adapter(client: Any, address: str) -> Any:
 
 
 def _try_call(function: Any, block: int) -> int | None:
-    """Best-effort integer view call; None when it reverts (e.g. an IRM that reverts)."""
+    """Best-effort integer view call for display-only values; None when it reverts (e.g. an IRM that reverts)."""
     try:
         return int(function.call(block_identifier=block))
     except Exception as e:  # noqa: BLE001 - a reverting valuation only drops the amount from the alert
@@ -271,4 +284,5 @@ def evaluate_v2(client: Any, chain: Chain, vault: VaultConfig, events: list[Gove
                 REASON_RESOLUTION if event.name in RESOLUTION_EVENTS else REASON_UNSUPPORTED
             )
     result.alerts = diff.alerts
+    result.commit = diff.commit
     return result

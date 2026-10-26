@@ -31,8 +31,10 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+# Before anything imports utils.cache: live Morpho checks must use the daily jobs' cache namespace.
+from protocols.morpho.daily_governance_cache import check_daily_governance_cache  # isort: skip
 from protocols.morpho.governance_stream import MORPHO_GOVERNANCE_STREAM, morpho_governance_scope
-from protocols.morpho.live_governance import DELIVERY_MODES, build_consumer, live_health, live_summary
+from protocols.morpho.live_governance import DELIVERY_MODES, MODE_SHADOW, build_consumer, live_health, live_summary
 from protocols.morpho.live_store import LiveStore
 from protocols.timelock.event_stream import TIMELOCK_STREAM, timelock_scope
 from utils.graphql_ws import http_to_ws_url
@@ -122,6 +124,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         notices = PilotNotices(notifier, inbox, scope.labels) if notifier is not None else None
         consumer = None
         if stream is MORPHO_GOVERNANCE_STREAM:
+            check_daily_governance_cache()
             consumer = build_consumer(LiveStore(inbox), args.morpho_delivery)
         workers.append(
             Worker(post, ws_url, inbox, scope.addresses, config, notices=notices, heads=heads, consumer=consumer)
@@ -243,8 +246,11 @@ def main() -> None:
     run.add_argument(
         "--morpho-delivery",
         choices=DELIVERY_MODES,
-        default=os.getenv("MORPHO_LIVE_DELIVERY", "observe"),
-        help="Live Morpho governance alerts: record only (observe, default) or post to the errors chat (shadow).",
+        default=os.getenv("MORPHO_LIVE_DELIVERY", MODE_SHADOW),
+        help=(
+            "Live Morpho governance alerts: post to the errors chat (shadow, default; observe without one), "
+            "record only (observe), or send to the Morpho channel (production)."
+        ),
     )
     add_reconcile_args(run)
     run.set_defaults(func=cmd_run)

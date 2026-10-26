@@ -11,7 +11,10 @@ ingestion:
 - ``morpho_live_alerts``: one row per message the daily jobs would have sent,
   with its delivery mode and status. Observation mode records ``observed``;
   shadow mode records ``pending`` and the delivery loop moves it to ``sent`` (or
-  keeps retrying, recording ``last_error``).
+  keeps retrying, recording ``last_error``); production records ``sent``. Each
+  request keeps the revisions of the events it came from: a pending request whose
+  events were removed or rewritten by a reorg is ``invalidated`` instead of sent
+  (the rewritten event is evaluated again and makes its own request).
 """
 
 import json
@@ -30,6 +33,7 @@ OUTCOME_HISTORICAL = "historical"
 STATUS_OBSERVED = "observed"
 STATUS_PENDING = "pending"
 STATUS_SENT = "sent"
+STATUS_INVALIDATED = "invalidated"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS morpho_live_decisions (
@@ -55,6 +59,8 @@ CREATE TABLE IF NOT EXISTS morpho_live_alerts (
     severity      TEXT NOT NULL,
     message       TEXT NOT NULL,
     event_ids     TEXT NOT NULL,
+    -- {event_id: revision} of the events the request came from
+    event_revisions TEXT NOT NULL,
     created_at    REAL NOT NULL,
     status        TEXT NOT NULL,
     attempts      INTEGER NOT NULL DEFAULT 0,
@@ -123,18 +129,26 @@ class LiveStore:
             with conn:
                 yield conn
 
-    def undecided(self, limit: int = 500) -> list[PendingEvent]:
-        """Return active events without a decision for their current revision, in chain order."""
+    def undecided(self, limit: int = 500, exclude: set[tuple[int, str]] | None = None) -> list[PendingEvent]:
+        """Return active events without a decision for their current revision, in chain order.
+
+        Args:
+            limit: Most rows to return.
+            exclude: ``(chain id, lowercase vault)`` pairs to skip (vaults in backoff),
+                applied before ``limit`` so they cannot crowd out other vaults.
+        """
+        skip = sorted(exclude or ())
+        not_excluded = "".join(" AND NOT (e.chain_id = ? AND e.contract_address = ?)" for _ in skip)
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
                 SELECT e.* FROM {self._events} e
                 LEFT JOIN morpho_live_decisions d ON d.event_id = e.event_id AND d.revision = e.revision
-                WHERE e.status = 'active' AND d.event_id IS NULL
+                WHERE e.status = 'active' AND d.event_id IS NULL{not_excluded}
                 ORDER BY e.chain_id, e.block_number, e.log_index
                 LIMIT ?
                 """,
-                (limit,),
+                (*[value for pair in skip for value in pair], limit),
             ).fetchall()
         return [
             PendingEvent(
@@ -170,7 +184,9 @@ class LiveStore:
         Returns:
             The new alert request ids.
         """
-        alerted = [d.event.event_id for d in decisions if d.outcome == OUTCOME_ALERTED]
+        alerted = [d.event for d in decisions if d.outcome == OUTCOME_ALERTED]
+        alerted_ids = json.dumps([e.event_id for e in alerted])
+        revisions = json.dumps({e.event_id: e.revision for e in alerted})
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             alert_ids = []
@@ -180,10 +196,11 @@ class LiveStore:
                     cursor = conn.execute(
                         """
                         INSERT INTO morpho_live_alerts (
-                            chain_id, vault_address, mode, severity, message, event_ids, created_at, status
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            chain_id, vault_address, mode, severity, message, event_ids, event_revisions,
+                            created_at, status
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (chain_id, vault, mode, severity, message, json.dumps(alerted), now, status),
+                        (chain_id, vault, mode, severity, message, alerted_ids, revisions, now, status),
                     )
                     alert_ids.append(int(cursor.lastrowid or 0))
             for decision in decisions:
@@ -215,11 +232,27 @@ class LiveStore:
         return alert_ids
 
     def pending_alerts(self, limit: int = 50) -> list[AlertRequest]:
-        """Return alert requests awaiting delivery, oldest first."""
+        """Return alert requests awaiting delivery, oldest first, invalidating reorged ones.
+
+        A request whose source events are no longer active at the revisions it was
+        made from (removed, or rewritten and so evaluated again) is marked
+        ``invalidated`` and not returned.
+        """
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 "SELECT * FROM morpho_live_alerts WHERE status = ? ORDER BY id LIMIT ?", (STATUS_PENDING, limit)
             ).fetchall()
+            current = []
+            for row in rows:
+                if self._sources_current(conn, json.loads(row["event_revisions"])):
+                    current.append(row)
+                else:
+                    conn.execute(
+                        "UPDATE morpho_live_alerts SET status = ?, last_error = ? WHERE id = ?",
+                        (STATUS_INVALIDATED, "source event removed or rewritten by a reorg", row["id"]),
+                    )
+            rows = current
         return [
             AlertRequest(
                 id=row["id"],
@@ -233,6 +266,16 @@ class LiveStore:
             )
             for row in rows
         ]
+
+    def _sources_current(self, conn: sqlite3.Connection, revisions: dict[str, int]) -> bool:
+        """True when every source event is still active at the revision the request was made from."""
+        for event_id, revision in revisions.items():
+            row = conn.execute(
+                f"SELECT status, revision FROM {self._events} WHERE event_id = ?", (event_id,)
+            ).fetchone()
+            if row is None or row["status"] != "active" or row["revision"] != revision:
+                return False
+        return True
 
     def mark_sent(self, alert_id: int, now: float) -> None:
         """Record a delivered request."""

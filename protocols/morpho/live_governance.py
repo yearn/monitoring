@@ -14,12 +14,20 @@ and stores the decision and the alert requests durably (``live_store``):
   Events from later blocks are evaluated even when first seen after a restart.
 - **Failures retry.** An RPC node behind the event's block, or any read error,
   leaves the vault's events undecided and retries with capped backoff.
-- **Delivery mode:** ``observe`` (default) records requests as ``observed`` and
-  sends nothing. ``shadow`` posts each request to the internal errors chat,
-  labelled ``[morpho-live-shadow]``, and only when that chat is configured, so
-  shadow output never reaches the Morpho group. A failed send stays pending and
-  is retried. Production delivery (the Morpho channel, shared dedup with the daily
-  jobs) is part of the #450 cutover.
+- **Delivery mode** (``MORPHO_LIVE_DELIVERY``, ``shadow`` by default in the
+  subscriber CLI; ``LiveConfig`` itself defaults to ``observe``): ``observe``
+  records requests as ``observed`` and sends nothing. ``shadow`` posts each
+  request to the internal errors chat, labelled ``[morpho-live-shadow]``, and only
+  when that chat is configured, so shadow output never reaches the Morpho group.
+  A failed or skipped send stays pending and is retried; a request whose source
+  events a reorg removed or rewrote is invalidated instead.
+- ``production`` sends to the Morpho channel exactly like the daily jobs: under
+  the vault's ``governance_lock`` (which the daily jobs take too) it evaluates,
+  sends every message, and only then commits the daily jobs' cache writes, so
+  each change is alerted once by whichever path sees it first. A failed send
+  commits nothing and leaves the events undecided: they are re-evaluated and
+  re-sent on retry (a duplicate beats a missed alert, as in the daily jobs).
+  Enable it only after shadow mode matched the daily alerts (#450).
 """
 
 import asyncio
@@ -27,7 +35,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from protocols.morpho._alerts import render_vault_alerts
+from protocols.morpho._alerts import governance_lock, render_vault_alerts, split_body
+from protocols.morpho._shared import PROTOCOL
 from protocols.morpho.config import VaultConfig
 from protocols.morpho.live_rules import (
     REASON_ALERTED,
@@ -44,21 +53,25 @@ from protocols.morpho.live_store import (
     OUTCOME_NO_ALERT,
     STATUS_OBSERVED,
     STATUS_PENDING,
+    STATUS_SENT,
     AlertRequest,
     Decision,
     LiveStore,
     PendingEvent,
 )
+from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import Chain
 from utils.logger import get_logger
-from utils.telegram import error_channel_configured, send_error_message
+from utils.subscriber.worker import backoff_delay
+from utils.telegram import ERROR_CHANNEL, MAX_MESSAGE_LENGTH, error_channel_configured, send_telegram_message
 from utils.web3_wrapper import ChainManager
 
 logger = get_logger("morpho.live_governance")
 
 MODE_OBSERVE = "observe"
 MODE_SHADOW = "shadow"
-DELIVERY_MODES = (MODE_OBSERVE, MODE_SHADOW)
+MODE_PRODUCTION = "production"
+DELIVERY_MODES = (MODE_OBSERVE, MODE_SHADOW, MODE_PRODUCTION)
 
 # Inbox status key: when the consumer first ran on this inbox. Older blocks are history.
 BASELINE_STATUS_KEY = "live_baseline_at"
@@ -68,10 +81,19 @@ SHADOW_ALERT_PROTOCOL = "yearn-internal"
 
 Evaluator = Callable[[Chain, VaultConfig, int, list[GovernanceEvent]], VaultEvaluation]
 SendFn = Callable[[AlertRequest], None]
+PublishFn = Callable[[AlertSeverity, str], None]
 
 
 class ShadowChannelMissing(Exception):
     """Shadow delivery needs the internal errors chat; it never falls back to a protocol group."""
+
+
+class NotDelivered(Exception):
+    """Telegram skipped the message (missing credentials or debug mode); it must not count as sent."""
+
+
+# Event ids listed in a shadow message header; the rest are counted.
+_SHADOW_MAX_IDS = 5
 
 
 def evaluate_on_chain(chain: Chain, vault: VaultConfig, version: int, events: list[GovernanceEvent]) -> VaultEvaluation:
@@ -80,20 +102,56 @@ def evaluate_on_chain(chain: Chain, vault: VaultConfig, version: int, events: li
     return (evaluate_v1 if version == 1 else evaluate_v2)(client, chain, vault, events)
 
 
+def shadow_texts(request: AlertRequest) -> list[str]:
+    """Return the exact plain-text messages shadow delivery posts for ``request``.
+
+    The header lists at most a few event ids, and the whole text is split by line
+    to Telegram's limit, so nothing is truncated however many events contributed.
+    """
+    ids = request.event_ids
+    shown = ", ".join(ids[:_SHADOW_MAX_IDS]) + (
+        f" (+{len(ids) - _SHADOW_MAX_IDS} more)" if len(ids) > _SHADOW_MAX_IDS else ""
+    )
+    text = f"[{SHADOW_LABEL}] shadow → morpho, {request.severity}, events {shown}\n\n{request.message}"
+    return split_body(text, MAX_MESSAGE_LENGTH)
+
+
 def send_shadow(request: AlertRequest) -> None:
-    """Post one would-be Morpho alert to the internal errors chat.
+    """Post one would-be Morpho alert to the internal errors chat, as plain text.
+
+    Sent straight to the errors channel (no fallback routing, no escaping), and
+    only counted as sent when Telegram accepted every part.
 
     Raises:
         ShadowChannelMissing: No errors chat is configured.
+        NotDelivered: Telegram skipped a part (e.g. the bot token is missing).
+        TelegramError: A send failed.
     """
     if not error_channel_configured():
         raise ShadowChannelMissing("no errors chat configured for shadow delivery")
-    send_error_message(
-        f"shadow → morpho, {request.severity}, events {', '.join(request.event_ids)}\n\n{request.message}",
-        SHADOW_LABEL,
-        source="morpho_live_shadow",
-        alert_protocol=SHADOW_ALERT_PROTOCOL,
-    )
+    for text in shadow_texts(request):
+        delivered = send_telegram_message(
+            text,
+            ERROR_CHANNEL,
+            True,
+            plain_text=True,
+            source="morpho_live_shadow",
+            origin_protocol=SHADOW_ALERT_PROTOCOL,
+            channel=ERROR_CHANNEL,
+        )
+        if not delivered:
+            raise NotDelivered("errors chat skipped the shadow message (missing Telegram credentials?)")
+
+
+def publish_to_morpho(severity: AlertSeverity, message: str) -> None:
+    """Send one rendered message to the Morpho channel, as ``send_vault_alerts`` does.
+
+    Raises:
+        TelegramError: The send failed; the caller must not commit its cache writes.
+        NotDelivered: Telegram skipped it (e.g. missing Morpho credentials); nor then.
+    """
+    if not send_alert(Alert(severity, message, PROTOCOL)):
+        raise NotDelivered("Morpho channel skipped the alert (missing Telegram credentials?)")
 
 
 @dataclass(frozen=True)
@@ -119,6 +177,7 @@ class LiveGovernanceConsumer:
         evaluate: Evaluator = evaluate_on_chain,
         send: SendFn = send_shadow,
         now: Callable[[], float] = time.time,
+        publish: PublishFn = publish_to_morpho,
     ) -> None:
         if config.mode not in DELIVERY_MODES:
             raise ValueError(f"delivery mode must be one of {DELIVERY_MODES}, got {config.mode!r}")
@@ -126,6 +185,7 @@ class LiveGovernanceConsumer:
         self.config = config
         self.evaluate = evaluate
         self.send = send
+        self.publish = publish
         self.now = now
         self.baseline: float | None = None
         self._wake = asyncio.Event()
@@ -175,8 +235,11 @@ class LiveGovernanceConsumer:
             The number of events decided in this pass.
         """
         baseline = self.load_baseline()
+        # Backed-off vaults are left out before the batch limit applies, so a failing
+        # vault's backlog can never crowd out other vaults' new events.
+        deferred = {key for key, (_, not_before) in self._retry.items() if self.now() < not_before}
         groups: dict[tuple[int, str], list[PendingEvent]] = {}
-        for event in self.store.undecided(self.config.batch_limit):
+        for event in self.store.undecided(self.config.batch_limit, exclude=deferred):
             groups.setdefault((event.chain_id, event.vault_address), []).append(event)
         decided = 0
         for key, events in groups.items():
@@ -197,7 +260,7 @@ class LiveGovernanceConsumer:
                 logger.info("%s on chain %s: %s; retrying", key[1], key[0], exc)
                 self._retry[key] = (failures, self.now() + self.config.retry_initial)
             except Exception as exc:  # noqa: BLE001 - one vault's failure must not block the others
-                delay = min(self.config.retry_max, self.config.retry_initial * 2**failures)
+                delay = backoff_delay(failures + 1, self.config.retry_initial, self.config.retry_max)
                 logger.warning(
                     "live evaluation for %s on chain %s failed (%s); retry in %.0fs", key[1], key[0], exc, delay
                 )
@@ -219,18 +282,26 @@ class LiveGovernanceConsumer:
         if vault is None:
             self._record(events, OUTCOME_NO_ALERT, "vault not in config.py")
             return len(events)
-        evaluation = self.evaluate(
-            chain, vault, first.version, [GovernanceEvent.from_payload(e.payload) for e in events]
-        )
-        messages = [
-            (severity.value, text) for severity, text in render_vault_alerts(evaluation.header, evaluation.alerts)
-        ]
+        governance_events = [GovernanceEvent.from_payload(e.payload) for e in events]
+        if self.config.mode == MODE_PRODUCTION:
+            # Same contract as the daily jobs: check, send, then record as alerted, all
+            # under the lock they take too, so one change is alerted once.
+            with governance_lock(vault.address):
+                evaluation = self.evaluate(chain, vault, first.version, governance_events)
+                rendered = render_vault_alerts(evaluation.header, evaluation.alerts)
+                for severity, text in rendered:
+                    self.publish(severity, text)  # raises on failure: nothing is committed or recorded
+                evaluation.commit()
+        else:
+            evaluation = self.evaluate(chain, vault, first.version, governance_events)
+            rendered = render_vault_alerts(evaluation.header, evaluation.alerts)
+        messages = [(severity.value, text) for severity, text in rendered]
         decisions = []
         for event in events:
             reason = evaluation.reasons.get(event.event_id, "not evaluated")
             outcome = OUTCOME_ALERTED if reason == REASON_ALERTED and messages else OUTCOME_NO_ALERT
             decisions.append(Decision(event, outcome, reason))
-        status = STATUS_PENDING if self.config.mode == MODE_SHADOW else STATUS_OBSERVED
+        status = {MODE_SHADOW: STATUS_PENDING, MODE_PRODUCTION: STATUS_SENT}.get(self.config.mode, STATUS_OBSERVED)
         alert_ids = self.store.record(decisions, messages, self.config.mode, status, self.now())
         for severity, text in messages:
             logger.info("live %s %s alert for %s: %s", self.config.mode, severity, vault.name, text.split("\n", 1)[0])
@@ -248,7 +319,7 @@ class LiveGovernanceConsumer:
                 except Exception as exc:  # noqa: BLE001 - delivery is retried, never dropped
                     self._delivery_failures += 1
                     await asyncio.to_thread(self.store.mark_failed, request.id, f"{type(exc).__name__}: {exc}")
-                    delay = min(self.config.retry_max, self.config.retry_initial * 2 ** (self._delivery_failures - 1))
+                    delay = backoff_delay(self._delivery_failures, self.config.retry_initial, self.config.retry_max)
                     logger.warning("shadow delivery of request %s failed (%s); retry in %.0fs", request.id, exc, delay)
                     break  # keep order: nothing after a failed request goes out first
                 self._delivery_failures = 0

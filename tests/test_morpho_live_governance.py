@@ -12,23 +12,28 @@ import pytest
 from eth_abi import encode as abi_encode
 from web3 import Web3
 
-from protocols.morpho import live_rules
+from protocols.morpho import governance_v2, live_rules
 from protocols.morpho._alerts import LOSS_PREFIX, VaultAlert, render_vault_alerts
 from protocols.morpho.config import VaultConfig
+from protocols.morpho.daily_governance_cache import check_daily_governance_cache, daily_morpho_filename
 from protocols.morpho.governance import MarketGovernanceState
 from protocols.morpho.governance_stream import MORPHO_GOVERNANCE_STREAM
 from protocols.morpho.governance_v2 import ROLE_TYPE, V2GovernanceSnapshot
 from protocols.morpho.live_governance import (
     BASELINE_STATUS_KEY,
+    MODE_PRODUCTION,
     MODE_SHADOW,
     SHADOW_LABEL,
     LiveConfig,
     LiveGovernanceConsumer,
+    NotDelivered,
     ShadowChannelMissing,
     build_consumer,
     live_health,
     live_summary,
+    publish_to_morpho,
     send_shadow,
+    shadow_texts,
 )
 from protocols.morpho.live_rules import (
     REASON_ALERTED,
@@ -44,6 +49,7 @@ from protocols.morpho.live_store import (
     OUTCOME_ALERTED,
     OUTCOME_HISTORICAL,
     OUTCOME_NO_ALERT,
+    STATUS_INVALIDATED,
     STATUS_OBSERVED,
     STATUS_PENDING,
     STATUS_SENT,
@@ -55,9 +61,11 @@ from tests.timelock_subscriber_fakes import FakeEnvio, FakeWSServer, make_morpho
 from utils.alert import AlertSeverity
 from utils.cache import morpho_key
 from utils.chains import Chain
+from utils.file_lock import LockTimeout, file_lock
 from utils.subscriber.inbox import SOURCE_HTTP, SOURCE_WS, EventInbox
 from utils.subscriber.reconcile import ReconcileConfig
 from utils.subscriber.worker import Worker, WorkerConfig
+from utils.telegram import MAX_MESSAGE_LENGTH
 
 V1_VAULT = "0x68Aea7b82Df6CcdF76235D46445Ed83f85F845A3"  # Yearn USDC V1, mainnet
 V2_VAULT = "0xaA8d9E2aBa210639cE6C7cE21385e7c673ACa6f3"  # Yearn USDC V2, mainnet
@@ -521,11 +529,30 @@ def test_shadow_requires_the_errors_chat(tmp_path: Path, monkeypatch: pytest.Mon
         send_shadow(request)  # conftest strips TELEGRAM_*
 
     monkeypatch.setenv("TELEGRAM_CHAT_ID_ERRORS", "-100123")
-    with patch("protocols.morpho.live_governance.send_error_message") as send:
+    with patch("protocols.morpho.live_governance.send_telegram_message", return_value=True) as send:
         send_shadow(request)
-    text, label = send.call_args.args
-    assert label == SHADOW_LABEL and text.startswith("shadow → morpho, HIGH, events 1_10_0")
-    assert send.call_args.kwargs["alert_protocol"] == "yearn-internal"
+    text, channel, _silent = send.call_args.args
+    assert channel == "errors" and text.startswith(f"[{SHADOW_LABEL}] shadow → morpho, HIGH, events 1_10_0")
+    assert send.call_args.kwargs["plain_text"] and send.call_args.kwargs["origin_protocol"] == "yearn-internal"
+
+    # The errors chat id is set but the bot token is not: Telegram skips it, so it is not "sent".
+    with pytest.raises(NotDelivered):
+        send_shadow(request)
+
+
+def test_shadow_text_bounds_its_header_and_fits_telegram() -> None:
+    ids = [f"1_{n}_0" for n in range(500)]
+    body = "\n".join("x" * 100 for _ in range(60))  # longer than one Telegram message
+    texts = shadow_texts(AlertRequest(1, 1, V1_VAULT, MODE_SHADOW, "MEDIUM", body, ids, 0))
+
+    assert len(texts) > 1 and all(len(t) <= MAX_MESSAGE_LENGTH for t in texts)
+    assert "events 1_0_0, 1_1_0, 1_2_0, 1_3_0, 1_4_0 (+495 more)" in texts[0]
+    assert sum(t.count("x" * 100) for t in texts) == 60  # nothing dropped
+
+
+def test_production_does_not_commit_when_telegram_skips_the_alert() -> None:
+    with patch("protocols.morpho.live_governance.send_alert", return_value=False), pytest.raises(NotDelivered):
+        publish_to_morpho(AlertSeverity.HIGH, "🚨 x")
 
 
 def test_live_health_and_summary(tmp_path: Path) -> None:
@@ -610,3 +637,196 @@ def test_a_dead_consumer_makes_the_worker_unhealthy(tmp_path: Path) -> None:
 
     with patch("utils.subscriber.worker.notify"):
         asyncio.run(scenario())
+
+
+# ── production mode ────────────────────────────────────────────────────
+
+
+class CommittingEvaluator(FakeEvaluator):
+    """FakeEvaluator whose evaluations record when their cache writes are committed."""
+
+    def __init__(self, log: list[str]) -> None:
+        super().__init__()
+        self.log = log
+
+    def __call__(self, chain: Chain, vault: VaultConfig, version: int, events: list[GovernanceEvent]):
+        self.log.append("evaluate")
+        result = super().__call__(chain, vault, version, events)
+        result.commit = lambda: self.log.append("commit")
+        return result
+
+
+@contextmanager
+def _recording_lock(log: list[str]) -> Iterator[MagicMock]:
+    @contextmanager
+    def lock(address: str) -> Iterator[None]:
+        log.append(f"lock {address}")
+        yield
+        log.append("unlock")
+
+    with patch("protocols.morpho.live_governance.governance_lock", side_effect=lock) as patched:
+        yield patched
+
+
+def test_production_sends_then_commits_under_the_vault_lock(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    log: list[str] = []
+
+    def publish(severity: AlertSeverity, message: str) -> None:
+        log.append(f"publish {severity.value}")
+
+    consumer = LiveGovernanceConsumer(
+        store, LiveConfig(mode=MODE_PRODUCTION), evaluate=CommittingEvaluator(log), publish=publish, now=lambda: 1.0
+    )
+    _observe(store, make_morpho_event(1, 10))
+    with _recording_lock(log):
+        consumer.process_once()
+
+    assert log == [f"lock {V1_VAULT}", "evaluate", "publish MEDIUM", "commit", "unlock"]
+    (alert,) = store.alerts_since(0)
+    assert alert["status"] == STATUS_SENT and alert["mode"] == MODE_PRODUCTION
+    assert [row["outcome"] for row in store.decisions_since(0)] == [OUTCOME_ALERTED]
+
+
+def test_production_send_failure_commits_nothing_and_retries_fresh(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    log: list[str] = []
+    failures = ["telegram 502"]
+
+    def publish(severity: AlertSeverity, message: str) -> None:
+        if failures:
+            raise RuntimeError(failures.pop())
+        log.append("publish")
+
+    clock = [1.0]
+    evaluate = CommittingEvaluator(log)
+    consumer = LiveGovernanceConsumer(
+        store, LiveConfig(mode=MODE_PRODUCTION, retry_initial=5.0), evaluate=evaluate, publish=publish,
+        now=lambda: clock[0],
+    )  # fmt: skip
+    _observe(store, make_morpho_event(1, 10))
+    with _recording_lock(log):
+        consumer.process_once()  # send fails
+        assert "commit" not in log and store.decisions_since(0) == [] and store.alerts_since(0) == []
+        clock[0] += 6
+        consumer.process_once()  # re-evaluated against fresh state, sent, committed
+
+    assert log.count("evaluate") == 2 and log.count("commit") == 1
+    assert [row["outcome"] for row in store.decisions_since(0)] == [OUTCOME_ALERTED]
+
+
+def test_daily_v2_job_takes_the_same_vault_lock() -> None:
+    entered: list[str] = []
+
+    @contextmanager
+    def lock(address: str) -> Iterator[None]:
+        entered.append(address)
+        yield
+
+    with (
+        patch("protocols.morpho.governance_v2.governance_lock", side_effect=lock),
+        _v2_cache(),
+        patch("protocols.morpho.governance_v2.send_vault_alerts"),
+    ):
+        governance_v2.diff_and_alert(_snapshot())
+
+    assert entered == [V2_VAULT]
+
+
+def test_file_lock_excludes_a_second_holder_until_released() -> None:
+    with file_lock("test_vault"):
+        with pytest.raises(LockTimeout), file_lock("test_vault", timeout=0.05, poll_interval=0.01):
+            pass
+    with file_lock("test_vault", timeout=0.05):
+        pass
+
+
+# ── review fixes ───────────────────────────────────────────────────────
+
+
+def test_a_failing_adapter_valuation_retries_instead_of_reading_as_empty() -> None:
+    client = _client()
+    vault = MagicMock()
+    vault.functions.owner.return_value.call.return_value = NEW_OWNER
+    vault.functions.curator.return_value.call.return_value = NEW_OWNER
+    vault.functions.asset.return_value.call.return_value = "0x" + "a0" * 20
+    vault.functions.adaptersLength.return_value.call.return_value = 1
+    vault.functions.adapters.return_value.call.return_value = ADAPTER
+    adapter = MagicMock()
+    adapter.functions.realAssets.return_value.call.side_effect = TimeoutError("rpc timeout")
+    client.eth.contract.side_effect = lambda address, abi: adapter if address.lower() == ADAPTER else vault
+
+    with pytest.raises(TimeoutError):
+        live_rules.load_v2_snapshot(client, Chain.MAINNET, V2_CONFIG, 1_000)
+
+
+def test_backed_off_vaults_do_not_crowd_other_vaults_out_of_the_batch(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    clock = [1_000.0]
+    calls: list[str] = []
+
+    def evaluate(chain, vault, version, events):  # noqa: ANN001, ANN202
+        calls.append(vault.address)
+        if vault.address == V1_VAULT:
+            raise RuntimeError("rpc down")
+        return FakeEvaluator()(chain, vault, version, events)
+
+    consumer = _consumer(store, evaluate, clock, batch_limit=3, retry_initial=60.0)
+    _observe(store, *(make_morpho_event(1, block) for block in range(10, 15)))  # 5 events of the failing vault
+    _observe(store, make_morpho_event(1, 20, address=OTHER_VAULT))
+
+    consumer.process_once()  # the first 3 rows are all the failing vault's
+    consumer.process_once()  # it is backed off: the batch reaches the other vault
+
+    assert calls == [V1_VAULT, OTHER_VAULT]
+    assert [row["event_id"] for row in store.decisions_since(0)] == ["1_20_0"]
+
+
+def test_backoff_survives_a_very_long_outage(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    evaluate = FakeEvaluator()
+    evaluate.fail = [RuntimeError("down")]
+    consumer = _consumer(store, evaluate, [1_000.0], retry_max=300.0)
+    consumer._retry[(1, V1_VAULT.lower())] = (5_000, 0.0)  # thousands of failures already
+    _observe(store, make_morpho_event(1, 10))
+
+    consumer.process_once()
+
+    assert consumer._retry[(1, V1_VAULT.lower())] == (5_001, 1_300.0)
+
+
+def test_pending_shadow_requests_are_invalidated_when_their_event_is_reorged(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    consumer = _consumer(store, FakeEvaluator(), [1_000.0], mode=MODE_SHADOW)
+    _observe(store, make_morpho_event(1, 10), make_morpho_event(1, 11, address=OTHER_VAULT))
+    consumer.process_once()
+    assert len(store.pending_alerts()) == 2
+
+    store.inbox.mark_missing(1, 10, 10, set(), SOURCE_HTTP, 1_001.0)  # reorg dropped the first event
+    _observe(store, make_morpho_event(1, 11, address=OTHER_VAULT, blockHash="0x" + "dd" * 32), source=SOURCE_HTTP)
+
+    assert store.pending_alerts() == []
+    assert [row["status"] for row in store.alerts_since(0)] == [STATUS_INVALIDATED, STATUS_INVALIDATED]
+    consumer.process_once()  # the rewritten event is evaluated again and makes its own request
+    (replacement,) = store.pending_alerts()
+    assert replacement.event_ids == ["1_11_0"]
+
+
+def test_subscriber_reads_the_daily_governance_cache_namespace() -> None:
+    import os  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    env = {k: v for k, v in os.environ.items() if k != "MORPHO_FILENAME"}
+    code = (
+        "import os, protocols.timelock.event_subscriber; from utils import cache;"
+        "print(os.path.basename(cache.morpho_filename))"
+    )
+    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True)
+
+    assert out.stdout.strip().splitlines()[-1] == daily_morpho_filename() == "cache-id-daily.txt"
+
+
+def test_check_daily_governance_cache_rejects_another_namespace() -> None:
+    with patch("utils.cache.morpho_filename", "/srv/cache/cache-id.txt"), pytest.raises(RuntimeError, match="daily"):
+        check_daily_governance_cache()
