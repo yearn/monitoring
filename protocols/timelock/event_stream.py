@@ -4,7 +4,7 @@ from protocols.timelock.timelock_alerts import TIMELOCK_LIST
 from utils.subscriber.reconcile import build_scope
 from utils.subscriber.stream import EventStream, StreamLabel, StreamScope
 
-# The hourly monitor's selection plus logIndex and blockHash. Both transports use
+# The scheduled monitor's selection plus logIndex and blockHash. Both transports use
 # it, so a row fingerprints identically whichever one fetched it, and a reorg that
 # replaces the block changes the fingerprint through blockHash.
 TIMELOCK_FIELDS = """

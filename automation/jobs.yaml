@@ -20,11 +20,15 @@ profiles:
 
   half_hourly:
     cron: "*/30 * * * *"
-    description: "Thirty-minute risk monitoring for active Yearn strategies."
+    description: "Thirty-minute risk monitoring for active Yearn strategies, and timelock alerts."
     tasks:
       - name: "yearn-lender-borrower-ltv"
         script: protocols/yearn/lender_borrower.py
         args: { checks: ltv }
+      # Every monitored timelock delays at least 24h, so 30 minutes leaves the
+      # reaction window nearly intact. Its cursor (TIMELOCK_LAST_TS) stays in the
+      # default cache-id.txt, as under the hourly profile: the move skips nothing.
+      - { name: "timelock-alerts",        script: protocols/timelock/timelock_alerts.py }
 
   six_hourly:
     cron: "17 */6 * * *"
@@ -67,7 +71,6 @@ profiles:
       # Cache: tks-trigger-cache.json under $CACHE_DIR (check_stuck_triggers.DEFAULT_CACHE_FILE).
       - { name: "yearn-check-stuck-triggers", script: protocols/yearn/check_stuck_triggers.py, enabled: false }
       - { name: "maple",                  script: protocols/maple/main.py, enabled: false }
-      - { name: "timelock-alerts",        script: protocols/timelock/timelock_alerts.py }
       - { name: "ustb",                   script: protocols/ustb/main.py }
       # Paused 2026-09-23 pending Bedrock response on the supply feeder omitting BOB (alert spam).
       - { name: "unibtc",                 script: protocols/unibtc/main.py, enabled: false }

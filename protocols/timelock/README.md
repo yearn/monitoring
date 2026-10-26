@@ -9,11 +9,11 @@ Monitors all timelock contract types (TimelockController, Aave, Compound, Lido, 
 3. Routes each alert to the correct Telegram channel based on the protocol mapping.
 4. Stores the latest processed `blockTimestamp` in the SQLite state store (namespace `cache-id.txt`, key `TIMELOCK_LAST_TS`) to avoid duplicate alerts between runs.
 
-The script runs hourly via the [monitoring runner](../../automation/jobs.yaml).
+The script runs every 30 minutes (the `half_hourly` profile) via the [monitoring runner](../../automation/jobs.yaml). Every monitored timelock delays operations by at least 24h (Infinifi's short timelock has been at 24h since 2026-08-16), so detection takes a small share of the reaction window.
 
 ## Continuous Subscriber Pilot
 
-`event_subscriber.py` is a continuously running worker that observes the same `TimelockEvent` rows as `timelock_alerts.py` with lower latency ([#438](https://github.com/yearn/monitoring/issues/438), the first step of [#437](https://github.com/yearn/monitoring/issues/437)). It is an observation pilot: **it sends no alerts and changes nothing about current delivery**. The hourly task remains the only sender to protocol groups. Optionally it posts diagnostic notices to the internal errors chat (see [Pilot notices](#pilot-notices)). It runs as the `monitoring-timelock-subscriber` systemd unit; operations are in the [runbook](../../deploy/runbook.md#timelock-event-subscriber-pilot).
+`event_subscriber.py` is a continuously running worker that observes the same `TimelockEvent` rows as `timelock_alerts.py` with lower latency ([#438](https://github.com/yearn/monitoring/issues/438), the first step of [#437](https://github.com/yearn/monitoring/issues/437)). It is an observation pilot: **it sends no alerts and changes nothing about current delivery**. The scheduled `timelock-alerts` task remains the only sender to protocol groups. Optionally it posts diagnostic notices to the internal errors chat (see [Pilot notices](#pilot-notices)). It runs as the `monitoring-timelock-subscriber` systemd unit; operations are in the [runbook](../../deploy/runbook.md#timelock-event-subscriber-pilot).
 
 The worker follows **named event streams** ([#447](https://github.com/yearn/monitoring/issues/447)). The shared code lives in [`utils/subscriber/`](../../utils/subscriber/); each stream is an `EventStream` that names its Envio entity, the field holding the monitored contract, its field selection, and its own SQLite file and table prefix:
 

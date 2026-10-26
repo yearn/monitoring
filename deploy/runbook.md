@@ -234,7 +234,7 @@ directly.
 
 `monitoring-timelock-subscriber` is the continuous timelock event worker from
 [#438](https://github.com/yearn/monitoring/issues/438). It runs alongside the
-hourly `timelock-alerts` task, which still sends every timelock alert. The pilot
+`timelock-alerts` task (every 30 minutes), which still sends every timelock alert. The pilot
 sends no alerts: it records what it observes in one SQLite inbox per stream
 (`/srv/cache/timelock_subscriber.db`, and `/srv/cache/morpho_subscriber.db` once
 the `morpho` stream is enabled) and journald. With `TIMELOCK_SUBSCRIBER_NOTIFY=errors` it also posts diagnostic

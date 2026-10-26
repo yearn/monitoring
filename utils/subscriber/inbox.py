@@ -11,7 +11,7 @@ in ``<prefix>_changes`` instead of silently overwritten.
 
 Each stream has its own SQLite file and table prefix (see ``EventStream``), so
 streams never contend for one write lock. Per-chain checkpoints live here too,
-independent of the hourly monitors' cursors. The inbox writes nothing else: no
+independent of the scheduled monitors' cursors. The inbox writes nothing else: no
 Telegram, no alert store.
 """
 
