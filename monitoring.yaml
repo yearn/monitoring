@@ -421,7 +421,7 @@ protocols:
       - name: "Timelock Events"
         description: "CallScheduled/ProposalQueued/QueueTransaction/StartVote/ProposalScheduled events across monitored timelocks via Envio; TimelockController/Compound alerts show the full operation ID"
       - name: "Stale Ready Operations"
-        description: "Daily: TimelockController operations ready >7 days but neither executed nor cancelled; one silent alert per operation showing the timelock, operation ID, readiness date, call details, and schedule transaction link, with an omitted-call count when details exceed the message budget"
+        description: "Daily: TimelockController operations ready >7 days but neither executed nor cancelled; one silent alert per operation showing the timelock, operation ID, readiness date, call details, schedule transaction link, and AI summary with full report link, with an omitted-call count when details exceed the message budget"
 
   unibtc:
     display_name: "Bedrock uniBTC"
