@@ -319,6 +319,136 @@ def test_run_workers_surfaces_a_crashed_stream(tmp_path: Path) -> None:
         asyncio.run(scenario())
 
 
+def test_run_workers_withholds_watchdog_after_heartbeat_write_fails(tmp_path: Path) -> None:
+    """A SQLite heartbeat failure must stop pings while reconciliation continues."""
+    notified: list[tuple[str, ...]] = []
+
+    async def scenario() -> None:
+        envio = FakeEnvio()
+        envio.set_head(1, 1)
+        inbox, _ = _inboxes(tmp_path)
+        config = WorkerConfig(transport="http", reconcile_interval=0.05, heartbeat_interval=0.02, reconcile=CONFIG)
+        worker = Worker(envio.post, None, inbox, TIMELOCK_SCOPE, config)
+        task = asyncio.create_task(run_workers([worker], watchdog_interval=0.01))
+        try:
+            await _until(lambda: "heartbeat" in inbox.status() and any(m[0] == "WATCHDOG=1" for m in notified))
+            with patch.object(inbox, "set_status", side_effect=sqlite3.OperationalError("database is locked")) as write:
+                await _until(lambda: write.called)
+                await _until(lambda: not worker.is_alive())
+                last_reconcile = worker.last_reconcile_at
+                notified.clear()
+                await _until(lambda: worker.last_reconcile_at != last_reconcile)
+                await asyncio.sleep(0.05)
+                assert not any(m[0] == "WATCHDOG=1" for m in notified)
+        finally:
+            worker.stop()
+            await asyncio.wait_for(task, 5)
+
+    with patch("utils.subscriber.worker.notify", side_effect=lambda *a: notified.append(a)):
+        asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("transport", ["http", "ws"])
+@pytest.mark.parametrize("after_first", [False, True], ids=["first-cycle", "later-cycle"])
+def test_run_workers_withholds_watchdog_when_heartbeat_hangs(tmp_path: Path, transport: str, after_first: bool) -> None:
+    """A pending heartbeat gets a bounded grace period, even with a healthy transport."""
+    notified: list[tuple[str, ...]] = []
+    blocked = threading.Event()
+    release = threading.Event()
+
+    async def scenario() -> None:
+        envio = FakeEnvio()
+        envio.set_head(1, 1)
+        server = FakeWSServer(envio)
+        await server.start()
+        inbox, _ = _inboxes(tmp_path)
+        config = WorkerConfig(transport=transport, reconcile_interval=0.05, heartbeat_interval=0.02, reconcile=CONFIG)
+        worker = Worker(envio.post, server.url, inbox, TIMELOCK_SCOPE, config)
+        set_status = inbox.set_status
+        writes = 0
+
+        def slow_write(key: str, value: dict, at: float) -> None:
+            nonlocal writes
+            writes += 1
+            if after_first and writes == 1:
+                clock.return_value = 1_040.0
+            if writes > int(after_first):
+                blocked.set()
+                if not release.wait(5):
+                    raise TimeoutError("test did not release the blocked heartbeat write")
+            set_status(key, value, at)
+
+        with patch.object(inbox, "set_status", side_effect=slow_write):
+            task = asyncio.create_task(run_workers([worker], watchdog_interval=0.01))
+            try:
+                await _until(blocked.is_set)
+                await _until(lambda: any(m[0] == "WATCHDOG=1" for m in notified))
+                deadline = 3 * config.heartbeat_interval + 120
+                last_progress = 1_040 if after_first else 1_000
+                clock.return_value = last_progress + deadline - 1
+                assert worker.is_alive()
+                clock.return_value = last_progress + deadline
+                assert not worker.is_alive()
+                with patch.object(worker, "now", return_value=worker.now() - 3_600):
+                    assert not worker.is_alive()
+                notified.clear()
+                last_reconcile = worker.last_reconcile_at
+                if transport == "http":
+                    await _until(lambda: worker.last_reconcile_at != last_reconcile)
+                await asyncio.sleep(0.05)
+                assert not any(m[0] == "WATCHDOG=1" for m in notified)
+                release.set()
+                await _until(lambda: any(m[0] == "WATCHDOG=1" for m in notified))
+                assert worker.is_alive()
+            finally:
+                release.set()
+                worker.stop()
+                await asyncio.wait_for(task, 5)
+                await server.stop()
+
+    with (
+        patch("utils.subscriber.worker.notify", side_effect=lambda *a: notified.append(a)),
+        patch("utils.subscriber.worker.monotonic", return_value=1_000.0) as clock,
+    ):
+        asyncio.run(scenario())
+
+
+def test_run_workers_keeps_pinging_after_notifier_crashes(tmp_path: Path) -> None:
+    """Notifier failure must not prevent fresh heartbeats from feeding the watchdog."""
+    notified: list[tuple[str, ...]] = []
+
+    async def scenario() -> None:
+        envio = FakeEnvio()
+        envio.set_head(1, 1)
+        inbox, _ = _inboxes(tmp_path)
+        notifier = RecordingNotifier()
+        notices = PilotNotices(notifier, inbox, {})
+        config = WorkerConfig(transport="http", reconcile_interval=0.05, heartbeat_interval=0.02, reconcile=CONFIG)
+        worker = Worker(envio.post, None, inbox, TIMELOCK_SCOPE, config, notices=notices)
+        crashed = asyncio.Event()
+
+        async def crash() -> None:
+            crashed.set()
+            raise RuntimeError("notifier failed")
+
+        with patch.object(notifier, "run", side_effect=crash):
+            task = asyncio.create_task(run_workers([worker], watchdog_interval=0.01))
+            try:
+                await asyncio.wait_for(crashed.wait(), 5)
+                await _until(lambda: "heartbeat" in inbox.status())
+                notified.clear()
+                last_heartbeat = inbox.status()["heartbeat"][1]
+                await _until(lambda: inbox.status()["heartbeat"][1] != last_heartbeat)
+                await _until(lambda: any(m[0] == "WATCHDOG=1" for m in notified))
+                assert worker.is_alive()
+            finally:
+                worker.stop()
+                await asyncio.wait_for(task, 5)
+
+    with patch("utils.subscriber.worker.notify", side_effect=lambda *a: notified.append(a)):
+        asyncio.run(scenario())
+
+
 def test_http_observation_of_both_streams_is_recorded_per_source(tmp_path: Path) -> None:
     envio = FakeEnvio()
     envio.set_head(1, 1)

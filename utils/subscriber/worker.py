@@ -28,6 +28,7 @@ import signal
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any
 
 from utils.graphql_ws import GraphQLWSError, subscribe
@@ -109,6 +110,7 @@ class Worker:
         self.last_reconcile: ReconcileReport | None = None
         self._stalled: set[int] = set()
         self.started_at: float | None = None
+        self._heartbeat_progress_monotonic: float | None = None
         self._tasks: list[asyncio.Task[None]] = []
 
     def stop(self) -> None:
@@ -127,6 +129,7 @@ class Worker:
         if self.supervised:
             _install_signal_handlers(self.stop)
         self.started_at = self.now()
+        self._heartbeat_progress_monotonic = monotonic()
         await asyncio.to_thread(self.inbox.log, "worker_started", self.started_at, transport=self.config.transport)
         if self.notices is not None:
             # Before any loop runs, so the first WebSocket snapshot is judged against it.
@@ -136,8 +139,9 @@ class Worker:
             loops.append(asyncio.create_task(self.reconcile_loop(), name="reconcile"))
         if self.config.transport in ("both", "ws"):
             loops.append(asyncio.create_task(self.ws_loop(), name="ws"))
+        loops.append(asyncio.create_task(self.heartbeat_loop(), name="heartbeat"))
         self._tasks = loops
-        helpers = [asyncio.create_task(self.heartbeat_loop(), name="heartbeat")]
+        helpers: list[asyncio.Task[None]] = []
         if self.notices is not None:
             # Not in self._tasks: a dead notifier must not trip the watchdog.
             helpers.append(asyncio.create_task(self.notices.notifier.run(), name="notifier"))
@@ -312,13 +316,17 @@ class Worker:
         }
 
     def is_alive(self) -> bool:
-        """True while every loop task runs and reconcile cycles keep completing.
+        """True while required tasks run and heartbeat/reconcile cycles keep completing.
 
-        A loop task that ended (it should only end on stop) makes the worker dead. The
-        reconcile deadline counts from the worker's start until the first cycle
-        completes, so a first cycle that hangs is caught too.
+        A loop task that ended (it should only end on stop) makes the worker dead.
+        Deadlines count from the worker's start until the first cycle completes,
+        so a first cycle that hangs is caught too. Heartbeat progress uses a
+        monotonic clock so wall-clock adjustments cannot hide a stalled loop.
         """
         if any(task.done() for task in self._tasks):
+            return False
+        heartbeat = self._heartbeat_progress_monotonic
+        if heartbeat is not None and monotonic() >= heartbeat + 3 * self.config.heartbeat_interval + 120:
             return False
         if self.config.transport == "ws":
             return True
@@ -356,13 +364,12 @@ class Worker:
                     await self.notices.maybe_daily_summary(health["at"])
                 except Exception:  # noqa: BLE001 - a report bug must not stop the heartbeat
                     _logger.warning("daily summary failed", exc_info=True)
+            self._heartbeat_progress_monotonic = monotonic()
             # Under run_workers the supervisor pings the watchdog for the whole process.
             if self.supervised and self.is_alive():
                 notify("WATCHDOG=1", f"STATUS={self.status_line()}")
             elif self.supervised:
-                _logger.error(
-                    "a worker loop stopped or reconcile has not completed recently; withholding watchdog ping"
-                )
+                _logger.error("a worker loop stopped or heartbeat/reconcile is stale; withholding watchdog ping")
             await self._sleep(self.config.heartbeat_interval)
 
     def status_line(self) -> str:
@@ -405,7 +412,7 @@ async def run_workers(workers: list[Worker], watchdog_interval: float = 30.0) ->
                 notify("WATCHDOG=1", "STATUS=" + " ".join(f"{w.stream.name}:{w.status_line()}" for w in workers))
             else:
                 dead = [w.stream.name for w in workers if not w.is_alive()]
-                _logger.error("streams %s stopped or stopped reconciling; withholding watchdog ping", dead)
+                _logger.error("streams %s stopped or heartbeat/reconcile is stale; withholding watchdog ping", dead)
             await asyncio.sleep(watchdog_interval)
 
     pinger = asyncio.create_task(watchdog(), name="watchdog")
