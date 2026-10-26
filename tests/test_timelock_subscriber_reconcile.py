@@ -4,12 +4,13 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from protocols.timelock.event_stream import TIMELOCK_STREAM
 from tests.timelock_subscriber_fakes import OTHER_TIMELOCK, TIMELOCK, FakeEnvio, make_event
-from utils.subscriber.envio import EnvioQueryError, fetch_range, range_query
+from utils.subscriber.envio import EnvioQueryError, entity_rows, fetch_range, range_query
 from utils.subscriber.inbox import SCHEMA_VERSION, SOURCE_HTTP, SOURCE_WS, EventInbox, event_fingerprint
 from utils.subscriber.reconcile import ReconcileConfig, build_scope, in_scope, reconcile_all
 
@@ -396,3 +397,75 @@ def test_widened_selection_does_not_hide_a_real_change(tmp_path: Path) -> None:
     result = inbox.observe([make_event(1, 10, transactionHash="0x" + "ee" * 32)], SOURCE_HTTP, 20.0)
     assert result.changed == 1
     assert [c["kind"] for c in inbox.changes_since(0)] == ["changed"]
+
+
+# ── malformed responses fail closed ────────────────────────────────────
+
+# A page reconciliation must not mistake for an empty range (issue #437 review): each
+# would otherwise mark the range's events removed and move the checkpoint past them.
+MALFORMED_PAGES = [
+    {},
+    {"data": None},
+    {"data": {}},
+    {"data": {"TimelockEvent": None}},
+    {"data": {"TimelockEvent": "oops"}},
+    {"data": {"TimelockEvent": [None]}},
+    [],
+]
+
+
+def _scenario(inbox: EventInbox) -> FakeEnvio:
+    """An active event at block 12, checkpoint 15, overlap 5, indexed head 20 (chain 1 only)."""
+    envio = FakeEnvio()
+    envio.set_head(1, 15)
+    reconcile_all(envio.post, inbox, {1: {TIMELOCK}}, CONFIG)
+    inbox.observe([make_event(1, 12)], SOURCE_WS, 1.0)
+    envio.add(make_event(1, 12), advance_head=False)
+    envio.set_head(1, 20)
+    return envio
+
+
+@pytest.mark.parametrize("page", MALFORMED_PAGES, ids=repr)
+def test_malformed_range_page_keeps_events_and_checkpoint(inbox: EventInbox, page: object) -> None:
+    envio = _scenario(inbox)
+
+    def post(query: str, variables: dict) -> Any:  # deliberately not a well-formed response
+        return envio.post(query, variables) if "chain_metadata" in query else page
+
+    report = reconcile_all(post, inbox, {1: {TIMELOCK}}, CONFIG)
+
+    assert not report.ok and "GraphQL response" in (report.chains[0].error or "")
+    (row,) = inbox.events_since(0)
+    assert row["status"] == "active"
+    assert _checkpoint(inbox, 1) == 15
+    assert inbox.changes_since(0) == []
+
+
+def test_explicit_empty_page_still_completes_the_range(inbox: EventInbox) -> None:
+    envio = _scenario(inbox)
+    envio.remove("1_12_0")  # the indexer really dropped it: [] is a genuine empty range
+
+    assert reconcile_all(envio.post, inbox, {1: {TIMELOCK}}, CONFIG).ok
+
+    (row,) = inbox.events_since(0)
+    assert row["status"] == "removed" and _checkpoint(inbox, 1) == 20
+
+
+@pytest.mark.parametrize("payload", [{}, {"data": None}, {"data": {"chain_metadata": None}}], ids=repr)
+def test_malformed_chain_metadata_fails_the_cycle(inbox: EventInbox, payload: object) -> None:
+    _scenario(inbox)
+
+    def post(query: str, variables: dict) -> Any:  # deliberately not a well-formed response
+        return payload
+
+    report = reconcile_all(post, inbox, {1: {TIMELOCK}}, CONFIG)
+
+    assert report.error is not None and "GraphQL response" in report.error
+    assert report.chains == [] and _checkpoint(inbox, 1) == 15
+
+
+def test_entity_rows_accepts_only_a_list_of_rows() -> None:
+    assert entity_rows({"data": {"TimelockEvent": []}}, "TimelockEvent") == []
+    assert entity_rows({"data": {"TimelockEvent": [{"id": "1"}]}}, "TimelockEvent") == [{"id": "1"}]
+    with pytest.raises(EnvioQueryError, match="GraphQL errors"):
+        entity_rows({"errors": [{"message": "x"}], "data": {"TimelockEvent": []}}, "TimelockEvent")

@@ -39,7 +39,7 @@ from typing import Any, Protocol
 from utils.graphql_ws import GraphQLWSError, subscribe
 from utils.logger import get_logger
 from utils.sd_notify import notify
-from utils.subscriber.envio import ChainHead, GraphQLPost, address_variants, live_subscription
+from utils.subscriber.envio import ChainHead, GraphQLPost, address_variants, entity_rows, live_subscription
 from utils.subscriber.inbox import SOURCE_HTTP, SOURCE_WS, EventInbox
 from utils.subscriber.notices import PilotNotices
 from utils.subscriber.reconcile import ReconcileConfig, ReconcileReport, in_scope, reconcile_all
@@ -228,10 +228,12 @@ class Worker:
             await self._sleep(delay)
 
     async def _ingest_snapshot(self, payload: dict[str, Any], received_at: float) -> None:
-        """Fold one live-query snapshot into the inbox and log first sightings."""
-        rows = [
-            r for r in (payload.get("data") or {}).get(self.stream.entity) or [] if in_scope(r, self.scope, self.stream)
-        ]
+        """Fold one live-query snapshot into the inbox and log first sightings.
+
+        A snapshot without the entity list raises (and the subscription reconnects)
+        instead of passing for an empty snapshot.
+        """
+        rows = [r for r in entity_rows(payload, self.stream.entity) if in_scope(r, self.scope, self.stream)]
         clock = time.perf_counter()
         result = await asyncio.to_thread(self.inbox.observe, rows, SOURCE_WS, received_at)
         ingest_ms = (time.perf_counter() - clock) * 1000
