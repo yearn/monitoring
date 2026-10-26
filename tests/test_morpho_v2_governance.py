@@ -6,9 +6,11 @@ from eth_abi import encode as abi_encode
 from web3 import Web3
 
 from protocols.morpho import governance_v2
+from protocols.morpho._alerts import LOSS_PREFIX
 from protocols.morpho._shared import MorphoV2MonitoringError
 from protocols.morpho.governance_v2 import PendingConfig, V2GovernanceSnapshot
 from protocols.morpho.v2_decoders import submit_data_key
+from utils.alert import AlertSeverity
 from utils.chains import Chain
 from utils.telegram import MAX_MESSAGE_LENGTH
 
@@ -381,3 +383,161 @@ class TestMorphoV2GovernanceFetch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+ADAPTER = Web3.to_checksum_address("0x" + "22" * 20)
+
+
+def _loss_snapshot(pending_configs: list[PendingConfig], adapter_assets: int) -> V2GovernanceSnapshot:
+    snapshot = _snapshot(pending_configs)
+    snapshot.asset_symbol = "USDC"
+    snapshot.asset_decimals = 6
+    snapshot.total_assets = 4_000_000 * 10**6
+    snapshot.adapter_assets = {ADAPTER: adapter_assets}
+    snapshot.adapter_types = {ADAPTER: "MorphoMarketV1"}
+    return snapshot
+
+
+def _pc(sig: str, types: list[str], values: list[Any], valid_at: int = 2_000_000_000) -> PendingConfig:
+    return PendingConfig(
+        valid_at=valid_at,
+        function_name=sig.split("(", 1)[0],
+        data=_build(sig, types, values),
+        tx_hash="0x" + "12" * 32,
+    )
+
+
+class TestMorphoV2LossClassification(unittest.TestCase):
+    def test_remove_adapter_holding_assets_is_a_loss_with_amount(self) -> None:
+        pc = _pc("removeAdapter(address)", ["address"], [ADAPTER])
+        loss = governance_v2.pending_loss(_loss_snapshot([pc], 1), pc)
+        assert loss is not None
+        self.assertEqual(loss[0], 1)
+
+    def test_remove_empty_adapter_is_not_a_loss(self) -> None:
+        pc = _pc("removeAdapter(address)", ["address"], [ADAPTER])
+        self.assertIsNone(governance_v2.pending_loss(_loss_snapshot([pc], 0), pc))
+
+    def test_decrease_remove_adapter_timelock_with_held_assets_is_a_loss(self) -> None:
+        pc = _pc("decreaseTimelock(bytes4,uint256)", ["bytes4", "uint256"], [_selector("removeAdapter(address)"), 0])
+        loss = governance_v2.pending_loss(_loss_snapshot([pc], 5), pc)
+        assert loss is not None
+        self.assertEqual(loss[0], 5)
+        self.assertIn("Shortens the timelock", loss[1])
+
+    def test_other_timelock_decrease_and_abdicate_are_not_losses(self) -> None:
+        decrease = _pc("decreaseTimelock(bytes4,uint256)", ["bytes4", "uint256"], [_selector("addAdapter(address)"), 0])
+        abdicate = _pc("abdicate(bytes4)", ["bytes4"], [_selector("setIsAllocator(address,bool)")])
+        snapshot = _loss_snapshot([], 5)
+        self.assertIsNone(governance_v2.pending_loss(snapshot, decrease))
+        self.assertIsNone(governance_v2.pending_loss(snapshot, abdicate))
+
+
+class TestMorphoV2LossDelivery(unittest.TestCase):
+    def _run(self, snapshot: V2GovernanceSnapshot, state: dict[str, str], now: int) -> list[Any]:
+        from datetime import datetime as real_datetime
+
+        sent: list[Any] = []
+        with (
+            patch(
+                "protocols.morpho.governance_v2.get_last_value_for_key_from_file",
+                side_effect=lambda _f, key: state.get(key, 0),
+            ),
+            patch(
+                "protocols.morpho.governance_v2.write_last_value_to_file",
+                side_effect=lambda _f, key, value: state.__setitem__(key, str(value)),
+            ),
+            patch("protocols.morpho._alerts.send_alert", side_effect=sent.append),
+            patch("protocols.morpho.governance_v2.datetime") as fake_datetime,
+            patch("protocols.morpho._alerts.datetime") as alerts_datetime,
+        ):
+            fake_datetime.now.return_value = real_datetime.fromtimestamp(now)
+            alerts_datetime.now.return_value = real_datetime.fromtimestamp(now)
+            governance_v2.diff_and_alert(snapshot)
+        return sent
+
+    def test_loss_operation_is_sent_alone_and_reminded_once_near_deadline(self) -> None:
+        valid_at = 2_000_000_000
+        remove = _pc("removeAdapter(address)", ["address"], [ADAPTER], valid_at)
+        add = _pc("addAdapter(address)", ["address"], [A1], valid_at)
+        snapshot = _loss_snapshot([remove, add], 1_000_000 * 10**6)
+        state: dict[str, str] = {}
+
+        first = self._run(snapshot, state, now=valid_at - 3 * 86400)
+        quiet = self._run(snapshot, state, now=valid_at - 2 * 86400)
+        reminder = self._run(snapshot, state, now=valid_at - 3600)
+        after = self._run(snapshot, state, now=valid_at - 60)
+
+        # The loss goes out on its own, ahead of the grouped routine message.
+        self.assertEqual(len(first), 2)
+        self.assertEqual(first[0].severity, AlertSeverity.HIGH)
+        self.assertTrue(first[0].message.startswith(LOSS_PREFIX))
+        self.assertIn(f"removeAdapter([{ADAPTER}]", first[0].message)
+        self.assertIn("1.00M USDC (25.00% of vault)", first[0].message)
+        self.assertEqual(first[1].severity, AlertSeverity.MEDIUM)
+        self.assertNotIn("removeAdapter", first[1].message)
+        self.assertEqual(quiet, [])
+        self.assertEqual(len(reminder), 1)
+        self.assertIn("Reminder", reminder[0].message)
+        self.assertEqual(after, [])
+
+    def test_remove_adapter_escalates_when_the_adapter_gets_funded(self) -> None:
+        """An operation first sent as MEDIUM (empty adapter) must escalate once the
+        adapter holds assets, not wait for the reminder window (PR #436 review)."""
+        valid_at = 2_000_000_000
+        remove = _pc("removeAdapter(address)", ["address"], [ADAPTER], valid_at)
+        state: dict[str, str] = {}
+
+        first = self._run(_loss_snapshot([remove], 0), state, now=valid_at - 3 * 86400)
+        escalated = self._run(_loss_snapshot([remove], 10**6), state, now=valid_at - 2 * 86400)
+        repeat = self._run(_loss_snapshot([remove], 10**6), state, now=valid_at - 2 * 86400 + 60)
+
+        self.assertEqual([a.severity for a in first], [AlertSeverity.MEDIUM])
+        self.assertEqual(len(escalated), 1)
+        self.assertEqual(escalated[0].severity, AlertSeverity.HIGH)
+        self.assertTrue(escalated[0].message.startswith(LOSS_PREFIX))
+        self.assertNotIn("Reminder", escalated[0].message)
+        self.assertEqual(repeat, [])
+
+    def test_abdicate_is_grouped_at_medium(self) -> None:
+        abdicate = _pc("abdicate(bytes4)", ["bytes4"], [_selector("setIsAllocator(address,bool)")])
+        sent = self._run(_loss_snapshot([abdicate], 0), {}, now=1_000_000_000)
+
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0].severity, AlertSeverity.MEDIUM)
+        self.assertNotIn("POTENTIAL VAULT LOSS", sent[0].message)
+
+
+class TestMorphoV2GovernanceMainAdapters(unittest.TestCase):
+    def test_adapter_read_failure_still_runs_graphql_diff_and_fails_the_run(self) -> None:
+        snapshot = _loss_snapshot([], 1)
+        diffed: list[Any] = []
+
+        with (
+            patch(
+                "protocols.morpho.governance_v2.fetch_governance_snapshots",
+                return_value={Chain.MAINNET: [snapshot]},
+            ),
+            patch(
+                "protocols.morpho.governance_v2.adapter_timelocks_v2.load_adapter_states",
+                side_effect=ValueError("No providers found for chain MAINNET"),
+            ) as load,
+            patch(
+                "protocols.morpho.governance_v2.diff_and_alert",
+                side_effect=lambda vault, states: diffed.append((vault, states)),
+            ),
+            self.assertRaisesRegex(MorphoV2MonitoringError, "adapters on MAINNET: ValueError"),
+        ):
+            governance_v2.main()
+
+        load.assert_called_once_with(Chain.MAINNET, [ADAPTER])
+        # The GraphQL diff still ran, with the adapter diff skipped.
+        self.assertEqual(diffed, [(snapshot, None)])
+
+
+class TestMorphoV2GovernanceQuery(unittest.TestCase):
+    def test_configured_vaults_fit_in_one_page(self) -> None:
+        """The query fetches a single page; outgrowing it would fail every run."""
+        from protocols.morpho.config import VAULTS_V2_BY_CHAIN, iter_vaults
+
+        self.assertLessEqual(len(list(iter_vaults(VAULTS_V2_BY_CHAIN))), governance_v2.GOVERNANCE_PAGE_SIZE)

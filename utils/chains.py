@@ -15,6 +15,7 @@ EXPLORER_URLS: dict[int, str] = {
 # Setting any of those env vars disables the public fallback for that chain.
 PUBLIC_RPC_URLS: dict[int, str] = {
     999: "https://rpc.hyperliquid.xyz/evm",
+    4663: "https://rpc.mainnet.chain.robinhood.com",
 }
 
 

@@ -16,6 +16,7 @@ a message it has already recorded.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import partial
 from typing import Any, Callable, List
 
@@ -34,12 +35,57 @@ SECTION_SEPARATOR = "\n\n---\n\n"
 _MESSAGE_OVERHEAD = 64
 
 
+# Header prefix for findings that can write off vault funds (market removal,
+# adapter removal, share burn). They are sent as their own message so they never
+# drown in a routine grouped diff.
+LOSS_PREFIX = "🚨 POTENTIAL VAULT LOSS"
+
+# Pending loss operations are re-alerted once when their execution time is this close.
+REMINDER_WINDOW_SECONDS = 24 * 60 * 60
+
+
+@dataclass(frozen=True)
+class LossNotice:
+    """A potential-loss alert that is due for one pending operation."""
+
+    reminder: bool  # render as the near-deadline reminder rather than the first alert
+    in_window: bool  # the deadline is inside the reminder window, so mark the reminder as sent too
+
+
+def due_loss_notice(deadline: int, loss_alerted_at: int, reminded_at: int) -> LossNotice | None:
+    """Decide whether a pending operation that puts funds at risk needs a loss alert now.
+
+    The loss alert is tracked separately from the "pending operation seen" cursor,
+    so an operation first seen with nothing at risk (sent at a lower severity) still
+    escalates once funds arrive, instead of waiting for the reminder window.
+
+    Args:
+        deadline: When the operation becomes executable; also the cache value.
+        loss_alerted_at: Cached deadline of the last loss alert sent for it.
+        reminded_at: Cached deadline of the last reminder sent for it.
+
+    Returns:
+        The notice to send, or None if both the alert and the reminder already went out.
+    """
+    in_window = int(datetime.now().timestamp()) >= deadline - REMINDER_WINDOW_SECONDS
+    if loss_alerted_at != deadline:
+        return LossNotice(reminder=False, in_window=in_window)
+    if in_window and reminded_at != deadline:
+        return LossNotice(reminder=True, in_window=True)
+    return None
+
+
 @dataclass
 class VaultAlert:
-    """One section of a vault's grouped Telegram message."""
+    """One section of a vault's grouped Telegram message.
+
+    ``standalone`` sections are sent as their own message with ``LOSS_PREFIX``
+    instead of being grouped with the vault's other findings.
+    """
 
     severity: AlertSeverity
     body: str
+    standalone: bool = False
 
 
 @dataclass
@@ -52,6 +98,10 @@ class VaultDiff:
     def alert(self, severity: AlertSeverity, body: str) -> None:
         """Buffer one section of the vault's grouped message."""
         self.alerts.append(VaultAlert(severity, body))
+
+    def loss(self, body: str) -> None:
+        """Buffer a HIGH potential-loss finding, sent as its own message."""
+        self.alerts.append(VaultAlert(AlertSeverity.HIGH, body, standalone=True))
 
     def defer(self, write: Callable[..., Any], *args: Any) -> None:
         """Buffer a cache write to apply once the alert is delivered."""
@@ -111,7 +161,18 @@ def send_vault_alerts(header: str, alerts: List[VaultAlert], protocol: str) -> N
     No-op when ``alerts`` is empty so callers don't have to guard. Every part
     carries the same header and the highest severity of the whole group, so a
     LOW section bundled with an owner change still pings the channel.
+
+    Standalone (potential-loss) sections go out first, one message each, under a
+    ``LOSS_PREFIX`` header; the remaining sections are grouped as usual.
     """
+    for alert in alerts:
+        if alert.standalone:
+            _send_group(f"{LOSS_PREFIX} — {header}", [alert], protocol)
+    _send_group(header, [a for a in alerts if not a.standalone], protocol)
+
+
+def _send_group(header: str, alerts: List[VaultAlert], protocol: str) -> None:
+    """Send sections under one header at their highest severity, split into parts if long."""
     if not alerts:
         return
     severity = max((a.severity for a in alerts), key=_SEVERITY_ORDER.index)

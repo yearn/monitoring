@@ -2,12 +2,14 @@
 
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 
 from utils.chains import Chain
 from utils.config import Config
+from utils.formatting import format_duration, format_token_amount, format_with_suffix
 from utils.http_client import request_with_retry
 from utils.logger import get_logger
 
@@ -79,6 +81,67 @@ def execute_graphql(
 
     # Unreachable — loop always returns or raises.
     raise error_type(f"Morpho GraphQL failed after {retries + 1} attempts for {context}")
+
+
+MORPHO_BLUE_ABI_PATH = "protocols/morpho/abi/morpho_blue.json"
+
+# Morpho Blue SharesMathLib virtual offsets, used to convert supply shares to assets.
+VIRTUAL_SHARES = 10**6
+VIRTUAL_ASSETS = 1
+
+
+def to_assets_down(shares: int, total_assets: int, total_shares: int) -> int:
+    """Convert Morpho Blue supply shares to assets, rounding down like ``SharesMathLib``.
+
+    Uses the market's stored totals rather than an IRM-accrued view, so it can't
+    revert on a market whose IRM reverts; it only omits interest since the last update.
+    """
+    return shares * (total_assets + VIRTUAL_ASSETS) // (total_shares + VIRTUAL_SHARES)
+
+
+def format_ts(ts: int) -> str:
+    """Render a unix timestamp as local ``YYYY-MM-DD HH:MM:SS``."""
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_countdown(ts: int) -> str:
+    """Human-friendly time remaining until ``ts``, e.g. ``(3 days)``."""
+    seconds = ts - int(datetime.now().timestamp())
+    if seconds <= 0:
+        return "(now)"
+    days = seconds / 86400
+    if days >= 1:
+        n = round(days)
+        return f"({n} day{'s' if n != 1 else ''})"
+    hours = seconds / 3600
+    if hours >= 1:
+        n = round(hours)
+        return f"({n} hour{'s' if n != 1 else ''})"
+    n = max(round(seconds / 60), 1)
+    return f"({n} minute{'s' if n != 1 else ''})"
+
+
+def format_timelock(seconds: int) -> str:
+    """Render a timelock duration; a zero timelock reads ``0s`` rather than ``now``."""
+    return format_duration(seconds) if seconds > 0 else "0s"
+
+
+def format_amount_at_risk(raw: int, decimals: int | None, symbol: str | None, total_assets: int | None) -> str:
+    """Render an at-risk amount with its share of the vault, e.g. ``1.20M USDC (12.50% of vault)``.
+
+    Dust that would round to ``0.00`` is shown in raw units instead, because any
+    non-zero amount at risk is worth seeing exactly.
+    """
+    if decimals is None:
+        amount = f"{raw:,} (raw units)"
+    else:
+        human = format_token_amount(raw, decimals)
+        amount = str(format_with_suffix(human)) if human >= 0.01 else f"{raw:,} raw units"
+    if symbol:
+        amount = f"{amount} {symbol}"
+    if total_assets:
+        amount = f"{amount} ({raw / total_assets:.2%} of vault)"
+    return amount
 
 
 def require_configured_keys(
