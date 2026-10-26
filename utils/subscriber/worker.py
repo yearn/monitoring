@@ -17,6 +17,11 @@ wedged stream restarts the process instead of hiding behind a healthy one. The
 streams share the HTTP poster and a ``SharedChainHeads`` reader, and each keeps
 its own WebSocket connection, inbox, and checkpoints.
 
+An optional ``StreamConsumer`` runs as one more loop of the worker, woken after
+every ingest that stored new, changed, or restored rows. It reads the inbox
+itself, so whatever it does (RPC reads, Telegram) never delays ingestion, and a
+consumer that dies withholds the watchdog ping like any other loop.
+
 The pilot sends no alerts. With an optional ``PilotNotices`` it posts diagnostic
 notices to the internal errors chat from a background queue (see ``notices.py``);
 without one, all output stays in journald and the inbox.
@@ -29,7 +34,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from time import monotonic
-from typing import Any
+from typing import Any, Protocol
 
 from utils.graphql_ws import GraphQLWSError, subscribe
 from utils.logger import get_logger
@@ -44,6 +49,19 @@ _logger = get_logger("subscriber.worker")
 TRANSPORTS = ("both", "ws", "http")
 
 SubscribeFn = Callable[..., AsyncIterator[dict[str, Any]]]
+
+
+class StreamConsumer(Protocol):
+    """Reads a stream's inbox on its own schedule (e.g. to decide alerts), never inside ingestion."""
+
+    async def run(self) -> None:
+        """Run until cancelled."""
+        ...
+
+    def wake(self) -> None:
+        """Called after an ingest stored new, changed, or restored rows."""
+        ...
+
 
 # Doublings beyond this cannot matter (2**20 x any sane initial delay exceeds any
 # cap) and keep ``2 ** n`` from overflowing a float after ~1,000 failures.
@@ -84,6 +102,7 @@ class Worker:
         now: Callable[[], float] = time.time,
         notices: PilotNotices | None = None,
         heads: Callable[[], dict[int, ChainHead]] | None = None,
+        consumer: StreamConsumer | None = None,
     ) -> None:
         if config.transport not in TRANSPORTS:
             raise ValueError(f"transport must be one of {TRANSPORTS}, got {config.transport!r}")
@@ -98,6 +117,7 @@ class Worker:
         self.now = now
         self.notices = notices
         self.heads = heads
+        self.consumer = consumer
         self.stream = inbox.stream
         # False when ``run_workers`` owns signals and systemd notifications for the process.
         self.supervised = True
@@ -140,6 +160,8 @@ class Worker:
         if self.config.transport in ("both", "ws"):
             loops.append(asyncio.create_task(self.ws_loop(), name="ws"))
         loops.append(asyncio.create_task(self.heartbeat_loop(), name="heartbeat"))
+        if self.consumer is not None:
+            loops.append(asyncio.create_task(self.consumer.run(), name="consumer"))
         self._tasks = loops
         helpers: list[asyncio.Task[None]] = []
         if self.notices is not None:
@@ -215,6 +237,8 @@ class Worker:
         ingest_ms = (time.perf_counter() - clock) * 1000
         self.ws_messages += 1
         self.last_ws_message_at = received_at
+        if self.consumer is not None and (result.new or result.changed or result.restored):
+            self.consumer.wake()
         if self.notices is not None:
             await self.notices.new_events(SOURCE_WS, result.new_ids)
             self.notices.snapshot_changes(result.changed_ids)
@@ -258,6 +282,8 @@ class Worker:
                 report = ReconcileReport(started_at=started, error=f"{type(exc).__name__}: {exc}")
             self.last_reconcile = report
             self.last_reconcile_at = self.now()
+            if self.consumer is not None and any(c.new or c.changed or c.restored for c in report.chains):
+                self.consumer.wake()
             ws_expected = ws_was_connected and self.config.transport == "both"
             self._log_reconcile(report, ws_expected)
             if self.notices is not None:

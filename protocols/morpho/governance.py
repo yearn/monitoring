@@ -159,7 +159,7 @@ def _load_vault_market_ids(
     return list(set(queued_markets) | pending_markets)
 
 
-def _load_market_governance_states(
+def load_market_governance_states(
     morpho_contract: Any,
     market_ids: list[bytes],
     client: Any,
@@ -219,7 +219,7 @@ def _try_total_assets(morpho_contract: Any, block_number: int) -> int | None:
         return None
 
 
-def _vault_header(name: str, vault_address: str, chain: Chain) -> str:
+def vault_header(name: str, vault_address: str, chain: Chain) -> str:
     """One-line header for the vault's grouped alert."""
     return f"[{name}]({get_vault_url(vault_address, chain)}) on {chain.name}"
 
@@ -359,7 +359,7 @@ def check_markets_pending_cap(
 ) -> None:
     """Check V1 market cap and removal governance for one vault."""
     market_ids = _load_vault_market_ids(morpho_contract, chain, client, block_number)
-    for state in _load_market_governance_states(morpho_contract, market_ids, client, block_number):
+    for state in load_market_governance_states(morpho_contract, market_ids, client, block_number):
         check_market_governance_state(name, state, chain, diff)
 
 
@@ -433,7 +433,7 @@ def get_data_for_chain(chain: Chain) -> None:
             block_number=block_number,
         )
         check_timelock_and_guardian(morpho_contract, client, diff, block_number)
-        send_vault_alerts(_vault_header(vault.name, vault.address, chain), diff.alerts, PROTOCOL)
+        send_vault_alerts(vault_header(vault.name, vault.address, chain), diff.alerts, PROTOCOL)
         diff.commit()
 
 

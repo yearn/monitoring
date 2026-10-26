@@ -290,6 +290,13 @@ at each chain's indexed head; rerun it to confirm the range queries succeed. To
 disable the stream, drop it from `EVENT_SUBSCRIBER_STREAMS` and restart; its inbox is
 kept.
 
+The stream's live consumer starts in `observe` mode: it records what the daily
+governance jobs would alert for each new event (`report` shows the summary) and
+sends nothing. To compare with the daily jobs in the errors chat, set
+`MORPHO_LIVE_DELIVERY=shadow` and restart. The daily jobs keep alerting the Morpho
+group in both modes. Events from before the consumer's first run are recorded as
+history and never alerted.
+
 Supervision: the unit is `Type=notify` with `WatchdogSec=120`. The heartbeat pings
 the watchdog only while HTTP reconciliation keeps completing, so a wedged worker
 is killed and restarted. `Restart=always` also covers a crash, after which
@@ -317,6 +324,7 @@ Set in `/etc/monitoring/.env`, then restart the unit:
 | Variable | Default | Meaning |
 |---|---|---|
 | `EVENT_SUBSCRIBER_STREAMS` | `timelock` | Streams to follow: `timelock`, `morpho`, comma-separated |
+| `MORPHO_LIVE_DELIVERY` | `observe` | Live Morpho governance decisions: `observe` records them only; `shadow` also posts them to the internal errors chat (needs it configured) |
 | `TIMELOCK_SUBSCRIBER_TRANSPORT` | `both` | `both`, `ws`, or `http` (every stream) |
 | `TIMELOCK_SUBSCRIBER_NOTIFY` | `none` | `errors` posts pilot notices to the internal errors chat (needs `TELEGRAM_TOPIC_ID_ERRORS` or `TELEGRAM_CHAT_ID_ERRORS`) |
 | `TIMELOCK_SUBSCRIBER_RECONCILE_SECONDS` | `60` | HTTP reconcile interval |

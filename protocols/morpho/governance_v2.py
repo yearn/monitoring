@@ -304,7 +304,7 @@ def _pending_function_key(snapshot: V2GovernanceSnapshot, data_hash: str) -> str
     return str(morpho_key(snapshot.address.lower(), data_hash, PENDING_FUNCTION_TYPE))
 
 
-def _vault_header(snapshot: V2GovernanceSnapshot) -> str:
+def vault_header(snapshot: V2GovernanceSnapshot) -> str:
     """One-line header for the grouped alert: ``V2 [name](url) on chain``."""
     return f"V2 [{snapshot.name}]({get_vault_url(snapshot.address, snapshot.chain)}) on {snapshot.chain.name}"
 
@@ -379,7 +379,7 @@ def _check_pending_loss(
         diff.defer(_write, reminder_key, pc.valid_at)
 
 
-def _alert_pending_new(
+def alert_pending_new(
     snapshot: V2GovernanceSnapshot,
     pending: List[tuple[PendingConfig, str]],
     diff: VaultDiff,
@@ -464,31 +464,50 @@ def _alert_set_diff(set_name: str, added: set[str], removed: set[str], diff: Vau
 # ----------------------------------------------------------------------------
 
 
+def diff_pending_config(
+    snapshot: V2GovernanceSnapshot, pc: PendingConfig, diff: VaultDiff
+) -> tuple[PendingConfig, str] | None:
+    """Diff one pending operation against the cache.
+
+    A potential loss is buffered on ``diff`` directly (as its own message). Any
+    other operation not alerted yet is returned as ``(pc, label)`` for the caller
+    to group with the vault's other new submissions via ``alert_pending_new``.
+    Shared by the daily snapshot diff and the live event consumer, so both alert
+    the same operations with the same content and severity.
+    """
+    operation_label = _operation_label(snapshot, pc)
+    diff.defer(_write, _pending_function_key(snapshot, pc.data_hash), _operation_function_name(pc, operation_label))
+    cache_key = morpho_key(snapshot.address.lower(), pc.data_hash, PENDING_TYPE)
+    last = _read_int(cache_key)
+    if last == EXECUTED:
+        return None
+    new = None
+    # A loss is tracked on its own key, so an operation first seen with nothing
+    # at risk still escalates once funds arrive.
+    loss = pending_loss(snapshot, pc)
+    if loss is not None:
+        _check_pending_loss(snapshot, pc, operation_label, loss, diff)
+    elif last != pc.valid_at:
+        new = (pc, operation_label)
+    if last != pc.valid_at:
+        diff.defer(_write, cache_key, pc.valid_at)
+    return new
+
+
 def _diff_pending(snapshot: V2GovernanceSnapshot, diff: VaultDiff) -> None:
+    """Diff every pending operation and detect the ones that left ``pendingConfigs``."""
     addr = snapshot.address.lower()
 
     current_keys: set[str] = set()
     new_pending: List[tuple[PendingConfig, str]] = []
     for pc in snapshot.pending_configs:
         current_keys.add(pc.data_hash)
-        operation_label = _operation_label(snapshot, pc)
-        diff.defer(_write, _pending_function_key(snapshot, pc.data_hash), _operation_function_name(pc, operation_label))
-        cache_key = morpho_key(addr, pc.data_hash, PENDING_TYPE)
-        last = _read_int(cache_key)
-        if last == EXECUTED:
-            continue
-        # A loss is tracked on its own key, so an operation first seen with nothing
-        # at risk still escalates once funds arrive.
-        loss = pending_loss(snapshot, pc)
-        if loss is not None:
-            _check_pending_loss(snapshot, pc, operation_label, loss, diff)
-        elif last != pc.valid_at:
-            new_pending.append((pc, operation_label))
-        if last != pc.valid_at:
-            diff.defer(_write, cache_key, pc.valid_at)
+        new = diff_pending_config(snapshot, pc, diff)
+        if new is not None:
+            new_pending.append(new)
 
     # Group all other newly-submitted operations for this vault into one section.
-    _alert_pending_new(snapshot, new_pending, diff)
+    alert_pending_new(snapshot, new_pending, diff)
 
     # Detect resolved entries: anything in last-run's index that isn't in the
     # current pending list. Reading a function-name key here is safe despite the
@@ -512,7 +531,8 @@ def _diff_pending(snapshot: V2GovernanceSnapshot, diff: VaultDiff) -> None:
     diff.defer(_write, index_key, ",".join(sorted(current_keys)))
 
 
-def _diff_single_role(snapshot: V2GovernanceSnapshot, role: str, current: str, diff: VaultDiff) -> None:
+def diff_single_role(snapshot: V2GovernanceSnapshot, role: str, current: str, diff: VaultDiff) -> None:
+    """Alert HIGH when ``role`` (owner/curator) differs from the cached holder; the first run seeds silently."""
     cache_key = morpho_key(snapshot.address.lower(), role, ROLE_TYPE)
     last = _read_str(cache_key)
     cur_lc = current.lower()
@@ -521,7 +541,8 @@ def _diff_single_role(snapshot: V2GovernanceSnapshot, role: str, current: str, d
     diff.defer(_write, cache_key, cur_lc)
 
 
-def _diff_set(snapshot: V2GovernanceSnapshot, set_name: str, current: List[str], diff: VaultDiff) -> None:
+def diff_set(snapshot: V2GovernanceSnapshot, set_name: str, current: List[str], diff: VaultDiff) -> None:
+    """Alert LOW on members added to or removed from ``set_name`` since the cached set; the first run seeds silently."""
     cache_key = morpho_key(snapshot.address.lower(), set_name, SET_TYPE)
     last_str = _read_str(cache_key)
     last_set = {a for a in last_str.split(",") if a} if last_str else set()
@@ -558,14 +579,14 @@ def diff_and_alert(
     """
     diff = VaultDiff()
     _diff_pending(snapshot, diff)
-    _diff_single_role(snapshot, "owner", snapshot.owner, diff)
-    _diff_single_role(snapshot, "curator", snapshot.curator, diff)
-    _diff_set(snapshot, "sentinels", snapshot.sentinels, diff)
-    _diff_set(snapshot, "allocators", snapshot.allocators, diff)
-    _diff_set(snapshot, "adapters", snapshot.adapters, diff)
+    diff_single_role(snapshot, "owner", snapshot.owner, diff)
+    diff_single_role(snapshot, "curator", snapshot.curator, diff)
+    diff_set(snapshot, "sentinels", snapshot.sentinels, diff)
+    diff_set(snapshot, "allocators", snapshot.allocators, diff)
+    diff_set(snapshot, "adapters", snapshot.adapters, diff)
     for state in adapter_states or []:
         adapter_timelocks_v2.diff_adapter(snapshot.chain, snapshot.total_assets, state, diff)
-    send_vault_alerts(_vault_header(snapshot), diff.alerts, PROTOCOL)
+    send_vault_alerts(vault_header(snapshot), diff.alerts, PROTOCOL)
     diff.commit()
 
 
