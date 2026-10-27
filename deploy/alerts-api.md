@@ -221,8 +221,10 @@ you revoke one by dropping it from the list.
 openssl rand -hex 32     # generate one token per consumer (run once each)
 ```
 
-Use hex (`openssl rand -hex`) — it contains only `[0-9a-f]`, so it needs no
-escaping inside Caddy's matcher regex. ~32 bytes (256 bits) is plenty.
+Use exactly `openssl rand -hex 32` — 64 lowercase hex characters. The Caddyfile
+rejects any bearer value that isn't 64 hex characters before comparing tokens, so
+an empty or unset `ALERTS_API_TOKENS` fails closed; tokens in another format
+are refused. Hex also needs no escaping inside Caddy's matcher regex.
 
 **Where to store them:**
 

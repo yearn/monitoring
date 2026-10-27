@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from automation.git_sync import UV_SYNC_ARGV, sync_dependencies, sync_to_remote_main
+from automation.git_sync import GIT_FETCH_TIMEOUT_SECONDS, UV_SYNC_ARGV, sync_dependencies, sync_to_remote_main
 
 
 class _Result:
@@ -69,6 +69,21 @@ class TestSyncToRemoteMain(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("cannot lock ref", result.output)
 
+    def test_hung_fetch_times_out(self):
+        import subprocess
+
+        with TemporaryDirectory() as d:
+            repo = Path(d)
+            (repo / ".git").mkdir()
+            hung = subprocess.TimeoutExpired(["git", "fetch"], GIT_FETCH_TIMEOUT_SECONDS)
+
+            with patch("automation.git_sync.subprocess.run", side_effect=hung) as mock_run:
+                result = sync_to_remote_main(repo)
+
+        self.assertFalse(result.ok)
+        self.assertIn("timed out", result.output)
+        self.assertEqual(mock_run.call_args.kwargs["timeout"], GIT_FETCH_TIMEOUT_SECONDS)
+
 
 class TestSyncDependencies(unittest.TestCase):
     def test_runs_frozen_uv_sync_in_repo(self):
@@ -103,6 +118,15 @@ class TestSyncDependencies(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertIn("lockfile out of date", result.output)
+
+    def test_hung_uv_sync_times_out(self):
+        import subprocess
+
+        with patch("automation.git_sync.subprocess.run", side_effect=subprocess.TimeoutExpired(UV_SYNC_ARGV, 600)):
+            result = sync_dependencies(Path("/srv/repo"))
+
+        self.assertFalse(result.ok)
+        self.assertIn("timed out", result.output)
 
     def test_missing_uv_is_reported(self):
         with patch("automation.git_sync.subprocess.run", side_effect=FileNotFoundError("uv")):

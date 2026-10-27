@@ -6,6 +6,8 @@ import sys
 
 from dotenv import load_dotenv
 
+from utils.redact import redact_secrets
+
 load_dotenv()
 
 # Third-party libraries that emit high-volume per-request / per-connection noise
@@ -45,12 +47,24 @@ def quiet_dependency_loggers(level: str | None = None) -> None:
         logging.getLogger(logger_name).setLevel(numeric)
 
 
+class RedactingFormatter(logging.Formatter):
+    """Formatter that masks credentials (RPC keys, API keys, bot tokens) in every line.
+
+    Exception text from ``requests``/web3 quotes full URLs, which embed API keys;
+    journald (and any log shipper behind it) must not receive them.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Format the record, then redact secrets from the result."""
+        return redact_secrets(super().format(record))
+
+
 def get_logger(name: str) -> logging.Logger:
     """Return a pre-configured logger for the given protocol or module name."""
     logger = logging.getLogger(name)
     if not logger.handlers:
         handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s"))
+        handler.setFormatter(RedactingFormatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s"))
         logger.addHandler(handler)
         logger.propagate = False
         level = os.getenv("LOG_LEVEL", "INFO").upper()

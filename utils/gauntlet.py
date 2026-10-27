@@ -13,12 +13,15 @@ from utils.logger import get_logger
 
 logger = get_logger("utils.gauntlet")
 
+# requests has no default timeout; a stalled connection would hang the task.
+REQUEST_TIMEOUT_SECONDS = 30
+
 
 def get_gauntlet_build_id() -> str | None:
     """Get the latest build ID from Gauntlet dashboard"""
     try:
         # Request the main page first to get the latest build ID
-        response = requests.get("https://dashboards.gauntlet.xyz/")
+        response = requests.get("https://dashboards.gauntlet.xyz/", timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
 
         # Find the build ID in the HTML
@@ -46,7 +49,7 @@ def get_markets_for_protocol(protocol, max_retries=3) -> list[dict] | None:
             protocol_lower = protocol.lower()
             urlHealthMetrics = base_url.format(build_id, protocol_lower, protocol_lower)
 
-            response = requests.get(urlHealthMetrics)
+            response = requests.get(urlHealthMetrics, timeout=REQUEST_TIMEOUT_SECONDS)
             response.raise_for_status()
             data = response.json()
 
@@ -82,7 +85,7 @@ def get_charts_for_protocol_market(protocol, market, max_retries=3):
             protocol_lower = protocol.lower()
             urlCharts = base_url.format(build_id, protocol_lower, market)
 
-            response = requests.get(urlCharts)
+            response = requests.get(urlCharts, timeout=REQUEST_TIMEOUT_SECONDS)
             response.raise_for_status()
             data = response.json()
 

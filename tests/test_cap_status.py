@@ -107,6 +107,19 @@ def test_stcusd_assets_per_share_decrease_is_critical(monkeypatch: pytest.Monkey
     assert alerts[0].severity == status.AlertSeverity.CRITICAL
     assert "Decrease: 0.010000 cUSD per stcUSD" in alerts[0].message
     assert cache[status.CACHE_KEY_STCUSD_ASSETS_PER_SHARE] == "1090000000000000000"
+    assert alerts[0].dispatch
+
+
+def test_stcusd_rounding_decrease_alerts_without_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(status, "send_alert", alerts.append)
+
+    status.check_stcusd_assets_per_share(1_100_000_000_000_000_000)
+    status.check_stcusd_assets_per_share(1_099_999_999_999_999_998)
+
+    assert len(alerts) == 1
+    assert not alerts[0].dispatch
 
 
 def test_stcusd_assets_per_share_increase_does_not_alert(monkeypatch: pytest.MonkeyPatch) -> None:

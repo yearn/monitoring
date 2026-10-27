@@ -87,6 +87,11 @@ CACHE_KEY_USD3_TVL = "3JANE_USD3_TVL"
 CACHE_KEY_SUSD3_TVL = "3JANE_SUSD3_TVL"
 CACHE_KEY_SHUTDOWN_USD3 = "3JANE_SHUTDOWN_USD3"
 CACHE_KEY_SHUTDOWN_SUSD3 = "3JANE_SHUTDOWN_SUSD3"
+# A PPS drop smaller than this (percent) still alerts but does not trigger the
+# emergency withdrawal dispatch: float PPS and share-rounding noise can produce
+# tiny decreases that are not losses.
+PPS_DISPATCH_MIN_DECREASE_PCT = 0.01
+
 CACHE_KEY_DEBT_CAP = "3JANE_DEBT_CAP"
 CACHE_KEY_NOMINAL_FLOOR = "3JANE_NOMINAL_FLOOR"
 CACHE_KEY_FLOOR_BREACH = "3JANE_FLOOR_BREACH"
@@ -585,7 +590,8 @@ def check_pps(usd3_pps_float: float, susd3_pps_float: float) -> None:
             f"⚠️ Possible loan markdown or default\n"
             f"🔗 [USD3](https://etherscan.io/address/{USD3_ADDRESS})"
         )
-        send_alert(Alert(AlertSeverity.CRITICAL, message, PROTOCOL))
+        dispatch = decrease_pct >= PPS_DISPATCH_MIN_DECREASE_PCT
+        send_alert(Alert(AlertSeverity.CRITICAL, message, PROTOCOL, dispatch=dispatch))
 
     if usd3_pps_float != previous_usd3_pps:
         set_cache_value(CACHE_KEY_USD3_PPS, usd3_pps_float)
@@ -603,7 +609,8 @@ def check_pps(usd3_pps_float: float, susd3_pps_float: float) -> None:
             f"⚠️ Junior tranche absorbing losses — first-loss buffer impacted\n"
             f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
         )
-        send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
+        dispatch = decrease_pct >= PPS_DISPATCH_MIN_DECREASE_PCT
+        send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL, dispatch=dispatch))
 
     if susd3_pps_float != previous_susd3_pps:
         set_cache_value(CACHE_KEY_SUSD3_PPS, susd3_pps_float)
