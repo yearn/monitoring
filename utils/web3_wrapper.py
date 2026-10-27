@@ -14,6 +14,7 @@ from web3.types import RPCEndpoint, RPCResponse
 
 from utils.chains import PUBLIC_RPC_URLS, Chain
 from utils.logger import get_logger
+from utils.redact import redact_secrets, safe_url
 
 load_dotenv()
 
@@ -64,9 +65,10 @@ def retry_with_provider_rotation(func):
                 # on retry, so fail fast and let the caller handle it.
                 if _is_non_retryable(e):
                     raise
-                current_url = self.endpoint_uri
-                errors[current_url] = str(e)
-                logger.warning("Failed on %s: %s", current_url, e)
+                # Provider URLs embed API keys: keep only scheme + host in errors and logs.
+                current_url = safe_url(self.endpoint_uri)
+                errors[current_url] = redact_secrets(str(e))
+                logger.warning("Failed on %s: %s", current_url, errors[current_url])
                 time.sleep(min(self.backoff_factor * (2**attempt), MAX_BACKOFF_SECONDS))
                 self._rotate_provider()
 
@@ -91,7 +93,7 @@ class RetryProviders:
         current_index = self.provider_urls.index(self.endpoint_uri)
         next_index = (current_index + 1) % len(self.provider_urls)
         self.endpoint_uri = self.provider_urls[next_index]
-        logger.warning("Switching to provider: %s", self.endpoint_uri)
+        logger.warning("Switching to provider: %s", safe_url(self.endpoint_uri))
 
 
 class MultiHTTPProvider(HTTPProvider, RetryProviders):
@@ -117,11 +119,11 @@ class MultiHTTPProvider(HTTPProvider, RetryProviders):
             try:
                 parsed = urlparse(url)
                 if not parsed.scheme or not parsed.netloc:
-                    logger.warning("Invalid URL format: %s", url)
+                    logger.warning("Invalid URL format: %s", safe_url(url))
                     continue
                 valid_urls.append(url)
             except Exception as e:
-                logger.warning("Error validating URL %s: %s", url, e)
+                logger.warning("Error validating URL %s: %s", safe_url(url), e)
         return valid_urls
 
     @retry_with_provider_rotation
@@ -189,7 +191,7 @@ class Web3Client(RetryProviders):
         try:
             return operation(*args, **kwargs)
         except Exception as e:
-            raise ProviderConnectionError(f"Operation failed on {self.chain.name}: {str(e)}")
+            raise ProviderConnectionError(f"Operation failed on {self.chain.name}: {redact_secrets(str(e))}")
 
     @property
     def eth(self):

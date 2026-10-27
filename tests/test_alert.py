@@ -140,3 +140,30 @@ class TestAlert(unittest.TestCase):
             mock_send.assert_called_once()
         finally:
             register_alert_hook(None)
+
+
+class TestAlertHookResilience(unittest.TestCase):
+    """The emergency hook must not depend on Telegram delivery."""
+
+    def tearDown(self):
+        register_alert_hook(None)
+
+    @patch("utils.alert.send_telegram_message", side_effect=RuntimeError("telegram down"))
+    def test_hook_runs_when_telegram_fails(self, _mock_send):
+        hook = MagicMock()
+        register_alert_hook(hook)
+
+        with self.assertRaises(RuntimeError):
+            send_alert(Alert(severity=AlertSeverity.CRITICAL, message="depeg", protocol="maple"))
+
+        hook.assert_called_once()
+
+    @patch("utils.alert.send_telegram_message", side_effect=RuntimeError("telegram down"))
+    def test_hook_skipped_for_low_severity_even_on_failure(self, _mock_send):
+        hook = MagicMock()
+        register_alert_hook(hook)
+
+        with self.assertRaises(RuntimeError):
+            send_alert(Alert(severity=AlertSeverity.MEDIUM, message="stale", protocol="maple"))
+
+        hook.assert_not_called()

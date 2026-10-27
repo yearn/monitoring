@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from automation.config import JobsConfigError, load_jobs_config
+from automation.config import DEFAULT_TASK_TIMEOUT_SECONDS, JobsConfigError, load_jobs_config
 
 
 def _write_yaml(tmp: Path, body: str) -> Path:
@@ -137,6 +137,39 @@ class TestLoadJobsConfig(unittest.TestCase):
             with self.assertRaises(JobsConfigError) as ctx:
                 load_jobs_config(path)
             self.assertIn("unknown_field", str(ctx.exception))
+
+    def test_task_timeout_default_and_override(self):
+        with TemporaryDirectory() as d:
+            path = _write_yaml(
+                Path(d),
+                """
+                profiles:
+                  hourly:
+                    cron: "26 * * * *"
+                    tasks:
+                      - { name: "a", script: a/main.py }
+                      - { name: "b", script: b/main.py, timeout: 300 }
+                """,
+            )
+            tasks = load_jobs_config(path).profiles["hourly"].tasks
+            self.assertEqual([t.timeout for t in tasks], [DEFAULT_TASK_TIMEOUT_SECONDS, 300])
+
+    def test_invalid_task_timeout(self):
+        for bad in ("0", "-5", '"300"', "true"):
+            with self.subTest(timeout=bad), TemporaryDirectory() as d:
+                path = _write_yaml(
+                    Path(d),
+                    f"""
+                    profiles:
+                      hourly:
+                        cron: "26 * * * *"
+                        tasks:
+                          - {{ name: "a", script: a/main.py, timeout: {bad} }}
+                    """,
+                )
+                with self.assertRaises(JobsConfigError) as ctx:
+                    load_jobs_config(path)
+                self.assertIn("timeout", str(ctx.exception))
 
     def test_missing_file(self):
         with TemporaryDirectory() as d:

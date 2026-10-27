@@ -975,3 +975,30 @@ def test_debt_cap_alert_displays_wausdc_shares_and_usdc_equivalent(monkeypatch: 
     assert alerts[0].severity == module.AlertSeverity.LOW
     assert "waUSDC shares: 60.00M → 63.00M" in alerts[0].message
     assert "USDC equivalent at current rate: $63.00M → $66.15M" in alerts[0].message
+
+
+def test_pps_rounding_drop_alerts_without_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    cache = {module.CACHE_KEY_USD3_PPS: 1.05, module.CACHE_KEY_SUSD3_PPS: 1.10}
+    monkeypatch.setattr(module, "get_cache_value", lambda key: cache.get(key, 0.0))
+    monkeypatch.setattr(module, "set_cache_value", cache.__setitem__)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    # A sub-basis-point float dip on both tranches: still alerts, but must not move funds.
+    module.check_pps(1.05 * (1 - 1e-7), 1.10 * (1 - 1e-7))
+
+    assert [alert.dispatch for alert in alerts] == [False, False]
+
+
+def test_pps_material_drop_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    cache = {module.CACHE_KEY_USD3_PPS: 1.05, module.CACHE_KEY_SUSD3_PPS: 1.10}
+    monkeypatch.setattr(module, "get_cache_value", lambda key: cache.get(key, 0.0))
+    monkeypatch.setattr(module, "set_cache_value", cache.__setitem__)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_pps(1.04, 1.09)
+
+    assert [alert.dispatch for alert in alerts] == [True, True]

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from automation import crontab, git_sync
 from automation.config import Profile, Task
+from utils.redact import redact_secrets
 from utils.telegram import TelegramError, escape_markdown, send_telegram_message
 
 logger = logging.getLogger(__name__)
@@ -68,7 +69,8 @@ def _error_tail(stdout: str | None, stderr: str | None) -> str | None:
         lines = [ln.rstrip() for ln in stream.splitlines() if ln.strip()]
         if not lines:
             continue
-        tail = "\n".join(lines[-_ERROR_TAIL_LINES:])
+        # Tracebacks quote request URLs, which embed RPC/API keys.
+        tail = redact_secrets("\n".join(lines[-_ERROR_TAIL_LINES:]))
         if len(tail) > _ERROR_TAIL_CHARS:
             tail = "…" + tail[-_ERROR_TAIL_CHARS:]
         return tail
@@ -222,7 +224,26 @@ def _run_task(task: Task, *, profile: Profile, repo_root: Path, dry_run: bool) -
     logger.info("running task %s: %s", task.name, " ".join(argv))
     start = time.monotonic()
     try:
-        completed = subprocess.run(argv, cwd=repo_root, env=env, check=False, capture_output=True, text=True)
+        completed = subprocess.run(
+            argv, cwd=repo_root, env=env, check=False, capture_output=True, text=True, timeout=task.timeout
+        )
+    except subprocess.TimeoutExpired as exc:
+        duration = time.monotonic() - start
+        output = _decode_output(exc.stderr) + _decode_output(exc.stdout)
+        logger.error(
+            "task %s timed out after %ds and was killed%s",
+            task.name,
+            task.timeout,
+            f"\n{output.rstrip()}" if output.strip() else "",
+        )
+        tail = _error_tail(_decode_output(exc.stdout), _decode_output(exc.stderr))
+        return TaskResult(
+            name=task.name,
+            script=task.script,
+            returncode=-1,
+            duration_s=duration,
+            error=f"timed out after {task.timeout}s" + (f"\n{tail}" if tail else ""),
+        )
     except OSError as exc:
         duration = time.monotonic() - start
         logger.exception("task %s failed to spawn", task.name)
@@ -282,6 +303,15 @@ def _run_task(task: Task, *, profile: Profile, repo_root: Path, dry_run: bool) -
         returncode=completed.returncode,
         duration_s=duration,
     )
+
+
+def _decode_output(output: str | bytes | None) -> str:
+    """Normalize partial output from ``TimeoutExpired`` (bytes even in text mode) to str."""
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        return output.decode(errors="replace")
+    return output
 
 
 def _send_failure_digest(result: ProfileResult) -> None:

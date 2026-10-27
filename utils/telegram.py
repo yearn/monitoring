@@ -1,11 +1,12 @@
 import os
-import re
+import time
 
 import requests
 from dotenv import load_dotenv
 
 from utils import store
 from utils.logger import get_logger
+from utils.redact import redact_secrets
 
 load_dotenv()
 
@@ -46,16 +47,26 @@ CURATION_CHANNEL = "curation"
 # matching ``CURATION_CHANNEL``'s "fail-open to the protocol group" semantics.
 YEARN_MAINTENANCE_CHANNEL = "yearn_maintenance"
 
-# Matches `bot<digits>:<token>` in Telegram API URLs. Used to scrub the bot
-# token out of exception messages — `requests.HTTPError.__str__()` includes
-# the full URL, so without this the token leaks into any log or alert that
-# surfaces the error. GitHub Actions auto-masks secrets in workflow logs,
-# but local runs and any Telegram crash-alert do not.
-_BOT_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
+# Longest wait honored from a Telegram 429 `retry_after` before giving up. Alert
+# bursts during an incident hit the per-chat rate limit; one bounded retry keeps
+# the alert instead of dropping it.
+MAX_RETRY_AFTER_SECONDS = 30
 
 
-def _redact_bot_token(text: str) -> str:
-    return _BOT_TOKEN_RE.sub("bot***", text)
+def _utf16_len(text: str) -> int:
+    """Length as Telegram counts it (UTF-16 code units, so most emoji count as 2)."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _truncate_utf16(text: str, limit: int, suffix: str = "...") -> str:
+    """Trim ``text`` so it plus ``suffix`` fits in ``limit`` UTF-16 code units."""
+    budget = limit - _utf16_len(suffix)
+    used = 0
+    for index, char in enumerate(text):
+        used += 2 if ord(char) > 0xFFFF else 1
+        if used > budget:
+            return text[:index] + suffix
+    return text
 
 
 def escape_markdown(text: str) -> str:
@@ -86,6 +97,17 @@ def _is_parse_entities_error(exc: TelegramError) -> bool:
     return "can't parse entities" in str(exc).lower()
 
 
+def _retry_after_seconds(response: requests.Response | None) -> int | None:
+    """Return Telegram's ``retry_after`` for a 429 response, or None."""
+    if response is None or response.status_code != 429:
+        return None
+    try:
+        retry_after = response.json().get("parameters", {}).get("retry_after")
+    except ValueError, AttributeError:
+        return None
+    return int(retry_after) if isinstance(retry_after, (int, float)) else None
+
+
 def _post_message(
     bot_token: str,
     chat_id: str,
@@ -94,7 +116,11 @@ def _post_message(
     disable_notification: bool,
     topic_id: str | None = None,
 ) -> None:
-    """Send a single message to Telegram, raising TelegramError on failure."""
+    """Send a single message to Telegram, raising TelegramError on failure.
+
+    A 429 is retried once after Telegram's ``retry_after`` (capped at
+    ``MAX_RETRY_AFTER_SECONDS``).
+    """
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload: dict[str, object] = {
         "chat_id": chat_id,
@@ -106,26 +132,70 @@ def _post_message(
     if topic_id:
         payload["message_thread_id"] = int(topic_id)
 
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        # Telegram's response body carries the real failure reason
-        # (e.g. "can't parse entities", invalid message_thread_id). Surface it
-        # so callers don't have to debug from just an HTTP status.
-        body = ""
-        err_response = getattr(e, "response", None)
-        if err_response is not None:
-            try:
-                body = f" body={err_response.text}"
-            except Exception:
-                pass
-        raise TelegramError(_redact_bot_token(f"Failed to send telegram message: {e}{body}"))
+    for attempt in range(2):
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+        except requests.RequestException as e:
+            err_response = getattr(e, "response", None)
+            retry_after = _retry_after_seconds(err_response)
+            if attempt == 0 and retry_after is not None and retry_after <= MAX_RETRY_AFTER_SECONDS:
+                logger.warning("Telegram rate limited; retrying in %ds", retry_after)
+                time.sleep(retry_after)
+                continue
+            # Telegram's response body carries the real failure reason
+            # (e.g. "can't parse entities", invalid message_thread_id). Surface it
+            # so callers don't have to debug from just an HTTP status.
+            body = ""
+            if err_response is not None:
+                try:
+                    body = f" body={err_response.text}"
+                except Exception:
+                    pass
+            # requests quotes the URL, which embeds the bot token.
+            raise TelegramError(redact_secrets(f"Failed to send telegram message: {e}{body}"))
 
-    if response.status_code != 200:
-        raise TelegramError(
-            _redact_bot_token(f"Failed to send telegram message: {response.status_code} - {response.text}")
-        )
+        if response.status_code != 200:
+            raise TelegramError(
+                redact_secrets(f"Failed to send telegram message: {response.status_code} - {response.text}")
+            )
+        return
+
+
+def _deliver(
+    alert_id: int | None,
+    bot_token: str,
+    chat_id: str,
+    message: str,
+    plain_text: bool,
+    disable_notification: bool,
+    protocol: str,
+    topic_id: str | None = None,
+) -> None:
+    """Post ``message`` and record the delivery outcome on ``alert_id``.
+
+    A malformed-Markdown message (e.g. a truncated `code`/[link] entity)
+    triggers a 400 "can't parse entities" and can never be delivered as-is.
+    Callers that gate their dedupe cursor on delivery (e.g. timelock_alerts)
+    would then re-send the whole batch every run forever, so it is retried once
+    as plain text.
+
+    Raises:
+        TelegramError: If delivery fails.
+    """
+    try:
+        _post_message(bot_token, chat_id, message, plain_text, disable_notification, topic_id)
+    except TelegramError as exc:
+        if plain_text or not _is_parse_entities_error(exc):
+            _update_alert_delivery_safe(alert_id, status="failed", error=str(exc))
+            raise
+        logger.warning("Markdown parse error from Telegram; retrying as plain text for %s", protocol)
+        try:
+            _post_message(bot_token, chat_id, message, True, disable_notification, topic_id)
+        except TelegramError as retry_exc:
+            _update_alert_delivery_safe(alert_id, status="failed", error=str(retry_exc))
+            raise
+    _update_alert_delivery_safe(alert_id, status="delivered", delivered_at=store.utc_now_iso())
 
 
 def send_telegram_message(
@@ -151,11 +221,15 @@ def send_telegram_message(
     Raises:
         TelegramError: If the message fails to send
     """
+    # Last line of defense: alerts quote exception text, which can carry RPC/API
+    # keys. Redact before the message is stored, exposed by the API, or sent.
+    message = redact_secrets(message)
     logger.debug("Sending telegram message:\n%s", message)
 
-    # Truncate long messages; disable Markdown to avoid broken entities
-    if len(message) > MAX_MESSAGE_LENGTH:
-        message = message[: MAX_MESSAGE_LENGTH - 3] + "..."
+    # Truncate long messages; disable Markdown to avoid broken entities. Telegram
+    # counts UTF-16 code units, so emoji-heavy text is measured that way.
+    if _utf16_len(message) > MAX_MESSAGE_LENGTH:
+        message = _truncate_utf16(message, MAX_MESSAGE_LENGTH)
         plain_text = True
 
     logical_protocol = origin_protocol or protocol
@@ -217,12 +291,7 @@ def send_telegram_message(
             silent=disable_notification,
             metadata=metadata,
         )
-        try:
-            _post_message(bot_token, test_chat_id, sent_message, plain_text, disable_notification)
-        except TelegramError as exc:
-            _update_alert_delivery_safe(alert_id, status="failed", error=str(exc))
-            raise
-        _update_alert_delivery_safe(alert_id, status="delivered", delivered_at=store.utc_now_iso())
+        _deliver(alert_id, bot_token, test_chat_id, sent_message, plain_text, disable_notification, protocol)
         return
 
     # Check if this protocol has a topic ID configured (forum-style group)
@@ -264,26 +333,7 @@ def send_telegram_message(
         silent=disable_notification,
         metadata=metadata,
     )
-    try:
-        _post_message(bot_token, chat_id, message, plain_text, disable_notification, topic_id)
-    except TelegramError as exc:
-        # A malformed-Markdown message (e.g. a truncated `code`/[link] entity)
-        # triggers a 400 "can't parse entities" and can never be delivered as-is.
-        # Callers that gate their dedupe cursor on delivery (e.g. timelock_alerts)
-        # would then re-send the whole batch every run forever. Retry once as plain
-        # text so the alert still lands and the cursor can advance.
-        if not plain_text and _is_parse_entities_error(exc):
-            logger.warning("Markdown parse error from Telegram; retrying as plain text for %s", protocol)
-            try:
-                _post_message(bot_token, chat_id, message, True, disable_notification, topic_id)
-            except TelegramError as retry_exc:
-                _update_alert_delivery_safe(alert_id, status="failed", error=str(retry_exc))
-                raise
-            _update_alert_delivery_safe(alert_id, status="delivered", delivered_at=store.utc_now_iso())
-            return
-        _update_alert_delivery_safe(alert_id, status="failed", error=str(exc))
-        raise
-    _update_alert_delivery_safe(alert_id, status="delivered", delivered_at=store.utc_now_iso())
+    _deliver(alert_id, bot_token, chat_id, message, plain_text, disable_notification, protocol, topic_id)
 
 
 def _record_alert_safe(

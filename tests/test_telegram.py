@@ -389,3 +389,78 @@ class TestSendEnvioErrorMessage(unittest.TestCase):
         json_body = mock_post.call_args[1]["json"]
         self.assertEqual(json_body["chat_id"], "errors_chat_id")
         self.assertEqual(json_body["text"], "[yearn] GraphQL boom")
+
+
+class TestTelegramHardening(unittest.TestCase):
+    """Rate-limit retry, secret redaction, and UTF-16 truncation."""
+
+    _ENV = {"TELEGRAM_BOT_TOKEN_TEST": "123:tok", "TELEGRAM_CHAT_ID_TEST": "chat", "LOG_LEVEL": "INFO"}
+
+    @staticmethod
+    def _rate_limited(retry_after: int) -> mock.Mock:
+        response = mock.Mock(status_code=429, text="Too Many Requests")
+        response.json.return_value = {"ok": False, "parameters": {"retry_after": retry_after}}
+        response.raise_for_status.side_effect = requests.HTTPError("429", response=response)
+        return response
+
+    @patch("utils.telegram.time.sleep")
+    @patch("utils.telegram.requests.post")
+    def test_rate_limit_is_retried_once_after_retry_after(self, mock_post, mock_sleep):
+        ok = mock.Mock(status_code=200, raise_for_status=mock.Mock(return_value=None))
+        mock_post.side_effect = [self._rate_limited(3), ok]
+
+        with patch.dict(os.environ, self._ENV):
+            send_telegram_message("msg", "test")
+
+        self.assertEqual(mock_post.call_count, 2)
+        mock_sleep.assert_called_once_with(3)
+
+    @patch("utils.telegram.time.sleep")
+    @patch("utils.telegram.requests.post")
+    def test_long_retry_after_is_not_waited(self, mock_post, mock_sleep):
+        mock_post.return_value = self._rate_limited(600)
+
+        with patch.dict(os.environ, self._ENV), self.assertRaises(TelegramError):
+            send_telegram_message("msg", "test")
+
+        self.assertEqual(mock_post.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    @patch("utils.telegram.requests.post")
+    def test_secrets_are_redacted_before_send(self, mock_post):
+        mock_post.return_value = mock.Mock(status_code=200, raise_for_status=mock.Mock(return_value=None))
+        url = "https://eth-mainnet.g.alchemy.com/v2/supersecretkey12345"
+
+        with patch.dict(os.environ, {**self._ENV, "PROVIDER_URL_MAINNET": url}):
+            send_telegram_message(f"crashed: 429 for url: {url}", "test", plain_text=True)
+
+        text = mock_post.call_args.kwargs["json"]["text"]
+        self.assertNotIn("supersecretkey12345", text)
+        self.assertIn("eth-mainnet.g.alchemy.com/***", text)
+
+    @patch("utils.telegram.requests.post")
+    def test_truncation_counts_utf16_units(self, mock_post):
+        mock_post.return_value = mock.Mock(status_code=200, raise_for_status=mock.Mock(return_value=None))
+
+        with patch.dict(os.environ, self._ENV):
+            send_telegram_message("🚨" * 3000, "test")
+
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertLessEqual(len(payload["text"].encode("utf-16-le")) // 2, 4096)
+        self.assertTrue(payload["text"].endswith("..."))
+        self.assertNotIn("parse_mode", payload)
+
+    @patch("utils.telegram.requests.post")
+    def test_test_chat_override_retries_parse_errors_as_plain_text(self, mock_post):
+        bad = mock.Mock(status_code=400, text="Bad Request: can't parse entities")
+        bad.json.return_value = {}
+        bad.raise_for_status.side_effect = requests.HTTPError("400", response=bad)
+        ok = mock.Mock(status_code=200, raise_for_status=mock.Mock(return_value=None))
+        mock_post.side_effect = [bad, ok]
+
+        env = {"TELEGRAM_BOT_TOKEN_DEFAULT": "123:tok", "TELEGRAM_TEST_CHAT_ID": "dummy", "LOG_LEVEL": "INFO"}
+        with patch.dict(os.environ, env):
+            send_telegram_message("*unbalanced", "test")
+
+        self.assertEqual(mock_post.call_count, 2)
+        self.assertNotIn("parse_mode", mock_post.call_args.kwargs["json"])

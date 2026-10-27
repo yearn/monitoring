@@ -29,6 +29,13 @@
 # below, nothing to escape) and join multiple with `|`. Clients then call the
 # API with:  -H "Authorization: Bearer <their-token>"
 #
+# Tokens MUST be 64 hex characters: the config rejects any other bearer format
+# before comparing tokens, so an unset/empty ALERTS_API_TOKENS (which would turn
+# the token regex into `^Bearer ()$`) fails closed instead of matching an empty
+# token. Also refuse to start Caddy without tokens — in the same drop-in:
+#
+#   ExecStartPre=/bin/sh -c 'test -n "$ALERTS_API_TOKENS" || { echo "ALERTS_API_TOKENS unset" >&2; exit 1; }'
+#
 # Rate limiting (the commented `rate_limit` blocks) needs the caddy-ratelimit
 # plugin, which is NOT in the stock apt build. Either build it once with
 #   xcaddy build --with github.com/mholt/caddy-ratelimit
@@ -84,6 +91,13 @@
 
 	# --- token-gated API (everything else) ---
 	handle {
+		# Fail closed: only well-formed 64-hex bearer tokens are even considered,
+		# so an empty ALERTS_API_TOKENS can never authorize a request.
+		@malformed {
+			not header_regexp Authorization "^Bearer [0-9a-f]{64}$"
+		}
+		error @malformed "unauthorized" 401
+
 		# Accept any token in the pipe-separated ALERTS_API_TOKENS list.
 		@unauthorized {
 			not header_regexp Authorization "^Bearer ({$ALERTS_API_TOKENS})$"

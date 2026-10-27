@@ -146,6 +146,35 @@ The restart re-reads the env and re-renders the crontab. Anyone who could read
 the file has seen the old values, so a leaked credential should be rotated at
 the provider, not just edited here.
 
+`monitoring-api` does not load this file (it needs no credentials, and the unit
+makes `/etc/monitoring` inaccessible to it), so it needs no restart on rotation.
+
+Outbound text (logs, Telegram alerts, crash alerts, the automation digest and
+alert history) passes through `utils/redact.py`, which masks the values of
+`PROVIDER_URL_*` and every `*_KEY` / `*_TOKEN` / `*_SECRET` env var. Before that
+redaction existed, crash alerts quoted full RPC URLs, so **rotate any RPC key
+that may have appeared in an alert or log before the change**.
+
+---
+
+## Security baseline
+
+The box hard-resets to `origin/main` every 10 minutes and runs it with every
+secret in `/etc/monitoring/.env`, so write access to `main` is effectively code
+execution on the VPS. Keep these in place:
+
+- **Branch protection on `main`:** required PR review, required CI, no force
+  pushes or deletions, and ideally signed commits. Limit who can merge.
+- **Read-only repo credentials on the box:** a fine-grained token scoped to this
+  repo with `Contents: read` only, or a read-only SSH deploy key. `install.sh`
+  no longer copies a personal `gh` login token.
+- **Caddy:** tokens are 64-hex (`openssl rand -hex 32`); add the
+  `ExecStartPre` check from `deploy/Caddyfile` so Caddy refuses to start without
+  `ALERTS_API_TOKENS`.
+- **Emergency dispatch receiver:** the signed body now includes `sent_at` (unix
+  seconds). The liquidity-monitoring receiver should reject requests older than a
+  few minutes to stop replays.
+
 ---
 
 ## Test / staging run (route every alert to one dummy group)

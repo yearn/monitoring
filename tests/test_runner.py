@@ -99,5 +99,22 @@ class TestRunWithAlert(unittest.TestCase):
         self.assertIn(boom.__module__, message)
 
 
+class TestRunWithAlertRedaction(unittest.TestCase):
+    def test_crash_alert_redacts_rpc_key(self) -> None:
+        import os
+
+        url = "https://eth-mainnet.g.alchemy.com/v2/crashkey1234567890ab"
+
+        def boom() -> None:
+            raise RuntimeError(f"All providers failed. Errors:\n{url}: 429")
+
+        with patch.dict(os.environ, {"PROVIDER_URL_MAINNET": url}), patch("utils.runner.send_error_message") as send:
+            run_with_alert(boom, "aave", name="aave.main")
+
+        message = send.call_args.args[0]
+        self.assertNotIn("crashkey1234567890ab", message)
+        self.assertIn("eth-mainnet.g.alchemy.com/***", message)
+
+
 if __name__ == "__main__":
     unittest.main()

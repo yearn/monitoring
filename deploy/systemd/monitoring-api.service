@@ -24,14 +24,9 @@ Environment=CACHE_DIR=__CACHE_DIR__
 Environment=MONITORING_API_HOST=127.0.0.1
 Environment=MONITORING_API_PORT=8923
 
-ExecStartPre=+/bin/bash -c '\
-  install -m 750 -o root -g __MONITOR_USER__ -d __ETC_DIR__; \
-  if [ ! -f __ETC_DIR__/.env ]; then \
-    echo "monitoring-api: __ETC_DIR__/.env missing" >&2; \
-    exit 1; \
-  fi'
-
-EnvironmentFile=__ETC_DIR__/.env
+# No EnvironmentFile: the API only reads the alerts DB under CACHE_DIR and the repo's
+# YAML, so it gets none of the RPC/Telegram/LLM credentials in __ETC_DIR__/.env. A bug
+# in the internet-facing (via Caddy) HTTP server then has no secrets to expose.
 ExecStart=__REPO_DIR__/.venv/bin/python -m api
 
 Restart=on-failure
@@ -44,6 +39,8 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=__CACHE_DIR__
+# Keep the credentials file out of reach even though the API runs as the same user.
+InaccessiblePaths=-__ETC_DIR__
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

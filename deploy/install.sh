@@ -24,13 +24,13 @@
 #      root:<deploy-user>) — copy from .env.example and fill in the values.
 # Then: `systemctl enable --now monitoring`.
 #
-# Private-repo auth over HTTPS resolves a token, in order:
-#   1. $GITHUB_TOKEN in the environment (pass with `sudo -E`).
-#   2. The invoking user's `gh` login.
-#   3. root's own `gh` login.
-# When found it's written to the target user's ~/.git-credentials (mode 600) so
-# the clone AND subsequent `git pull`s authenticate without prompting. SSH
-# remotes (git@github.com:...) skip this entirely.
+# Private-repo auth over HTTPS uses $GITHUB_TOKEN from the environment (pass
+# with `sudo -E`). It's written to the target user's ~/.git-credentials (mode
+# 600) so the clone AND the every-10-min sync authenticate without prompting.
+# That file is readable by the monitoring service itself, so use a fine-grained
+# token scoped to this one repository with read-only "Contents" access (or an SSH
+# deploy key, read-only) — never a personal `gh` login token, which usually
+# carries write and org scopes. SSH remotes (git@github.com:...) skip this entirely.
 
 set -Eeuo pipefail
 
@@ -77,23 +77,12 @@ as_user() {
   fi
 }
 
-# Resolve a GitHub token (env → invoking user's gh → root's gh). Prints the
-# token on stdout and returns 0 when found; returns 1 otherwise.
+# Print $GITHUB_TOKEN and return 0 when set; return 1 otherwise. Deliberately no
+# `gh auth token` fallback: that is the operator's personal, broadly scoped token,
+# and it would end up in a file the monitoring service can read.
 _github_token() {
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     printf '%s' "$GITHUB_TOKEN"; return 0
-  fi
-  if [[ -n "${SUDO_USER:-}" ]] && command -v gh >/dev/null 2>&1; then
-    local tok
-    if tok="$(sudo -u "$SUDO_USER" gh auth token 2>/dev/null)" && [[ -n "$tok" ]]; then
-      printf '%s' "$tok"; return 0
-    fi
-  fi
-  if command -v gh >/dev/null 2>&1; then
-    local tok
-    if tok="$(gh auth token 2>/dev/null)" && [[ -n "$tok" ]]; then
-      printf '%s' "$tok"; return 0
-    fi
   fi
   return 1
 }
@@ -139,9 +128,10 @@ if [[ "$REPO_URL" == https://* ]]; then
     chmod 600 "$cred_file"
     as_user git config --global credential.helper store
   else
-    warn "no GITHUB_TOKEN / gh login found. If ${REPO_URL} is private the"
-    warn "clone below will fail. Re-run with a token, e.g.:"
-    warn "    sudo -E GITHUB_TOKEN=ghp_xxx bash deploy/install.sh"
+    warn "no GITHUB_TOKEN set. If ${REPO_URL} is private the clone below will"
+    warn "fail. Re-run with a fine-grained, read-only (Contents: read) token for"
+    warn "this repo only, e.g.:"
+    warn "    sudo -E GITHUB_TOKEN=github_pat_xxx bash deploy/install.sh"
   fi
 fi
 

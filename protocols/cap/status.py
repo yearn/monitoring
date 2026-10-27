@@ -17,6 +17,11 @@ STCUSD = "0x88887bE419578051FF9F4eb6C858A951921D8888"
 CUSD_DECIMALS = 18
 ONE_STCUSD = 10**18
 
+# An assets-per-share drop smaller than this (basis points) still alerts but does
+# not trigger the emergency withdrawal dispatch: ERC-4626 rounding can lower
+# convertToAssets(1e18) by a few wei without any loss.
+ASSETS_PER_SHARE_DISPATCH_MIN_DECREASE_BPS = 1
+
 CACHE_KEY_STCUSD_BACKING_DEFICIT = "CAP_STCUSD_BACKING_DEFICIT"
 CACHE_KEY_STCUSD_ASSETS_PER_SHARE = "CAP_STCUSD_ASSETS_PER_SHARE"
 
@@ -106,7 +111,8 @@ def check_stcusd_assets_per_share(current_assets_per_share: int) -> None:
             f"Decrease: {_format_cusd(decrease)} cUSD per stcUSD\n"
             f"🔗 [stcUSD](https://etherscan.io/address/{STCUSD})"
         )
-        send_alert(Alert(AlertSeverity.CRITICAL, message, PROTOCOL))
+        dispatch = decrease * 10_000 >= previous_assets_per_share * ASSETS_PER_SHARE_DISPATCH_MIN_DECREASE_BPS
+        send_alert(Alert(AlertSeverity.CRITICAL, message, PROTOCOL, dispatch=dispatch))
 
     if current_assets_per_share != previous_assets_per_share:
         write_last_value_to_file(

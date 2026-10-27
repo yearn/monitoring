@@ -33,6 +33,13 @@ logger = logging.getLogger(__name__)
 # Mirrors deploy/install.sh: the production venv carries the `ai` extra (LLM clients).
 UV_SYNC_ARGV: list[str] = ["uv", "sync", "--frozen", "--extra", "ai"]
 
+# Bounds on each step. A stalled `git fetch` (half-open TCP to GitHub) would
+# otherwise block the sync profile forever: its flock stays held, so every later
+# tick — and with it code sync — is skipped.
+GIT_FETCH_TIMEOUT_SECONDS = 120
+GIT_RESET_TIMEOUT_SECONDS = 60
+UV_SYNC_TIMEOUT_SECONDS = 600
+
 
 @dataclass
 class SyncResult:
@@ -61,6 +68,7 @@ def sync_to_remote_main(repo_root: Path) -> SyncResult:
             capture_output=True,
             text=True,
             check=False,
+            timeout=GIT_FETCH_TIMEOUT_SECONDS,
         )
         if fetch.returncode != 0:
             output = (fetch.stdout + fetch.stderr).strip()
@@ -71,7 +79,10 @@ def sync_to_remote_main(repo_root: Path) -> SyncResult:
             capture_output=True,
             text=True,
             check=False,
+            timeout=GIT_RESET_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired as exc:
+        return SyncResult(ok=False, output=f"git sync timed out after {exc.timeout}s: {' '.join(exc.cmd)}")
     except OSError as exc:
         return SyncResult(ok=False, output=f"git sync failed to spawn: {exc}")
 
@@ -116,7 +127,10 @@ def sync_dependencies(repo_root: Path) -> SyncResult:
             capture_output=True,
             text=True,
             check=False,
+            timeout=UV_SYNC_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired as exc:
+        return SyncResult(ok=False, output=f"uv sync timed out after {exc.timeout}s")
     except OSError as exc:
         return SyncResult(ok=False, output=f"uv sync failed to spawn: {exc}")
 
