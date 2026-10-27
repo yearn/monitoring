@@ -452,14 +452,6 @@ class TestBuildReport(unittest.TestCase):
         self.assertLess(report.index("## Analysis"), report.index("## Call Flow"))
         self.assertLess(report.index("## Call Flow"), report.index("## Reference"))
 
-    def test_protocol_context_is_deterministic_section_after_call_flow(self) -> None:
-        ctx = _add_farms_ctx(protocol_context="- **Farm:** New Silver 2 Senior", related_addresses=[DROP])
-        report = build_report("Updates the rate.", "Long analysis.", ctx, "LOW")
-        self.assertIn("## Protocol Context\n\n- **Farm:** New Silver 2 Senior", report)
-        self.assertLess(report.index("## Analysis"), report.index("## Call Flow"))
-        self.assertLess(report.index("## Call Flow"), report.index("## Protocol Context"))
-        self.assertLess(report.index("## Protocol Context"), report.index("## Reference"))
-
     def test_metadata_header(self) -> None:
         report = build_report("Summary.", "Analysis.", _add_farms_ctx(label_address=TIMELOCK), "HIGH")
         self.assertIn("- **Protocol:** INFINIFI", report)

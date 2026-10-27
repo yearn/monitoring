@@ -32,7 +32,6 @@ from utils.chains import Chain
 from utils.erc20_metadata import fetch_erc20_metadata
 from utils.eth_view import call_view
 from utils.formatting import format_asset_amount, format_duration, format_utc
-from utils.llm.report import address_link
 from utils.logger import get_logger
 from utils.source_context import get_contract_label
 from utils.web3_wrapper import ChainManager, Web3Client
@@ -426,27 +425,6 @@ def format_yearn_strategy_prompt(contexts: list[YearnStrategyContext]) -> str:
             "Proposed by this transaction (in batch order):",
             *(f"  - {line}" for line in context.proposal_lines(render)),
         ]
-        sections.append("\n".join(lines))
-    sections.extend(_shared_notes(contexts))
-    return "\n\n".join(sections)
-
-
-def format_yearn_strategy_report(
-    contexts: list[YearnStrategyContext],
-    chain_id: int,
-    labels: dict[str, str],
-) -> str:
-    """Render the deterministic tokenized-strategy section for the gist report."""
-    sections: list[str] = []
-    for context in contexts:
-        merged = {**context.labels, **labels}
-
-        def render(address: str, merged: dict[str, str] = merged) -> str:
-            return address_link(address, chain_id, merged)
-
-        header, settings = context.header_lines(render)
-        lines = [f"**{header}**", f"- {settings}", "- **Proposed:**"]
-        lines.extend(f"  - {line}" for line in context.proposal_lines(render))
         sections.append("\n".join(lines))
     sections.extend(_shared_notes(contexts))
     return "\n\n".join(sections)

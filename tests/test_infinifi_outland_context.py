@@ -13,7 +13,6 @@ from utils.llm.infinifi_outland_context import (
     OutlandMessageContext,
     RouteConfig,
     format_outland_prompt,
-    format_outland_report,
     resolve_outland_context,
 )
 
@@ -138,7 +137,6 @@ class TestConnectorRoute(unittest.TestCase):
         prompt = format_outland_prompt(contexts)
         self.assertIn("NOT configured", prompt)
         self.assertIn("route is not live after this batch", prompt)
-        self.assertIn("**not configured**", format_outland_report(contexts, 1, {}))
 
     def test_configured_route_names_the_peer(self) -> None:
         contexts = self._resolve([_call("setCctpDomain", ("uint256", 143), ("uint32", 15))], (PEER, 200_000, 99))
@@ -171,15 +169,11 @@ class TestConnectorRoute(unittest.TestCase):
         self.assertIn(f"to peer {NEW_PEER}, gas limit 300,000", prompt)
         self.assertIn(f"Before the batch: peer {PEER}", prompt)
         self.assertNotIn("unchanged", prompt)
-        report = format_outland_report(contexts, 1, {})
-        self.assertIn(f"set by this batch — peer [`{NEW_PEER}`]", report)
-        self.assertIn(f"(was peer [`{PEER}`]", report)
         self.assertEqual(contexts[0].addresses, [CONNECTOR, PEER, NEW_PEER])
 
     def test_clearing_a_live_route_is_flagged(self) -> None:
         contexts = self._resolve([self._set_configuration(ZERO_ADDRESS, 0, 0)], (PEER, 200_000, 99))
         self.assertIn("this batch CLEARS the route", format_outland_prompt(contexts))
-        self.assertIn("**cleared** by this batch", format_outland_report(contexts, 1, {}))
 
     def test_last_configuration_for_a_chain_wins(self) -> None:
         calls = [self._set_configuration(PEER, 99, 200_000), self._set_configuration(NEW_PEER, 99, 300_000)]

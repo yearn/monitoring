@@ -104,10 +104,8 @@ def test_upgrade_includes_scope_controls_and_route_semantics(boundaries: Boundar
     assert "SwapType.ODOS" not in after
     assert "assert(false)" in after
     assert "_transferOut(tokenOut, msg.sender, netOut)" in after
-    explorer = "etherscan.io" if chain_id == 1 else "arbiscan.io"
     for address in (PENDLE_SWAP, OLD, NEW, OWNER):
         assert address in resolved.addresses
-        assert f"https://{explorer}/address/{address}" in resolved.report
     assert resolved.labels[PENDLE_SWAP] == "PendleSwap"
     contract_call = boundaries[2].return_value.eth.contract.call_args
     assert contract_call.kwargs["address"] == PENDLE_SWAP

@@ -14,7 +14,6 @@ from utils.llm.yearn_v3_context import (
     StrategyState,
     YearnV3VaultContext,
     format_yearn_v3_prompt,
-    format_yearn_v3_report,
     resolve_yearn_v3_context,
 )
 
@@ -159,13 +158,6 @@ class TestRendering(unittest.TestCase):
         self.assertEqual(two.count("denominated in its asset WETH"), 2)
         self.assertIn("False only permits custom queues — the default queue still applies", prompt)
         self.assertIn(f"1. Spark Accumulator {PEER}: current_debt 921 WETH / max_debt 10,000 WETH", prompt)
-
-    def test_report_links_queue_and_lists_proposals(self) -> None:
-        report = format_yearn_v3_report([_context([ADD_LOOPER, CAP_LOOPER])], 1, {})
-        self.assertIn(f"https://etherscan.io/address/{VAULT}", report)
-        self.assertIn(f"https://etherscan.io/address/{PEER}", report)
-        self.assertIn("- **Proposed:**", report)
-        self.assertIn("update_max_debt_for_strategy(wstETH/WETH Spark Looper): 10,000 WETH", report)
 
     def test_labels_name_vault_and_strategies(self) -> None:
         labels = _context([]).labels
@@ -570,8 +562,6 @@ class TestDebtAllocatorRebalance(unittest.TestCase):
         self.assertIn("stETH Accumulator 189.02 WETH (12.6%) → 89.17 WETH (6.0%)", line)
         self.assertIn("Yearn OG WETH 46.11 WETH (3.1%) → 21.75 WETH (1.5%)", line)
         self.assertFalse([line for line in self.weth1.outcome_lines if line.startswith("Look-through")])
-        report = format_yearn_v3_report([self.weth2], 1, {})
-        self.assertIn("- Look-through exposure of WETH-2 yVault", report)
 
     def test_exit_liquidity_drops_by_the_off_queue_deposit(self) -> None:
         (line,) = [line for line in self.weth2.outcome_lines if line.startswith("Exit liquidity")]

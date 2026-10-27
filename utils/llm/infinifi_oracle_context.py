@@ -25,7 +25,6 @@ from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
 from utils.erc20_metadata import fetch_erc20_metadata
 from utils.llm.abi_exposure import exposes
-from utils.llm.report import address_link
 from utils.logger import get_logger
 from utils.source_context import fetch_verified_contract
 from utils.web3_wrapper import ChainManager
@@ -254,27 +253,5 @@ def format_infinifi_oracle_prompt(contexts: list[OracleAssignmentContext]) -> st
         )
         if context.feed:
             line += " " + context.feed.describe()
-        lines.append(line)
-    return "\n".join(lines)
-
-
-def format_infinifi_oracle_report(
-    contexts: list[OracleAssignmentContext], chain_id: int, labels: dict[str, str]
-) -> str:
-    """Render the deterministic oracle section for the gist report."""
-    lines = []
-    for context in contexts:
-        line = (
-            f"- **Oracle price:** {address_link(context.oracle, chain_id, labels)} reports `{context.price_raw}` "
-            f"→ one whole `{context.asset_symbol}` = `{context.unit_price_text}` reference units (USDC ≈ 1)"
-        )
-        feed = context.feed
-        if feed:
-            freshness = f", updated {_hours(feed.age)} before this alert" if feed.age is not None else ""
-            line += (
-                f"\n  - **Feed:** {address_link(feed.feed, chain_id, labels)} — "
-                f'"{feed.description or "n/a"}"; heartbeat `{_hours(feed.heartbeat)}`{freshness}. '
-                "A stale feed makes `price()` revert."
-            )
         lines.append(line)
     return "\n".join(lines)

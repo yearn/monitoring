@@ -16,7 +16,6 @@ from utils.llm.threejane_context import (
     _proposed_config_values,
     _requested_epochs,
     format_threejane_prompt,
-    format_threejane_report,
     resolve_threejane_context,
 )
 
@@ -197,17 +196,8 @@ class TestHashedLabelRendering(unittest.TestCase):
             note="minter role: can mint new JANE",
         )
         prompt = format_threejane_prompt([context])
-        report = format_threejane_report([context], 1, {})
         self.assertIn('keccak256("MINTER_ROLE")', prompt)
         self.assertNotIn("value stored on-chain", prompt)
-        self.assertNotIn("Value stored on-chain", report)
-
-    def test_report_links_the_target(self) -> None:
-        context = HashedLabelContext(PROTOCOL_CONFIG, "0xabc", "DEBT_CAP", "ceiling", True, 63_366_281_225_814)
-        report = format_threejane_report([context], 1, {PROTOCOL_CONFIG: "3Jane ProtocolConfig"})
-        self.assertIn(f"https://etherscan.io/address/{PROTOCOL_CONFIG}", report)
-        self.assertIn("3Jane ProtocolConfig", report)
-        self.assertIn("`63,366,281,225,814`", report)
 
     def test_capped_quantity_without_a_unit_stays_raw(self) -> None:
         context = HashedLabelContext(
@@ -221,10 +211,8 @@ class TestHashedLabelRendering(unittest.TestCase):
             current_usage=75_045_566_960_234,
         )
         prompt = format_threejane_prompt([context])
-        report = format_threejane_report([context], 1, {})
         self.assertIn("USD3 totalAssets right now: 75045566960234", prompt)
         self.assertIn("directly comparable", prompt)
-        self.assertIn("`75,045,566,960,234`", report)
 
     def test_supply_cap_raise_renders_in_the_asset_with_headroom(self) -> None:
         """The alert that read "80,000,000,000,000 asset units" now reads in USDC."""
@@ -243,7 +231,6 @@ class TestHashedLabelRendering(unittest.TestCase):
             usage_enforcement=usage_read.enforcement,
         )
         prompt = format_threejane_prompt([context])
-        report = format_threejane_report([context], 1, {})
         self.assertIn("value stored on-chain right now: 80,000,000 USDC (raw 80000000000000)", prompt)
         self.assertIn("this transaction sets it to: 100,000,000 USDC (raw 100000000000000)", prompt)
         self.assertIn("USD3 totalAssets right now: 80,354,041.482181 USDC", prompt)
@@ -251,8 +238,6 @@ class TestHashedLabelRendering(unittest.TestCase):
         self.assertIn("Against the proposed cap: 19,645,958.517819 USDC of headroom", prompt)
         self.assertIn("compares this cap directly against USD3 totalAssets", prompt)
         self.assertNotIn("directly comparable", prompt)
-        self.assertIn("Set by this transaction to: `100,000,000 USDC`", report)
-        self.assertIn("Against the proposed cap: 19,645,958.517819 USDC of headroom", report)
 
     def test_proposed_config_values_are_keyed_by_hash(self) -> None:
         calls = [_set_config_call("USD3_SUPPLY_CAP", 5), _set_config_call("MAX_LTV", 7)]
@@ -263,7 +248,6 @@ class TestHashedLabelRendering(unittest.TestCase):
     def test_usage_line_absent_for_keys_without_one(self) -> None:
         context = HashedLabelContext(PROTOCOL_CONFIG, "0xabc", "MAX_LTV", "ltv", True, 350000000000000000)
         self.assertNotIn("directly comparable", format_threejane_prompt([context]))
-        self.assertNotIn("totalAssets", format_threejane_report([context], 1, {}))
 
     def test_usage_reads_are_registered_for_known_keys_only(self) -> None:
         for as_hex in threejane_context._USAGE_READS:
@@ -345,12 +329,6 @@ class TestDistributorRendering(unittest.TestCase):
     def test_outstanding_is_allocated_minus_claimed(self) -> None:
         self.assertEqual(_distributor_context().outstanding_raw, (84_649_011 - 38_919_583) * WAD)
 
-    def test_report_lists_accounting_and_links_token(self) -> None:
-        report = format_threejane_report([_distributor_context()], 1, {})
-        self.assertIn("**Distribution mode:**", report)
-        self.assertIn("maxClaimable 84,649,011 JANE", report)
-        self.assertIn(f"https://etherscan.io/address/{JANE}", report)
-
     def test_cadence_line_compares_against_the_previous_epoch(self) -> None:
         prompt = format_threejane_prompt([_distributor_context()])
         self.assertIn("Epoch 45 is the current epoch.", prompt)
@@ -372,11 +350,6 @@ class TestDistributorRendering(unittest.TestCase):
         prompt = format_threejane_prompt([_distributor_context()])
         self.assertIn(f"RewardsDistributor.owner() = {TIMELOCK}", prompt)
         self.assertIn("owned BY this address", prompt)
-
-    def test_report_links_the_owner(self) -> None:
-        report = format_threejane_report([_distributor_context()], 1, {TIMELOCK: "3Jane 24h TimelockController"})
-        self.assertIn("**Owner**", report)
-        self.assertIn(f"https://etherscan.io/address/{TIMELOCK}", report)
 
     def test_context_contributes_addresses_and_labels(self) -> None:
         context = _distributor_context()

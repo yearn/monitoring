@@ -25,7 +25,6 @@ from utils.llm.infinifi_context import (
     _resolve_whitelist,
     _TokenCandidate,
     format_infinifi_prompt,
-    format_infinifi_report,
     resolve_infinifi_context,
 )
 
@@ -185,15 +184,6 @@ class TestInfinifiContextFormatting(unittest.TestCase):
         self.assertIn("3,003,294.554623 USDC", result)
         self.assertIn("Whitelisted ERC20 call target", result)
 
-    def test_report_links_all_context_addresses(self) -> None:
-        context = _resolved_context()
-        report = format_infinifi_report([context], 1, context.labels)
-        self.assertIn("**Farm:** New Silver 2 Senior", report)
-        self.assertIn(f"https://etherscan.io/address/{FARM}", report)
-        self.assertIn(f"https://etherscan.io/address/{DROP}", report)
-        self.assertIn("New Silver Series 2 DROP", report)
-        self.assertIn("Whitelisted call targets", report)
-
 
 class TestReadToken(unittest.TestCase):
     @patch.object(infinifi_context.ChainManager, "get_client")
@@ -262,20 +252,6 @@ class TestFarmLookupAndParsing(unittest.TestCase):
 
 
 class TestFormattingEdgeCases(unittest.TestCase):
-    def test_report_omits_configured_tokens_section_when_empty(self) -> None:
-        context = InfinifiEscrowContext(
-            escrow_address=ESCROW,
-            farm_address=FARM,
-            farm_name="New Silver 2 Senior",
-            farm_slug="new-silver-senior",
-            accounting_asset=TokenContext(USDC, "USD Coin", "USDC", 6),
-            total_assets_raw=3_003_294_554_623,
-            configured_tokens=(),
-        )
-        report = format_infinifi_report([context], 1, context.labels)
-        self.assertIn("**Farm:** New Silver 2 Senior", report)
-        self.assertNotIn("Configured non-accounting ERC-20 targets", report)
-
     @patch.object(infinifi_context, "_fetch_farm_records")
     @patch.object(infinifi_context, "_read_token", return_value=None)
     @patch.object(infinifi_context, "_read_escrow_state", return_value=_EscrowState(ESCROW, FARM, USDC, 1))

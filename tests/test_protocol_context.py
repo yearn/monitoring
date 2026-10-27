@@ -27,7 +27,6 @@ def _adapter(name: str, contexts: list[_FakeContext]) -> _Adapter:
         name=name,
         resolve=lambda protocol, chain_id, calls: contexts,
         format_prompt=lambda ctxs: f"{name} prompt",
-        format_report=lambda ctxs, chain_id, labels: f"{name} report",
     )
 
 
@@ -43,7 +42,6 @@ class TestResolveProtocolContext(unittest.TestCase):
             resolved = resolve_protocol_context("3JANE", 1, [(TARGET, _call())])
 
         self.assertEqual(resolved.prompt, "alpha prompt\n\nbeta prompt")
-        self.assertEqual(resolved.report, "alpha report\n\nbeta report")
         self.assertEqual(resolved.addresses, [TARGET, TOKEN])
         self.assertEqual(resolved.labels, {TARGET: "Config", TOKEN: "Token"})
 
@@ -52,14 +50,13 @@ class TestResolveProtocolContext(unittest.TestCase):
             resolved = resolve_protocol_context("3JANE", 1, [(TARGET, _call())])
 
         self.assertEqual(resolved.prompt, "")
-        self.assertEqual(resolved.report, "")
         self.assertEqual(resolved.addresses, [])
 
     def test_failing_adapter_does_not_block_the_others(self) -> None:
         def explode(protocol: str, chain_id: int, calls: list) -> list:
             raise RuntimeError("etherscan down")
 
-        broken = _Adapter("broken", explode, lambda c: "x", lambda contexts, chain_id, labels: "x")
+        broken = _Adapter("broken", explode, lambda c: "x")
         adapters = (broken, _adapter("beta", [_FakeContext([TOKEN], {})]))
         with patch.object(protocol_context, "_ADAPTERS", adapters):
             resolved = resolve_protocol_context("3JANE", 1, [(TARGET, _call())])
@@ -74,27 +71,13 @@ class TestResolveProtocolContext(unittest.TestCase):
             "broken",
             lambda p, c, t: [_FakeContext([TOKEN], {TOKEN: "Broken"})],
             explode,
-            lambda contexts, chain_id, labels: "x",
         )
         adapters = (broken, _adapter("alpha", [_FakeContext([TARGET], {TARGET: "Timelock"})]))
         with patch.object(protocol_context, "_ADAPTERS", adapters):
             resolved = resolve_protocol_context("x", 1, [(TARGET, _call())])
-        self.assertEqual((resolved.prompt, resolved.report), ("alpha prompt", "alpha report"))
-        # Nothing from the adapter that failed to render reaches the report.
+        self.assertEqual(resolved.prompt, "alpha prompt")
+        # Nothing from the adapter that failed to render is kept.
         self.assertEqual((resolved.addresses, resolved.labels), ([TARGET], {TARGET: "Timelock"}))
-
-    def test_existing_labels_reach_the_report_renderer(self) -> None:
-        seen: dict[str, str] = {}
-
-        def capture(contexts: list, chain_id: int, labels: dict[str, str]) -> str:
-            seen.update(labels)
-            return "report"
-
-        adapter = _Adapter("alpha", lambda p, c, t: [_FakeContext([TOKEN], {TOKEN: "Token"})], lambda c: "p", capture)
-        with patch.object(protocol_context, "_ADAPTERS", (adapter,)):
-            resolve_protocol_context("3JANE", 1, [(TARGET, _call())], {TARGET: "Timelock"})
-
-        self.assertEqual(seen, {TARGET: "Timelock", TOKEN: "Token"})
 
     def test_registered_adapters_cover_the_known_protocols(self) -> None:
         self.assertEqual(

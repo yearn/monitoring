@@ -37,7 +37,6 @@ from utils.erc20_metadata import fetch_erc20_metadata
 from utils.eth_view import call_view
 from utils.formatting import format_asset_amount, format_decimal_amount, format_duration, format_utc
 from utils.formatting import normalize_token_amount as normalize
-from utils.llm.report import address_link
 from utils.logger import get_logger
 from utils.source_context import (
     extract_short_function_body,
@@ -970,25 +969,5 @@ def format_yearn_auction_prompt(contexts: list[YearnAuctionContext]) -> str:
             "Proposed by this transaction (in batch order):",
             *(f"  - {line}" for line in context.proposal_lines(render)),
         ]
-        sections.append("\n".join(lines))
-    return "\n\n".join(sections)
-
-
-def format_yearn_auction_report(
-    contexts: list[YearnAuctionContext],
-    chain_id: int,
-    labels: dict[str, str],
-) -> str:
-    """Render the deterministic auction section for the gist report; mechanics are stated once."""
-    sections: list[str] = [f"_{AUCTION_MECHANICS}_"] if contexts else []
-    for context in contexts:
-        merged = {**context.labels, **labels}
-
-        def render(address: str, merged: dict[str, str] = merged) -> str:
-            return address_link(address, chain_id, merged)
-
-        header, *rest = context.header_lines(render)
-        lines = [f"**{header}**", *(f"- {line}" for line in rest), "- **Proposed:**"]
-        lines.extend(f"  - {line}" for line in context.proposal_lines(render))
         sections.append("\n".join(lines))
     return "\n\n".join(sections)

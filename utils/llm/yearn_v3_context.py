@@ -37,7 +37,6 @@ from utils.chains import Chain
 from utils.erc20_metadata import fetch_erc20_metadata
 from utils.eth_view import call_view
 from utils.formatting import format_asset_amount
-from utils.llm.report import address_link
 from utils.llm.yearn_v3_batch import DebtMove, VaultBatchState
 from utils.logger import get_logger
 from utils.web3_wrapper import ChainManager
@@ -1177,39 +1176,5 @@ def format_yearn_v3_prompt(contexts: list[YearnV3VaultContext]) -> str:
             *(f"  - {line}" for line in context.proposal_lines()),
             *context.outcome_lines,
         ]
-        sections.append("\n".join(lines))
-    return "\n\n".join(sections)
-
-
-def format_yearn_v3_report(
-    contexts: list[YearnV3VaultContext],
-    chain_id: int,
-    labels: dict[str, str],
-) -> str:
-    """Render the deterministic Yearn V3 section for the gist report."""
-    sections: list[str] = []
-    for context in contexts:
-        lines = [
-            f"**Yearn V3 vault:** {address_link(context.vault_address, chain_id, labels)} — API "
-            f"`{context.api_version}`, asset `{context.asset_symbol}` ({context.asset_decimals} decimals)",
-            f"- **Size:** `{context.amount(context.total_assets)}` total assets "
-            f"(`{context.amount(context.total_debt)}` deployed, `{context.amount(context.total_idle)}` idle)",
-            f"- **Deposit limit:** `{context.optional_amount(context.deposit_limit)}` · "
-            f"**use_default_queue:** `{context.use_default_queue}` · **shutdown:** `{str(context.is_shutdown).lower()}`",
-            f"- **Default queue** ({len(context.default_queue)}/{MAX_QUEUE}, current_debt / max_debt):",
-        ]
-        lines.extend(
-            f"  {i}. {address_link(s.address, chain_id, labels)} — `{context.amount(s.current_debt)}` / "
-            f"`{context.amount(s.max_debt)}`"
-            for i, s in enumerate(context.default_queue, start=1)
-        )
-        lines.extend(f"- {line}" for line in _allocator_lines(context, lambda a: address_link(a, chain_id, labels)))
-        lines.append("- **Proposed:**")
-        lines.extend(f"  - {line}" for line in context.proposal_lines())
-        lines.extend(f"- {line}" for line in context.outcome_lines)
-        lines.append(
-            "- _Units: `max_debt`, `target_debt`, `deposit_limit` and `minimum_total_idle` are in the vault asset. "
-            "Funds move only via `update_debt`._"
-        )
         sections.append("\n".join(lines))
     return "\n\n".join(sections)

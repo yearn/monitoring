@@ -24,10 +24,9 @@ from dataclasses import dataclass
 from eth_utils import keccak, to_checksum_address
 
 from utils.calldata.decoder import DecodedCall
-from utils.chains import EXPLORER_URLS, Chain
+from utils.chains import Chain
 from utils.erc20_metadata import fetch_erc20_metadata
 from utils.formatting import format_decimal_amount, normalize_token_amount
-from utils.llm.report import address_link
 from utils.llm.threejane_abi import exposes, threejane_abi
 from utils.logger import get_logger
 from utils.proxy import eip7702_delegate
@@ -615,61 +614,3 @@ def format_account_prompt(context: AccountContext) -> str:
             *(f"- {context.account_line(account)}" for account in context.accounts),
         ]
     )
-
-
-def format_account_report(context: AccountContext, chain_id: int, labels: dict[str, str]) -> str:
-    """Render one account context for the gist report."""
-    if isinstance(context, LCCBounceContext):
-        lines = [
-            f"- **LCC bounce:** {address_link(context.vault_address, chain_id, labels)} → user "
-            f"{address_link(context.user_address, chain_id, labels)}",
-            f"  - Commitment removed: `{context.funding.amount(context.commitment_raw)}` "
-            f"(funding asset {address_link(context.funding.address, chain_id)})",
-            f"  - Account now: activeCommitment `{context.funding.amount(context.active_commitment_raw)}`, "
-            f"activeMargin `{context.margin.amount(context.active_margin_raw)}` "
-            f"(margin asset {address_link(context.margin.address, chain_id)})",
-            f"  - Effect: {context.effect_line()}",
-        ]
-        if share := context.vault_share_line():
-            lines.append(f"  - {share}")
-        return "\n".join(lines)
-
-    lines = [
-        f"- **USD3 supply-cap exemptions** on {address_link(context.usd3_address, chain_id, labels)}: "
-        f"{context.overview_line()}",
-        f"  - {context.semantics_line()}",
-        f"  - {context.purpose_line()}",
-        f"  - {context.pairing_line()}",
-        f"  - {context.supply_line()}",
-    ]
-    if exempt_set := context.exempt_set_line():
-        lines.append(f"  - {exempt_set}")
-    history_header = " Last change |" if context.history_read else ""
-    lines += [
-        "",
-        f"| # | Account | Type | supplyCapExempt | ringFenceConduit | USD3 balance |{history_header}",
-        "|---|---|---|---|---|---|" + ("---|" if context.history_read else ""),
-    ]
-    for number, account in enumerate(context.accounts, start=1):
-        kind = (
-            f"EOA, EIP-7702 → {address_link(account.delegate, chain_id, labels)}"
-            if account.delegate
-            else account.kind()
-        )
-        issue = f" ⚠️ {account.pairing_issue()}" if account.pairing_issue() else ""
-        history = f" {_history_cell(account.last_change, chain_id)} |" if context.history_read else ""
-        lines.append(
-            f"| {number} | {address_link(account.address, chain_id, labels)} | {kind} | {account.change()} | "
-            f"{str(account.ring_fence_conduit).lower()}{issue} | `{context.share.amount(account.usd3_balance_raw)}` |"
-            f"{history}"
-        )
-    return "\n".join(lines)
-
-
-def _history_cell(change: ExemptionChange | None, chain_id: int) -> str:
-    """``set false at [block N](tx link)`` for the report table, or "none on record"."""
-    if change is None:
-        return "none on record"
-    explorer = EXPLORER_URLS.get(chain_id)
-    block = f"[block {change.block}]({explorer}/tx/{change.tx_hash})" if explorer else f"block {change.block}"
-    return f"set {str(change.exempt).lower()} at {block}"

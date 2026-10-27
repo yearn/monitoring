@@ -28,7 +28,6 @@ from eth_utils import to_checksum_address
 from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
 from utils.llm.abi_exposure import exposes
-from utils.llm.report import address_link
 from utils.logger import get_logger
 from utils.web3_wrapper import ChainManager
 
@@ -584,45 +583,4 @@ def format_outland_prompt(contexts: list[OutlandContext]) -> str:
             lines.append(_hub_vault_line(context))
         else:
             lines.append(f"Connector {context.connector} route to chain {context.chain_id}: {_route_status(context)}.")
-    return "\n".join(lines)
-
-
-def format_outland_report(contexts: list[OutlandContext], chain_id: int, labels: dict[str, str]) -> str:
-    """Render the deterministic Outland section for the gist report."""
-    lines: list[str] = []
-    for context in contexts:
-        if isinstance(context, FarmTypeContext):
-            lines.append(
-                f"- **Farm type {context.farm_type}:** `FarmTypes.{context.type_name}` — {context.type_note} "
-                f"({address_link(context.registry, chain_id, labels)} `{context.function_name}`)"
-            )
-            lines.extend(f"  - {line}" for line in context.terms_lines())
-        elif isinstance(context, OutlandMessageContext):
-            lines.append(f"- **Cross-chain message (`{context.function_name}`):** {context.describe()}")
-        elif isinstance(context, HubVaultContext):
-            registered = ", ".join(f"`{chain}`" for chain in context.registered_chain_ids) or "none"
-            effect = (
-                f"replaces {address_link(context.replaced_vault, chain_id, labels)}"
-                if context.replaced_vault
-                else "new chain, no vault replaced"
-            )
-            lines.append(
-                f"- **PortalHub vault for chain `{context.vault_chain_id}`:** {effect}; "
-                f"chains registered before: {registered}"
-            )
-        else:
-            if context.proposed is not None:
-                change = "set" if context.proposed.is_configured else "**cleared**"
-                status = f"{change} by this batch — peer {address_link(context.proposed.peer, chain_id, labels)}"
-                status += f", gas limit `{context.proposed.gas_limit:,}`, selector `{context.proposed.chain_selector}`"
-                if context.current.is_configured:
-                    status += f" (was peer {address_link(context.current.peer, chain_id, labels)})"
-            elif context.current.is_configured:
-                status = f"configured, unchanged — peer {address_link(context.current.peer, chain_id, labels)}"
-            else:
-                status = "**not configured** — sends revert until a later `setConfiguration` sets the peer"
-            lines.append(
-                f"- **Connector route to chain `{context.chain_id}`** "
-                f"({address_link(context.connector, chain_id, labels)}): {status}"
-            )
     return "\n".join(lines)
