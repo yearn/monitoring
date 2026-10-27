@@ -93,12 +93,11 @@ Keep DETAIL lean:
   happened to omit unless it changes the risk.
 - Do not add a standalone list of contracts or addresses (the report's Call Flow and
   Reference sections already link them), and do not rebuild tables of values the Current
-  State or Protocol Context sections already show — quote the before→after in prose.
+  State section already shows — quote the before→after in prose.
 - When the same calls repeat across several contracts (a setter and a report() per
   strategy), explain the pattern once, then give each contract's own numbers — do not
   write a section per contract that repeats the same explanation.
-- Do not restate Protocol Context settings that do not bear on the verdict; the report
-  already publishes that section.
+- Do not restate Protocol Context settings that do not bear on the verdict.
 
 Address hyperlink rule (applies to DETAIL only):
 - EVERY address you mention must be a markdown link to the block explorer, never a
@@ -294,7 +293,7 @@ Write ONLY the thorough DETAIL analysis now, as markdown. Cover what each call d
 why, parameter values and significance, asset/token flow, state changes, and an explicit
 risk rationale. Keep it lean: put limitations once in a final `### Not verified` list
 (at most 4 bullets, omitted when nothing material is unverified), no standalone address
-lists, no tables that repeat the Current State or Protocol Context sections. It MUST stay fully consistent with the TLDR above — same magnitudes,
+lists, no tables that repeat the Current State section. It MUST stay fully consistent with the TLDR above — same magnitudes,
 same risk level. Do not contradict its numbers or verdict and do not restate it
 verbatim; expand on the reasoning.
 
@@ -2235,7 +2234,7 @@ def explain_transaction(
     roles_by_target = _collect_role_names([(target, decoded)], chain_id)
     token_flows = _collect_token_flows([(target, decoded)], chain_id, address_labels)
     related_tokens = _collect_related_tokens([(target, decoded)], chain_id)
-    protocol_ctx = resolve_protocol_context(protocol, chain_id, executed_calls, address_labels)
+    protocol_ctx = resolve_protocol_context(protocol, chain_id, executed_calls)
     for address, context_label in protocol_ctx.labels.items():
         address_labels.setdefault(address, context_label)
 
@@ -2319,7 +2318,6 @@ def explain_transaction(
         label=label,
         from_address=from_address,
         label_address=label_address or from_address,
-        protocol_context=protocol_ctx.report,
         related_addresses=protocol_ctx.addresses,
         state_read_notes=state_reads.report_text(chain_id, address_labels),
         context_note=context_note,
@@ -2642,7 +2640,7 @@ def explain_batch_transaction(
     roles_by_target = _collect_role_names(decoded_with_target, chain_id)
     token_flows = _collect_token_flows(decoded_with_target, chain_id, address_labels)
     related_tokens = _collect_related_tokens(decoded_with_target, chain_id)
-    protocol_ctx = resolve_protocol_context(protocol, chain_id, executed_calls, address_labels)
+    protocol_ctx = resolve_protocol_context(protocol, chain_id, executed_calls)
     for address, context_label in protocol_ctx.labels.items():
         address_labels.setdefault(address, context_label)
 
@@ -2704,7 +2702,6 @@ def explain_batch_transaction(
         label=label,
         from_address=from_address,
         label_address=label_address or from_address,
-        protocol_context=protocol_ctx.report,
         related_addresses=protocol_ctx.addresses,
         state_read_notes=state_reads.report_text(chain_id, address_labels),
         context_note=context_note,

@@ -12,7 +12,6 @@ from utils.llm.infinifi_oracle_context import (
     FeedDetails,
     OracleAssignmentContext,
     format_infinifi_oracle_prompt,
-    format_infinifi_oracle_report,
     resolve_infinifi_oracle_context,
 )
 
@@ -87,12 +86,6 @@ class TestOracleAssignment(unittest.TestCase):
         self.assertIn("price() reverts (StalePrice) once the feed is older than the heartbeat of 48h", prompt)
         self.assertIn("The wrapper's name refers to the AggregatorV3 interface it reads", prompt)
 
-    def test_report_lists_the_feed(self) -> None:
-        (context,) = _resolve()
-        report = format_infinifi_oracle_report([context], 1, {})
-        self.assertIn("= `1.1053024341839888` reference units", report)
-        self.assertIn('"reUSD NAV / USD"; heartbeat `48h`, updated 12.4h before this alert', report)
-
     def test_oracle_without_a_feed_still_renders_its_price(self) -> None:
         (context,) = _resolve(with_feed=False)
         self.assertIsNone(context.feed)
@@ -101,7 +94,7 @@ class TestOracleAssignment(unittest.TestCase):
     def test_usdc_scale_reads_as_parity(self) -> None:
         # IOracle convention: a 6-decimal stable at parity is quoted at 1e30.
         context = OracleAssignmentContext(ACCOUNTING, USDC, "USDC", 6, ORACLE, 10**30)
-        self.assertIn("= `1` reference units", format_infinifi_oracle_report([context], 1, {}))
+        self.assertEqual(context.unit_price_text, "1")
 
     def test_removing_an_oracle_is_not_priced(self) -> None:
         call = _call("setOracle", ("address", REUSD), ("address", ZERO_ADDRESS))

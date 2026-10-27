@@ -7,7 +7,7 @@ from eth_utils import to_checksum_address
 
 from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
-from utils.llm.report import address_link, checksum_or_none
+from utils.llm.report import checksum_or_none
 from utils.logger import get_logger
 from utils.proxy import get_current_implementation
 from utils.solidity_text import contract_functions, declares_contract, strip_noise, struct_definitions
@@ -215,16 +215,7 @@ def _upgrade_implementation(target: str, call: DecodedCall) -> str | None:
 
 def format_pendle_prompt(contexts: list[PendleSwapContext]) -> str:
     """Render integration references separately from live state and verified code."""
-    return "\n\n".join(_format_contexts(group, None, {}) for group in _by_proxy(contexts))
-
-
-def format_pendle_report(
-    contexts: list[PendleSwapContext],
-    chain_id: int,
-    labels: dict[str, str],
-) -> str:
-    """Render the same evidence with full explorer links for the gist report."""
-    return "\n\n".join(_format_contexts(group, chain_id, labels) for group in _by_proxy(contexts))
+    return "\n\n".join(_format_contexts(group) for group in _by_proxy(contexts))
 
 
 def _by_proxy(contexts: list[PendleSwapContext]) -> list[list[PendleSwapContext]]:
@@ -256,8 +247,8 @@ def _execution_note(context: PendleSwapContext) -> str:
     )
 
 
-def _format_contexts(contexts: list[PendleSwapContext], chain_id: int | None, labels: dict[str, str]) -> str:
-    """Keep prompt and report facts identical, varying only address rendering.
+def _format_contexts(contexts: list[PendleSwapContext]) -> str:
+    """Render one proxy's upgrades.
 
     The integration reference, proxy state and each implementation's source are stated
     once for the batch; every upgrade call keeps its own line and payload.
@@ -266,8 +257,8 @@ def _format_contexts(contexts: list[PendleSwapContext], chain_id: int | None, la
         return ""
 
     def link(address: str | None) -> str:
-        """Link known addresses and keep missing state explicit."""
-        return address_link(address, chain_id, labels) if address and chain_id else address or "unavailable"
+        """Keep missing state explicit."""
+        return address or "unavailable"
 
     first = contexts[0]
     lines = [

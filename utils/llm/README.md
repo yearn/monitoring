@@ -227,7 +227,7 @@ For Infinifi mainnet alerts, the adapter:
 4. Reconstructs the escrow's current whitelist from `WhitelistUpdated` events. ERC20 targets are listed as tokens, and other targets (redemption vaults, swappers) are listed with their verified contract name; these used to be dropped. For `setWhitelist` calls, it reads each target's flag before the call and, for a token, the router's balance of it: once whitelisted, `externalCall` can transfer or approve that balance.
 5. Decodes `RWAEscrowRateManager` calls. `setRate(escrow, rate)` is an annual accrual rate in WAD around 1e18, bounded to ±20%. The context shows the stored rate before and the proposed rate after, as signed annual percentages, plus the yearly amount on current `totalAssets`. Reports had read these as relative changes of the raw number ("raises the rate by 1.09%" for 7.51% → 8.683% a year). `governanceUpdateTotalAssets(escrow, assets)` is shown as an unbounded overwrite of `totalAssets`, with the profit or loss it books.
 
-The result is added to the LLM prompt as verified protocol context and rendered independently in the Wavey Gist under `## Protocol Context`. Semantics are read from the verified `RWAEscrow`, `RWAEscrowRouter` and `RWAEscrowRateManager` sources. Failures are best-effort and never block the governance alert.
+The result is added to the LLM prompt as verified protocol context. Semantics are read from the verified `RWAEscrow`, `RWAEscrowRouter` and `RWAEscrowRateManager` sources. Failures are best-effort and never block the governance alert.
 
 ### 5e-2. Infinifi Outland Context (`utils/llm/infinifi_outland_context.py`)
 
@@ -399,7 +399,7 @@ ownership guard are also included when uniquely resolved in the bundle. This exp
 semantic enum changes despite an unchanged ABI, unsupported scaling reverts, and unchanged
 authorization/approval code that a diff alone omits. Missing source or owner reads remain
 explicitly unavailable; a replacement with a different contract name is not assumed to
-retain PendleSwap behavior. Context is rendered in both the prompt and gist and sets no
+retain PendleSwap behavior. Context is rendered in the prompt and sets no
 fixed risk tag or storage-safety verdict. Nested governance wrappers are not resolved by
 this adapter.
 
@@ -409,7 +409,7 @@ verdict is not evidence that collisions are more likely.
 
 ### 5g. Adapter Registry (`utils/llm/protocol_context.py`)
 
-Adapters register in `_ADAPTERS`; `resolve_protocol_context()` fans one call out to all of them and merges the rendered prompt text, report text, introduced addresses, and address labels. Each adapter guards itself, so registration order carries no meaning. An adapter that raises, while resolving or while rendering, is logged and skipped (with its addresses and labels) rather than dropping the alert. Most guard on protocol and chain. The Yearn V3 adapter guards on call shape and `apiVersion()`; the tokenized-strategy and auction adapters on call shape and their getters. The control-transfer, allowlist-scope and timelock-execution adapters guard on call shape alone.
+Adapters register in `_ADAPTERS`; `resolve_protocol_context()` fans one call out to all of them and merges the rendered prompt text, introduced addresses, and address labels. Each adapter guards itself, so registration order carries no meaning. An adapter that raises, while resolving or while rendering, is logged and skipped (with its addresses and labels) rather than dropping the alert. Most guard on protocol and chain. The Yearn V3 adapter guards on call shape and `apiVersion()`; the tokenized-strategy and auction adapters on call shape and their getters. The control-transfer, allowlist-scope and timelock-execution adapters guard on call shape alone.
 
 Adapters receive the inner calls of executed governance wrappers too. `expand_executed_calls()` keeps each wrapper and splices in its decoded inner calls (`execute`, `executeBatch`, `executeTransaction`, up to two levels deep). Address labels are collected over the same list. Scheduling wrappers are not expanded, because their inner calls run in a later transaction. Before this, a Safe batch registered Flex inside a timelock `executeBatch` and then funded it in a top-level `update_debt`. The V3 adapter never saw the registration and reported the funding call as "REVERTS — inactive strategy". The model then flagged the context as contradicting the simulation. The executing address (the Safe) is labeled as well, so it no longer appears unlabeled in the reference table.
 
@@ -609,7 +609,7 @@ The report can end with a code-generated `## Reference` table after Call Flow. I
 | [`0xE4C72b4dE5b0F9ACcEA880Ad0b1F944F85A9dAA0`](https://etherscan.io/address/0xE4C72b4dE5b0F9ACcEA880Ad0b1F944F85A9dAA0) | New Silver Series 2 DROP | Protocol context |
 ```
 
-It used to list every address with a Description column that restated the call flow ("Passed as `_asset` to `setOracle`"). That doubled the report without adding information. The DETAIL prompt likewise asks for limitations once, in a final `### Not verified` list of at most four bullets. It also asks for no standalone address lists and no tables repeating Current State or Protocol Context. A report had spent about 40% of its text on per-paragraph caveats.
+It used to list every address with a Description column that restated the call flow ("Passed as `_asset` to `setOracle`"). That doubled the report without adding information. The DETAIL prompt likewise asks for limitations once, in a final `### Not verified` list of at most four bullets. It also asks for no standalone address lists and no tables repeating Current State. A report had spent about 40% of its text on per-paragraph caveats.
 
 **Call Flow is built in Python, not asked of the LLM** — it comes straight from the
 input calls (`CallEntry` per call: original 1-based index, target, signature or

@@ -162,10 +162,6 @@ class ReportContext:
     # Safe multisend batch labels the utility contract instead. Linked from the
     # report's Contract header line.
     label_address: str = ""
-    # Deterministic protocol-specific facts that belong in the full gist but
-    # are not part of the raw calldata flow (for example an Infinifi farm and
-    # the non-accounting ERC20 targets configured in its escrow).
-    protocol_context: str = ""
     # Addresses introduced by protocol-specific context. These may not occur in
     # calldata but still belong in the report's deterministic reference table.
     related_addresses: list[str] = field(default_factory=list)
@@ -710,8 +706,6 @@ def build_report(
     if ctx.safety_notes:
         notes = "\n".join(f"- {note}" for note in ctx.safety_notes)
         sections.append(f"## Safety Checks\n\n{notes}")
-    if ctx.protocol_context:
-        sections.append(f"## Protocol Context\n\n{ctx.protocol_context}")
     reference = format_reference_table(ctx, shown="\n\n".join(sections))
     if reference:
         sections.append(f"## Reference\n\n{reference}")

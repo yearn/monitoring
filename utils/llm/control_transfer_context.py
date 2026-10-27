@@ -30,7 +30,6 @@ from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
 from utils.eth_view import call_view
 from utils.llm.abi_exposure import exposes
-from utils.llm.report import address_link
 from utils.logger import get_logger
 from utils.on_chain_state import resolve_function_source
 from utils.source_context import find_state_var_writes, get_contract_label
@@ -394,54 +393,3 @@ def resolve_control_transfer_context(
 def format_control_transfer_prompt(contexts: list[ControlTransferContext]) -> str:
     """Render verified control-transfer facts for the LLM prompt."""
     return "\n\n".join("\n".join(context.lines()) for context in contexts)
-
-
-def describe_controller_markdown(info: ControllerInfo, chain_id: int, labels: dict[str, str]) -> str:
-    """Markdown twin of ``ControllerInfo.describe`` with explorer links."""
-    link = address_link(info.address, chain_id, labels)
-    if info.kind == "none":
-        return f"{link} — zero address: control is **renounced**"
-    if info.kind == "eoa":
-        return f"{link} — **EOA** (single private key)"
-    if info.kind == "eip7702":
-        return f"{link} — **EOA with EIP-7702 delegated code** (single private key)"
-    if info.kind == "safe":
-        return f"{link} — Safe multisig, **{info.threshold}-of-{info.owner_count}**"
-    parts = [f"{link} — contract"]
-    if info.controlled_by is not None:
-        parts.append(
-            f"its `{info.controller_getter}()` is {describe_controller_markdown(info.controlled_by, chain_id, labels)}"
-        )
-    if info.has_operators:
-        parts.append("keeps an **operator whitelist** (approved addresses act through it)")
-    return "; ".join(parts)
-
-
-def format_control_transfer_report(
-    contexts: list[ControlTransferContext],
-    chain_id: int,
-    labels: dict[str, str],
-) -> str:
-    """Render the deterministic control-transfer section for the gist report."""
-    sections: list[str] = []
-    for context in contexts:
-        target = address_link(context.target, chain_id, labels)
-        if context.role_hash:
-            lines = [f"**`{context.signature}`** on {target} — grants role `{context.role_hash}`"]
-        else:
-            lines = [f"**`{context.signature}`** on {target} — hands over **{context.role}**"]
-        if context.current is not None:
-            lines.append(
-                f"- **Current {context.role}:** {describe_controller_markdown(context.current, chain_id, labels)}"
-            )
-        who = "Grantee" if context.role_hash else f"Proposed {context.role}"
-        lines.append(f"- **{who}:** {describe_controller_markdown(context.proposed, chain_id, labels)}")
-        timing = context.timing_note()
-        if timing:
-            heading, _, detail = timing.partition(": ")
-            lines.append(f"- **{heading}:** {detail}" if detail else f"- **Timing:** {timing}")
-        change = context.threshold_change()
-        if change:
-            lines.append(f"- **Threshold:** {change}")
-        sections.append("\n".join(lines))
-    return "\n\n".join(sections)

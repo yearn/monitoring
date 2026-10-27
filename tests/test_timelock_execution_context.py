@@ -7,7 +7,6 @@ from utils.calldata.decoder import DecodedCall
 from utils.llm import timelock_execution_context
 from utils.llm.timelock_execution_context import (
     TimelockExecutionContext,
-    format_timelock_execution_report,
     operation_id,
     resolve_timelock_execution_context,
 )
@@ -85,11 +84,6 @@ class TestStatus(unittest.TestCase):
         self.assertIn("ALREADY EXECUTED", done)
         for text in (unscheduled, early, done):
             self.assertNotIn("sat publicly in the timelock queue", text)
-
-    def test_report(self) -> None:
-        report = format_timelock_execution_report([_context(READY_AT)], 1, {})
-        self.assertIn(f"**Operation ID:** `{OPERATION_ID}` (4 call(s))", report)
-        self.assertIn("**Min delay:** 7d", report)
 
 
 class TestResolve(unittest.TestCase):
