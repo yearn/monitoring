@@ -112,7 +112,7 @@ def send_alert(
     *,
     silent: bool | None = None,
     plain_text: bool = False,
-) -> None:
+) -> bool:
     """Send an alert via Telegram with auto-emoji prefix and severity-based defaults.
 
     Args:
@@ -121,6 +121,10 @@ def send_alert(
         silent: Override notification silencing. None uses severity default
                 (LOW/MEDIUM=silent, HIGH/CRITICAL=loud).
         plain_text: If True, send without Markdown formatting.
+
+    Returns:
+        True when Telegram accepted the message; False when it was skipped
+        (debug mode or missing credentials). See ``send_telegram_message``.
     """
     emoji = _SEVERITY_EMOJI[alert.severity.value]
     message = f"{emoji} {alert.message}"
@@ -128,7 +132,7 @@ def send_alert(
     if silent is None:
         silent = _SEVERITY_SILENT_DEFAULT[alert.severity.value]
 
-    send_telegram_message(
+    delivered = send_telegram_message(
         message,
         alert.channel or alert.protocol,
         silent,
@@ -145,6 +149,7 @@ def send_alert(
             _alert_hook(alert)
         except Exception:
             logger.exception("Alert hook failed for %s alert", alert.severity.value)
+    return delivered
 
 
 # After AlertSeverity / Alert exist so utils.dispatch can import this module safely.

@@ -139,7 +139,7 @@ def send_telegram_message(
     origin_protocol: str | None = None,
     channel: str | None = None,
     metadata: dict[str, object] | None = None,
-) -> None:
+) -> bool:
     """
     Send a message to a Telegram chat using a bot.
 
@@ -147,6 +147,11 @@ def send_telegram_message(
         message: The message to send
         protocol: Protocol identifier used to select bot token and chat ID
         disable_notification: If True, sends the message silently
+
+    Returns:
+        True when Telegram accepted the message; False when it was skipped
+        (``LOG_LEVEL=DEBUG`` or missing credentials). Callers that record a
+        message as delivered must check this.
 
     Raises:
         TelegramError: If the message fails to send
@@ -175,7 +180,7 @@ def send_telegram_message(
             metadata=metadata,
         )
         logger.debug("Skipping Telegram send (LOG_LEVEL=DEBUG)")
-        return
+        return False
 
     # Test/staging override: route every message to one chat for comparison runs.
     # Set TELEGRAM_TEST_CHAT_ID to a dummy group id; unset to restore prod routing.
@@ -198,7 +203,7 @@ def send_telegram_message(
                 metadata=metadata,
             )
             logger.warning("TELEGRAM_TEST_CHAT_ID set but TELEGRAM_BOT_TOKEN_DEFAULT missing")
-            return
+            return False
         # Escape the label for Markdown sends — protocol names contain `_`
         # (e.g. yearn_timelock) and the brackets are link syntax in V1, either of
         # which would trip a 400 parse error and drop the comparison alert. The
@@ -223,7 +228,7 @@ def send_telegram_message(
             _update_alert_delivery_safe(alert_id, status="failed", error=str(exc))
             raise
         _update_alert_delivery_safe(alert_id, status="delivered", delivered_at=store.utc_now_iso())
-        return
+        return True
 
     # Check if this protocol has a topic ID configured (forum-style group)
     topic_id = os.getenv(f"TELEGRAM_TOPIC_ID_{protocol.upper()}")
@@ -252,7 +257,7 @@ def send_telegram_message(
             metadata=metadata,
         )
         logger.warning("Missing Telegram credentials for %s", protocol)
-        return
+        return False
 
     alert_id = _record_alert_safe(
         message=message,
@@ -280,10 +285,11 @@ def send_telegram_message(
                 _update_alert_delivery_safe(alert_id, status="failed", error=str(retry_exc))
                 raise
             _update_alert_delivery_safe(alert_id, status="delivered", delivered_at=store.utc_now_iso())
-            return
+            return True
         _update_alert_delivery_safe(alert_id, status="failed", error=str(exc))
         raise
     _update_alert_delivery_safe(alert_id, status="delivered", delivered_at=store.utc_now_iso())
+    return True
 
 
 def _record_alert_safe(

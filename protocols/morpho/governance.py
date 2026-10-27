@@ -4,7 +4,7 @@ from typing import Any
 
 from web3 import Web3
 
-from protocols.morpho._alerts import VaultDiff, due_loss_notice, send_vault_alerts
+from protocols.morpho._alerts import VaultDiff, due_loss_notice, governance_lock, send_vault_alerts
 from protocols.morpho._shared import (
     MORPHO_BLUE_ABI_PATH,
     PROTOCOL,
@@ -159,7 +159,7 @@ def _load_vault_market_ids(
     return list(set(queued_markets) | pending_markets)
 
 
-def _load_market_governance_states(
+def load_market_governance_states(
     morpho_contract: Any,
     market_ids: list[bytes],
     client: Any,
@@ -219,7 +219,7 @@ def _try_total_assets(morpho_contract: Any, block_number: int) -> int | None:
         return None
 
 
-def _vault_header(name: str, vault_address: str, chain: Chain) -> str:
+def vault_header(name: str, vault_address: str, chain: Chain) -> str:
     """One-line header for the vault's grouped alert."""
     return f"[{name}]({get_vault_url(vault_address, chain)}) on {chain.name}"
 
@@ -359,7 +359,7 @@ def check_markets_pending_cap(
 ) -> None:
     """Check V1 market cap and removal governance for one vault."""
     market_ids = _load_vault_market_ids(morpho_contract, chain, client, block_number)
-    for state in _load_market_governance_states(morpho_contract, market_ids, client, block_number):
+    for state in load_market_governance_states(morpho_contract, market_ids, client, block_number):
         check_market_governance_state(name, state, chain, diff)
 
 
@@ -422,19 +422,21 @@ def get_data_for_chain(chain: Chain) -> None:
     for vault in vaults:
         morpho_contract = client.eth.contract(address=vault.address, abi=ABI_MORPHO)
         # Buffer every finding for this vault, then send them as one message and
-        # only then record them as alerted.
-        diff = VaultDiff()
-        check_markets_pending_cap(
-            vault.name,
-            morpho_contract,
-            chain,
-            client,
-            diff,
-            block_number=block_number,
-        )
-        check_timelock_and_guardian(morpho_contract, client, diff, block_number)
-        send_vault_alerts(_vault_header(vault.name, vault.address, chain), diff.alerts, PROTOCOL)
-        diff.commit()
+        # only then record them as alerted. The lock keeps the live consumer from
+        # alerting the same change in between.
+        with governance_lock(vault.address):
+            diff = VaultDiff()
+            check_markets_pending_cap(
+                vault.name,
+                morpho_contract,
+                chain,
+                client,
+                diff,
+                block_number=block_number,
+            )
+            check_timelock_and_guardian(morpho_contract, client, diff, block_number)
+            send_vault_alerts(vault_header(vault.name, vault.address, chain), diff.alerts, PROTOCOL)
+            diff.commit()
 
 
 def main() -> None:

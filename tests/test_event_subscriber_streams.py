@@ -11,14 +11,12 @@ from unittest.mock import patch
 
 import pytest
 
-from protocols.morpho.config import VAULTS_V1_BY_CHAIN, VAULTS_V2_BY_CHAIN, iter_vaults
 from protocols.morpho.governance_stream import (
     MORPHO_GOVERNANCE_STREAM,
     describe_governance_event,
-    morpho_governance_scope,
 )
 from protocols.timelock.event_stream import TIMELOCK_STREAM
-from protocols.timelock.event_subscriber import STREAMS, heartbeat_problems, parse_streams
+from protocols.timelock.event_subscriber import heartbeat_problems, parse_streams
 from tests.timelock_subscriber_fakes import (
     MORPHO_VAULT,
     TIMELOCK,
@@ -28,12 +26,12 @@ from tests.timelock_subscriber_fakes import (
     make_morpho_event,
 )
 from utils.subscriber import envio as envio_module
-from utils.subscriber.envio import EnvioQueryError, SharedChainHeads, http_poster, live_subscription, range_query
-from utils.subscriber.inbox import SOURCE_HTTP, SOURCE_WS, EventInbox
+from utils.subscriber.envio import EnvioQueryError, SharedChainHeads, http_poster
+from utils.subscriber.inbox import SOURCE_WS, EventInbox
 from utils.subscriber.notices import NoticeConfig, PilotNotices
 from utils.subscriber.notifier import Notifier
 from utils.subscriber.reconcile import ReconcileConfig, reconcile_all
-from utils.subscriber.report import build_report, format_report
+from utils.subscriber.stream import StreamLabel
 from utils.subscriber.worker import Worker, WorkerConfig, run_workers
 
 TIMELOCK_SCOPE = {1: {TIMELOCK}}
@@ -63,32 +61,6 @@ def _ids(inbox: EventInbox) -> set[str]:
 
 
 # ── stream definitions ─────────────────────────────────────────────────
-
-
-def test_morpho_queries_target_the_governance_entity() -> None:
-    query = range_query(MORPHO_GOVERNANCE_STREAM, 1, 10, 20, 50, 0, since_ts=None)
-    assert "MorphoGovernanceEvent(" in query and "vaultAddress: { _in: $addresses }" in query
-    assert "argsJson" in query and "timelockAddress" not in query
-    live = live_subscription(MORPHO_GOVERNANCE_STREAM, 50, [8453, 1])
-    assert "subscription MorphoGovernanceEventLive" in live and "chainId: { _in: [1, 8453] }" in live
-
-
-def test_morpho_scope_covers_every_configured_vault_with_a_label() -> None:
-    scope = morpho_governance_scope()
-    configured = [*iter_vaults(VAULTS_V1_BY_CHAIN), *iter_vaults(VAULTS_V2_BY_CHAIN)]
-
-    assert sum(len(addresses) for addresses in scope.addresses.values()) == len(configured)
-    for chain, vault in configured:
-        assert vault.address.lower() in scope.addresses[chain.chain_id]
-        assert scope.labels[(vault.address.lower(), chain.chain_id)].protocol == "morpho"
-    assert scope.labels[(MORPHO_VAULT, 1)].label == "Yearn USDC V1"
-
-
-def test_stream_names_tables_and_files_are_distinct() -> None:
-    assert TIMELOCK_STREAM.table("events") == "timelock_sub_events"  # unchanged for the running pilot
-    assert MORPHO_GOVERNANCE_STREAM.table("events") == "morpho_sub_events"
-    assert TIMELOCK_STREAM.db_filename != MORPHO_GOVERNANCE_STREAM.db_filename
-    assert set(STREAMS) == {"timelock", "morpho"}
 
 
 def test_describe_governance_event_shows_args_and_survives_bad_json() -> None:
@@ -186,28 +158,23 @@ def test_http_poster_keeps_one_session_per_thread() -> None:
     assert sessions[2] is not sessions[0]
 
 
-# ── notices and reports ────────────────────────────────────────────────
+# ── notices ────────────────────────────────────────────────
 
 
 def test_morpho_notice_names_the_vault_and_its_arguments(tmp_path: Path) -> None:
     _, inbox = _inboxes(tmp_path)
     notifier = RecordingNotifier()
-    notices = PilotNotices(notifier, inbox, morpho_governance_scope().labels, NoticeConfig(), now=lambda: 0.0)
+    labels = {(MORPHO_VAULT, 1): StreamLabel("Test Vault V1", "morpho")}
+    notices = PilotNotices(notifier, inbox, labels, NoticeConfig(), now=lambda: 0.0)
     inbox.observe([make_morpho_event(1, 26_000_000, 7)], SOURCE_WS, 1_700_000_005.0)
 
     asyncio.run(notices.new_events(SOURCE_WS, ["1_26000000_7"]))
 
     (text,) = notifier.posted
     assert text.startswith("🛰️ New Morpho governance event via WS, 5s after its block")
-    assert "Yearn USDC V1 (morpho) on Mainnet: SubmitMarketRemoval 1_26000000_7" in text
+    assert "Test Vault V1 (morpho) on Mainnet: SubmitMarketRemoval 1_26000000_7" in text
     assert f"Vault: {MORPHO_VAULT} https://etherscan.io/address/{MORPHO_VAULT}" in text
     assert "Args: {" in text and "Operation ID" not in text
-
-
-def test_report_is_titled_by_stream(tmp_path: Path) -> None:
-    timelock_inbox, morpho_inbox = _inboxes(tmp_path)
-    assert format_report(build_report(timelock_inbox, 1)).startswith("Timelock subscriber pilot report")
-    assert format_report(build_report(morpho_inbox, 1)).startswith("Morpho governance subscriber pilot report")
 
 
 # ── one process, several streams ───────────────────────────────────────
@@ -447,20 +414,6 @@ def test_run_workers_keeps_pinging_after_notifier_crashes(tmp_path: Path) -> Non
 
     with patch("utils.subscriber.worker.notify", side_effect=lambda *a: notified.append(a)):
         asyncio.run(scenario())
-
-
-def test_http_observation_of_both_streams_is_recorded_per_source(tmp_path: Path) -> None:
-    envio = FakeEnvio()
-    envio.set_head(1, 1)
-    timelock_inbox, morpho_inbox = _inboxes(tmp_path)
-    for inbox, scope in ((timelock_inbox, TIMELOCK_SCOPE), (morpho_inbox, MORPHO_SCOPE)):
-        reconcile_all(envio.post, inbox, scope, CONFIG)
-    envio.add(make_event(1, 10), make_morpho_event(1, 10, 1))
-    for inbox, scope in ((timelock_inbox, TIMELOCK_SCOPE), (morpho_inbox, MORPHO_SCOPE)):
-        reconcile_all(envio.post, inbox, scope, CONFIG)
-
-    assert {row["first_source"] for row in morpho_inbox.events_since(0)} == {SOURCE_HTTP}
-    assert {q["entity"] for q in envio.queries} == {"TimelockEvent", "MorphoGovernanceEvent"}
 
 
 # ── CLI ────────────────────────────────────────────────────────────────

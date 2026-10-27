@@ -232,7 +232,7 @@ class TestMorphoV1VaultReads(unittest.TestCase):
         client.batch_requests.side_effect = batch_requests
         client.execute_batch.side_effect = lambda batch: batch.calls
 
-        [state] = governance._load_market_governance_states(vault, [market_id], client, block_number=1)
+        [state] = governance.load_market_governance_states(vault, [market_id], client, block_number=1)
 
         self.assertIsNone(state.vault_total_assets)
         self.assertEqual(
@@ -281,7 +281,7 @@ class TestMorphoV1GovernanceGrouping(unittest.TestCase):
             for state in states:
                 governance.check_market_governance_state("Yearn OG USDC", state, Chain.BASE, diff)
             governance.send_vault_alerts(
-                governance._vault_header("Yearn OG USDC", VAULT, Chain.BASE),
+                governance.vault_header("Yearn OG USDC", VAULT, Chain.BASE),
                 diff.alerts,
                 governance.PROTOCOL,
             )

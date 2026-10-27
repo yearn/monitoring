@@ -203,9 +203,34 @@ Both scripts share `MORPHO_FILENAME` (default `cache-id.txt`). New key types add
 
 [`governance_stream.py`](./governance_stream.py) defines the `morpho` stream of the continuous event subscriber ([#447](https://github.com/yearn/monitoring/issues/447), part of [#437](https://github.com/yearn/monitoring/issues/437)). It follows `MorphoGovernanceEvent`, which [yearn-envio#71](https://github.com/yearn/yearn-envio/pull/71) indexes for every V1 and V2 vault in [`config.py`](./config.py): V1 `SubmitCap`, `SubmitMarketRemoval`, `SubmitTimelock`; V2 `Submit`, `Accept`, `SetOwner`, `SetCurator`, `AddAdapter`, `RemoveAdapter`. Adapter-internal timelocks (`burnShares`) are not indexed.
 
-It runs in the timelock subscriber's process with `EVENT_SUBSCRIBER_STREAMS=timelock,morpho` and uses the same WebSocket + HTTP reconciliation, per-chain checkpoints, reorg tracking, health, and report (see the [timelock README](../timelock/README.md#continuous-subscriber-pilot)); its inbox is `$CACHE_DIR/morpho_subscriber.db`. It is observation only: **it sends no alerts**, and the daily `governance.py` / `governance_v2.py` jobs remain the alerting path. With notices enabled, each new event is posted to the internal errors chat as `[morpho-subscriber]` with the vault, its generation, the sender, and the ABI-named arguments. Lifecycle rules and grouped delivery are [#448](https://github.com/yearn/monitoring/issues/448); comparing with the daily snapshots is [#449](https://github.com/yearn/monitoring/issues/449).
+It runs in the timelock subscriber's process with `EVENT_SUBSCRIBER_STREAMS=timelock,morpho` and uses the same WebSocket + HTTP reconciliation, per-chain checkpoints, reorg tracking, health, and report (see the [timelock README](../timelock/README.md#continuous-subscriber-pilot)); its inbox is `$CACHE_DIR/morpho_subscriber.db`. It sends no alerts to the Morpho group: the daily `governance.py` / `governance_v2.py` jobs remain the alerting path (see live decisions below). With notices enabled, each new event is posted to the internal errors chat as `[morpho-subscriber]` with the vault, its generation, the sender, and the ABI-named arguments. Comparing with the daily snapshots is [#449](https://github.com/yearn/monitoring/issues/449).
 
-Enable it only once the Envio deployment serves `MorphoGovernanceEvent` and has backfilled all five chains; until then its reconcile cycles and WebSocket fail with `field 'MorphoGovernanceEvent' not found` (without affecting the timelock stream). Its first reconcile starts at each chain's indexed head, so history is never announced.
+#### Live decisions ([#448](https://github.com/yearn/monitoring/issues/448))
+
+[`live_governance.py`](./live_governance.py) runs inside the `morpho` stream's worker and decides, for every newly indexed event, what the daily jobs would alert. The indexer has no V1 revoke/accept events and no V2 `Revoke`, so an event is only a trigger: [`live_rules.py`](./live_rules.py) reads the vault's current state on-chain, at a block at or after the event (an RPC node behind the event is retried), and runs the daily jobs' own checks on it:
+
+| Event | Check (same function as the daily job) |
+|---|---|
+| V1 `SubmitCap`, `SubmitMarketRemoval` | that market's pending cap and removal checks, including the potential-loss alert |
+| V1 `SubmitTimelock` | the timelock (and guardian) check |
+| V2 `Submit` | `executableAt(data)` must still be set, then the pending-operation diff (loss alerts, grouping of new submissions) |
+| V2 `SetOwner`, `SetCurator` | the owner/curator diff |
+| V2 `AddAdapter`, `RemoveAdapter` | the adapter set diff |
+| V2 `Accept` | none: executed/revoked notes stay with the daily job |
+
+So content, severity, per-vault grouping, and dedup match the daily jobs, and an operation revoked or executed before the read is no longer pending and is not alerted. The checks read the daily jobs' cache (an operation they already alerted is not alerted again) but write it only in `production` mode, so in the other modes the daily jobs keep alerting exactly as before. That cache is the daily profile's namespace (`MORPHO_FILENAME` from `automation/jobs.yaml`, applied by [`daily_governance_cache.py`](./daily_governance_cache.py) before `utils.cache` loads); the subscriber refuses to start the Morpho consumer if it resolved another one. An adapter whose `realAssets()` cannot be read fails the evaluation and is retried, never treated as empty.
+
+Decisions and alert requests are stored durably next to the inbox (`morpho_live_decisions`, `morpho_live_alerts` in `morpho_subscriber.db`, see [`live_store.py`](./live_store.py)), one decision per event revision: a restart resumes undecided events, and a reorg that rewrites an event re-evaluates it. Events from blocks before the consumer's first run on the inbox (`live_baseline_at`) are recorded as `historical` and never evaluated. A failing vault retries with capped backoff, and is left out of the batch meanwhile so it cannot crowd out other vaults.
+
+`MORPHO_LIVE_DELIVERY` picks the delivery mode:
+
+- `shadow` (default): each request is posted to the internal errors chat as `[morpho-live-shadow]`, as plain text split to Telegram's limit, in order, retrying a failed or skipped send (e.g. a missing bot token) until Telegram accepts it. A request whose source events a reorg removed or rewrote before delivery is `invalidated` instead. Shadow requires the errors chat (`TELEGRAM_TOPIC_ID_ERRORS` or `TELEGRAM_CHAT_ID_ERRORS`) and falls back to `observe` without it, so its output never reaches the Morpho group.
+- `observe`: requests are recorded as `observed`; nothing is sent.
+- `production`: alerts go to the Morpho channel, like the daily jobs. Per vault, under a `governance_lock` that the daily `governance.py` / `governance_v2.py` jobs also take, the consumer evaluates, sends every message, and only then commits the daily jobs' cache writes. So each change is alerted once, by whichever path sees it first, and the daily jobs keep catching anything the live path missed (indexer gaps, outages) plus resolutions and guardian changes. A failed send, or one Telegram skips for missing credentials, commits nothing and leaves the events undecided; they are re-evaluated and re-sent on retry (a duplicate beats a missed alert, as in the daily jobs).
+
+Switch to `production` only after a shadow period matched the daily alerts ([#450](https://github.com/yearn/monitoring/issues/450)). The lock is a file in `CACHE_DIR` (`morpho_governance_<vault>.lock`), so both processes must share it, as the `monitoring` and `monitoring-timelock-subscriber` units do. `event_subscriber.py --streams morpho report` adds a live-decision summary (outcomes, block-to-decision delay, request statuses); `health` also fails when events stay undecided or shadow alerts stay undelivered for more than 10 minutes.
+
+Enable the stream only once the Envio deployment serves `MorphoGovernanceEvent` and has backfilled all five chains; until then its reconcile cycles and WebSocket fail with `field 'MorphoGovernanceEvent' not found` (without affecting the timelock stream). Its first reconcile starts at each chain's indexed head, so history is never announced.
 
 ### Limitations
 
