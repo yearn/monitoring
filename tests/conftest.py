@@ -37,7 +37,7 @@ def _isolate_from_live_apis(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     """
     for key in list(os.environ):
         if key in {"ETHERSCAN_TOKEN", "LIQUIDITY_WEBHOOK_SECRET", "TENDERLY_API_KEY"} or key.startswith(
-            ("PROVIDER_URL_", "TELEGRAM_", "LIQUIDITY_WEBHOOK_")
+            ("PROVIDER_URL_", "TELEGRAM_", "LIQUIDITY_WEBHOOK_", "VAULTS_MOMMY_WEBHOOK_", "EMERGENCY_DISPATCH_")
         ):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("LOG_LEVEL", "INFO")
