@@ -18,6 +18,12 @@
 
 profiles:
 
+  emergency_delivery:
+    cron: "* * * * *"
+    description: "Drain durable emergency webhook retries even when no new alert fires."
+    tasks:
+      - { name: "emergency-delivery-retries", script: utils/dispatch_retry.py }
+
   half_hourly:
     cron: "*/30 * * * *"
     description: "Thirty-minute risk monitoring for active Yearn strategies, and timelock alerts."
