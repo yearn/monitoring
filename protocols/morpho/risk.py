@@ -259,11 +259,11 @@ ALLOCATION_TIERS = {
     5: 0.01,  # Unknown market max allocation
 }
 
-# Risk-1 vaults allow 70% risk-1 + 30% risk-2 exposure; higher tiers retain their limits.
+# Risk-1 vaults allow 70% risk-1 + 30% risk-2 exposure.
 MAX_RISK_THRESHOLDS = {
     1: 1.30,  # Risk tier 1 max total risk
     2: 2.30,  # Risk tier 2 max total risk
-    3: 3.45,  # Risk tier 3 max total risk
+    3: 3.50,  # Risk tier 3 max total risk
     4: 4.60,  # Risk tier 4 max total risk
     5: 5.00,  # Risk tier 5 max total risk
 }

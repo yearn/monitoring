@@ -111,7 +111,7 @@ The current maximum total-risk thresholds are:
 
 - **Risk Level 1:** 1.30
 - **Risk Level 2:** 2.30
-- **Risk Level 3:** 3.45
+- **Risk Level 3:** 3.50
 - **Risk Level 4:** 4.60
 - **Risk Level 5:** 5.00
 

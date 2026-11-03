@@ -289,7 +289,7 @@ protocols:
       - name: "Market Allocation Ratios"
         description: "Per-market allocation vs risk-adjusted thresholds"
       - name: "Vault Risk Levels"
-        description: "Weighted total risk score vs vault threshold in v1 and v2; risk-1 vaults allow up to 1.30"
+        description: "Weighted total risk score vs vault threshold"
       - name: "Low Liquidity"
         description: "V1 non-YV-collateral and all V2 vault liquidity <2%; combined V1/V2 YV-collateral unwind liquidity vs collateral at risk for Katana USDC, USDT, and WETH"
       - name: "V1 Governance"
