@@ -109,13 +109,15 @@ This computed risk level is compared against the mutable `MAX_RISK_THRESHOLDS` c
 
 The current maximum total-risk thresholds are:
 
-- **Risk Level 1:** 1.15
+- **Risk Level 1:** 1.30
 - **Risk Level 2:** 2.30
-- **Risk Level 3:** 3.45
+- **Risk Level 3:** 3.50
 - **Risk Level 4:** 4.60
 - **Risk Level 5:** 5.00
 
 For example, a Risk Level 2 vault alerts when its weighted total risk exceeds 2.30. These values are a snapshot for readability; [risk.py](./risk.py) remains the source of truth and may be updated as risk assessments change.
+
+The Risk Level 1 ceiling of 1.30 applies to both V1 and V2 vaults. It allows 70% in Risk Level 1 markets plus 30% in Risk Level 2 markets (`0.70 × 1 + 0.30 × 2 = 1.30`). Per-market allocation limits still apply independently. Multiple markets can each stay within their allocation limit while their combined weighted risk exceeds the vault ceiling.
 
 If a vault's total risk level exceeds its threshold, an alert is triggered via a Telegram message.
 
