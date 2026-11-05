@@ -45,13 +45,22 @@ query YearnParentVaults($chainId: Int) {
 }
 """
 
-KONG_STRATEGIES_QUERY = """
-query YearnStrategies {
-  strategies {
+KONG_V2_STRATEGIES_QUERY = """
+query YearnV2KeeperStrategies($limit: Int!, $offset: Int!, $includeStrategies: Boolean!) {
+  vaults(v3: false, yearn: true, limit: $limit, offset: $offset) {
+    chainId
+    address
+    apiVersion
+    strategies
+    meta {
+      isRetired
+    }
+  }
+  strategies(erc4626: false) @include(if: $includeStrategies) {
     chainId
     address
     name
-    isShutdown
+    apiVersion
   }
 }
 """
@@ -236,22 +245,58 @@ def fetch_kong_parent_vaults(chain: Chain) -> List[Dict[str, object]]:
     return result
 
 
-def fetch_kong_strategies() -> List[Dict[str, object]]:
-    """Fetch strategy metadata for every chain Kong indexes in one request.
+def _fetch_kong_v2_inventory() -> tuple[list[Any], list[Any]]:
+    """Load every v2 vault page and the unpaginated strategy inventory once."""
+    vaults: list[Any] = []
+    strategies: list[Any] | None = None
+    page_size = 1000
+    while True:
+        data = _post_graphql(
+            KONG_V2_STRATEGIES_QUERY,
+            {"limit": page_size, "offset": len(vaults), "includeStrategies": strategies is None},
+        )
+        page = data.get("vaults")
+        if not isinstance(page, list):
+            raise KongRequestError("Kong v2 response missing vaults list")
+        if strategies is None:
+            strategies = data.get("strategies")
+            if not isinstance(strategies, list):
+                raise KongRequestError("Kong v2 response missing strategies list")
+        vaults.extend(page)
+        if len(page) < page_size:
+            return vaults, strategies
 
-    Rows missing a chain id, address or name are skipped.
+
+def _v2_vault_strategy_addresses(vaults: list[Any]) -> set[tuple[int, str]]:
+    """Return strategy addresses grouped by chain for eligible Yearn v2 vaults."""
+    eligible: set[tuple[int, str]] = set()
+    for vault in vaults:
+        if not isinstance(vault, dict) or _is_retired(vault):
+            continue
+        chain_id = vault.get("chainId")
+        if not isinstance(chain_id, int) or not str(vault.get("apiVersion", "")).startswith("0."):
+            continue
+        for address in _lower_addresses(vault.get("strategies")):
+            eligible.add((chain_id, address))
+
+    return eligible
+
+
+def fetch_kong_v2_strategies() -> List[Dict[str, object]]:
+    """Fetch v2 strategies belonging to non-retired Yearn v2 vaults.
+
+    Kong's erc4626 filter can include v3 strategies with missing metadata, so
+    both vaults and strategies must also have a 0.x API version. Hidden vaults
+    remain eligible. Funding and keeper addresses are checked on-chain.
 
     Returns:
-        Strategy dicts with ``chain_id``, ``address``, ``name`` and ``is_shutdown`` keys.
+        Strategy dicts with chain_id, address, and name keys.
 
     Raises:
-        KongRequestError: If the Kong request fails or omits the strategies list.
+        KongRequestError: If Kong omits either required list.
     """
-    data = _post_graphql(KONG_STRATEGIES_QUERY, {})
-    strategies = data.get("strategies")
-    if not isinstance(strategies, list):
-        raise KongRequestError("Kong response missing strategies list")
-
+    vaults, strategies = _fetch_kong_v2_inventory()
+    eligible = _v2_vault_strategy_addresses(vaults)
     result: List[Dict[str, object]] = []
     for strategy in strategies:
         if not isinstance(strategy, dict):
@@ -261,13 +306,9 @@ def fetch_kong_strategies() -> List[Dict[str, object]]:
         name = strategy.get("name")
         if not isinstance(chain_id, int) or not isinstance(address, str) or not isinstance(name, str):
             continue
-        result.append(
-            {
-                "chain_id": chain_id,
-                "address": address,
-                "name": name,
-                "is_shutdown": bool(strategy.get("isShutdown")),
-            }
-        )
-
+        if (chain_id, address.lower()) not in eligible:
+            continue
+        if not str(strategy.get("apiVersion", "")).startswith("0."):
+            continue
+        result.append({"chain_id": chain_id, "address": address, "name": name})
     return result

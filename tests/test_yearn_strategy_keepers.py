@@ -1,70 +1,37 @@
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
 from web3 import Web3
 
 from protocols.yearn import check_strategy_keepers as mod
 from utils.chains import Chain
 
 ETH_KEY = "coingecko:ethereum"
-
-LOOPER_A = "0x00000000000000000000000000000000000000a1"
-LOOPER_B = "0x00000000000000000000000000000000000000a2"
-LOOPER_C = "0x00000000000000000000000000000000000000a3"
+STRATEGY_A = Web3.to_checksum_address("0x00000000000000000000000000000000000000a1")
+STRATEGY_B = Web3.to_checksum_address("0x00000000000000000000000000000000000000a2")
+STRATEGY_C = Web3.to_checksum_address("0x00000000000000000000000000000000000000a3")
 KEEPER_EOA = Web3.to_checksum_address("0x00000000000000000000000000000000000000e1")
 KEEPER_CONTRACT = Web3.to_checksum_address("0x00000000000000000000000000000000000000c1")
-BOT = Web3.to_checksum_address("0x00000000000000000000000000000000000000b1")
-MULTISIG = Web3.to_checksum_address("0x00000000000000000000000000000000000000f1")
 
 
-def _strategy(address: str, name: str, chain_id: int = 1, is_shutdown: bool = False) -> dict:
-    return {"chain_id": chain_id, "address": address, "name": name, "is_shutdown": is_shutdown}
-
-
-def _allowed_log(keeper: str, caller: str, allowed: bool, block: int, index: int = 0) -> dict:
-    return {
-        "address": keeper,
-        "blockNumber": block,
-        "logIndex": index,
-        "topics": [
-            bytes.fromhex(mod.ALLOWED_SET_TOPIC[2:]),
-            bytes(12) + bytes.fromhex(caller[2:]),
-            (1 if allowed else 0).to_bytes(32, "big"),
-        ],
-    }
-
-
-def test_select_keeper_strategies_filters_name_shutdown_and_unsupported_chains() -> None:
+def test_select_keeper_strategies_accepts_v2_names_and_deduplicates() -> None:
     selected = mod.select_keeper_strategies(
         [
-            _strategy(LOOPER_A, "wstETH/WETH Spark Looper"),
-            _strategy(LOOPER_A, "wstETH/WETH Spark Looper"),
-            _strategy(LOOPER_B, "Base syrupUSDC Morpho LooperStrategy", chain_id=Chain.BASE.chain_id),
-            _strategy(LOOPER_C, "Morpho vbWBTC/yvUSDC Lender Borrower", chain_id=Chain.KATANA.chain_id),
-            _strategy(LOOPER_C, "PT siUSD Morpho Looper", is_shutdown=True),
-            _strategy(LOOPER_C, "USDC Lender"),
-            _strategy(LOOPER_C, "spUSDG/USDG Morpho Looper", chain_id=4663),
-            _strategy(LOOPER_C, "CompV3 WMATIC Lender Borrower", chain_id=Chain.POLYGON.chain_id),
-            _strategy(LOOPER_C, "Arbitrum syrupUSDC/USDC Morpho Looper", chain_id=Chain.ARBITRUM.chain_id),
+            {"chain_id": 1, "address": STRATEGY_A, "name": "StrategyCurveBoostedFactory"},
+            {"chain_id": 1, "address": STRATEGY_A.lower(), "name": "StrategyCurveBoostedFactory"},
+            {"chain_id": 10, "address": STRATEGY_B, "name": "StrategyVelodrome"},
+            {"chain_id": 8453, "address": STRATEGY_C, "name": "StrategyAerodrome"},
+            {"chain_id": 42161, "address": STRATEGY_A, "name": "StrategyArbitrum"},
+            {"chain_id": 250, "address": STRATEGY_A, "name": "Unsupported"},
         ]
     )
-
     assert {chain: [strategy.address for strategy in items] for chain, items in selected.items()} == {
-        Chain.MAINNET: [Web3.to_checksum_address(LOOPER_A)],
-        Chain.BASE: [Web3.to_checksum_address(LOOPER_B)],
-        Chain.KATANA: [Web3.to_checksum_address(LOOPER_C)],
+        Chain.MAINNET: [STRATEGY_A],
+        Chain.OPTIMISM: [STRATEGY_B],
+        Chain.BASE: [STRATEGY_C],
+        Chain.ARBITRUM: [STRATEGY_A],
     }
-
-
-def test_latest_allowed_callers_replays_events_in_order() -> None:
-    other = "0x00000000000000000000000000000000000000b2"
-    logs = [
-        _allowed_log(KEEPER_CONTRACT, BOT, False, block=20),
-        _allowed_log(KEEPER_CONTRACT, BOT, True, block=10),
-        _allowed_log(KEEPER_CONTRACT, other, True, block=10, index=1),
-    ]
-
-    assert mod.latest_allowed_callers(logs) == {KEEPER_CONTRACT: {Web3.to_checksum_address(other)}}
 
 
 class FakeBatch:
@@ -84,47 +51,35 @@ class FakeBatch:
 
 
 class FakeClient:
-    """Web3Client stand-in whose calls resolve eagerly; batches just collect the results.
-
-    Like web3, a call is only batched when it is built inside ``batch_requests()``, so
-    every batchable call asserts it runs inside one.
-    """
+    """RPC boundary fake that only accepts v2 asset calls and defers batch calls."""
 
     def __init__(
         self,
         keepers: dict[str, str],
         contracts: set[str],
         balances: dict[str, int],
-        logs: list,
         empty: frozenset[str] = frozenset(),
     ) -> None:
         self.batches: list[list] = []
         self.in_batch = False
-        self.logs_requests: list[dict] = []
-        self._keepers = {Web3.to_checksum_address(k): v for k, v in keepers.items()}
-        self._empty = {Web3.to_checksum_address(address) for address in empty}
+        self._keepers = keepers
+        self._empty = empty
         self.eth = SimpleNamespace(
             get_code=lambda address: self._batched(b"\x01" if address in contracts else b""),
             get_balance=lambda address: self._batched(balances[address]),
-            get_logs=self._get_logs,
         )
-        self._logs = logs
 
     def _batched(self, value: object) -> object:
-        assert self.in_batch, "call built outside batch_requests() would run unbatched"
+        assert self.in_batch, "RPC call built outside batch_requests() would run unbatched"
         return value
 
-    def _get_logs(self, params: dict) -> list:
-        self.logs_requests.append(params)
-        return self._logs
-
     def get_contract(self, address: str, abi: list) -> SimpleNamespace:
-        keeper = self._keepers[Web3.to_checksum_address(address)]
-        total_assets = 0 if address in self._empty else 10**18
         return SimpleNamespace(
             functions=SimpleNamespace(
-                keeper=lambda: SimpleNamespace(call=lambda: self._batched(keeper)),
-                totalAssets=lambda: SimpleNamespace(call=lambda: self._batched(total_assets)),
+                keeper=lambda: SimpleNamespace(call=lambda: self._batched(self._keepers[address])),
+                estimatedTotalAssets=lambda: SimpleNamespace(
+                    call=lambda: self._batched(0 if address in self._empty else 10**18)
+                ),
             )
         )
 
@@ -135,118 +90,124 @@ class FakeClient:
         self.batches.append(batch.calls)
         return batch.calls
 
-    def execute(self, operation, *args, **kwargs):
-        return operation(*args, **kwargs)
 
-
-def test_collect_keeper_wallets_dedupes_and_batches(monkeypatch) -> None:
+def test_collect_keeper_wallets_deduplicates_and_skips_contract_keepers(monkeypatch) -> None:
     client = FakeClient(
-        keepers={LOOPER_A: KEEPER_EOA, LOOPER_B: KEEPER_CONTRACT, LOOPER_C: KEEPER_CONTRACT},
-        contracts={KEEPER_CONTRACT, MULTISIG},
-        balances={KEEPER_EOA: 10**18, BOT: 2 * 10**18},
-        logs=[
-            _allowed_log(KEEPER_CONTRACT, BOT, True, block=1),
-            _allowed_log(KEEPER_CONTRACT, MULTISIG, True, block=2),
-        ],
+        keepers={STRATEGY_A: KEEPER_EOA, STRATEGY_B: KEEPER_EOA, STRATEGY_C: KEEPER_CONTRACT},
+        contracts={KEEPER_CONTRACT},
+        balances={KEEPER_EOA: 10**18},
     )
     monkeypatch.setattr(mod.ChainManager, "get_client", lambda chain: client)
-    monkeypatch.setattr(mod, "EXTRA_KEEPER_CALLERS", {Chain.MAINNET: {KEEPER_CONTRACT: (KEEPER_EOA, BOT)}})
-    loopers = [
-        mod.KeeperStrategy(Chain.MAINNET, Web3.to_checksum_address(LOOPER_A), "A"),
-        mod.KeeperStrategy(Chain.MAINNET, Web3.to_checksum_address(LOOPER_B), "B"),
-        mod.KeeperStrategy(Chain.MAINNET, Web3.to_checksum_address(LOOPER_C), "C"),
+    strategies = [
+        mod.KeeperStrategy(Chain.MAINNET, STRATEGY_A, "A"),
+        mod.KeeperStrategy(Chain.MAINNET, STRATEGY_B, "B"),
+        mod.KeeperStrategy(Chain.MAINNET, STRATEGY_C, "C"),
     ]
-
-    result = mod.collect_keeper_wallets(Chain.MAINNET, loopers)
-
-    assert {address: wallet.strategies for address, wallet in result.wallets.items()} == {
-        KEEPER_EOA: {"A", "B", "C"},
-        BOT: {"B", "C"},
-    }
-    assert {address: wallet.balance_wei for address, wallet in result.wallets.items()} == {
-        KEEPER_EOA: 10**18,
-        BOT: 2 * 10**18,
-    }
-    assert result.keepers_without_callers == {}
-    # keeper()+totalAssets(), keeper code, caller code, balances: one batch each, no repeated addresses.
-    assert [len(calls) for calls in client.batches] == [6, 2, 3, 2]
-    assert client.logs_requests[0]["address"] == [KEEPER_CONTRACT]
+    result = mod.collect_keeper_wallets(Chain.MAINNET, strategies)
+    assert result.wallets == {KEEPER_EOA: mod.KeeperWallet(KEEPER_EOA, {"A", "B"}, 10**18)}
+    assert [len(calls) for calls in client.batches] == [6, 2, 1]
 
 
-def test_collect_keeper_wallets_flags_contract_keeper_with_only_multisig_callers(monkeypatch) -> None:
+def test_collect_keeper_wallets_skips_empty_strategies(monkeypatch) -> None:
     client = FakeClient(
-        keepers={LOOPER_A: KEEPER_CONTRACT},
-        contracts={KEEPER_CONTRACT, MULTISIG},
-        balances={},
-        logs=[_allowed_log(KEEPER_CONTRACT, MULTISIG, True, block=1)],
-    )
-    monkeypatch.setattr(mod.ChainManager, "get_client", lambda chain: client)
-    monkeypatch.setattr(mod, "EXTRA_KEEPER_CALLERS", {})
-
-    result = mod.collect_keeper_wallets(
-        Chain.MAINNET, [mod.KeeperStrategy(Chain.MAINNET, Web3.to_checksum_address(LOOPER_A), "A")]
-    )
-
-    assert result.wallets == {}
-    assert result.keepers_without_callers == {KEEPER_CONTRACT: {"A"}}
-
-
-def test_collect_keeper_wallets_skips_strategies_without_assets(monkeypatch) -> None:
-    client = FakeClient(
-        keepers={LOOPER_A: KEEPER_EOA, LOOPER_B: BOT},
+        keepers={STRATEGY_A: KEEPER_EOA, STRATEGY_B: STRATEGY_C},
         contracts=set(),
         balances={KEEPER_EOA: 10**18},
-        logs=[],
-        empty=frozenset({LOOPER_B}),
+        empty=frozenset({STRATEGY_B}),
     )
     monkeypatch.setattr(mod.ChainManager, "get_client", lambda chain: client)
-
     result = mod.collect_keeper_wallets(
-        Chain.KATANA,
-        [
-            mod.KeeperStrategy(Chain.KATANA, Web3.to_checksum_address(LOOPER_A), "A"),
-            mod.KeeperStrategy(Chain.KATANA, Web3.to_checksum_address(LOOPER_B), "B"),
-        ],
+        Chain.BASE,
+        [mod.KeeperStrategy(Chain.BASE, STRATEGY_A, "A"), mod.KeeperStrategy(Chain.BASE, STRATEGY_B, "B")],
     )
-
-    assert {address: wallet.strategies for address, wallet in result.wallets.items()} == {KEEPER_EOA: {"A"}}
-    assert client.logs_requests == []
-
-
-def _result(chain: Chain, balance_wei: int, without_callers: dict | None = None) -> mod.ChainResult:
-    wallet = mod.KeeperWallet(KEEPER_EOA, {"Looper"}, balance_wei)
-    return mod.ChainResult(chain, {KEEPER_EOA: wallet}, without_callers or {})
+    assert result.wallets == {KEEPER_EOA: mod.KeeperWallet(KEEPER_EOA, {"A"}, 10**18)}
+    assert [len(calls) for calls in client.batches] == [4, 1, 1]
 
 
-def test_evaluate_uses_ten_dollars_on_mainnet_and_two_dollars_on_l2s() -> None:
-    prices = {ETH_KEY: Decimal("2000")}
-    # 0.0045 ETH = $9 on mainnet (below $10); 0.00125 ETH = $2.50 on Katana (above $2).
-    issues = mod.evaluate(
-        [_result(Chain.MAINNET, 45 * 10**14), _result(Chain.KATANA, 125 * 10**13)],
-        prices,
-    )
-
-    assert [issue.code for issue in issues] == [f"low:1:{KEEPER_EOA.lower()}"]
-    assert f"https://etherscan.io/address/{KEEPER_EOA}" in issues[0].message
-    assert "($9.00 < $10)" in issues[0].message
-
-    # 0.0009 ETH = $1.80 on Base (below $2); 0.0055 ETH = $11 on mainnet (above $10).
-    issues = mod.evaluate([_result(Chain.BASE, 9 * 10**14), _result(Chain.MAINNET, 55 * 10**14)], prices)
-    assert [issue.code for issue in issues] == [f"low:8453:{KEEPER_EOA.lower()}"]
+def test_collect_keeper_wallets_with_only_contract_keepers_never_reads_balances(monkeypatch) -> None:
+    client = FakeClient(keepers={STRATEGY_A: KEEPER_CONTRACT}, contracts={KEEPER_CONTRACT}, balances={})
+    monkeypatch.setattr(mod.ChainManager, "get_client", lambda chain: client)
+    result = mod.collect_keeper_wallets(Chain.MAINNET, [mod.KeeperStrategy(Chain.MAINNET, STRATEGY_A, "A")])
+    assert result.wallets == {}
+    assert mod.evaluate([result], {}) == []
 
 
-def test_evaluate_reports_keepers_without_callers_even_without_price() -> None:
-    issues = mod.evaluate([_result(Chain.MAINNET, 0, {KEEPER_CONTRACT: {"Looper"}})], {ETH_KEY: Decimal("0")})
+def _result(chain: Chain, balance_wei: int) -> mod.ChainResult:
+    return mod.ChainResult(chain, {KEEPER_EOA: mod.KeeperWallet(KEEPER_EOA, {"StrategyCurve"}, balance_wei)})
 
-    # No price: balances cannot be judged, but the no-caller finding needs no price and still fires.
-    assert [issue.code for issue in issues] == ["price:1", f"nocaller:1:{KEEPER_CONTRACT.lower()}"]
+
+@pytest.mark.parametrize("chain", [Chain.MAINNET, Chain.OPTIMISM, Chain.BASE, Chain.ARBITRUM])
+def test_evaluate_alerts_below_minimum_but_not_at_minimum(chain: Chain) -> None:
+    minimum = 5 * 10**15 if chain == Chain.MAINNET else 10**15
+    assert mod.evaluate([_result(chain, minimum)], {ETH_KEY: Decimal("2000")}) == []
+    issues = mod.evaluate([_result(chain, minimum - 1)], {ETH_KEY: Decimal("2000")})
+    assert [issue.code for issue in issues] == [f"low:{chain.chain_id}:{KEEPER_EOA.lower()}"]
+    assert f"{chain.explorer_url}/address/{KEEPER_EOA}" in issues[0].message
+    assert "StrategyCurve" in issues[0].message
+
+
+@pytest.mark.parametrize("prices", [{}, {ETH_KEY: Decimal("0")}, {ETH_KEY: Decimal("-1")}])
+def test_evaluate_reports_unavailable_prices(prices: dict[str, Decimal]) -> None:
+    assert [i.code for i in mod.evaluate([_result(Chain.MAINNET, 0)], prices)] == ["price:1"]
 
 
 def test_should_send_alert_dedupes_and_reminds_daily() -> None:
     state = '{"fingerprint": "low:1:0xabc", "last_alert": 1000}'
-
     assert not mod.should_send_alert("", None, 1000)
     assert mod.should_send_alert("low:1:0xabc", None, 1000)
+    assert mod.should_send_alert("low:1:0xabc", "invalid json", 1000)
     assert not mod.should_send_alert("low:1:0xabc", state, 1000 + mod.ALERT_REMINDER_SECONDS - 1)
     assert mod.should_send_alert("low:1:0xabc", state, 1000 + mod.ALERT_REMINDER_SECONDS)
     assert mod.should_send_alert("low:1:0xabc|low:1:0xdef", state, 1001)
+
+
+def test_main_dry_run_does_not_send_alerts_or_write_state(monkeypatch) -> None:
+    monkeypatch.setattr("sys.argv", ["check_strategy_keepers.py", "--dry-run"])
+    monkeypatch.setattr(
+        mod, "fetch_kong_v2_strategies", lambda: [{"chain_id": 10, "address": STRATEGY_A, "name": "StrategyVelodrome"}]
+    )
+    monkeypatch.setattr(mod, "collect_keeper_wallets", lambda *args: _result(Chain.OPTIMISM, 0))
+    monkeypatch.setattr(mod, "fetch_prices", lambda keys: {ETH_KEY: Decimal("2000")})
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Dry run must not send alerts or access stored state")
+
+    monkeypatch.setattr(mod, "send_alert", unexpected)
+    monkeypatch.setattr(mod.store, "state_get", unexpected)
+    monkeypatch.setattr(mod.store, "state_set", unexpected)
+    mod.main()
+
+
+def test_main_reports_rpc_failure_and_checks_other_chains(monkeypatch) -> None:
+    monkeypatch.setattr("sys.argv", ["check_strategy_keepers.py"])
+    monkeypatch.setattr(
+        mod,
+        "fetch_kong_v2_strategies",
+        lambda: [
+            {"chain_id": 1, "address": STRATEGY_A, "name": "StrategyCurve"},
+            {"chain_id": 8453, "address": STRATEGY_B, "name": "StrategyAero"},
+        ],
+    )
+
+    def collect(chain, strategies):
+        if chain == Chain.MAINNET:
+            raise ConnectionError("RPC unavailable")
+        return _result(chain, 0)
+
+    monkeypatch.setattr(mod, "collect_keeper_wallets", collect)
+    monkeypatch.setattr(mod, "fetch_prices", lambda keys: {ETH_KEY: Decimal("2000")})
+    monkeypatch.setattr(mod, "resolve_channel", lambda *args: "maintenance")
+    monkeypatch.setattr(mod.store, "state_get", lambda *args: None)
+    sent = []
+    stored = []
+    monkeypatch.setattr(mod, "send_alert", lambda alert, **kwargs: sent.append(alert))
+    monkeypatch.setattr(mod.store, "state_set", lambda *args: stored.append(args))
+    mod.main()
+    assert len(sent) == 1
+    assert sent[0].protocol == "yearn-internal"
+    assert sent[0].channel == "maintenance"
+    assert sent[0].severity == mod.AlertSeverity.MEDIUM
+    assert "Yearn V2 Keeper Gas Warning" in sent[0].message
+    assert "MAINNET: monitor error RPC unavailable" in sent[0].message
+    assert f"https://basescan.org/address/{KEEPER_EOA}" in sent[0].message
+    assert stored[0][0] == "yearn_v2_keepers_alerts"

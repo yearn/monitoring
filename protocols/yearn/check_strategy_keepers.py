@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
-"""Monitor native gas balances of the wallets that keep Yearn looper and lender-borrower strategies running.
+"""Monitor ETH balances of direct keeper wallets for funded Yearn v2 strategies.
 
-Strategies are discovered from Kong (name contains "Looper" or "Lender Borrower", not
-shut down) and skipped when ``totalAssets()`` is zero. Each strategy's ``keeper()`` is
-read on-chain. A keeper that is a wallet pays gas itself. A keeper that is a contract
-(LooperKeeper, PublicAllocatorTendExecutor, yHaaSRelayer, TKSRelayer) holds no ETH: its
-allow-listed wallets send ``msg.value`` and pay gas, so those wallets are resolved from
-``AllowedSet`` events plus ``EXTRA_KEEPER_CALLERS``.
+V3 keeper gas checks are handled in the vaults repo. Kong discovers strategies
+of non-retired Yearn v2 vaults; on-chain estimatedTotalAssets() skips empty
+strategies. Keeper contracts are logged and excluded: a contract's ETH balance
+is not the gas balance of the external automation network that calls it.
 
-Every address is collected into a deduplicated map first, then each RPC step
-(``keeper()`` with ``totalAssets()``, ``eth_getCode``, ``eth_getBalance``) runs as a
-single batch per chain.
-Only mainnet, Base and Katana are monitored. An alert fires when a wallet holds less
-than ``$10`` of the native token on mainnet or ``$2`` on Base/Katana, or when a keeper
-contract has no known wallet caller.
+Keeper and asset reads, code checks, and wallet balances each use one batch per
+chain. Mainnet alerts below $10; Optimism, Base, and Arbitrum alert below $2.
 """
 
 from __future__ import annotations
@@ -28,7 +22,7 @@ from typing import Any, Iterable
 from dotenv import load_dotenv
 from web3 import Web3
 
-from protocols.yearn.kong import fetch_kong_strategies
+from protocols.yearn.kong import fetch_kong_v2_strategies
 from utils import store
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.chains import Chain
@@ -45,8 +39,6 @@ PROTOCOL = "yearn"
 # Alert-history key: internal-only, so these alerts stay off the public Yearn page.
 ALERT_PROTOCOL = "yearn-internal"
 
-# Lower-cased Kong strategy-name fragments of strategies that depend on a keeper.
-KEEPER_STRATEGY_MARKERS = ("looper", "lender borrower")
 MIN_BALANCE_USD_MAINNET = Decimal("10")
 MIN_BALANCE_USD_L2 = Decimal("2")
 WEI_PER_NATIVE = Decimal(10) ** 18
@@ -55,32 +47,8 @@ WEI_PER_NATIVE = Decimal(10) ** 18
 NATIVE_TOKENS: dict[Chain, tuple[str, str]] = {
     Chain.MAINNET: ("ETH", "coingecko:ethereum"),
     Chain.BASE: ("ETH", "coingecko:ethereum"),
-    Chain.KATANA: ("ETH", "coingecko:ethereum"),
-}
-
-# AllowedSet(address indexed, bool indexed), emitted by LooperKeeper and PublicAllocatorTendExecutor.
-ALLOWED_SET_TOPIC = "0x" + Web3.keccak(text="AllowedSet(address,bool)").hex().removeprefix("0x")
-
-# Wallets that call a keeper contract but cannot be found from AllowedSet events:
-# yHaaSRelayer and TKSRelayer emit no events, and the LooperKeeper-style constructors
-# allow-list governance without emitting one. Contract entries (multisigs) are dropped on-chain.
-EXTRA_KEEPER_CALLERS: dict[Chain, dict[str, tuple[str, ...]]] = {
-    Chain.MAINNET: {
-        # yHaaSRelayer
-        "0x604e586F17cE106B64185A7a0d2c1Da5bAce711E": (
-            "0x283132390eA87D6ecc20255B59Ba94329eE17961",
-            "0x420ACF637D662b80cca8bEfb327AA24039E7e0Fa",
-        ),
-        # PublicAllocatorTendExecutor (governance)
-        "0xb86c97f61DB0b339D4fFe7F39f7725B80a121D5D": ("0x1b5f15DCb82d25f91c65b53CEe151E8b9fBdD271",),
-    },
-    Chain.KATANA: {
-        # TKSRelayer (same yHaaS bots as mainnet)
-        "0xC29cbdcf5843f8550530cc5d627e1dd3007EF231": (
-            "0x283132390eA87D6ecc20255B59Ba94329eE17961",
-            "0x420ACF637D662b80cca8bEfb327AA24039E7e0Fa",
-        ),
-    },
+    Chain.OPTIMISM: ("ETH", "coingecko:ethereum"),
+    Chain.ARBITRUM: ("ETH", "coingecko:ethereum"),
 }
 
 STRATEGY_ABI = [
@@ -93,21 +61,21 @@ STRATEGY_ABI = [
     },
     {
         "inputs": [],
-        "name": "totalAssets",
+        "name": "estimatedTotalAssets",
         "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
         "stateMutability": "view",
         "type": "function",
     },
 ]
 
-ALERT_STATE_NAMESPACE = "yearn_strategy_keepers_alerts"
+ALERT_STATE_NAMESPACE = "yearn_v2_keepers_alerts"
 ALERT_STATE_KEY = "all"
 ALERT_REMINDER_SECONDS = 24 * 60 * 60
 
 
 @dataclass(frozen=True)
 class KeeperStrategy:
-    """A keeper-run strategy discovered from Kong."""
+    """A Yearn v2 strategy discovered from a non-retired vault in Kong."""
 
     chain: Chain
     address: str
@@ -125,11 +93,10 @@ class KeeperWallet:
 
 @dataclass
 class ChainResult:
-    """Keeper wallets and unresolved keeper contracts found on one chain."""
+    """Direct keeper wallets found on one chain."""
 
     chain: Chain
     wallets: dict[str, KeeperWallet]
-    keepers_without_callers: dict[str, set[str]]
 
 
 @dataclass(frozen=True)
@@ -141,49 +108,29 @@ class Issue:
 
 
 def select_keeper_strategies(strategies: Iterable[dict[str, Any]]) -> dict[Chain, list[KeeperStrategy]]:
-    """Group live looper and lender-borrower strategies by chain, skipping chains we cannot monitor.
+    """Group discovered Yearn v2 strategies by supported ETH-gas chain.
 
     Args:
-        strategies: Strategy rows from ``fetch_kong_strategies``.
+        strategies: Rows from fetch_kong_v2_strategies, already filtered to v2 vaults.
 
     Returns:
-        Strategies keyed by chain, deduplicated by address.
+        Strategies keyed by chain and deduplicated by address.
     """
     chains_by_id = {chain.chain_id: chain for chain in NATIVE_TOKENS}
     selected: dict[Chain, dict[str, KeeperStrategy]] = {}
     for strategy in strategies:
-        name = str(strategy["name"])
-        if strategy["is_shutdown"] or not any(marker in name.lower() for marker in KEEPER_STRATEGY_MARKERS):
-            continue
         chain = chains_by_id.get(int(strategy["chain_id"]))
         if chain is None:
             logger.info(
-                "Skipping strategy %s (%s) on unmonitored chain %s",
+                "Skipping v2 strategy %s (%s) on unmonitored chain %s",
                 strategy["name"],
                 strategy["address"],
                 strategy["chain_id"],
             )
             continue
         address = Web3.to_checksum_address(str(strategy["address"]))
-        selected.setdefault(chain, {})[address] = KeeperStrategy(chain, address, name)
+        selected.setdefault(chain, {})[address] = KeeperStrategy(chain, address, str(strategy["name"]))
     return {chain: list(by_address.values()) for chain, by_address in selected.items()}
-
-
-def latest_allowed_callers(logs: Iterable[Any]) -> dict[str, set[str]]:
-    """Replay ``AllowedSet`` logs in order and return the callers still allowed per keeper.
-
-    Args:
-        logs: ``eth_getLogs`` entries for the ``AllowedSet`` topic.
-
-    Returns:
-        Currently allowed caller addresses keyed by checksummed keeper contract.
-    """
-    state: dict[str, dict[str, bool]] = {}
-    for log in sorted(logs, key=lambda entry: (entry["blockNumber"], entry["logIndex"])):
-        keeper = Web3.to_checksum_address(log["address"])
-        caller = Web3.to_checksum_address("0x" + bytes(log["topics"][1])[-20:].hex())
-        state.setdefault(keeper, {})[caller] = int.from_bytes(bytes(log["topics"][2]), "big") != 0
-    return {keeper: {caller for caller, allowed in callers.items() if allowed} for keeper, callers in state.items()}
 
 
 def min_balance_usd(chain: Chain) -> Decimal:
@@ -212,21 +159,21 @@ def _is_contract_map(client: Web3Client, addresses: list[str]) -> dict[str, bool
 
 
 def collect_keeper_wallets(chain: Chain, strategies: list[KeeperStrategy]) -> ChainResult:
-    """Resolve every funded strategy's keeper to the deduplicated set of wallets that pay its gas.
+    """Collect direct keeper wallets for v2 strategies holding assets.
 
     Args:
         chain: Chain the strategies live on.
-        strategies: Keeper-run strategies on ``chain``.
+        strategies: V2 strategies discovered from non-retired vaults.
 
     Returns:
-        Keeper wallets (with balances) and keeper contracts that resolved to no wallet.
+        Deduplicated direct keeper wallets with balances. Contract keepers are
+        excluded because their own balances do not fund their callers' gas.
     """
     client = ChainManager.get_client(chain)
-
-    # 1. keeper() and totalAssets() for every strategy, one batch. Empty strategies need no keeper.
     contracts = [client.get_contract(strategy.address, STRATEGY_ABI) for strategy in strategies]
     results = _batch(
-        client, (call for c in contracts for call in (c.functions.keeper().call(), c.functions.totalAssets().call()))
+        client,
+        (call for c in contracts for call in (c.functions.keeper().call(), c.functions.estimatedTotalAssets().call())),
     )
     strategies_by_keeper: dict[str, set[str]] = {}
     for strategy, keeper, total_assets in zip(strategies, results[0::2], results[1::2]):
@@ -235,46 +182,23 @@ def collect_keeper_wallets(chain: Chain, strategies: list[KeeperStrategy]) -> Ch
             continue
         strategies_by_keeper.setdefault(Web3.to_checksum_address(keeper), set()).add(strategy.name)
 
-    # 2. Split unique keepers into wallets and contracts, one batch.
     keeper_is_contract = _is_contract_map(client, list(strategies_by_keeper))
     wallets: dict[str, KeeperWallet] = {}
-    contract_keepers = [keeper for keeper, is_contract in keeper_is_contract.items() if is_contract]
     for keeper, is_contract in keeper_is_contract.items():
-        if not is_contract:
-            wallets.setdefault(keeper, KeeperWallet(keeper)).strategies.update(strategies_by_keeper[keeper])
+        if is_contract:
+            logger.info(
+                "Skipping v2 keeper contract %s: %s",
+                _address_url(chain, keeper),
+                _strategy_list(strategies_by_keeper[keeper]),
+            )
+            continue
+        wallets[keeper] = KeeperWallet(keeper, strategies_by_keeper[keeper])
 
-    # 3. Callers of keeper contracts: one getLogs across all of them, plus configured extras.
-    callers_by_keeper: dict[str, set[str]] = {keeper: set() for keeper in contract_keepers}
-    if contract_keepers:
-        logs = client.execute(
-            client.eth.get_logs,
-            {"address": contract_keepers, "topics": [ALLOWED_SET_TOPIC], "fromBlock": 0, "toBlock": "latest"},
-        )
-        for keeper, callers in latest_allowed_callers(logs).items():
-            callers_by_keeper.setdefault(keeper, set()).update(callers)
-        for keeper, extras in EXTRA_KEEPER_CALLERS.get(chain, {}).items():
-            keeper = Web3.to_checksum_address(keeper)
-            if keeper in callers_by_keeper:
-                callers_by_keeper[keeper].update(Web3.to_checksum_address(extra) for extra in extras)
-
-    # 4. Keep only wallet callers (drop multisigs), one batch over the deduplicated set.
-    unique_callers = sorted({caller for callers in callers_by_keeper.values() for caller in callers})
-    caller_is_contract = _is_contract_map(client, unique_callers)
-    keepers_without_callers: dict[str, set[str]] = {}
-    for keeper, callers in callers_by_keeper.items():
-        wallet_callers = [caller for caller in callers if not caller_is_contract[caller]]
-        if not wallet_callers:
-            keepers_without_callers[keeper] = strategies_by_keeper[keeper]
-        for caller in wallet_callers:
-            wallets.setdefault(caller, KeeperWallet(caller)).strategies.update(strategies_by_keeper[keeper])
-
-    # 5. Native balances for every unique wallet, one batch.
     addresses = list(wallets)
     if addresses:
         for address, balance in zip(addresses, _batch(client, (client.eth.get_balance(a) for a in addresses))):
             wallets[address].balance_wei = int(balance)
-
-    return ChainResult(chain, wallets, keepers_without_callers)
+    return ChainResult(chain, wallets)
 
 
 def _address_url(chain: Chain, address: str) -> str:
@@ -307,7 +231,7 @@ def _low_balance_issues(result: ChainResult, symbol: str, price: Decimal) -> lis
 
 
 def evaluate(results: list[ChainResult], prices: dict[str, Decimal]) -> list[Issue]:
-    """Return low-balance and missing-caller issues across all chains.
+    """Return low-balance issues across all chains.
 
     Args:
         results: Per-chain keeper wallets with balances.
@@ -318,6 +242,8 @@ def evaluate(results: list[ChainResult], prices: dict[str, Decimal]) -> list[Iss
     """
     issues: list[Issue] = []
     for result in results:
+        if not result.wallets:
+            continue
         chain = result.chain
         symbol, price_key = NATIVE_TOKENS[chain]
         price = prices.get(price_key)
@@ -325,15 +251,6 @@ def evaluate(results: list[ChainResult], prices: dict[str, Decimal]) -> list[Iss
             issues.append(Issue(f"price:{chain.chain_id}", f"{chain.name}: no {symbol} USD price from DeFiLlama"))
         else:
             issues.extend(_low_balance_issues(result, symbol, price))
-        # No-caller issues need no price, so a price outage must not hide them.
-        for keeper, strategies in sorted(result.keepers_without_callers.items()):
-            issues.append(
-                Issue(
-                    f"nocaller:{chain.chain_id}:{keeper.lower()}",
-                    f"{chain.name}: keeper contract {_address_url(chain, keeper)} has no known wallet caller; "
-                    f"add it to EXTRA_KEEPER_CALLERS\n  keeps: {_strategy_list(strategies)}",
-                )
-            )
     return issues
 
 
@@ -353,19 +270,19 @@ def should_send_alert(fingerprint: str, previous_raw: str | None, now: int) -> b
 
 def build_message(issues: list[Issue]) -> str:
     """Build the plain-text Telegram message for the given issues."""
-    lines = ["Strategy Keeper Gas Warning"]
+    lines = ["Yearn V2 Keeper Gas Warning"]
     lines.extend(f"- {issue.message}" for issue in issues)
     return "\n".join(lines)
 
 
 def main() -> None:
-    """Check keeper wallet balances for every live Yearn looper and lender-borrower strategy."""
-    parser = argparse.ArgumentParser(description="Check native gas balances of Yearn strategy keeper wallets")
+    """Check direct keeper ETH balances for funded Yearn v2 strategies."""
+    parser = argparse.ArgumentParser(description="Check ETH balances of Yearn v2 strategy keeper wallets")
     parser.add_argument("--dry-run", action="store_true", help="Read and evaluate without storing state or alerting")
     args = parser.parse_args()
 
-    strategies_by_chain = select_keeper_strategies(fetch_kong_strategies())
-    logger.info("Found %d keeper-run strategies", sum(len(items) for items in strategies_by_chain.values()))
+    strategies_by_chain = select_keeper_strategies(fetch_kong_v2_strategies())
+    logger.info("Found %d Yearn v2 strategies", sum(len(items) for items in strategies_by_chain.values()))
 
     results: list[ChainResult] = []
     issues: list[Issue] = []
@@ -376,7 +293,7 @@ def main() -> None:
             logger.exception("Failed to resolve strategy keepers on %s", chain.name)
             issues.append(Issue(f"error:{chain.chain_id}:{type(exc).__name__}", f"{chain.name}: monitor error {exc}"))
 
-    price_keys = sorted({NATIVE_TOKENS[result.chain][1] for result in results})
+    price_keys = sorted({NATIVE_TOKENS[result.chain][1] for result in results if result.wallets})
     issues = evaluate(results, fetch_prices(price_keys)) + issues
 
     fingerprint = "|".join(sorted(issue.code for issue in issues))
