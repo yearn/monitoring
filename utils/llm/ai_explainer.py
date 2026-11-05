@@ -1014,7 +1014,8 @@ def _proxy_upgrade_block(upgrade: ProxyUpgrade, chain_id: int) -> str:
     if upgrade.via:
         header += f" It is nested inside the transaction's governance wrapper call ({upgrade.via})."
     verification_note = _new_impl_verification_note(new_impl, chain_id)
-    old_impl = get_current_implementation(proxy, chain_id)
+    # Read fresh: the LLM diffs against this baseline, so it must never come from cache.
+    old_impl = get_current_implementation(proxy, chain_id, use_cache=False)
     if not old_impl:
         return f"{header}\nNew implementation: {new_impl}{verification_note}"
 
