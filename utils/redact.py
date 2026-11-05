@@ -121,7 +121,12 @@ def _secret_pairs(items: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], 
             if not replacement or replacement == value:
                 continue
             pairs.append((value, replacement))
-            parts = urlsplit(value)
+            try:
+                parts = urlsplit(value)
+            except ValueError:
+                # Malformed (e.g. "https://[broken/..."): _mask_url already masks the
+                # whole value, and there is no request target to derive.
+                continue
             if parts.scheme and parts.netloc:
                 # urllib3 connection errors quote only the request target (the
                 # path and query) rather than the configured absolute URL.

@@ -132,6 +132,12 @@ class TestRedactSecrets(unittest.TestCase):
 
         self.assertEqual(text, "Invalid URL format: eth-mainnet.g.alchemy.com/REDACTED")
 
+    def test_malformed_provider_url_does_not_break_redaction(self):
+        value = "https://[broken/v2/FAKE_CREDENTIAL_1234"
+        with patch.dict(os.environ, {"PROVIDER_URL_MAINNET": value}, clear=True):
+            self.assertEqual(redact_secrets("Unrelated monitoring alert"), "Unrelated monitoring alert")
+            self.assertNotIn("FAKE_CREDENTIAL", redact_secrets(f"bad provider {value}"))
+
     def test_marker_is_safe_in_telegram_markdown(self):
         self.assertFalse(set(REDACTED) & set("_*`["))
 

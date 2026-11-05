@@ -109,7 +109,9 @@ def _assets_per_share_dispatch_eligible(previous: int, current: int) -> bool:
     """
     stored_peak = _cache_int(CACHE_KEY_STCUSD_ASSETS_PER_SHARE_PEAK)
     peak = max(stored_peak, previous)
-    eligible = 0 < current < previous and (peak - current) * 10_000 >= peak * ASSETS_PER_SHARE_DISPATCH_MIN_DECREASE_BPS
+    # A drop to zero is a complete loss and must dispatch, so only `current < previous`
+    # is required (`previous` is then positive).
+    eligible = current < previous and (peak - current) * 10_000 >= peak * ASSETS_PER_SHARE_DISPATCH_MIN_DECREASE_BPS
     # After a dispatch-eligible alert the next leg is measured from the new level.
     new_peak = current if eligible else max(peak, current)
     if new_peak != stored_peak:

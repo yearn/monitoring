@@ -122,6 +122,19 @@ def test_stcusd_rounding_decrease_alerts_without_dispatch(monkeypatch: pytest.Mo
     assert not alerts[0].dispatch
 
 
+def test_stcusd_drop_to_zero_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(status, "send_alert", alerts.append)
+
+    status.check_stcusd_assets_per_share(10**18)
+    status.check_stcusd_assets_per_share(0)
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == status.AlertSeverity.CRITICAL
+    assert alerts[0].dispatch
+
+
 def test_stcusd_small_steps_dispatch_once_cumulative_drop_crosses_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
     alerts: list[Alert] = []
     stub_cache(monkeypatch)

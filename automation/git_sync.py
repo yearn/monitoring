@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
@@ -67,6 +68,10 @@ def _run(
 
     ``subprocess.run(timeout=...)`` sends SIGKILL, which leaves git lock files in
     place. This sends SIGTERM first and only kills after ``TERMINATE_GRACE_SECONDS``.
+    The process runs in its own process group and the signals go to the whole
+    group, so helpers it spawned (git-remote-https, uv workers) are stopped too.
+    Draining their output is bounded as well: a descendant that escaped the group
+    and still holds the pipes cannot keep the sync profile locked.
 
     Args:
         argv: Command and arguments.
@@ -82,19 +87,35 @@ def _run(
         OSError: If the process could not be spawned.
     """
     with subprocess.Popen(
-        argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", errors="replace"
+        argv,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        errors="replace",
+        start_new_session=True,
     ) as proc:
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            proc.terminate()
-            try:
-                proc.communicate(timeout=TERMINATE_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                _signal_group(proc, sig)
+                try:
+                    proc.communicate(timeout=TERMINATE_GRACE_SECONDS)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
             raise subprocess.TimeoutExpired(argv, timeout) from None
     return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+
+
+def _signal_group(proc: subprocess.Popen[str], sig: signal.Signals) -> None:
+    """Send ``sig`` to the process group led by ``proc``, ignoring an already-empty group."""
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        pass
 
 
 def _remove_stale_git_locks(repo_root: Path) -> None:

@@ -110,6 +110,34 @@ class TestGracefulTimeout(unittest.TestCase):
 
             self.assertTrue(marker.exists())
 
+    def test_timeout_stops_descendants_holding_the_pipes(self):
+        import subprocess
+
+        from automation.git_sync import _run
+
+        with TemporaryDirectory() as d:
+            pid_file = Path(d) / "child.pid"
+            # The backgrounded child inherits stdout/stderr and ignores SIGTERM, so
+            # only a group-wide SIGKILL with bounded draining returns promptly.
+            script = f"sh -c 'trap \"\" TERM; echo $$ > {pid_file}; exec sleep 30' & wait"
+            start = time.monotonic()
+            with (
+                patch("automation.git_sync.TERMINATE_GRACE_SECONDS", 0.5),
+                self.assertRaises(subprocess.TimeoutExpired),
+            ):
+                _run(["sh", "-c", script], timeout=0.5)
+
+            self.assertLess(time.monotonic() - start, 5)
+            child_pid = int(pid_file.read_text())
+            for _ in range(50):
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("descendant survived the timeout")
+
     def test_stale_lock_is_removed_and_fresh_lock_kept(self):
         with TemporaryDirectory() as d:
             repo = Path(d)
