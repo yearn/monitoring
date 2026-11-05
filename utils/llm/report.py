@@ -277,8 +277,13 @@ def _format_param_value(
     chain_id: int,
     labels: dict[str, str],
     token: RelatedToken | None = None,
+    role_names: dict[str, str] | None = None,
 ) -> str:
     """Render a single scalar parameter value for the markdown call flow."""
+    if role_names and type_str == "bytes32":
+        role_hash = normalize_role_hash(value)
+        if role := role_names.get(role_hash):
+            return f"`{role_hash}` — role **{role}**"
     if type_str == "address" and isinstance(value, str):
         return address_link(value, chain_id, labels)
     if isinstance(value, bytes):
@@ -346,6 +351,7 @@ def _render_param(
     indent: str,
     depth: int = 0,
     token: "RelatedToken | None" = None,
+    role_names: dict[str, str] | None = None,
 ) -> list[str]:
     """Render one parameter, expanding arrays and tuples into nested bullets.
 
@@ -363,9 +369,11 @@ def _render_param(
         for i, item in enumerate(value):
             if _is_composite(element):
                 # Nested tuples/structs must not inherit a parent amount token.
-                lines.extend(_render_param(f"`[{i}]`", element, item, chain_id, labels, indent + "  ", depth, None))
+                lines.extend(
+                    _render_param(f"`[{i}]`", element, item, chain_id, labels, indent + "  ", depth, None, role_names)
+                )
             else:
-                lines.append(f"{indent}  - {_format_param_value(element, item, chain_id, labels, token)}")
+                lines.append(f"{indent}  - {_format_param_value(element, item, chain_id, labels, token, role_names)}")
         return lines
 
     components = tuple_component_types(type_str)
@@ -374,7 +382,11 @@ def _render_param(
             return [f"{indent}- {label}: _(empty)_"]
         lines = [f"{indent}- {label}:"]
         for component, item in zip(components, value):
-            lines.extend(_render_param(f"`{component}`", component, item, chain_id, labels, indent + "  ", depth, None))
+            lines.extend(
+                _render_param(
+                    f"`{component}`", component, item, chain_id, labels, indent + "  ", depth, None, role_names
+                )
+            )
         return lines
 
     if type_str == "bytes" and depth < MAX_BYTES_RECURSION_DEPTH:
@@ -384,7 +396,7 @@ def _render_param(
             lines.extend(_format_params(inner, chain_id, labels, None, indent + "  ", depth + 1))
             return lines
 
-    return [f"{indent}- {label}: {_format_param_value(type_str, value, chain_id, labels, token)}"]
+    return [f"{indent}- {label}: {_format_param_value(type_str, value, chain_id, labels, token, role_names)}"]
 
 
 def _format_params(
@@ -399,9 +411,8 @@ def _format_params(
 ) -> list[str]:
     """Render a call's parameters as an indented markdown bullet list.
 
-    A ``bytes32`` that ``role_names`` resolves is annotated with its role name.
-    Scalars render to exactly one line, so the annotation is appended to the
-    line just produced; composites are left alone.
+    A ``bytes32`` that ``role_names`` resolves is annotated with its role name,
+    including each element of a role array.
     """
     lines: list[str] = []
     for i, (type_str, value) in enumerate(call.params):
@@ -411,12 +422,8 @@ def _format_params(
             lines.extend(_render_script_calls(call, _param_label(type_str, name), chain_id, labels, indent, depth))
             continue
         rendered = _render_param(
-            _param_label(type_str, name), type_str, value, chain_id, labels, indent, depth, hint_token
+            _param_label(type_str, name), type_str, value, chain_id, labels, indent, depth, hint_token, role_names
         )
-        if role_names and type_str == "bytes32" and len(rendered) == 1:
-            role = role_names.get(normalize_role_hash(value))
-            if role:
-                rendered = [f"{rendered[0]} — role **{role}**"]
         lines.extend(rendered)
     return lines
 

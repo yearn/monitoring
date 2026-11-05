@@ -29,6 +29,7 @@ from utils.llm.report import (
     CallEntry,
     ReportContext,
     address_link,
+    array_element_type,
     build_report,
     build_title,
     checksum_or_none,
@@ -926,7 +927,7 @@ def _collect_role_names(
     targets_and_calls: list[tuple[str, DecodedCall]],
     chain_id: int,
 ) -> dict[str, dict[str, str]]:
-    """Resolve ``bytes32`` role arguments to names, keyed by lowercased target.
+    """Resolve scalar and array ``bytes32`` roles, keyed by lowercased target.
 
     Only calls whose function name mentions a role (``grantRole``,
     ``revokeRole``, ``setRoleAdmin``, …) are inspected. That heuristic matters:
@@ -947,8 +948,15 @@ def _collect_role_names(
             # `decode_calldata` keeps raw eth_abi output, so this is 32 raw bytes
             # for a real call. Normalize here rather than stringifying, which
             # would produce an unparseable Python repr.
-            if type_str == "bytes32" and (role_hash := normalize_role_hash(value)):
-                hashes_by_target.setdefault(target, set()).add(role_hash)
+            if type_str == "bytes32":
+                values = (value,)
+            elif array_element_type(type_str) == "bytes32" and isinstance(value, (list, tuple)):
+                values = value
+            else:
+                continue
+            for role_value in values:
+                if role_hash := normalize_role_hash(role_value):
+                    hashes_by_target.setdefault(target, set()).add(role_hash)
 
     if not hashes_by_target:
         return {}
