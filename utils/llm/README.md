@@ -98,6 +98,12 @@ Positive entries do not expire because verified source and curated labels are ef
 
 Writes are atomic (`mkstemp` + `os.replace`) and same-process duplicate lookups are single-flighted per key, so a Safe batch with repeated targets does not fan out duplicate Etherscan/Swiss Knife calls. Debug logs include memory/disk hit/miss counters, which are useful after deploy for confirming the VPS cache is warm.
 
+#### Proxy Implementation Cache
+
+`utils.proxy.get_current_implementation` is called by several enrichment steps (source context, on-chain state, address labels, role names), and each call costs 2–4 RPC reads. Successful lookups are cached in memory per `(chain_id, address)` for a short TTL; failed lookups are not cached. The cache is never written to disk because an implementation changes on upgrade, and upgrade alerts (`format_upgrade_lines`) always read the current implementation fresh.
+
+- `PROXY_IMPL_CACHE_TTL_SECONDS`: in-memory TTL, default `60`. Set to `0` to disable.
+
 ### 3. On-chain Before-State (`utils/on_chain_state.py`)
 
 For setter-style calls, reads the *current* on-chain value of state variables the function will write so the LLM can quote concrete before→after deltas instead of guessing scale.

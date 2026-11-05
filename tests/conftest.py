@@ -33,7 +33,8 @@ def _isolate_from_live_apis(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     Also clears `ChainManager._instances` so a real client object cached by
     one test can't leak into the next, and points `CACHE_DIR` at a per-test
     temp dir so the file-backed disk caches (utils.disk_cache) never litter the
-    repo and never leak entries between tests.
+    repo and never leak entries between tests. The in-memory proxy
+    implementation cache is cleared for the same reason.
     """
     for key in list(os.environ):
         if key in {"ETHERSCAN_TOKEN", "LIQUIDITY_WEBHOOK_SECRET", "TENDERLY_API_KEY"} or key.startswith(
@@ -64,3 +65,8 @@ def _isolate_from_live_apis(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
         monkeypatch.setattr("utils.web3_wrapper.DEFAULT_PROVIDER_URLS", {})
     except Exception:  # noqa: BLE001 - test setup is best-effort
         pass
+    # Tests mock RPC per test, often reusing addresses; a proxy implementation
+    # cached by one test must not answer for the next.
+    from utils.proxy import clear_implementation_cache
+
+    clear_implementation_cache()
