@@ -48,9 +48,9 @@ def quiet_dependency_loggers(level: str | None = None) -> None:
 
 
 class RedactingFormatter(logging.Formatter):
-    """Formatter that masks credentials (RPC keys, API keys, bot tokens) in every line.
+    """Formatter that masks credentials in every line (see ``utils.redact``).
 
-    Exception text from ``requests``/web3 quotes full URLs, which embed API keys;
+    Exception text from ``requests``/web3 quotes full URLs, which can carry credentials;
     journald (and any log shipper behind it) must not receive them.
     """
 

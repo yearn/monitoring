@@ -62,6 +62,18 @@ class TestDepegConfirmation(unittest.TestCase):
             stables.main()
         self.assertTrue(self._run("0.90")[0].dispatch)
 
+    def test_stale_breach_does_not_confirm(self):
+        now = 1_800_000_000
+        with patch.object(stables.time, "time", return_value=now):
+            self._run("0.90")
+        later = now + stables.BREACH_CONFIRMATION_WINDOW_SECONDS + 1
+        with patch.object(stables.time, "time", return_value=later):
+            stale = self._run("0.90")
+        self.assertFalse(stale[0].dispatch)
+        self.assertIn("Unconfirmed", stale[0].message)
+        with patch.object(stables.time, "time", return_value=later + 600):
+            self.assertTrue(self._run("0.90")[0].dispatch)
+
 
 if __name__ == "__main__":
     unittest.main()

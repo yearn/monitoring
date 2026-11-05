@@ -69,7 +69,7 @@ def _error_tail(stdout: str | None, stderr: str | None) -> str | None:
         lines = [ln.rstrip() for ln in stream.splitlines() if ln.strip()]
         if not lines:
             continue
-        # Tracebacks quote request URLs, which embed RPC/API keys.
+        # Tracebacks quote request URLs, which can carry credentials.
         tail = redact_secrets("\n".join(lines[-_ERROR_TAIL_LINES:]))
         if len(tail) > _ERROR_TAIL_CHARS:
             tail = "…" + tail[-_ERROR_TAIL_CHARS:]

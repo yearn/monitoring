@@ -12,7 +12,6 @@ Usage:
 from typing import Callable
 
 from utils.logger import get_logger
-from utils.redact import redact_secrets
 from utils.telegram import get_github_run_url, send_error_message
 
 logger = get_logger("utils.runner")
@@ -50,8 +49,8 @@ def run_with_alert(
     except Exception as exc:  # noqa: BLE001 - top-level safety net by design
         script = name or entrypoint.__module__
         logger.exception("%s crashed", script)
-        # Exception text quotes request URLs, which embed RPC/API keys.
-        lines = [f"🚨 {script} crashed: {type(exc).__name__}: {redact_secrets(str(exc))}"]
+        # send_telegram_message redacts credentials from the exception text.
+        lines = [f"🚨 {script} crashed: {type(exc).__name__}: {exc}"]
         run_url = get_github_run_url()
         if run_url:
             lines.append(f"Run: {run_url}")

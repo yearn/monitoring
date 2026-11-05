@@ -4,10 +4,16 @@ Fetches all monitored stablecoin prices in a single DeFiLlama call and routes
 depeg alerts to the owning protocol's Telegram channel.
 """
 
+import time
 from decimal import Decimal
 
 from utils.alert import Alert, AlertSeverity, send_alert
-from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
+from utils.cache import (
+    cache_filename,
+    cache_timestamp_key,
+    get_last_value_for_key_from_file,
+    write_last_value_to_file,
+)
 from utils.defillama import fetch_prices
 from utils.logger import get_logger
 
@@ -18,6 +24,10 @@ logger = get_logger("stables")
 # occasionally wrong; the alert still fires on the first breach, but funds only
 # move once the next run (~10 min later) confirms it.
 DISPATCH_CONFIRMATION_RUNS = 2
+# A prior breach older than this no longer counts toward confirmation, so a
+# breach seen after a long gap (e.g. DeFiLlama omitting the token for hours) is
+# treated as a first sample again. Allows one missed run at the 10-min cadence.
+BREACH_CONFIRMATION_WINDOW_SECONDS = 25 * 60
 CACHE_KEY_BREACH_PREFIX = "stables_depeg_breaches_"
 
 # (display_name, defillama_key, protocol for telegram routing)
@@ -57,7 +67,8 @@ def main() -> None:
     for name, key, protocol, depeg_threshold in MONITORED_TOKENS:
         price = prices.get(key)
         if price is None:
-            # Leave the breach counter alone: a missing sample neither confirms nor clears.
+            # Leave the breach counter alone: a missing sample neither confirms nor
+            # clears, and a stale count expires after BREACH_CONFIRMATION_WINDOW_SECONDS.
             logger.warning("No price returned for %s (%s)", name, key)
             continue
         logger.info("%s price: $%s", name, price)
@@ -84,13 +95,31 @@ def main() -> None:
 
 
 def _update_breach_count(key: str, breached: bool) -> int:
-    """Record whether ``key`` is below its threshold this run; return the consecutive breach count."""
+    """Record whether ``key`` is below its threshold this run; return the consecutive breach count.
+
+    Args:
+        key: DeFiLlama price id of the token.
+        breached: Whether this run's price is below the depeg threshold.
+
+    Returns:
+        Number of consecutive breaches including this run, or 0 when not breached.
+    """
     # The legacy file cache splits key:value on the first colon.
     cache_key = CACHE_KEY_BREACH_PREFIX + key.replace(":", "_")
+    timestamp_key = cache_timestamp_key(cache_key)
     previous = int(get_last_value_for_key_from_file(cache_filename, cache_key) or 0)
-    current = previous + 1 if breached else 0
-    if current != previous:
-        write_last_value_to_file(cache_filename, cache_key, current)
+    if not breached:
+        if previous:
+            write_last_value_to_file(cache_filename, cache_key, 0)
+        return 0
+
+    now = int(time.time())
+    last_breach_at = int(float(get_last_value_for_key_from_file(cache_filename, timestamp_key) or 0))
+    if now - last_breach_at > BREACH_CONFIRMATION_WINDOW_SECONDS:
+        previous = 0
+    current = previous + 1
+    write_last_value_to_file(cache_filename, cache_key, current)
+    write_last_value_to_file(cache_filename, timestamp_key, now)
     return current
 
 

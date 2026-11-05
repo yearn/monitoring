@@ -1002,3 +1002,25 @@ def test_pps_material_drop_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
     module.check_pps(1.04, 1.09)
 
     assert [alert.dispatch for alert in alerts] == [True, True]
+
+
+def test_pps_small_steps_dispatch_once_cumulative_drop_crosses_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_3jane_module()
+    alerts: list = []
+    cache = {module.CACHE_KEY_USD3_PPS: 1.0, module.CACHE_KEY_SUSD3_PPS: 1.0}
+    monkeypatch.setattr(module, "get_cache_value", lambda key: cache.get(key, 0.0))
+    monkeypatch.setattr(module, "set_cache_value", cache.__setitem__)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    # 0.004% per run: no single step reaches the 0.01% gate, the third run's
+    # cumulative 0.012% drawdown does.
+    pps = 1.0
+    for _ in range(3):
+        pps *= 1 - 0.00004
+        module.check_pps(pps, 1.0)
+
+    assert [alert.dispatch for alert in alerts] == [False, False, True]
+
+    # After a dispatch-eligible alert the next small step is measured from the new level.
+    module.check_pps(pps * (1 - 0.00004), 1.0)
+    assert alerts[-1].dispatch is False

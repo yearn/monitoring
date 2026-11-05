@@ -122,6 +122,26 @@ def test_stcusd_rounding_decrease_alerts_without_dispatch(monkeypatch: pytest.Mo
     assert not alerts[0].dispatch
 
 
+def test_stcusd_small_steps_dispatch_once_cumulative_drop_crosses_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(status, "send_alert", alerts.append)
+
+    start = 10**18
+    status.check_stcusd_assets_per_share(start)
+    # 0.4 bp per run: no single step reaches the 1 bp gate, the third run's
+    # cumulative 1.2 bp drawdown does.
+    step = start * 4 // 100_000
+    for i in range(1, 4):
+        status.check_stcusd_assets_per_share(start - i * step)
+
+    assert [alert.dispatch for alert in alerts] == [False, False, True]
+
+    # After a dispatch-eligible alert the next small step is measured from the new level.
+    status.check_stcusd_assets_per_share(start - 4 * step)
+    assert alerts[-1].dispatch is False
+
+
 def test_stcusd_assets_per_share_increase_does_not_alert(monkeypatch: pytest.MonkeyPatch) -> None:
     alerts: list[Alert] = []
     stub_cache(monkeypatch)

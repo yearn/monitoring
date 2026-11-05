@@ -436,7 +436,7 @@ class TestTelegramHardening(unittest.TestCase):
 
         text = mock_post.call_args.kwargs["json"]["text"]
         self.assertNotIn("supersecretkey12345", text)
-        self.assertIn("eth-mainnet.g.alchemy.com/***", text)
+        self.assertIn("eth-mainnet.g.alchemy.com/REDACTED", text)
 
     @patch("utils.telegram.requests.post")
     def test_truncation_counts_utf16_units(self, mock_post):

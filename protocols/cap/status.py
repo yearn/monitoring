@@ -17,13 +17,16 @@ STCUSD = "0x88887bE419578051FF9F4eb6C858A951921D8888"
 CUSD_DECIMALS = 18
 ONE_STCUSD = 10**18
 
-# An assets-per-share drop smaller than this (basis points) still alerts but does
-# not trigger the emergency withdrawal dispatch: ERC-4626 rounding can lower
-# convertToAssets(1e18) by a few wei without any loss.
+# An assets-per-share drawdown smaller than this (basis points) still alerts but
+# does not trigger the emergency withdrawal dispatch: ERC-4626 rounding can lower
+# convertToAssets(1e18) by a few wei without any loss. The drawdown is measured
+# from the peak since the last dispatch-eligible alert, so a loss spread over
+# many small steps still dispatches once it adds up.
 ASSETS_PER_SHARE_DISPATCH_MIN_DECREASE_BPS = 1
 
 CACHE_KEY_STCUSD_BACKING_DEFICIT = "CAP_STCUSD_BACKING_DEFICIT"
 CACHE_KEY_STCUSD_ASSETS_PER_SHARE = "CAP_STCUSD_ASSETS_PER_SHARE"
+CACHE_KEY_STCUSD_ASSETS_PER_SHARE_PEAK = "CAP_STCUSD_ASSETS_PER_SHARE_PEAK"
 
 logger = get_logger("cap_status")
 
@@ -88,19 +91,45 @@ def check_stcusd_backing(state: StcUsdState) -> None:
         write_last_value_to_file(cache_filename, CACHE_KEY_STCUSD_BACKING_DEFICIT, int(has_deficit))
 
 
+def _cache_int(key: str) -> int:
+    """Return a cached integer, or zero when absent."""
+    cached_value = get_last_value_for_key_from_file(cache_filename, key)
+    return int(cached_value) if cached_value else 0
+
+
+def _assets_per_share_dispatch_eligible(previous: int, current: int) -> bool:
+    """Return whether an assets-per-share decrease warrants dispatch, and advance the stored peak.
+
+    Args:
+        previous: Assets per share from the previous run (0 when unknown).
+        current: Assets per share from this run.
+
+    Returns:
+        True when the drawdown from the peak reaches ``ASSETS_PER_SHARE_DISPATCH_MIN_DECREASE_BPS``.
+    """
+    stored_peak = _cache_int(CACHE_KEY_STCUSD_ASSETS_PER_SHARE_PEAK)
+    peak = max(stored_peak, previous)
+    eligible = 0 < current < previous and (peak - current) * 10_000 >= peak * ASSETS_PER_SHARE_DISPATCH_MIN_DECREASE_BPS
+    # After a dispatch-eligible alert the next leg is measured from the new level.
+    new_peak = current if eligible else max(peak, current)
+    if new_peak != stored_peak:
+        write_last_value_to_file(cache_filename, CACHE_KEY_STCUSD_ASSETS_PER_SHARE_PEAK, new_peak)
+    return eligible
+
+
 def check_stcusd_assets_per_share(current_assets_per_share: int) -> None:
     """Alert when one stcUSD converts to fewer cUSD than on the previous run.
 
     Args:
         current_assets_per_share: Result of ``convertToAssets(1e18)``.
     """
-    cached_value = get_last_value_for_key_from_file(cache_filename, CACHE_KEY_STCUSD_ASSETS_PER_SHARE)
-    previous_assets_per_share = int(cached_value) if cached_value else 0
+    previous_assets_per_share = _cache_int(CACHE_KEY_STCUSD_ASSETS_PER_SHARE)
     logger.info(
         "stcUSD assets per share: current=%s previous=%s",
         current_assets_per_share,
         previous_assets_per_share,
     )
+    dispatch = _assets_per_share_dispatch_eligible(previous_assets_per_share, current_assets_per_share)
 
     if previous_assets_per_share > 0 and current_assets_per_share < previous_assets_per_share:
         decrease = previous_assets_per_share - current_assets_per_share
@@ -111,7 +140,6 @@ def check_stcusd_assets_per_share(current_assets_per_share: int) -> None:
             f"Decrease: {_format_cusd(decrease)} cUSD per stcUSD\n"
             f"🔗 [stcUSD](https://etherscan.io/address/{STCUSD})"
         )
-        dispatch = decrease * 10_000 >= previous_assets_per_share * ASSETS_PER_SHARE_DISPATCH_MIN_DECREASE_BPS
         send_alert(Alert(AlertSeverity.CRITICAL, message, PROTOCOL, dispatch=dispatch))
 
     if current_assets_per_share != previous_assets_per_share:

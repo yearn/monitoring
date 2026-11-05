@@ -65,7 +65,7 @@ def retry_with_provider_rotation(func):
                 # on retry, so fail fast and let the caller handle it.
                 if _is_non_retryable(e):
                     raise
-                # Provider URLs embed API keys: keep only scheme + host in errors and logs.
+                # Keep only scheme + host of provider URLs in errors and logs.
                 current_url = safe_url(self.endpoint_uri)
                 errors[current_url] = redact_secrets(str(e))
                 logger.warning("Failed on %s: %s", current_url, errors[current_url])

@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +40,13 @@ UV_SYNC_ARGV: list[str] = ["uv", "sync", "--frozen", "--extra", "ai"]
 GIT_FETCH_TIMEOUT_SECONDS = 120
 GIT_RESET_TIMEOUT_SECONDS = 60
 UV_SYNC_TIMEOUT_SECONDS = 600
+# On timeout a step gets SIGTERM and this long to exit before SIGKILL. git
+# removes its lock files on SIGTERM; a SIGKILL leaves them behind.
+TERMINATE_GRACE_SECONDS = 10
+# A git lock file older than this cannot belong to a live sync step (each one is
+# bounded well below it), so it was left by a killed process and is removed.
+# Otherwise every later sync fails with "index.lock: File exists".
+STALE_LOCK_SECONDS = 30 * 60
 
 
 @dataclass
@@ -47,6 +55,63 @@ class SyncResult:
 
     ok: bool
     output: str
+
+
+def _run(
+    argv: list[str],
+    timeout: float,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run ``argv`` capturing text output, terminating it gracefully on timeout.
+
+    ``subprocess.run(timeout=...)`` sends SIGKILL, which leaves git lock files in
+    place. This sends SIGTERM first and only kills after ``TERMINATE_GRACE_SECONDS``.
+
+    Args:
+        argv: Command and arguments.
+        timeout: Seconds before the process is terminated.
+        cwd: Working directory for the process.
+        env: Environment for the process; inherits the current one when None.
+
+    Returns:
+        The completed process.
+
+    Raises:
+        subprocess.TimeoutExpired: If the process outlived ``timeout``.
+        OSError: If the process could not be spawned.
+    """
+    with subprocess.Popen(
+        argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", errors="replace"
+    ) as proc:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                proc.communicate(timeout=TERMINATE_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+            raise subprocess.TimeoutExpired(argv, timeout) from None
+    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+
+
+def _remove_stale_git_locks(repo_root: Path) -> None:
+    """Delete git lock files left behind by a killed git process.
+
+    Args:
+        repo_root: Path to the git checkout.
+    """
+    git_dir = repo_root / ".git"
+    cutoff = time.time() - STALE_LOCK_SECONDS
+    for lock in (*git_dir.glob("*.lock"), *git_dir.glob("refs/**/*.lock")):
+        try:
+            if lock.stat().st_mtime < cutoff:
+                lock.unlink()
+                logger.warning("Removed stale git lock %s", lock)
+        except OSError as exc:
+            logger.warning("Could not remove stale git lock %s: %s", lock, exc)
 
 
 def sync_to_remote_main(repo_root: Path) -> SyncResult:
@@ -62,23 +127,18 @@ def sync_to_remote_main(repo_root: Path) -> SyncResult:
     if not (repo_root / ".git").exists():
         return SyncResult(ok=False, output=f"{repo_root} is not a git checkout")
 
+    _remove_stale_git_locks(repo_root)
     try:
-        fetch = subprocess.run(
+        fetch = _run(
             ["git", "-C", str(repo_root), "fetch", "--quiet", "origin", "main"],
-            capture_output=True,
-            text=True,
-            check=False,
             timeout=GIT_FETCH_TIMEOUT_SECONDS,
         )
         if fetch.returncode != 0:
             output = (fetch.stdout + fetch.stderr).strip()
             return SyncResult(ok=False, output=output or f"fetch exited {fetch.returncode}")
 
-        reset = subprocess.run(
+        reset = _run(
             ["git", "-C", str(repo_root), "reset", "--hard", "--quiet", "origin/main"],
-            capture_output=True,
-            text=True,
-            check=False,
             timeout=GIT_RESET_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
@@ -120,16 +180,10 @@ def sync_dependencies(repo_root: Path) -> SyncResult:
         is uv's combined output (it reports installs on stderr). Never raises.
     """
     try:
-        completed = subprocess.run(
-            UV_SYNC_ARGV,
-            cwd=repo_root,
-            env=_uv_env(),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=UV_SYNC_TIMEOUT_SECONDS,
-        )
+        completed = _run(UV_SYNC_ARGV, timeout=UV_SYNC_TIMEOUT_SECONDS, cwd=repo_root, env=_uv_env())
     except subprocess.TimeoutExpired as exc:
+        # An interrupted install can leave the venv partly updated; the next tick
+        # re-runs `uv sync` unconditionally and repairs it.
         return SyncResult(ok=False, output=f"uv sync timed out after {exc.timeout}s")
     except OSError as exc:
         return SyncResult(ok=False, output=f"uv sync failed to spawn: {exc}")

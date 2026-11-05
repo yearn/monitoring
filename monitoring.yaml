@@ -384,7 +384,7 @@ protocols:
       - protocols/stables/oracles.py
     monitors:
       - name: "Stablecoin Prices"
-        description: "Depeg alerts via DeFiLlama"
+        description: "Depeg alerts via DeFiLlama; emergency dispatch only after two consecutive below-threshold checks"
       - name: "Oracle Health"
         description: "Chainlink staleness, round health, peg deviation, oracle-market divergence; rate-oracle monotonicity/delta"
 

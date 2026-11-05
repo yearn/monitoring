@@ -133,25 +133,25 @@ def send_alert(
     if silent is None:
         silent = _SEVERITY_SILENT_DEFAULT[alert.severity.value]
 
-    try:
-        send_telegram_message(
-            message,
-            alert.channel or alert.protocol,
-            silent,
-            plain_text,
-            severity=alert.severity.value,
-            source="protocol",
-            origin_protocol=alert.protocol,
-            channel=alert.channel or alert.protocol,
-        )
-    finally:
-        # The hook (emergency dispatch) must run even when Telegram is down or
-        # rate limited — an alert burst is exactly when both happen together.
-        if alert.severity in (AlertSeverity.HIGH, AlertSeverity.CRITICAL) and _alert_hook is not None:
-            try:
-                _alert_hook(alert)
-            except Exception:
-                logger.exception("Alert hook failed for %s alert", alert.severity.value)
+    # The hook (emergency dispatch) runs before Telegram: during an alert burst
+    # Telegram is rate limited and a send can wait out 429s and a plain-text
+    # retry, and a failed send must not stop the dispatch.
+    if alert.severity in (AlertSeverity.HIGH, AlertSeverity.CRITICAL) and _alert_hook is not None:
+        try:
+            _alert_hook(alert)
+        except Exception:
+            logger.exception("Alert hook failed for %s alert", alert.severity.value)
+
+    send_telegram_message(
+        message,
+        alert.channel or alert.protocol,
+        silent,
+        plain_text,
+        severity=alert.severity.value,
+        source="protocol",
+        origin_protocol=alert.protocol,
+        channel=alert.channel or alert.protocol,
+    )
 
 
 # After AlertSeverity / Alert exist so utils.dispatch can import this module safely.

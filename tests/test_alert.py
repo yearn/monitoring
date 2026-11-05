@@ -158,6 +158,15 @@ class TestAlertHookResilience(unittest.TestCase):
 
         hook.assert_called_once()
 
+    def test_hook_runs_before_telegram_send(self):
+        calls: list[str] = []
+        register_alert_hook(lambda _alert: calls.append("hook"))
+
+        with patch("utils.alert.send_telegram_message", side_effect=lambda *a, **k: calls.append("telegram")):
+            send_alert(Alert(severity=AlertSeverity.CRITICAL, message="depeg", protocol="maple"))
+
+        self.assertEqual(calls, ["hook", "telegram"])
+
     @patch("utils.alert.send_telegram_message", side_effect=RuntimeError("telegram down"))
     def test_hook_skipped_for_low_severity_even_on_failure(self, _mock_send):
         hook = MagicMock()

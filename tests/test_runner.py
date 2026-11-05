@@ -100,7 +100,7 @@ class TestRunWithAlert(unittest.TestCase):
 
 
 class TestRunWithAlertRedaction(unittest.TestCase):
-    def test_crash_alert_redacts_rpc_key(self) -> None:
+    def test_crash_alert_redacts_provider_url(self) -> None:
         import os
 
         url = "https://eth-mainnet.g.alchemy.com/v2/crashkey1234567890ab"
@@ -108,12 +108,17 @@ class TestRunWithAlertRedaction(unittest.TestCase):
         def boom() -> None:
             raise RuntimeError(f"All providers failed. Errors:\n{url}: 429")
 
-        with patch.dict(os.environ, {"PROVIDER_URL_MAINNET": url}), patch("utils.runner.send_error_message") as send:
+        # Redaction happens in send_telegram_message, so follow the alert down to
+        # the point where it is stored (every delivery path records it first).
+        with (
+            patch.dict(os.environ, {"PROVIDER_URL_MAINNET": url}, clear=True),
+            patch("utils.telegram._record_alert_safe") as record,
+        ):
             run_with_alert(boom, "aave", name="aave.main")
 
-        message = send.call_args.args[0]
+        message = record.call_args.kwargs["message"]
         self.assertNotIn("crashkey1234567890ab", message)
-        self.assertIn("eth-mainnet.g.alchemy.com/***", message)
+        self.assertIn("eth-mainnet.g.alchemy.com/REDACTED", message)
 
 
 if __name__ == "__main__":

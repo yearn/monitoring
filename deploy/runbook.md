@@ -151,9 +151,9 @@ makes `/etc/monitoring` inaccessible to it), so it needs no restart on rotation.
 
 Outbound text (logs, Telegram alerts, crash alerts, the automation digest and
 alert history) passes through `utils/redact.py`, which masks the values of
-`PROVIDER_URL_*` and every `*_KEY` / `*_TOKEN` / `*_SECRET` env var. Before that
-redaction existed, crash alerts quoted full RPC URLs, so **rotate any RPC key
-that may have appeared in an alert or log before the change**.
+`PROVIDER_URL_*` and every `*_KEY` / `*_TOKEN` / `*_SECRET` / `*_PASSWORD` env
+var, including suffixed names such as `TELEGRAM_BOT_TOKEN_DEFAULT` or
+`SAFE_API_KEY_2`. Masked values appear as `REDACTED`.
 
 ---
 
