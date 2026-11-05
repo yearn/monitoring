@@ -10,7 +10,8 @@ Two layers:
     1. Exact values of configured secrets (``PROVIDER_URL_*`` and any env var
        whose name ends in ``_KEY``, ``_TOKEN``, ``_TOKENS``, ``_SECRET`` or
        ``_PASSWORD``). RPC URLs are replaced by ``scheme://host/***`` so the
-       provider stays identifiable.
+       provider stays identifiable. Their relative request targets are also
+       masked because connection errors can omit the scheme and host.
     2. Pattern fallbacks for credentials that were never in the env (bot
        tokens, ``apikey=`` query params, keys in well-known RPC URL paths).
 """
@@ -76,6 +77,16 @@ def _configured_secrets() -> list[tuple[str, str]]:
             replacement = _provider_url_replacement(value)
             if replacement:
                 pairs.append((value, replacement))
+                # urllib3 connection errors quote only the request target, e.g.
+                # /v2/<key>, rather than the configured absolute provider URL.
+                parts = urlsplit(value)
+                target = parts.path or "/"
+                if parts.query:
+                    target += "?" + parts.query
+                # Scope this to connection-error URLs: public targets like /eth
+                # must not replace substrings in links such as https://etherscan.io.
+                if target != "/":
+                    pairs.append(("url: " + target, "url: /" + REDACTED))
         elif _SECRET_NAME_RE.search(name):
             # ALERTS_API_TOKENS-style lists hold several secrets.
             for part in value.split("|") if name.endswith("_TOKENS") else (value,):

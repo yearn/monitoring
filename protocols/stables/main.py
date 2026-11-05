@@ -85,7 +85,8 @@ def main() -> None:
 
 def _update_breach_count(key: str, breached: bool) -> int:
     """Record whether ``key`` is below its threshold this run; return the consecutive breach count."""
-    cache_key = CACHE_KEY_BREACH_PREFIX + key
+    # The legacy file cache splits key:value on the first colon.
+    cache_key = CACHE_KEY_BREACH_PREFIX + key.replace(":", "_")
     previous = int(get_last_value_for_key_from_file(cache_filename, cache_key) or 0)
     current = previous + 1 if breached else 0
     if current != previous:

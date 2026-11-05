@@ -1,5 +1,7 @@
 """Tests for protocols/stables/main.py depeg confirmation."""
 
+import os
+import tempfile
 import unittest
 from decimal import Decimal
 from unittest.mock import patch
@@ -39,6 +41,18 @@ class TestDepegConfirmation(unittest.TestCase):
         self._run("0.90")
         self.assertEqual(self._run("1.00"), [])
         self.assertFalse(self._run("0.90")[0].dispatch)
+
+    def test_file_backend_confirms_and_resets_breaches(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"CACHE_BACKEND": "file"}),
+            patch.object(stables, "cache_filename", os.path.join(directory, "cache-id.txt")),
+        ):
+            self.assertFalse(self._run("0.90")[0].dispatch)
+            self.assertTrue(self._run("0.90")[0].dispatch)
+            self.assertEqual(self._run("1.00"), [])
+            self.assertFalse(self._run("0.90")[0].dispatch)
+            self.assertTrue(self._run("0.90")[0].dispatch)
 
     def test_missing_price_neither_confirms_nor_clears(self):
         self._run("0.90")

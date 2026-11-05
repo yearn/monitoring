@@ -4,6 +4,8 @@ import os
 import unittest
 from unittest.mock import patch
 
+import requests
+
 from utils.redact import redact_secrets, safe_url
 
 
@@ -15,6 +17,42 @@ class TestRedactSecrets(unittest.TestCase):
 
         self.assertNotIn("abcDEF1234567890xyz", text)
         self.assertIn("https://eth-mainnet.g.alchemy.com/***", text)
+
+    def test_connection_error_hides_configured_provider_path(self):
+        key = "rpc-secret-1234567890"
+        url = f"https://eth-mainnet.g.alchemy.com/v2/{key}"
+        with (
+            patch.dict(os.environ, {"PROVIDER_URL_MAINNET": url}, clear=True),
+            patch("urllib3.util.connection.create_connection", side_effect=OSError("connection failed")),
+            requests.Session() as session,
+        ):
+            session.trust_env = False
+            with self.assertRaises(requests.ConnectionError) as ctx:
+                session.get(url, timeout=1)
+            self.assertIn(f"/v2/{key}", str(ctx.exception))
+            self.assertNotIn(key, redact_secrets(str(ctx.exception)))
+
+    def test_configured_provider_relative_paths_are_masked(self):
+        for path in (
+            "/v3/rpc-secret-1234567890",
+            "/custom/rpc-secret-1234567890/",
+            "/?credential=rpc-secret-1234567890",
+        ):
+            with (
+                self.subTest(path=path),
+                patch.dict(os.environ, {"PROVIDER_URL_MAINNET": f"https://rpc.example{path}"}, clear=True),
+            ):
+                text = redact_secrets(f"Max retries exceeded with url: {path} (connection failed)")
+                self.assertNotIn("rpc-secret-1234567890", text)
+
+    def test_public_provider_paths_preserve_explorer_links(self):
+        for path in ("/", "/eth", "/rpc", "/ethereum"):
+            with (
+                self.subTest(path=path),
+                patch.dict(os.environ, {"PROVIDER_URL_MAINNET": f"https://rpc.example{path}"}, clear=True),
+            ):
+                text = "See https://etherscan.io/address/0x123 or https://ethereum.org or /tmp/monitor.log"
+                self.assertEqual(redact_secrets(text), text)
 
     def test_configured_secret_env_values_are_masked(self):
         env = {
