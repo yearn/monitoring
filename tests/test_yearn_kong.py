@@ -176,26 +176,74 @@ def test_fetch_kong_parent_vaults_filters_retired_and_malformed_vaults(monkeypat
     ]
 
 
-def test_fetch_kong_strategies_parses_rows_and_skips_malformed(monkeypatch) -> None:
+def test_fetch_kong_v2_strategies_excludes_retired_vaults_v3_and_other_strategies(monkeypatch) -> None:
     payload = {
         "data": {
+            "vaults": [
+                {
+                    "chainId": 1,
+                    "apiVersion": "0.4.6",
+                    "strategies": ["0xAAA", "0xCCC", "0xBAD"],
+                    "meta": {"isRetired": False, "isHidden": True},
+                },
+                {"chainId": 10, "apiVersion": "0.4.6", "strategies": ["0xAAA"]},
+                {"chainId": 1, "apiVersion": "0.4.3", "strategies": ["0xBBB"], "meta": {"isRetired": True}},
+                {"chainId": 1, "apiVersion": "3.0.4", "strategies": ["0xDDD"]},
+                None,
+            ],
             "strategies": [
-                {"chainId": 1, "address": "0xAAA", "name": "wstETH/WETH Spark Looper", "isShutdown": False},
-                {"chainId": 137, "address": "0xBBB", "name": "Old Looper", "isShutdown": True},
-                {"chainId": 1, "address": "0xCCC", "name": None, "isShutdown": False},
-            ]
+                {"chainId": 1, "address": "0xAaA", "name": "StrategyCurve", "apiVersion": "0.4.6"},
+                {"chainId": 10, "address": "0xAAA", "name": "StrategyVelo", "apiVersion": "0.4.6"},
+                {"chainId": 8453, "address": "0xAAA", "name": "Other chain", "apiVersion": "0.4.6"},
+                {"chainId": 1, "address": "0xBBB", "name": "Retired vault", "apiVersion": "0.4.3"},
+                {"chainId": 1, "address": "0xCCC", "name": "V3 strategy", "apiVersion": "3.0.4"},
+                {"chainId": 1, "address": "0xDDD", "name": "V3 vault", "apiVersion": "0.4.6"},
+                {"chainId": 1, "address": "0xEEE", "name": "Unrelated", "apiVersion": "0.4.6"},
+                {"chainId": 1, "address": "0xBAD", "name": None, "apiVersion": "0.4.6"},
+                None,
+            ],
         }
     }
-    monkeypatch.setattr(kong, "request_with_retry", lambda *args, **kwargs: FakeResponse(payload))
 
-    assert kong.fetch_kong_strategies() == [
-        {"chain_id": 1, "address": "0xAAA", "name": "wstETH/WETH Spark Looper", "is_shutdown": False},
-        {"chain_id": 137, "address": "0xBBB", "name": "Old Looper", "is_shutdown": True},
+    def request(method, url, **kwargs):
+        assert "vaults(v3: false, yearn: true, limit: $limit, offset: $offset)" in kwargs["json"]["query"]
+        return FakeResponse(payload)
+
+    monkeypatch.setattr(kong, "request_with_retry", request)
+    assert kong.fetch_kong_v2_strategies() == [
+        {"chain_id": 1, "address": "0xAaA", "name": "StrategyCurve"},
+        {"chain_id": 10, "address": "0xAAA", "name": "StrategyVelo"},
     ]
 
 
-def test_fetch_kong_strategies_raises_without_list(monkeypatch) -> None:
-    monkeypatch.setattr(kong, "request_with_retry", lambda *args, **kwargs: FakeResponse({"data": {}}))
+@pytest.mark.parametrize("data", [{}, {"vaults": []}, {"strategies": []}])
+def test_fetch_kong_v2_strategies_raises_without_required_lists(monkeypatch, data) -> None:
+    monkeypatch.setattr(kong, "request_with_retry", lambda *args, **kwargs: FakeResponse({"data": data}))
+    with pytest.raises(kong.KongRequestError, match="missing (vaults|strategies) list"):
+        kong.fetch_kong_v2_strategies()
 
-    with pytest.raises(kong.KongRequestError):
-        kong.fetch_kong_strategies()
+
+def test_fetch_kong_v2_strategies_accepts_empty_lists(monkeypatch) -> None:
+    payload = {"data": {"vaults": [], "strategies": []}}
+    monkeypatch.setattr(kong, "request_with_retry", lambda *args, **kwargs: FakeResponse(payload))
+    assert kong.fetch_kong_v2_strategies() == []
+
+
+def test_fetch_kong_v2_strategies_paginates_vaults_and_fetches_strategies_once(monkeypatch) -> None:
+    calls = []
+    vault = {"chainId": 10, "apiVersion": "0.4.6", "strategies": ["0xAAA"]}
+    strategy = {"chainId": 10, "apiVersion": "0.4.6", "address": "0xAAA", "name": "StrategyVelo"}
+
+    def request(method, url, **kwargs):
+        variables = kwargs["json"]["variables"]
+        calls.append(variables)
+        if variables["offset"] == 0:
+            return FakeResponse({"data": {"vaults": [None] * 1000, "strategies": [strategy]}})
+        return FakeResponse({"data": {"vaults": [vault]}})
+
+    monkeypatch.setattr(kong, "request_with_retry", request)
+    assert kong.fetch_kong_v2_strategies() == [{"chain_id": 10, "address": "0xAAA", "name": "StrategyVelo"}]
+    assert calls == [
+        {"limit": 1000, "offset": 0, "includeStrategies": True},
+        {"limit": 1000, "offset": 1000, "includeStrategies": False},
+    ]
