@@ -334,7 +334,7 @@ class TestNestedProxyUpgradeInfo(unittest.TestCase):
         from utils.llm.ai_explainer import _get_proxy_upgrade_info
 
         old_impls = {ORACLE: "0xOldOracle", CUSD: "0xOldCusd"}
-        current_impl.side_effect = lambda proxy, chain_id: old_impls[proxy]
+        current_impl.side_effect = lambda proxy, chain_id, **_: old_impls[proxy]
         data = execute_batch([ORACLE, CUSD], [upgrade_to_and_call(NEW_ORACLE_IMPL), upgrade_to_and_call(NEW_CUSD_IMPL)])
 
         info = _get_proxy_upgrade_info(data, "0xD8236031d8279d82E615aF2BFab5FC0127A329ab", 1)
@@ -347,6 +347,34 @@ class TestNestedProxyUpgradeInfo(unittest.TestCase):
         self.assertIn(f"IMPL DIFF 0xOldCusd->{NEW_CUSD_IMPL}", info)
         # Call order is kept even though diffs are fetched in parallel.
         self.assertLess(info.index(ORACLE), info.index(CUSD))
+
+    @patch("utils.llm.ai_explainer.get_verification_status", return_value=True)
+    @patch("utils.llm.ai_explainer.diff_implementations", return_value=None)
+    def test_upgrade_baseline_bypasses_implementation_cache(self, _diff, _verified) -> None:
+        """An implementation cached earlier in the run must not become the LLM's "current" baseline."""
+        from unittest.mock import MagicMock
+
+        from eth_utils import to_checksum_address
+
+        from tests.test_calldata_wrappers import NEW_ORACLE_IMPL, ORACLE
+        from utils.llm.ai_explainer import _proxy_upgrade_block
+        from utils.proxy import EIP1967_IMPL_SLOT, ProxyUpgrade, get_current_implementation
+
+        def client_with(impl: str) -> MagicMock:
+            client = MagicMock()
+            word = bytes(12) + bytes.fromhex(impl[2:])
+            client.eth.get_storage_at.side_effect = lambda _a, slot: word if slot == EIP1967_IMPL_SLOT else bytes(32)
+            return client
+
+        cached_impl = to_checksum_address("0x" + "11" * 20)
+        live_impl = to_checksum_address("0x" + "22" * 20)
+        with patch("utils.web3_wrapper.ChainManager.get_client", return_value=client_with(cached_impl)):
+            get_current_implementation(ORACLE, 1)  # e.g. source context, earlier in the same run
+        with patch("utils.web3_wrapper.ChainManager.get_client", return_value=client_with(live_impl)):
+            block = _proxy_upgrade_block(ProxyUpgrade(ORACLE, NEW_ORACLE_IMPL), 1)
+
+        self.assertIn(f"Current implementation: {live_impl}", block)
+        self.assertNotIn(cached_impl, block)
 
     def test_non_upgrade_wrapper_adds_nothing(self) -> None:
         from tests.test_calldata_wrappers import CUSD, execute_batch

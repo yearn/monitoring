@@ -9,7 +9,6 @@ from utils.erc20_metadata import ERC20Metadata
 from utils.llm import yearn_auction_context
 from utils.llm.yearn_auction_context import (
     format_yearn_auction_prompt,
-    format_yearn_auction_report,
     resolve_yearn_auction_context,
 )
 
@@ -164,10 +163,6 @@ class TestYearnAuctionContext(unittest.TestCase):
         self.assertIn("a sold lot is one possible source", prompt)
         self.assertNotIn("proceeds the auction paid it", prompt)
         self.assertIn("(all of it would be 0.088% of totalAssets)", prompt)
-
-        report = format_yearn_auction_report(contexts, 1, {})
-        self.assertIn(f"[`{BIG_AUCTION}`](https://etherscan.io/address/{BIG_AUCTION})", report)
-        self.assertIn("- **Proposed:**", report)
 
     def test_report_before_the_setter_kicks_at_the_old_floor(self, mock_cm: MagicMock, *_: MagicMock) -> None:
         (context,) = self._resolve(mock_cm, [(BIG, REPORT), (BIG, SET_FLOOR)])

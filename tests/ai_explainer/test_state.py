@@ -3,6 +3,9 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+from eth_abi import encode
+from eth_utils import function_signature_to_4byte_selector
+
 from utils.calldata.decoder import DecodedCall, decode_calldata
 from utils.llm.ai_explainer import (
     MAX_STATE_READ_KEYS_PER_SIGNATURE,
@@ -133,6 +136,69 @@ class TestCollectRoleNames(unittest.TestCase):
         self.assertEqual(resolved["0xcore"][self.MINTER_HASH], "RECEIPT_TOKEN_MINTER")
         self.assertIn("is the role RECEIPT_TOKEN_MINTER", "\n".join(_format_role_name_notes(resolved)))
 
+    @patch("utils.source_context.fetch_source")
+    def test_infinifi_batch_roles_reach_prompt_and_report(self, mock_source: MagicMock) -> None:
+        """Reproduce the priority-hook batch with real ABI encoding and source harvesting."""
+        from utils.llm.ai_explainer import _collect_role_names, _format_role_name_notes
+        from utils.llm.report import CallEntry, ReportContext, format_call_flow
+
+        rebalancer = "0x81c2da19079a6b9586648186d4d64ede4daff8cc96fb1e2cbf9c9bb9c3b3bb94"
+        swap_caller = "0x456cfaf8d1ec98ae5bbe595a448911a58cb2e264d4686992e15dec9d0f363e03"
+        target = "0xF6d48735EcCf12bDC1DF2674b1ce3fcb3bD25490"
+        accounts = [
+            "0x20f1B8FB379d4cc07b917C68Ee855a1F35ef3Ed6",
+            "0x006E2897400da44CF772cD2664C1a9e712755909",
+            "0x3D18480CC32B6AB3B833dCabD80E76CfD41c48a9",
+        ]
+        mock_source.return_value = (
+            "InfiniFiCore",
+            'bytes32 internal constant MANUAL_REBALANCER = keccak256("MANUAL_REBALANCER");\n'
+            'bytes32 internal constant FARM_SWAP_CALLER = keccak256("FARM_SWAP_CALLER");',
+        )
+        signature = "grantRoles(bytes32[],address[])"
+        data = function_signature_to_4byte_selector(signature) + encode(
+            ["bytes32[]", "address[]"],
+            [[bytes.fromhex(h[2:]) for h in (rebalancer, rebalancer, swap_caller)], accounts],
+        )
+        with patch("utils.calldata.decoder.resolve_selector", return_value=signature):
+            call = decode_calldata("0x" + data.hex())
+        assert call is not None
+        resolved = _collect_role_names([(target, call)], chain_id=1)
+        self.assertEqual(resolved[target.lower()], {rebalancer: "MANUAL_REBALANCER", swap_caller: "FARM_SWAP_CALLER"})
+        mock_source.assert_called_once_with(1, target)
+        notes = "\n".join(_format_role_name_notes(resolved))
+        self.assertIn("is the role MANUAL_REBALANCER", notes)
+        self.assertIn("is the role FARM_SWAP_CALLER", notes)
+        flow = format_call_flow(
+            ReportContext(
+                chain_id=1,
+                entries=[CallEntry(target=target, call=call, role_names=resolved[target.lower()])],
+            )
+        )
+        self.assertEqual(flow.count(f"`{rebalancer}` — role **MANUAL_REBALANCER**"), 2)
+        self.assertIn(f"`{swap_caller}` — role **FARM_SWAP_CALLER**", flow)
+        for account in accounts:
+            self.assertIn(f"https://etherscan.io/address/{account}", flow)
+
+    @patch("utils.llm.ai_explainer.resolve_role_names", return_value={})
+    def test_fixed_role_array_and_empty_array(self, mock_resolve: MagicMock) -> None:
+        """Skip malformed byte values and avoid lookups for an empty role array."""
+        from utils.llm.ai_explainer import _collect_role_names
+
+        call = DecodedCall(
+            function_name="grantRoles",
+            signature="grantRoles(bytes32[2])",
+            params=[("bytes32[2]", (bytes.fromhex(self.MINTER_HASH[2:]), b"short"))],
+        )
+        _collect_role_names([("0xCore", call)], chain_id=1)
+        mock_resolve.assert_called_once_with([self.MINTER_HASH], chain_id=1, target="0xCore")
+        mock_resolve.reset_mock()
+        empty_call = DecodedCall(
+            function_name="grantRoles", signature="grantRoles(bytes32[])", params=[("bytes32[]", ())]
+        )
+        self.assertEqual(_collect_role_names([("0xCore", empty_call)], chain_id=1), {})
+        mock_resolve.assert_not_called()
+
     @patch("utils.llm.ai_explainer.resolve_role_names")
     def test_ignores_bytes32_on_non_role_functions(self, mock_resolve: MagicMock) -> None:
         """A timelock's all-zero predecessor/salt must not become DEFAULT_ADMIN_ROLE."""
@@ -141,7 +207,12 @@ class TestCollectRoleNames(unittest.TestCase):
         schedule = DecodedCall(
             function_name="scheduleBatch",
             signature="scheduleBatch(address[],uint256[],bytes[],bytes32,bytes32,uint256)",
-            params=[("bytes32", b"\x00" * 32), ("bytes32", b"\x00" * 32), ("uint256", 604800)],
+            params=[
+                ("bytes32", b"\x00" * 32),
+                ("bytes32", b"\x00" * 32),
+                ("bytes32[]", (b"\x00" * 32,)),
+                ("uint256", 604800),
+            ],
         )
         self.assertEqual(_collect_role_names([("0xTimelock", schedule)], chain_id=1), {})
         mock_resolve.assert_not_called()

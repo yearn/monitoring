@@ -22,6 +22,7 @@ from protocols.timelock.event_stream import TIMELOCK_STREAM
 from tests.timelock_subscriber_fakes import TIMELOCK, FakeEnvio, FakeWSServer, make_event
 from utils.graphql_ws import GraphQLWSError, http_to_ws_url, subscribe
 from utils.sd_notify import notify
+from utils.subscriber.envio import EnvioQueryError
 from utils.subscriber.inbox import SOURCE_HTTP, SOURCE_WS, EventInbox
 from utils.subscriber.reconcile import ReconcileConfig, reconcile_all
 from utils.subscriber.report import PilotReport, _recommend, build_report, format_report, percentile
@@ -450,3 +451,13 @@ def test_report_ignores_closed_outage_before_the_window(tmp_path: Path) -> None:
     inbox.log("ws_connected", 10.0)
     report = build_report(inbox, hours=1, now=7_200.0)
     assert report.outages == [] and report.ws_downtime_seconds == 0.0
+
+
+@pytest.mark.parametrize("payload", [{}, {"data": None}, {"data": {"TimelockEvent": None}}], ids=repr)
+def test_malformed_ws_snapshot_raises_instead_of_reading_as_empty(tmp_path: Path, payload: dict) -> None:
+    inbox = EventInbox(TIMELOCK_STREAM, str(tmp_path / "sub.db"))
+    worker = Worker(FakeEnvio().post, "ws://unused", inbox, SCOPE, _config())
+
+    with pytest.raises(EnvioQueryError, match="GraphQL response"):
+        asyncio.run(worker._ingest_snapshot(payload, 1.0))
+    assert worker.ws_messages == 0 and _rows(inbox) == {}

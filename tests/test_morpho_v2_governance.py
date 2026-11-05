@@ -85,7 +85,7 @@ class TestMorphoV2GovernancePendingLabels(unittest.TestCase):
 
         sent: list[Any] = []
         with patch("protocols.morpho._alerts.send_alert", side_effect=sent.append):
-            governance_v2.send_vault_alerts(governance_v2._vault_header(snapshot), diff.alerts, governance_v2.PROTOCOL)
+            governance_v2.send_vault_alerts(governance_v2.vault_header(snapshot), diff.alerts, governance_v2.PROTOCOL)
 
         self.assertEqual(len(sent), 1)
         message = sent[0].message
@@ -275,11 +275,11 @@ class TestMorphoV2GovernanceVaultGrouping(unittest.TestCase):
         diff = governance_v2.VaultDiff()
         snapshot = _snapshot(pending)
         for pc in pending:
-            governance_v2._alert_pending_new(snapshot, [(pc, "increaseTimelock(setSendAssetsGate → 604800s)")], diff)
+            governance_v2.alert_pending_new(snapshot, [(pc, "increaseTimelock(setSendAssetsGate → 604800s)")], diff)
 
         sent: list[Any] = []
         with patch("protocols.morpho._alerts.send_alert", side_effect=sent.append):
-            governance_v2.send_vault_alerts(governance_v2._vault_header(snapshot), diff.alerts, governance_v2.PROTOCOL)
+            governance_v2.send_vault_alerts(governance_v2.vault_header(snapshot), diff.alerts, governance_v2.PROTOCOL)
 
         self.assertGreater(len(sent), 1, "oversized group should split into multiple messages")
         for index, alert in enumerate(sent, start=1):
@@ -308,14 +308,14 @@ class TestMorphoV2GovernanceVaultGrouping(unittest.TestCase):
         for i, pc in enumerate(pending):
             label = f"increaseTimelock(setSendAssetsGate → {604800 + i}s)"
             operations.append((pc, label))
-        governance_v2._alert_pending_new(snapshot, operations, diff)
+        governance_v2.alert_pending_new(snapshot, operations, diff)
 
         self.assertEqual(len(diff.alerts), 1, "the regression requires one oversized section")
         self.assertGreater(len(diff.alerts[0].body), MAX_MESSAGE_LENGTH)
 
         sent: list[Any] = []
         with patch("protocols.morpho._alerts.send_alert", side_effect=sent.append):
-            governance_v2.send_vault_alerts(governance_v2._vault_header(snapshot), diff.alerts, governance_v2.PROTOCOL)
+            governance_v2.send_vault_alerts(governance_v2.vault_header(snapshot), diff.alerts, governance_v2.PROTOCOL)
 
         self.assertGreater(len(sent), 1)
         for alert in sent:

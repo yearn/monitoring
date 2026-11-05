@@ -30,7 +30,6 @@ from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
 from utils.erc20_metadata import fetch_erc20_metadata
 from utils.llm.abi_exposure import exposes
-from utils.llm.report import address_link
 from utils.logger import get_logger
 from utils.web3_wrapper import ChainManager
 
@@ -492,33 +491,4 @@ def format_infinifi_farm_prompt(contexts: list[FarmContext]) -> str:
     """Render verified farm-configuration context for the LLM prompt; pair semantics are stated once."""
     lines = [PAIR_SEMANTICS] if any(isinstance(context, SwapPairContext) for context in contexts) else []
     lines.extend(context.prompt_line() for context in contexts)
-    return "\n".join(lines)
-
-
-def format_infinifi_farm_report(contexts: list[FarmContext], chain_id: int, labels: dict[str, str]) -> str:
-    """Render the deterministic farm-configuration section for the gist report."""
-    lines = []
-    for context in contexts:
-        link = address_link(context.farm, chain_id, labels)
-        if isinstance(context, SwapPairContext):
-            lines.append(
-                f"- **Swap pair {context.token_in.symbol}/{context.token_out.symbol}** on {link}: minimum output "
-                f"`{_percent(context.ratio)}` of oracle value (max loss `{_percent(WAD - context.ratio)}`; farm "
-                f"floor `{_percent(context.floor)}`), cooldown `{context.cooldown:,}s` ({_duration(context.cooldown)}); "
-                f"before: {context.current_text()}"
-            )
-        elif isinstance(context, AssetEnableContext):
-            for asset in context.assets:
-                state = "oracle set" if asset.can_be_priced else "**no Accounting oracle — reverts until one is set**"
-                lines.append(f"- **Enable {asset.symbol}** on {link}: {asset.status}; {state}")
-        else:
-            change = (
-                "no immediate change (no PTs held)"
-                if context.total_pts == 0
-                else f"assets() changes by `{_amount(context.assets_change, context.asset_decimals, context.asset_symbol)}`"
-            )
-            lines.append(
-                f"- **Maturity PT discount** on {link}: `{_percent(context.current)}` → `{_percent(context.proposed)}`; "
-                f"holds `{_amount(context.total_pts, context.pt_decimals, 'PT')}`; {change}"
-            )
     return "\n".join(lines)

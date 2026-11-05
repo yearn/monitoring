@@ -15,12 +15,14 @@ a message it has already recorded.
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
 from typing import Any, Callable, List
 
 from utils.alert import Alert, AlertSeverity, send_alert
+from utils.file_lock import file_lock
 from utils.telegram import MAX_MESSAGE_LENGTH
 
 # Ascending severity — a grouped alert is sent at the highest of its sections.
@@ -42,6 +44,16 @@ LOSS_PREFIX = "🚨 POTENTIAL VAULT LOSS"
 
 # Pending loss operations are re-alerted once when their execution time is this close.
 REMINDER_WINDOW_SECONDS = 24 * 60 * 60
+
+
+def governance_lock(vault_address: str) -> AbstractContextManager[None]:
+    """Lock one vault's governance check → send → cache-write sequence across processes.
+
+    The daily jobs and the live consumer's production mode read and write the
+    same cache keys; holding this lock around the whole sequence keeps them from
+    both treating one change as new and alerting it twice.
+    """
+    return file_lock(f"morpho_governance_{vault_address.lower()}")
 
 
 @dataclass(frozen=True)
@@ -155,30 +167,42 @@ def split_into_messages(alerts: List[VaultAlert], budget: int) -> List[List[str]
     return parts
 
 
+def render_vault_alerts(header: str, alerts: List[VaultAlert]) -> List[tuple[AlertSeverity, str]]:
+    """Render buffered sections into the ``(severity, message)`` pairs ``send_vault_alerts`` sends.
+
+    Standalone (potential-loss) sections come first, one message each, under a
+    ``LOSS_PREFIX`` header; the remaining sections are grouped under ``header`` at
+    their highest severity and split into "(i/N)" parts if long.
+    """
+    messages: List[tuple[AlertSeverity, str]] = []
+    for alert in alerts:
+        if alert.standalone:
+            messages += _render_group(f"{LOSS_PREFIX} — {header}", [alert])
+    messages += _render_group(header, [a for a in alerts if not a.standalone])
+    return messages
+
+
 def send_vault_alerts(header: str, alerts: List[VaultAlert], protocol: str) -> None:
     """Send the buffered sections as one Telegram message, or "(i/N)" parts if long.
 
     No-op when ``alerts`` is empty so callers don't have to guard. Every part
     carries the same header and the highest severity of the whole group, so a
-    LOW section bundled with an owner change still pings the channel.
-
-    Standalone (potential-loss) sections go out first, one message each, under a
-    ``LOSS_PREFIX`` header; the remaining sections are grouped as usual.
+    LOW section bundled with an owner change still pings the channel. See
+    ``render_vault_alerts`` for the message layout.
     """
-    for alert in alerts:
-        if alert.standalone:
-            _send_group(f"{LOSS_PREFIX} — {header}", [alert], protocol)
-    _send_group(header, [a for a in alerts if not a.standalone], protocol)
+    for severity, message in render_vault_alerts(header, alerts):
+        send_alert(Alert(severity, message, protocol))
 
 
-def _send_group(header: str, alerts: List[VaultAlert], protocol: str) -> None:
-    """Send sections under one header at their highest severity, split into parts if long."""
+def _render_group(header: str, alerts: List[VaultAlert]) -> List[tuple[AlertSeverity, str]]:
+    """Render sections under one header at their highest severity, split into parts if long."""
     if not alerts:
-        return
+        return []
     severity = max((a.severity for a in alerts), key=_SEVERITY_ORDER.index)
     parts = split_into_messages(alerts, MAX_MESSAGE_LENGTH - _MESSAGE_OVERHEAD - len(header))
     total = len(parts)
+    messages = []
     for index, bodies in enumerate(parts, start=1):
         suffix = f" ({index}/{total})" if total > 1 else ""
-        message = f"{header}{suffix}\n\n" + SECTION_SEPARATOR.join(bodies)
-        send_alert(Alert(severity, message, protocol))
+        messages.append((severity, f"{header}{suffix}\n\n" + SECTION_SEPARATOR.join(bodies)))
+    return messages

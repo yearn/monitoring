@@ -31,7 +31,11 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+# Before anything imports utils.cache: live Morpho checks must use the daily jobs' cache namespace.
+from protocols.morpho.daily_governance_cache import check_daily_governance_cache  # isort: skip
 from protocols.morpho.governance_stream import MORPHO_GOVERNANCE_STREAM, morpho_governance_scope
+from protocols.morpho.live_governance import DELIVERY_MODES, MODE_SHADOW, build_consumer, live_health, live_summary
+from protocols.morpho.live_store import LiveStore
 from protocols.timelock.event_stream import TIMELOCK_STREAM, timelock_scope
 from utils.graphql_ws import http_to_ws_url
 from utils.logger import get_logger
@@ -118,14 +122,21 @@ def cmd_run(args: argparse.Namespace) -> None:
         inbox = EventInbox(stream)
         notifier = build_notifier(args.notify, stream.name)
         notices = PilotNotices(notifier, inbox, scope.labels) if notifier is not None else None
-        workers.append(Worker(post, ws_url, inbox, scope.addresses, config, notices=notices, heads=heads))
+        consumer = None
+        if stream is MORPHO_GOVERNANCE_STREAM:
+            check_daily_governance_cache()
+            consumer = build_consumer(LiveStore(inbox), args.morpho_delivery)
+        workers.append(
+            Worker(post, ws_url, inbox, scope.addresses, config, notices=notices, heads=heads, consumer=consumer)
+        )
         _logger.info(
-            "starting %s stream: %s chains, transport=%s reconcile every %.0fs notices=%s",
+            "starting %s stream: %s chains, transport=%s reconcile every %.0fs notices=%s live=%s",
             stream.name,
             len(scope.addresses),
             config.transport,
             config.reconcile_interval,
             "errors chat" if notices else "off",
+            consumer.config.mode if consumer else "off",
         )
     asyncio.run(run_workers(workers, watchdog_interval=config.heartbeat_interval))
 
@@ -155,8 +166,11 @@ def cmd_report(args: argparse.Namespace) -> None:
     reports = {stream.name: build_report(EventInbox(stream), args.hours) for stream, _ in _selected(args)}
     if args.json:
         print(json.dumps({name: report_to_json(r) for name, r in reports.items()}, indent=2))
-    else:
-        print("\n\n".join(format_report(r) for r in reports.values()))
+        return
+    sections = [format_report(r) for r in reports.values()]
+    if MORPHO_GOVERNANCE_STREAM.name in reports:
+        sections.append(live_summary(LiveStore(EventInbox(MORPHO_GOVERNANCE_STREAM)), args.hours, time.time()))
+    print("\n\n".join(sections))
 
 
 def heartbeat_problems(status: Mapping[str, tuple[Any, float]], now: float) -> list[str]:
@@ -182,8 +196,11 @@ def cmd_health(args: argparse.Namespace) -> None:
     streams = {}
     problems: list[str] = []
     for stream, _ in _selected(args):
-        status = EventInbox(stream).status()
+        inbox = EventInbox(stream)
+        status = inbox.status()
         stream_problems = heartbeat_problems(status, now)
+        if stream is MORPHO_GOVERNANCE_STREAM:
+            stream_problems += live_health(LiveStore(inbox), now)
         problems += [f"{stream.name}: {problem}" for problem in stream_problems]
         streams[stream.name] = {"problems": stream_problems, "heartbeat": status.get("heartbeat", (None, 0.0))[0]}
     print(json.dumps({"ok": not problems, "problems": problems, "streams": streams}, indent=2))
@@ -225,6 +242,15 @@ def main() -> None:
         choices=NOTIFY_MODES,
         default=os.getenv("TIMELOCK_SUBSCRIBER_NOTIFY", "none"),
         help="Post pilot notices to the internal errors chat (errors) or not at all (none, default).",
+    )
+    run.add_argument(
+        "--morpho-delivery",
+        choices=DELIVERY_MODES,
+        default=os.getenv("MORPHO_LIVE_DELIVERY", MODE_SHADOW),
+        help=(
+            "Live Morpho governance alerts: post to the errors chat (shadow, default; observe without one), "
+            "record only (observe), or send to the Morpho channel (production)."
+        ),
     )
     add_reconcile_args(run)
     run.set_defaults(func=cmd_run)

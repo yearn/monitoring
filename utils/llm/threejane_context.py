@@ -25,7 +25,6 @@ from eth_utils import keccak, to_checksum_address
 from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
 from utils.erc20_metadata import fetch_erc20_metadata
-from utils.llm.report import address_link
 from utils.llm.threejane_abi import exposes, threejane_abi
 from utils.llm.threejane_abi import reset_cache as reset_abi_cache
 from utils.llm.threejane_account_context import (
@@ -34,7 +33,6 @@ from utils.llm.threejane_account_context import (
     TokenUnit,
     fetch_token_unit,
     format_account_prompt,
-    format_account_report,
     resolve_account_contexts,
 )
 from utils.logger import get_logger
@@ -717,77 +715,6 @@ def _hashed_label_prompt(context: HashedLabelContext) -> str:
     lines = [line, *context.usage_lines()]
     if context.usage_enforcement:
         lines.append(context.usage_enforcement)
-    return "\n".join(lines)
-
-
-def format_threejane_report(
-    contexts: list[ThreeJaneContext],
-    chain_id: int,
-    labels: dict[str, str],
-) -> str:
-    """Render the deterministic 3Jane section for the gist report."""
-    sections: list[str] = []
-    for context in contexts:
-        if isinstance(context, RewardsDistributorContext):
-            lines = [
-                f"- **Rewards distributor:** {address_link(context.distributor_address, chain_id, labels)}",
-                f"- **Owner** (`owner()`, sole caller of the `onlyOwner` setters): "
-                f"{address_link(context.owner_address, chain_id, labels)}",
-                f"- **Reward token:** `{context.token_symbol}` ({context.token_decimals} decimals) — "
-                f"{address_link(context.token_address, chain_id)}",
-                f"- **Distribution mode:** `useMint = {str(context.use_mint).lower()}` — "
-                + (
-                    f"claims mint new {context.token_symbol}"
-                    + (
-                        " (distributor holds `MINTER_ROLE`)"
-                        if context.distributor_is_minter
-                        else " (distributor does NOT hold `MINTER_ROLE`)"
-                    )
-                    if context.use_mint
-                    else f"claims transfer from the distributor's balance of `{context.amount(context.distributor_balance_raw)}`"
-                ),
-                f"- **Token supply:** `{context.amount(context.token_total_supply_raw)}` total, "
-                f"transfers globally enabled: `{str(context.token_transferable).lower()}`",
-                f"- **Claim accounting:** `maxClaimable {context.amount(context.max_claimable_raw)}` | "
-                f"`totalClaimed {context.amount(context.total_claimed_raw)}` | "
-                f"`outstanding {context.amount(context.outstanding_raw)}`",
-                f"- **Current `merkleRoot`:** `{context.merkle_root}`",
-                f"- **Current epoch:** `{context.current_epoch}`",
-                "- **Epoch emissions on-chain now:**",
-            ]
-            lines.extend(f"  - Epoch `{epoch}`: `{context.amount(value)}`" for epoch, value in context.epoch_emissions)
-            lines.extend(f"- **Proposed:** {line}" for line in context.cadence_lines())
-            sections.append("\n".join(lines))
-        elif isinstance(context, HashedLabelContext):
-            sections.append(_hashed_label_report(context, chain_id, labels))
-        else:
-            sections.append(format_account_report(context, chain_id, labels))
-    return "\n\n".join(sections)
-
-
-def _report_value(context: HashedLabelContext, raw: int) -> str:
-    """A config value for the gist: in its unit when verified, else the grouped raw integer."""
-    return f"`{context.amount_text(raw)}`" if context.unit else f"`{raw:,}`"
-
-
-def _hashed_label_report(context: HashedLabelContext, chain_id: int, labels: dict[str, str]) -> str:
-    """The gist bullet for one hashed label."""
-    lines = [
-        f'- **`{context.argument_hex}`** = `keccak256("{context.name}")` — {context.note}',
-        f"  - Target: {address_link(context.target, chain_id, labels)}",
-    ]
-    if context.is_config_key:
-        value = "not readable" if context.current_value is None else _report_value(context, context.current_value)
-        lines.append(f"  - Value stored on-chain right now: {value}")
-        lines.extend(
-            f"  - Set by this transaction to: {_report_value(context, raw)}" for raw in context.proposed_values
-        )
-    if context.current_usage is not None:
-        suffix = "" if context.unit else " (same units as the key)"
-        lines.append(f"  - {context.usage_label} right now: {_report_value(context, context.current_usage)}{suffix}")
-        lines.extend(f"  - {line}" for line in context.usage_lines()[1:])
-    if context.usage_enforcement:
-        lines.append(f"  - {context.usage_enforcement}")
     return "\n".join(lines)
 
 

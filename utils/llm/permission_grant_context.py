@@ -32,8 +32,7 @@ from eth_utils import to_checksum_address
 
 from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
-from utils.llm.control_transfer_context import ControllerInfo, describe_controller, describe_controller_markdown
-from utils.llm.report import address_link
+from utils.llm.control_transfer_context import ControllerInfo, describe_controller
 from utils.logger import get_logger
 from utils.solidity_text import FunctionDef, contract_functions
 from utils.source_context import fetch_verified_contract, get_contract_label
@@ -601,68 +600,3 @@ def format_permission_grant_prompt(contexts: list[PermissionGrantContext]) -> st
 
 
 # What the call does to the gated entry points, keyed by the holder's access afterwards.
-_EFFECT: dict[bool | None, str] = {True: "opens", False: "closes", None: "controls"}
-
-
-def format_permission_grant_report(
-    contexts: list[PermissionGrantContext],
-    chain_id: int,
-    labels: dict[str, str],
-) -> str:
-    """Render the deterministic allowlist-scope section for the gist report.
-
-    One block per allowlist: its entry points and members before the batch once,
-    then each change with its holder, then the members after.
-    """
-
-    def links(addresses: tuple[str, ...]) -> str:
-        return ", ".join(address_link(a, chain_id, labels) for a in addresses) or "none"
-
-    sections: list[str] = []
-    for group in _groups(contexts):
-        first, last = group[0], group[-1]
-        accesses = {context.access for context in group}
-        effect = _EFFECT[accesses.pop()] if len(accesses) == 1 else "gates"
-        if len(group) == 1:
-            lines = [
-                f"**`{first.signature}`** on {address_link(first.target, chain_id, labels)} — "
-                f"{first.verb.lower()} an entry in `{first.allowlist}`",
-                f"- **Holder:** {describe_controller_markdown(first.holder, chain_id, labels)}",
-            ]
-        else:
-            lines = [
-                f"**`{first.allowlist}`** on {address_link(first.target, chain_id, labels)} — {len(group)} changes"
-            ]
-        lines.append(f"- **Entry points it {effect}:**")
-        for fn in first.gated:
-            flag = f" — **arbitrary {fn.arbitrary_call}**" if fn.arbitrary_call else ""
-            if fn.restricted_by:
-                flag = f" — forwards calls, restricted by {fn.restricted_by}"
-            lines.append(f"  - `{fn.signature}` ({fn.via}){flag}")
-        if any(fn.arbitrary_call for fn in first.gated):
-            lines.append(
-                "- **Scope:** an arbitrary-call entry point lets the holder use every permission the target holds."
-            )
-        if len(group) > 1:
-            if first.holders_before is not None:
-                lines.append(f"- **Members before:** {links(first.holders_before)}")
-            lines.append("- **Changes, in batch order:**")
-            for context in group:
-                lines.append(
-                    f"  - `{context.signature}` {context.verb.lower()} "
-                    f"{describe_controller_markdown(context.holder, chain_id, labels)}"
-                )
-                if context.holder_forwarders:
-                    forwarders = ", ".join(f"`{f}`" for f in context.holder_forwarders)
-                    lines.append(f"    - holder forwards arbitrary calls: {forwarders}")
-        elif first.holder_forwarders:
-            forwarders = ", ".join(f"`{f}`" for f in first.holder_forwarders)
-            lines.append(f"- **Holder forwards arbitrary calls:** {forwarders}")
-        after = last.holders_after()
-        if first.holders_before is not None and after is not None:
-            if len(group) > 1:
-                lines.append(f"- **Members after:** {links(after)}")
-            else:
-                lines.append(f"- **`{first.allowlist}` members:** {links(first.holders_before)} → {links(after)}")
-        sections.append("\n".join(lines))
-    return "\n\n".join(sections)

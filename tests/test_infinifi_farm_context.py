@@ -13,7 +13,6 @@ from utils.llm.infinifi_farm_context import (
     PendleDiscountContext,
     SwapPairContext,
     format_infinifi_farm_prompt,
-    format_infinifi_farm_report,
     resolve_infinifi_farm_context,
 )
 
@@ -205,11 +204,6 @@ class TestEnableAssets(unittest.TestCase):
         (enable,) = _resolve([(SWAP_FARM, ENABLE_REUSD)], reusd_supported=True, reusd_oracle=ORACLE)
         self.assertIn("is already supported, so the call reverts (InvalidAsset)", format_infinifi_farm_prompt([enable]))
 
-    def test_report_flags_the_missing_oracle(self) -> None:
-        enable, _pair = _resolve(BATCH)
-        report = format_infinifi_farm_report([enable], 1, {})
-        self.assertIn("**no Accounting oracle — reverts until one is set**", report)
-
 
 class TestPendleDiscount(unittest.TestCase):
     def test_no_pts_held_means_no_immediate_change(self) -> None:
@@ -227,7 +221,6 @@ class TestPendleDiscount(unittest.TestCase):
         prompt = format_infinifi_farm_prompt([context])
         self.assertIn("reported assets change immediately by 1,500 USDC", prompt)
         self.assertIn("the farm is registered in FarmRegistry", prompt)
-        self.assertIn("assets() changes by `1,500 USDC`", format_infinifi_farm_report([context], 1, {}))
 
     def test_add_farms_earlier_in_the_batch_registers_it(self) -> None:
         (context,) = _resolve([(REGISTRY, ADD_FARM), (PENDLE_FARM, DISCOUNT)])

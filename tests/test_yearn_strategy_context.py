@@ -8,7 +8,6 @@ from utils.erc20_metadata import ERC20Metadata
 from utils.llm import yearn_strategy_context
 from utils.llm.yearn_strategy_context import (
     format_yearn_strategy_prompt,
-    format_yearn_strategy_report,
     resolve_yearn_strategy_context,
 )
 
@@ -137,9 +136,6 @@ class TestYearnStrategyContext(unittest.TestCase):
         self.assertIn(f"default trigger → {FIXED_TRIGGER} (StrategyFixedReportTrigger)", prompt)
         self.assertIn("report only once 3d (259200 s) have passed since lastReport (last report 3h 26m ago)", prompt)
 
-        report = format_yearn_strategy_report([context], 1, {})
-        self.assertIn(f"[`{SAM}`](https://etherscan.io/address/{SAM}) (GnosisSafeProxy)", report)
-
     def test_report_timing_follows_the_unlock_time_set_earlier_in_the_batch(
         self, mock_cm: MagicMock, *_: MagicMock
     ) -> None:
@@ -152,9 +148,9 @@ class TestYearnStrategyContext(unittest.TestCase):
 
     def test_report_transfers_note_is_said_once(self, mock_cm: MagicMock, *_: MagicMock) -> None:
         contexts = self._resolve(mock_cm, [(GROVE, REPORT), (SPARK, REPORT)])
-        for rendered in (format_yearn_strategy_prompt(contexts), format_yearn_strategy_report(contexts, 1, {})):
-            self.assertEqual(rendered.count("Token transfers inside report()"), 1)
-            self.assertTrue(rendered.endswith("not payments."))
+        prompt = format_yearn_strategy_prompt(contexts)
+        self.assertEqual(prompt.count("Token transfers inside report()"), 1)
+        self.assertTrue(prompt.endswith("not payments."))
         (context,) = self._resolve(mock_cm, [(GROVE, _unlock(0))])
         self.assertNotIn("Token transfers", format_yearn_strategy_prompt([context]))
 

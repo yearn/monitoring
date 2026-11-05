@@ -13,7 +13,6 @@ from utils.llm.control_transfer_context import (
     ControllerInfo,
     ControlTransferContext,
     format_control_transfer_prompt,
-    format_control_transfer_report,
     resolve_control_transfer_context,
 )
 
@@ -270,13 +269,6 @@ class TestRendering(unittest.TestCase):
         self.assertIn("operator whitelist", prompt)
         self.assertIn("Two-step", prompt)
         self.assertIn("a LOWER signing threshold. Effective once accepted.", prompt)
-
-    def test_report_links_every_controller(self) -> None:
-        report = format_control_transfer_report([self.CONTEXT], 1, {})
-        for address in (TARGET, YCHAD, EXECUTOR, EXEC_SAFE):
-            self.assertIn(f"https://etherscan.io/address/{address}", report)
-        self.assertIn("**2-of-4**", report)
-        self.assertIn("- **Two-step:** this call only nominates", report)
 
     def test_labels_and_addresses_include_the_hop(self) -> None:
         self.assertEqual(self.CONTEXT.labels, {YCHAD: "Safe 6-of-9", EXEC_SAFE: "Safe 2-of-4"})

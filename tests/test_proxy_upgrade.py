@@ -1,7 +1,7 @@
 """Tests for utils/proxy.detect_proxy_upgrade."""
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from eth_abi import encode
 from eth_utils import function_signature_to_4byte_selector
@@ -19,6 +19,7 @@ from tests.test_calldata_wrappers import (
 from utils.proxy import (
     EIP1967_BEACON_SLOT,
     EIP1967_IMPL_SLOT,
+    IMPL_CACHE_TTL_SECONDS,
     ZEPPELINOS_IMPL_SLOT,
     ProxyUpgrade,
     detect_proxy_upgrade,
@@ -282,7 +283,111 @@ class TestFindProxyUpgrades(unittest.TestCase):
         self.assertEqual(find_proxy_upgrades("0xdeadbeef" + "00" * 32, ORACLE), [])
 
 
+class TestImplementationCache(unittest.TestCase):
+    """`get_current_implementation` caches successful lookups in memory for a short TTL."""
+
+    PROXY = _cs("0x" + "ab" * 20)
+    IMPL = _cs("0x" + "11" * 20)
+
+    def _client(self, impl: str | None = None) -> "MagicMock":
+        """Mock client whose EIP-1967 slot holds ``impl`` and has no impl getters."""
+        client = MagicMock()
+        word = bytes(32) if impl is None else bytes(12) + bytes.fromhex(impl[2:])
+        client.eth.get_storage_at.side_effect = lambda _addr, slot: word if slot == EIP1967_IMPL_SLOT else bytes(32)
+        client.eth.call.return_value = bytes(32)
+        return client
+
+    def test_repeat_lookup_is_served_from_cache(self) -> None:
+        """A second lookup, in any address casing, makes no RPC calls."""
+        client = self._client(self.IMPL)
+        with patch("utils.web3_wrapper.ChainManager.get_client", return_value=client):
+            self.assertEqual(get_current_implementation(self.PROXY, 1), self.IMPL)
+            calls = client.eth.get_storage_at.call_count
+            self.assertEqual(get_current_implementation(self.PROXY.lower(), 1), self.IMPL)
+        self.assertEqual(client.eth.get_storage_at.call_count, calls)
+
+    def test_non_proxy_result_is_cached(self) -> None:
+        """A successful "no implementation" read is cached like any other result."""
+        client = self._client(None)
+        with patch("utils.web3_wrapper.ChainManager.get_client", return_value=client):
+            self.assertIsNone(get_current_implementation(self.PROXY, 1))
+            calls = client.eth.get_storage_at.call_count + client.eth.call.call_count
+            self.assertIsNone(get_current_implementation(self.PROXY, 1))
+        self.assertEqual(client.eth.get_storage_at.call_count + client.eth.call.call_count, calls)
+
+    def test_cache_is_scoped_per_chain(self) -> None:
+        """The same address on another chain is looked up separately."""
+        client = self._client(self.IMPL)
+        with patch("utils.web3_wrapper.ChainManager.get_client", return_value=client):
+            get_current_implementation(self.PROXY, 1)
+            calls = client.eth.get_storage_at.call_count
+            get_current_implementation(self.PROXY, 10)
+        self.assertGreater(client.eth.get_storage_at.call_count, calls)
+
+    def test_failed_lookup_is_not_cached(self) -> None:
+        """A transient RPC failure must not hide the implementation on retry."""
+        failing = MagicMock()
+        failing.eth.get_storage_at.side_effect = ConnectionError("rpc down")
+        with patch("utils.web3_wrapper.ChainManager.get_client", return_value=failing):
+            self.assertIsNone(get_current_implementation(self.PROXY, 1))
+        with patch("utils.web3_wrapper.ChainManager.get_client", return_value=self._client(self.IMPL)):
+            self.assertEqual(get_current_implementation(self.PROXY, 1), self.IMPL)
+
+    def test_entry_expires_after_ttl(self) -> None:
+        """An upgrade becomes visible once the cached entry is older than the TTL."""
+        new_impl = _cs("0x" + "22" * 20)
+        with patch("utils.proxy.time.monotonic", return_value=1000.0):
+            with patch("utils.web3_wrapper.ChainManager.get_client", return_value=self._client(self.IMPL)):
+                get_current_implementation(self.PROXY, 1)
+        with patch("utils.web3_wrapper.ChainManager.get_client", return_value=self._client(new_impl)):
+            with patch("utils.proxy.time.monotonic", return_value=1000.0 + IMPL_CACHE_TTL_SECONDS - 1):
+                self.assertEqual(get_current_implementation(self.PROXY, 1), self.IMPL)
+            with patch("utils.proxy.time.monotonic", return_value=1000.0 + IMPL_CACHE_TTL_SECONDS):
+                self.assertEqual(get_current_implementation(self.PROXY, 1), new_impl)
+
+    def test_bypass_reads_fresh_and_refreshes_cache(self) -> None:
+        """``use_cache=False`` always hits RPC, and later cached reads see its result."""
+        new_impl = _cs("0x" + "22" * 20)
+        with patch("utils.web3_wrapper.ChainManager.get_client", return_value=self._client(self.IMPL)):
+            get_current_implementation(self.PROXY, 1)
+        upgraded = self._client(new_impl)
+        with patch("utils.web3_wrapper.ChainManager.get_client", return_value=upgraded):
+            self.assertEqual(get_current_implementation(self.PROXY, 1, use_cache=False), new_impl)
+            calls = upgraded.eth.get_storage_at.call_count
+            self.assertEqual(get_current_implementation(self.PROXY, 1), new_impl)
+        self.assertEqual(upgraded.eth.get_storage_at.call_count, calls)
+
+    def test_zero_ttl_disables_cache(self) -> None:
+        """With the TTL set to 0, every lookup goes to RPC."""
+        client = self._client(self.IMPL)
+        with (
+            patch("utils.proxy.IMPL_CACHE_TTL_SECONDS", 0),
+            patch("utils.web3_wrapper.ChainManager.get_client", return_value=client),
+        ):
+            get_current_implementation(self.PROXY, 1)
+            calls = client.eth.get_storage_at.call_count
+            get_current_implementation(self.PROXY, 1)
+        self.assertGreater(client.eth.get_storage_at.call_count, calls)
+
+    def test_expired_entries_are_pruned_when_cache_grows(self) -> None:
+        """Expired proxies are evicted once the cache passes its prune size."""
+        from utils import proxy
+
+        with patch("utils.proxy.time.monotonic", return_value=0.0):
+            for i in range(proxy._IMPL_CACHE_PRUNE_SIZE):
+                proxy._store_implementation((1, f"0x{i:040x}"), None)
+        with patch("utils.proxy.time.monotonic", return_value=IMPL_CACHE_TTL_SECONDS):
+            proxy._store_implementation((1, self.PROXY.lower()), self.IMPL)
+        self.assertEqual(list(proxy._impl_cache), [(1, self.PROXY.lower())])
+
+
 class TestFormatUpgradeLines(unittest.TestCase):
+    @patch("utils.proxy.get_current_implementation", return_value=OLD_IMPL)
+    def test_old_implementation_is_read_fresh(self, impl) -> None:
+        """The "old" side of an upgrade alert never comes from the cache."""
+        format_upgrade_lines(ProxyUpgrade(ORACLE, NEW_ORACLE_IMPL), ORACLE, 1)
+        impl.assert_called_once_with(ORACLE, 1, use_cache=False)
+
     @patch("utils.proxy.get_current_implementation", return_value=OLD_IMPL)
     def test_direct_upgrade_keeps_the_timelock_alert_format(self, _impl) -> None:
         lines = format_upgrade_lines(ProxyUpgrade(ORACLE, NEW_ORACLE_IMPL), ORACLE, 1)

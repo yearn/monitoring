@@ -67,10 +67,29 @@ def http_poster(url: str, timeout: int = 30) -> GraphQLPost:
     return post
 
 
-def _data(payload: dict[str, Any]) -> dict[str, Any]:
+def entity_rows(payload: Any, field: str) -> list[dict[str, Any]]:
+    """Return ``payload["data"][field]``, failing closed on anything but a list of rows.
+
+    Reconciliation treats a returned page as the complete content of its block
+    range: rows missing from it are marked removed and the checkpoint moves past
+    it. So only an explicit list (``[]`` included) may count as a page. A missing
+    or null ``data``, a missing or null ``field``, or a non-object row is a broken
+    response, not an empty range, and raises before anything is changed.
+
+    Raises:
+        EnvioQueryError: GraphQL ``errors``, or a response without the expected list.
+    """
+    if not isinstance(payload, dict):
+        raise EnvioQueryError(f"GraphQL response is not an object: {str(payload)[:200]}")
     if payload.get("errors"):
         raise EnvioQueryError(f"GraphQL errors: {json.dumps(payload['errors'])[:500]}")
-    return payload.get("data") or {}
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise EnvioQueryError(f"GraphQL response has no data object: {json.dumps(payload)[:200]}")
+    rows = data.get(field)
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise EnvioQueryError(f"GraphQL response has no {field} list: {json.dumps(data)[:200]}")
+    return rows
 
 
 def address_variants(addresses: set[str]) -> list[str]:
@@ -80,7 +99,7 @@ def address_variants(addresses: set[str]) -> list[str]:
 
 def fetch_chain_heads(post: GraphQLPost) -> dict[int, ChainHead]:
     """Fetch ``chain_metadata`` and key it by chain id."""
-    rows = _data(post(CHAIN_METADATA_QUERY, {})).get("chain_metadata") or []
+    rows = entity_rows(post(CHAIN_METADATA_QUERY, {}), "chain_metadata")
     heads: dict[int, ChainHead] = {}
     for row in rows:
         if row.get("latest_processed_block") is None:
@@ -175,7 +194,7 @@ def fetch_range(
     rows: list[dict[str, Any]] = []
     for page in range(max_pages):
         query = range_query(stream, chain_id, from_block, to_block, page_size, page * page_size, since_ts)
-        batch = _data(post(query, variables)).get(stream.entity) or []
+        batch = entity_rows(post(query, variables), stream.entity)
         rows.extend(batch)
         if len(batch) < page_size:
             return rows, page + 1

@@ -23,7 +23,6 @@ from utils.calldata.decoder import DecodedCall
 from utils.chains import Chain
 from utils.eth_view import call_view
 from utils.formatting import format_duration, format_utc
-from utils.llm.report import address_link
 from utils.logger import get_logger
 from utils.source_context import get_contract_label
 from utils.web3_wrapper import ChainManager, Web3Client
@@ -191,29 +190,3 @@ def resolve_timelock_execution_context(
 def format_timelock_execution_prompt(contexts: list[TimelockExecutionContext]) -> str:
     """Render verified timelock-operation facts for the LLM prompt."""
     return "\n\n".join("\n".join(context.lines()) for context in contexts)
-
-
-def format_timelock_execution_report(
-    contexts: list[TimelockExecutionContext],
-    chain_id: int,
-    labels: dict[str, str],
-) -> str:
-    """Render the deterministic timelock-operation section for the gist report."""
-    sections: list[str] = []
-    for context in contexts:
-        route = (
-            f"{address_link(context.target, chain_id, labels)} → {address_link(context.timelock, chain_id, labels)}"
-            if context.via_executor
-            else address_link(context.timelock, chain_id, labels)
-        )
-        sections.append(
-            "\n".join(
-                [
-                    f"**Timelock execution:** `{context.signature.split('(')[0]}` via {route}",
-                    f"- **Operation ID:** `{context.operation_id}` ({context.call_count} call(s))",
-                    f"- **Min delay:** {format_duration(context.min_delay)}",
-                    f"- **Status:** {context.status()}",
-                ]
-            )
-        )
-    return "\n\n".join(sections)

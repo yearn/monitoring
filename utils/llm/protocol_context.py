@@ -30,62 +30,50 @@ from utils.calldata.decoder import DecodedCall, decode_calldata
 from utils.calldata.wrappers import unwrap_executed_calls
 from utils.llm.control_transfer_context import (
     format_control_transfer_prompt,
-    format_control_transfer_report,
     resolve_control_transfer_context,
 )
 from utils.llm.infinifi_context import (
     format_infinifi_prompt,
-    format_infinifi_report,
     resolve_infinifi_context,
 )
 from utils.llm.infinifi_farm_context import (
     format_infinifi_farm_prompt,
-    format_infinifi_farm_report,
     resolve_infinifi_farm_context,
 )
 from utils.llm.infinifi_oracle_context import (
     format_infinifi_oracle_prompt,
-    format_infinifi_oracle_report,
     resolve_infinifi_oracle_context,
 )
 from utils.llm.infinifi_outland_context import (
     format_outland_prompt,
-    format_outland_report,
     resolve_outland_context,
 )
 from utils.llm.pendle_context import (
     format_pendle_prompt,
-    format_pendle_report,
     resolve_pendle_context,
 )
 from utils.llm.permission_grant_context import (
     format_permission_grant_prompt,
-    format_permission_grant_report,
     resolve_permission_grant_context,
 )
 from utils.llm.threejane_context import (
     format_threejane_prompt,
-    format_threejane_report,
     resolve_threejane_context,
 )
 from utils.llm.timelock_execution_context import (
     format_timelock_execution_prompt,
-    format_timelock_execution_report,
     resolve_timelock_execution_context,
 )
 from utils.llm.yearn_auction_context import (
     format_yearn_auction_prompt,
-    format_yearn_auction_report,
     resolve_yearn_auction_context,
 )
 from utils.llm.yearn_strategy_context import (
     format_yearn_strategy_prompt,
-    format_yearn_strategy_report,
     resolve_yearn_strategy_context,
 )
 from utils.llm.yearn_v3_context import (
     format_yearn_v3_prompt,
-    format_yearn_v3_report,
     resolve_yearn_v3_context,
 )
 from utils.logger import get_logger
@@ -96,61 +84,53 @@ logger = get_logger("utils.llm.protocol_context")
 
 @dataclass(frozen=True)
 class _Adapter:
-    """One protocol's resolver plus its prompt and report renderers."""
+    """One protocol's resolver plus its prompt renderer."""
 
     name: str
     resolve: Callable[[str, int, list[tuple[str, DecodedCall]]], list[Any]]
     format_prompt: Callable[[list[Any]], str]
-    format_report: Callable[[list[Any], int, dict[str, str]], str]
 
 
 _ADAPTERS: tuple[_Adapter, ...] = (
-    _Adapter("infinifi", resolve_infinifi_context, format_infinifi_prompt, format_infinifi_report),
-    _Adapter("infinifi-outland", resolve_outland_context, format_outland_prompt, format_outland_report),
+    _Adapter("infinifi", resolve_infinifi_context, format_infinifi_prompt),
+    _Adapter("infinifi-outland", resolve_outland_context, format_outland_prompt),
     _Adapter(
         "infinifi-oracle",
         resolve_infinifi_oracle_context,
         format_infinifi_oracle_prompt,
-        format_infinifi_oracle_report,
     ),
     _Adapter(
         "infinifi-farm",
         resolve_infinifi_farm_context,
         format_infinifi_farm_prompt,
-        format_infinifi_farm_report,
     ),
-    _Adapter("3jane", resolve_threejane_context, format_threejane_prompt, format_threejane_report),
-    _Adapter("pendle", resolve_pendle_context, format_pendle_prompt, format_pendle_report),
-    _Adapter("yearn-v3", resolve_yearn_v3_context, format_yearn_v3_prompt, format_yearn_v3_report),
+    _Adapter("3jane", resolve_threejane_context, format_threejane_prompt),
+    _Adapter("pendle", resolve_pendle_context, format_pendle_prompt),
+    _Adapter("yearn-v3", resolve_yearn_v3_context, format_yearn_v3_prompt),
     _Adapter(
         "yearn-strategy",
         resolve_yearn_strategy_context,
         format_yearn_strategy_prompt,
-        format_yearn_strategy_report,
     ),
     _Adapter(
         "yearn-auction",
         resolve_yearn_auction_context,
         format_yearn_auction_prompt,
-        format_yearn_auction_report,
     ),
     _Adapter(
         "control-transfer",
         resolve_control_transfer_context,
         format_control_transfer_prompt,
-        format_control_transfer_report,
     ),
     _Adapter(
         "permission-grant",
         resolve_permission_grant_context,
         format_permission_grant_prompt,
-        format_permission_grant_report,
     ),
     _Adapter(
         "timelock-execution",
         resolve_timelock_execution_context,
         format_timelock_execution_prompt,
-        format_timelock_execution_report,
     ),
 )
 
@@ -197,7 +177,6 @@ class ResolvedProtocolContext:
     """Rendered protocol context for one alert, empty when no adapter matched."""
 
     prompt: str = ""
-    report: str = ""
     addresses: list[str] = field(default_factory=list)
     labels: dict[str, str] = field(default_factory=dict)
 
@@ -206,7 +185,6 @@ def resolve_protocol_context(
     protocol: str,
     chain_id: int,
     targets_and_calls: list[tuple[str, DecodedCall]],
-    labels: dict[str, str] | None = None,
 ) -> ResolvedProtocolContext:
     """Resolve and render protocol-specific context from every matching adapter.
 
@@ -214,15 +192,13 @@ def resolve_protocol_context(
         protocol: Alert protocol name, matched case-insensitively by each adapter.
         chain_id: Chain the transaction executes on.
         targets_and_calls: Decoded calls paired with the address each one targets.
-        labels: Address labels used when rendering the report section.
 
     Returns:
-        Rendered prompt and report text plus the addresses and labels the
+        Rendered prompt text plus the addresses and labels the
         adapters introduced. Adapter failures are logged and skipped — context
         is an enrichment and must never block a governance alert.
     """
     prompts: list[str] = []
-    reports: list[str] = []
     addresses: list[str] = []
     resolved_labels: dict[str, str] = {}
 
@@ -234,25 +210,19 @@ def resolve_protocol_context(
             continue
         if not contexts:
             continue
-        merged = dict(resolved_labels)
-        for context in contexts:
-            for address, label in context.labels.items():
-                merged.setdefault(address, label)
         try:
             prompt = adapter.format_prompt(contexts)
-            report = adapter.format_report(contexts, chain_id, {**(labels or {}), **merged})
         except Exception as error:  # noqa: BLE001 - rendering must not break the alert either
             logger.info("Protocol context adapter %s failed to render: %s", adapter.name, error)
             continue
         for context in contexts:
             addresses.extend(context.addresses)
-        resolved_labels = merged
+            for address, label in context.labels.items():
+                resolved_labels.setdefault(address, label)
         prompts.append(prompt)
-        reports.append(report)
 
     return ResolvedProtocolContext(
         prompt="\n\n".join(part for part in prompts if part),
-        report="\n\n".join(part for part in reports if part),
         addresses=list(dict.fromkeys(addresses)),
         labels=resolved_labels,
     )

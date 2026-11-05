@@ -163,11 +163,32 @@ def unwrap_calls(data_hex: str) -> list[InnerCall]:
     name, types, extractor = _WRAPPERS[data_hex[:10].lower()]
     try:
         values = decode(types, bytes.fromhex(data_hex[10:]))
-        pairs = extractor(values)
+        return _inner_calls(name, extractor(values))
     except Exception as e:  # noqa: BLE001 - adversarial/malformed payloads
         logger.debug("could not unwrap %s calldata: %s", name, e)
         return []
 
+
+def unwrap_call_values(signature: str, values: tuple) -> list[InnerCall]:
+    """Extract target/payload pairs from already-decoded supported wrapper values.
+
+    Scheduled calls are included for inspection, without claiming they execute
+    in the wrapping transaction. Unknown or malformed wrappers return no calls.
+    """
+    extractor = _WRAPPER_SIGNATURES.get(signature)
+    if extractor is None:
+        return []
+    name = signature.split("(")[0]
+    try:
+        pairs = extractor(values)
+        return _inner_calls(name, pairs)
+    except Exception as e:  # noqa: BLE001 - best-effort decoding of malformed wrappers
+        logger.debug("could not unwrap %s values: %s", name, e)
+        return []
+
+
+def _inner_calls(name: str, pairs: list[tuple[str, bytes]]) -> list[InnerCall]:
+    """Normalize extracted wrapper calls with their original ordering."""
     multiple = len(pairs) > 1
     return [
         InnerCall(

@@ -39,7 +39,7 @@ from utils.erc20_metadata import fetch_erc20_metadata
 from utils.formatting import format_decimal_amount, normalize_token_amount
 from utils.http_client import fetch_json
 from utils.infinifi_escrow import fetch_whitelist_targets
-from utils.llm.report import address_link, iter_address_values
+from utils.llm.report import iter_address_values
 from utils.logger import get_logger
 from utils.source_context import fetch_abi_entries, get_contract_label
 from utils.web3_wrapper import ChainManager
@@ -653,41 +653,6 @@ def format_infinifi_prompt(contexts: list[InfinifiEscrowContext]) -> str:
             lines.append(f"Whitelisted contract call target: {address} ({label or 'unlabelled'})")
         lines.extend(context.rate_lines())
         lines.extend(context.whitelist_lines())
-        sections.append("\n".join(lines))
-    return "\n\n".join(sections)
-
-
-def format_infinifi_report(
-    contexts: list[InfinifiEscrowContext],
-    chain_id: int,
-    labels: dict[str, str],
-) -> str:
-    """Render the deterministic Infinifi farm section for the gist report."""
-    sections: list[str] = []
-    for context in contexts:
-        asset = context.accounting_asset
-        total_assets = format_decimal_amount(normalize_token_amount(context.total_assets_raw, asset.decimals))
-        farm_name = context.farm_name or context.farm_slug or "Unknown farm"
-        lines = [
-            f"- **Farm:** {farm_name} — {address_link(context.farm_address, chain_id)}",
-            f"- **Escrow:** {address_link(context.escrow_address, chain_id, labels)}",
-            f"- **Accounting asset:** {asset.name} (`{asset.symbol}`, {asset.decimals} decimals) — "
-            f"{address_link(asset.address, chain_id)}",
-            f"- **Current `totalAssets`:** `{total_assets} {asset.symbol}` (`{context.total_assets_raw:,}` raw units)",
-        ]
-        if custody := context.custody_line():
-            lines.append(f"- **Custody:** {custody}")
-        if context.configured_tokens or context.whitelisted_contracts:
-            lines.append("- **Whitelisted call targets** (`externalCall`):")
-            for token in context.configured_tokens:
-                lines.append(
-                    f"  - {token.name} (`{token.symbol}`, {token.decimals} decimals) — "
-                    f"{address_link(token.address, chain_id)}"
-                )
-            for address, label in context.whitelisted_contracts:
-                lines.append(f"  - {address_link(address, chain_id, {address: label} if label else labels)}")
-        lines.extend(f"- {line}" for line in context.rate_lines())
-        lines.extend(f"- {line}" for line in context.whitelist_lines())
         sections.append("\n".join(lines))
     return "\n\n".join(sections)
 

@@ -15,7 +15,6 @@ from utils.llm.threejane_account_context import (
     SupplyCapExemptContext,
     TokenUnit,
     format_account_prompt,
-    format_account_report,
     resolve_account_contexts,
 )
 
@@ -176,12 +175,6 @@ class TestLCCBounce(unittest.TestCase):
         self.assertIn("Commitment to remove: 499,999.999986 USDC (raw 499999999986)", prompt)
         self.assertIn("State is read at scheduling time", prompt)
 
-    def test_report_links_vault_user_and_assets(self) -> None:
-        report = format_account_report(_bounce(), 1, {VAULT: "LCCVault"})
-        for address in (VAULT, USER, USDC.address, WAEUSDC.address):
-            self.assertIn(f"https://etherscan.io/address/{address}", report)
-        self.assertIn("`499,999.999986 USDC`", report)
-
     def test_phase_blockers_come_first(self) -> None:
         """bounceCommitment reverts InvalidPhase during a pending auction or an unsettled call."""
         self.assertIn("shortfall auction is pending", _bounce(auction_pending=True).blocker())
@@ -289,7 +282,6 @@ class TestSupplyCapExempt(unittest.TestCase):
         self.assertIn("per-wallet right to grow USD3 past the cap", line)
         self.assertIn("adds no credit exposure", line)
         self.assertEqual(format_account_prompt(_exemption()).count("Why it matters"), 1)
-        self.assertEqual(format_account_report(_exemption(), 1, {}).count("Why it matters"), 1)
 
     def test_supply_line_above_cap_blocks_non_exempt(self) -> None:
         line = _exemption().supply_line()
@@ -317,23 +309,6 @@ class TestSupplyCapExempt(unittest.TestCase):
         self.assertIn(f"- {SAFE} (contract): true → false; ringFenceConduit false; holds 85,185.325821 USD3", prompt)
         self.assertEqual(sum(1 for line in prompt.splitlines() if line.startswith("- 0x")), 4)
 
-    def test_report_tabulates_accounts_with_links(self) -> None:
-        report = format_account_report(self._revocation(), 1, {USD3_ADDRESS: "USD3"})
-        self.assertEqual(report.count("What the flag does"), 1)
-        self.assertIn("| # | Account | Type | supplyCapExempt | ringFenceConduit | USD3 balance |", report)
-        self.assertIn(f"EOA, EIP-7702 → [`{DELEGATE}`](https://etherscan.io/address/{DELEGATE})", report)
-        for address in (OTHER, DELEGATED, SAFE, USER):
-            self.assertIn(f"https://etherscan.io/address/{address}", report)
-        self.assertIn("`1,271,316.91341 USD3`", report)
-
-    def test_report_flags_out_of_step_accounts(self) -> None:
-        conduit_revoke = _account(proposed_exempt=False, current_exempt=True, ring_fence_conduit=True)
-        self.assertIn(
-            "⚠️ exemption revoked while ringFenceConduit stays true",
-            format_account_report(_exemption(conduit_revoke), 1, {}),
-        )
-        self.assertNotIn("⚠️", format_account_report(_exemption(), 1, {}))
-
     def test_history_appears_only_when_read(self) -> None:
         account = _account(address=REGRANTED, last_change=ExemptionChange(26091398, False, REVOKE_TX))
         context = _exemption(account, history_read=True, exempt_before=5, exempt_conduits_before=2)
@@ -342,13 +317,9 @@ class TestSupplyCapExempt(unittest.TestCase):
             "Exempt before this transaction (replayed from SupplyCapExemptUpdated): 5 account(s), 2 of them", prompt
         )
         self.assertIn(f"re-grants an exemption revoked at block 26091398 (tx {REVOKE_TX})", prompt)
-        report = format_account_report(context, 1, {})
-        self.assertIn("| USD3 balance | Last change |", report)
-        self.assertIn(f"set false at [block 26091398](https://etherscan.io/tx/{REVOKE_TX})", report)
 
         unread = _exemption(account)
         self.assertNotIn("re-grants", format_account_prompt(unread))
-        self.assertNotIn("Last change", format_account_report(unread, 1, {}))
 
     def test_addresses_include_every_account(self) -> None:
         self.assertEqual(self._revocation().addresses, [USD3_ADDRESS, OTHER, DELEGATED, SAFE, USER])

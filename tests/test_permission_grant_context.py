@@ -8,7 +8,6 @@ from utils.llm import permission_grant_context
 from utils.llm.control_transfer_context import ControllerInfo
 from utils.llm.permission_grant_context import (
     format_permission_grant_prompt,
-    format_permission_grant_report,
     resolve_permission_grant_context,
 )
 from utils.verified_contract import VerifiedContract
@@ -254,9 +253,6 @@ class TestResolve(unittest.TestCase):
         self.assertIn("forwardCall(address,bytes) [onlyKeepers]", prompt)
         mock_client.return_value.get_contract.assert_not_called()  # a mapping has no member getter
 
-        report = format_permission_grant_report([context], 1, {})
-        self.assertIn("`forwardCall(address,bytes)` (modifier onlyKeepers) — **arbitrary call**", report)
-
     def test_restricted_forward_is_not_reported_as_arbitrary(self, mock_client: MagicMock, *_mocks: MagicMock) -> None:
         call = DecodedCall("setKeeper", "setKeeper(address,bool)", [("address", OPS_EOA), ("bool", True)])
         (context,) = resolve_permission_grant_context("YEARN_MS", 1, [(HARVESTER, call)])
@@ -265,9 +261,6 @@ class TestResolve(unittest.TestCase):
         self.assertIn("RESTRICTED FORWARD: forward(address,bytes) checks", prompt)
         self.assertIn('`require(_target == strategy, "!strategy")`', prompt)
         self.assertIn("`require(bytes4(_data) == IStrategy.report.selector", prompt)
-        report = format_permission_grant_report([context], 1, {})
-        self.assertNotIn("every permission", report)
-        self.assertIn("forwards calls, restricted by", report)
 
     def test_denylist_entry_blocks_instead_of_granting(self, mock_client: MagicMock, *_mocks: MagicMock) -> None:
         call = DecodedCall("setBlocked", "setBlocked(address,bool)", [("address", OPS_EOA), ("bool", True)])
@@ -275,9 +268,6 @@ class TestResolve(unittest.TestCase):
         self.assertIn(f"BLOCKS {OPS_EOA}", context.lines()[0])
         self.assertIn("gates withdraw(uint256)", context.lines()[1])
         self.assertIn("a denylist: listed callers are refused", context.lines()[1])
-        report = format_permission_grant_report([context], 1, {})
-        self.assertIn("**Entry points it closes:**", report)
-        self.assertNotIn("opens", report)
 
     def test_executor_removals_carry_membership_through_the_batch(
         self, mock_client: MagicMock, *_mocks: MagicMock
@@ -319,9 +309,6 @@ class TestResolve(unittest.TestCase):
         self.assertIn(f"  10. removeExecutor(address) REVOKES {executors[-1]}.", prompt)
         # Each change adds a line, not another copy of the scope and membership: linear, not quadratic.
         self.assertLess(len(prompt), 2_800)
-        report = format_permission_grant_report(contexts, 1, {})
-        self.assertEqual(report.count("**Entry points it closes:**"), 1)
-        self.assertEqual(report.count("**Members after:**"), 1)
 
     def test_ignores_non_setters_without_source_lookups(self, mock_client: MagicMock, *_mocks: MagicMock) -> None:
         call = DecodedCall("transfer", "transfer(address,uint256)", [("address", OPS_EOA), ("uint256", 1)])
