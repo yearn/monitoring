@@ -59,7 +59,7 @@ With `TIMELOCK_SUBSCRIBER_NOTIFY=errors` (or `run --notify errors`), the worker 
 
 | Notice | When |
 |---|---|
-| 🛰️ New timelock event | First sighting of each event: timelock, chain, event id, full timelock address and tx links, which transport saw it first, and the delay since its block. More than 10 new events in one batch post one summary per chain instead. Only events from blocks after the notice baseline are announced (see below). |
+| 🛰️ New timelock event | First sighting of each event: timelock, chain, event id, full timelock address and tx links, which transport saw it first, and the delay since its block. Batches with more than 10 new events are recorded without posting event notices or event-id summaries. Only events from blocks after the notice baseline are announced (see below). |
 | ⚠️ WS miss | HTTP reconciliation found events first although the WebSocket was connected. |
 | 🔀 Events changed | Indexed rows changed, were removed, or came back (a reorg or indexer rewrite). |
 | 🔌 / ✅ WebSocket | Down for more than 5 minutes, then reconnected. |

@@ -7,9 +7,10 @@ from unittest.mock import patch
 
 import pytest
 
+from protocols.morpho.governance_stream import MORPHO_GOVERNANCE_STREAM
 from protocols.timelock.event_stream import TIMELOCK_STREAM
 from protocols.timelock.timelock_alerts import TimelockConfig
-from tests.timelock_subscriber_fakes import TIMELOCK, FakeEnvio, FakeWSServer, make_event
+from tests.timelock_subscriber_fakes import TIMELOCK, FakeEnvio, FakeWSServer, make_event, make_morpho_event
 from utils.subscriber.inbox import SOURCE_HTTP, SOURCE_WS, EventInbox
 from utils.subscriber.notices import NoticeConfig, PilotNotices
 from utils.subscriber.notifier import (
@@ -19,6 +20,7 @@ from utils.subscriber.notifier import (
     send_to_errors_chat,
 )
 from utils.subscriber.reconcile import ChainReconcileResult, ReconcileConfig, ReconcileReport
+from utils.subscriber.stream import EventStream
 from utils.subscriber.worker import Worker, WorkerConfig
 
 TIMELOCKS = {(TIMELOCK, 1): TimelockConfig(TIMELOCK, 1, "YEARN_TIMELOCK", "Yearn TimelockController")}
@@ -133,14 +135,31 @@ def test_new_event_notice_has_full_address_links_and_transport(notices: PilotNot
     assert f"Operation ID: {event['operationId']}" in text
 
 
-def test_event_burst_becomes_one_summary_per_chain(notices: PilotNotices) -> None:
+@pytest.mark.parametrize("stream", [TIMELOCK_STREAM, MORPHO_GOVERNANCE_STREAM])
+@pytest.mark.parametrize("source", [SOURCE_WS, SOURCE_HTTP])
+def test_event_burst_notice_policy(tmp_path: Path, stream: EventStream, source: str) -> None:
+    inbox = EventInbox(stream, str(tmp_path / "burst.db"))
+    notices = PilotNotices(RecordingNotifier(), inbox, {}, NoticeConfig(max_event_notices=3), now=lambda: 0.0)
     ids = [f"1_{b}_0" for b in range(5)] + ["8453_7_0"]
-    notices.inbox.observe([*(make_event(1, b) for b in range(5)), make_event(8453, 7)], SOURCE_HTTP, 1.0)
-    asyncio.run(notices.new_events(SOURCE_HTTP, ids))
-    assert _posted(notices) == [
-        "🛰️ 5 new timelock events on Mainnet via HTTP: 1_0_0, 1_1_0, 1_2_0, 1_3_0, 1_4_0",
-        "🛰️ 1 new timelock events on Base via HTTP: 8453_7_0",
-    ]
+    make = make_event if stream is TIMELOCK_STREAM else make_morpho_event
+    inbox.observe([*(make(1, b) for b in range(5)), make(8453, 7)], source, 1.0)
+    asyncio.run(notices.new_events(source, ids))
+    if stream is TIMELOCK_STREAM:
+        assert _posted(notices) == []
+    else:
+        assert _posted(notices) == [
+            f"🛰️ 5 new Morpho governance events on Mainnet via {source.upper()}: 1_0_0, 1_1_0, 1_2_0, 1_3_0, 1_4_0",
+            f"🛰️ 1 new Morpho governance events on Base via {source.upper()}: 8453_7_0",
+        ]
+    assert {row["event_id"] for row in inbox.events_since(0)} == set(ids)
+    if stream is TIMELOCK_STREAM and source == SOURCE_HTTP:
+        report = ReconcileReport(
+            started_at=0,
+            chains=[ChainReconcileResult(chain_id=1, new=5, new_ids=ids[:5])],
+        )
+        asyncio.run(notices.reconcile(report, ws_expected=True))
+        (text,) = _posted(notices)
+        assert text.startswith("⚠️ WS miss: HTTP reconciliation found 5 event(s) on Mainnet")
 
 
 def test_reconcile_notices_skip_initialization_and_flag_ws_misses(notices: PilotNotices, inbox: EventInbox) -> None:
