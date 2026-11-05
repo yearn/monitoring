@@ -23,12 +23,17 @@ from utils.calldata.decoder import (
     MAX_BYTES_RECURSION_DEPTH,
     DecodedCall,
     ScriptCall,
+    decode_calldata,
     split_top_level_types,
     try_decode_inner_calldata,
 )
 from utils.calldata.role_names import normalize_role_hash
+from utils.calldata.wrappers import InnerCall, unwrap_call_values
 from utils.chains import EXPLORER_URLS, Chain
+from utils.logger import get_logger
 from utils.related_tokens import RelatedToken
+
+logger = get_logger("utils.llm.report")
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
@@ -173,6 +178,8 @@ class ReportContext:
     description: str = ""
     # Seatbelt-style checks (unverified target, ETH to nonpayable).
     safety_notes: list[str] = field(default_factory=list)
+    # Nested calls must use the names resolved for their own target.
+    role_names_by_target: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -277,8 +284,13 @@ def _format_param_value(
     chain_id: int,
     labels: dict[str, str],
     token: RelatedToken | None = None,
+    role_names: dict[str, str] | None = None,
 ) -> str:
     """Render a single scalar parameter value for the markdown call flow."""
+    if role_names and type_str == "bytes32":
+        role_hash = normalize_role_hash(value)
+        if role := role_names.get(role_hash):
+            return f"`{role_hash}` — role **{role}**"
     if type_str == "address" and isinstance(value, str):
         return address_link(value, chain_id, labels)
     if isinstance(value, bytes):
@@ -315,26 +327,27 @@ def _is_composite(type_str: str) -> bool:
     return array_element_type(type_str) is not None or tuple_component_types(type_str) is not None
 
 
-def iter_address_values(type_str: str, value: object) -> Iterator[str]:
-    """Yield every ``address`` leaf inside a decoded parameter value.
-
-    Walks arrays and tuples (and their nesting) so a struct argument like
-    ``(address,address,uint256)`` contributes its addresses to label lookup
-    and to the prompt's Address Links section — without this they'd only ever
-    be stringified into the report as raw, unlinked text.
-    """
+def iter_typed_values(type_str: str, value: object, leaf_type: str) -> Iterator[object]:
+    """Yield leaves of one ABI type through arrays and tuples of any nesting."""
     element = array_element_type(type_str)
     if element is not None and isinstance(value, (list, tuple)):
         for item in value:
-            yield from iter_address_values(element, item)
+            yield from iter_typed_values(element, item, leaf_type)
         return
     components = tuple_component_types(type_str)
     if components is not None and isinstance(value, (list, tuple)) and len(components) == len(value):
         for component, item in zip(components, value):
-            yield from iter_address_values(component, item)
+            yield from iter_typed_values(component, item, leaf_type)
         return
-    if type_str == "address" and isinstance(value, str):
+    if type_str == leaf_type:
         yield value
+
+
+def iter_address_values(type_str: str, value: object) -> Iterator[str]:
+    """Yield string address leaves from decoded arrays, tuples, or scalars."""
+    for address in iter_typed_values(type_str, value, "address"):
+        if isinstance(address, str):
+            yield address
 
 
 def _render_param(
@@ -346,6 +359,9 @@ def _render_param(
     indent: str,
     depth: int = 0,
     token: "RelatedToken | None" = None,
+    role_names: dict[str, str] | None = None,
+    nested_calls: Iterator[InnerCall] | None = None,
+    role_names_by_target: dict[str, dict[str, str]] | None = None,
 ) -> list[str]:
     """Render one parameter, expanding arrays and tuples into nested bullets.
 
@@ -361,11 +377,25 @@ def _render_param(
             return [f"{indent}- {label}: _(empty)_"]
         lines = [f"{indent}- {label}:"]
         for i, item in enumerate(value):
-            if _is_composite(element):
+            if _is_composite(element) or element == "bytes":
                 # Nested tuples/structs must not inherit a parent amount token.
-                lines.extend(_render_param(f"`[{i}]`", element, item, chain_id, labels, indent + "  ", depth, None))
+                lines.extend(
+                    _render_param(
+                        f"`[{i}]`",
+                        element,
+                        item,
+                        chain_id,
+                        labels,
+                        indent + "  ",
+                        depth,
+                        None,
+                        role_names,
+                        nested_calls,
+                        role_names_by_target,
+                    )
+                )
             else:
-                lines.append(f"{indent}  - {_format_param_value(element, item, chain_id, labels, token)}")
+                lines.append(f"{indent}  - {_format_param_value(element, item, chain_id, labels, token, role_names)}")
         return lines
 
     components = tuple_component_types(type_str)
@@ -374,17 +404,52 @@ def _render_param(
             return [f"{indent}- {label}: _(empty)_"]
         lines = [f"{indent}- {label}:"]
         for component, item in zip(components, value):
-            lines.extend(_render_param(f"`{component}`", component, item, chain_id, labels, indent + "  ", depth, None))
+            lines.extend(
+                _render_param(
+                    f"`{component}`",
+                    component,
+                    item,
+                    chain_id,
+                    labels,
+                    indent + "  ",
+                    depth,
+                    None,
+                    role_names,
+                    nested_calls,
+                    role_names_by_target,
+                )
+            )
         return lines
 
     if type_str == "bytes" and depth < MAX_BYTES_RECURSION_DEPTH:
-        inner = try_decode_inner_calldata(value)
+        nested = next(nested_calls, None) if nested_calls is not None else None
+        try:
+            inner = (
+                decode_calldata(nested.data, chain_id=chain_id, target=nested.target)
+                if nested is not None
+                else try_decode_inner_calldata(value)
+            )
+        except Exception as error:  # noqa: BLE001 - preserve raw payload when enrichment fails
+            logger.info("Nested report calldata decoding failed: %s", error)
+            inner = None
         if inner is not None:
             lines = [f"{indent}- {label}: ↳ `{inner.signature}`"]
-            lines.extend(_format_params(inner, chain_id, labels, None, indent + "  ", depth + 1))
+            inner_roles = (role_names_by_target or {}).get(nested.target.lower(), {}) if nested is not None else {}
+            lines.extend(
+                _format_params(
+                    inner,
+                    chain_id,
+                    labels,
+                    None,
+                    indent + "  ",
+                    depth + 1,
+                    role_names=inner_roles,
+                    role_names_by_target=role_names_by_target,
+                )
+            )
             return lines
 
-    return [f"{indent}- {label}: {_format_param_value(type_str, value, chain_id, labels, token)}"]
+    return [f"{indent}- {label}: {_format_param_value(type_str, value, chain_id, labels, token, role_names)}"]
 
 
 def _format_params(
@@ -396,28 +461,43 @@ def _format_params(
     depth: int = 0,
     token: "RelatedToken | None" = None,
     role_names: dict[str, str] | None = None,
+    role_names_by_target: dict[str, dict[str, str]] | None = None,
 ) -> list[str]:
     """Render a call's parameters as an indented markdown bullet list.
 
-    A ``bytes32`` that ``role_names`` resolves is annotated with its role name.
-    Scalars render to exactly one line, so the annotation is appended to the
-    line just produced; composites are left alone.
+    A ``bytes32`` that ``role_names`` resolves is annotated with its role name,
+    including each element of a role array.
     """
     lines: list[str] = []
+    # A role resolved elsewhere on this target does not make a salt/id a role.
+    if "role" not in (call.function_name or "").lower():
+        role_names = None
+    nested_calls = iter(unwrap_call_values(call.signature, tuple(value for _, value in call.params)))
     for i, (type_str, value) in enumerate(call.params):
         name = param_names[i] if param_names is not None and i < len(param_names) else None
         hint_token = token if is_token_amount_param(call.signature, i, name, token) else None
         if call.script_calls and type_str == "bytes":
-            lines.extend(_render_script_calls(call, _param_label(type_str, name), chain_id, labels, indent, depth))
+            lines.extend(
+                _render_script_calls(
+                    call, _param_label(type_str, name), chain_id, labels, indent, depth, role_names_by_target
+                )
+            )
             continue
-        rendered = _render_param(
-            _param_label(type_str, name), type_str, value, chain_id, labels, indent, depth, hint_token
+        lines.extend(
+            _render_param(
+                _param_label(type_str, name),
+                type_str,
+                value,
+                chain_id,
+                labels,
+                indent,
+                depth,
+                hint_token,
+                role_names,
+                nested_calls,
+                role_names_by_target,
+            )
         )
-        if role_names and type_str == "bytes32" and len(rendered) == 1:
-            role = role_names.get(normalize_role_hash(value))
-            if role:
-                rendered = [f"{rendered[0]} — role **{role}**"]
-        lines.extend(rendered)
     return lines
 
 
@@ -439,6 +519,7 @@ def _render_script_calls(
     labels: dict[str, str],
     indent: str,
     depth: int,
+    role_names_by_target: dict[str, dict[str, str]] | None = None,
 ) -> list[str]:
     """Render a Yearn Executor script as its inner calls instead of packed hex."""
     count = len(call.script_calls)
@@ -448,7 +529,18 @@ def _render_script_calls(
         target = address_link(script_call.target, chain_id, labels)
         lines.append(f"{indent}  - Script call {k}: {_script_call_what(script_call)} on {target}")
         if script_call.decoded is not None and depth < MAX_BYTES_RECURSION_DEPTH:
-            lines.extend(_format_params(script_call.decoded, chain_id, labels, None, indent + "    ", depth + 1))
+            lines.extend(
+                _format_params(
+                    script_call.decoded,
+                    chain_id,
+                    labels,
+                    None,
+                    indent + "    ",
+                    depth + 1,
+                    role_names=(role_names_by_target or {}).get(script_call.target.lower(), {}),
+                    role_names_by_target=role_names_by_target,
+                )
+            )
     return lines
 
 
@@ -491,7 +583,8 @@ def format_call_flow(ctx: ReportContext) -> str:
                 entry.param_names,
                 indent="   ",
                 token=entry.amount_token,
-                role_names=entry.role_names,
+                role_names=ctx.role_names_by_target.get(entry.target.lower(), entry.role_names),
+                role_names_by_target=ctx.role_names_by_target,
             )
             lines.extend(param_lines or ["   - _no inputs_"])
         if entry.simulation_note:
