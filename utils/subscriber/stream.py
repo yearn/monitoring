@@ -48,6 +48,8 @@ class EventStream:
     operation_field: str | None = None
     # Extra notice lines for one event row payload (e.g. decoded arguments).
     describe: Callable[[dict[str, Any]], list[str]] | None = field(default=None, compare=False)
+    # Whether batches above the notice limit post an event-id summary or stay quiet.
+    summarize_event_bursts: bool = True
 
     def table(self, name: str) -> str:
         """Return this stream's SQLite table called ``name`` (events, changes, checkpoints, log, status)."""

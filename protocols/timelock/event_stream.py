@@ -44,6 +44,7 @@ TIMELOCK_STREAM = EventStream(
     db_filename="timelock_subscriber.db",
     table_prefix="timelock_sub",
     operation_field="operationId",
+    summarize_event_bursts=False,
 )
 
 
