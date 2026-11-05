@@ -4,6 +4,9 @@ Detects proxy upgrade transactions (EIP-1967) and generates diff links
 to compare old vs new implementation source code on Etherscan.
 """
 
+import os
+import threading
+import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -46,6 +49,18 @@ _PROXY_ADMIN_SELECTOR = "0x9623609d"
 # calling a timelock; two covers a timelock operation that itself schedules on
 # another timelock. Bounded so adversarial nesting can't run away.
 MAX_WRAPPER_DEPTH = 2
+
+# In-process cache for `get_current_implementation`. Explaining one transaction
+# looks up the same proxy from several enrichment steps (source context,
+# on-chain state, address labels, role names), and each lookup costs 2–4 RPC
+# calls. The cache is deliberately in-memory and short-lived: an implementation
+# changes on upgrade, so it must never persist across runs or go stale inside a
+# long-lived process. Set the TTL to 0 to disable it.
+IMPL_CACHE_TTL_SECONDS: float = float(os.getenv("PROXY_IMPL_CACHE_TTL_SECONDS", "60"))
+# Expired entries are pruned once the cache grows past this many proxies.
+_IMPL_CACHE_PRUNE_SIZE = 1024
+_impl_cache: dict[tuple[int, str], tuple[float, str | None]] = {}
+_impl_cache_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -161,7 +176,8 @@ def format_upgrade_lines(upgrade: ProxyUpgrade, target: str, chain_id: int) -> l
     if upgrade.proxy_address.lower() != target.lower():
         suffix = f" (via {upgrade.via})" if upgrade.via else ""
         lines.append(f"🅿️ Proxy: `{upgrade.proxy_address}`{suffix}")
-    old_impl = get_current_implementation(upgrade.proxy_address, chain_id)
+    # Read fresh: the "old" side of an upgrade alert must never come from cache.
+    old_impl = get_current_implementation(upgrade.proxy_address, chain_id, use_cache=False)
     new_impl = upgrade.new_implementation
     if not old_impl:
         lines.append(f"🔄 New impl: `{new_impl}`")
@@ -254,7 +270,33 @@ def _call_impl_getters(client: "Web3Client", address: str) -> str | None:
     return None
 
 
-def get_current_implementation(proxy_address: str, chain_id: int) -> str | None:
+def clear_implementation_cache() -> None:
+    """Drop every cached ``get_current_implementation`` result."""
+    with _impl_cache_lock:
+        _impl_cache.clear()
+
+
+def _cached_implementation(key: tuple[int, str]) -> tuple[bool, str | None]:
+    """Return ``(hit, implementation)`` for an unexpired cache entry."""
+    with _impl_cache_lock:
+        entry = _impl_cache.get(key)
+    if entry is None or time.monotonic() - entry[0] >= IMPL_CACHE_TTL_SECONDS:
+        return False, None
+    return True, entry[1]
+
+
+def _store_implementation(key: tuple[int, str], implementation: str | None) -> None:
+    """Cache a successful lookup, pruning expired entries when the cache grows large."""
+    now = time.monotonic()
+    with _impl_cache_lock:
+        _impl_cache[key] = (now, implementation)
+        if len(_impl_cache) > _IMPL_CACHE_PRUNE_SIZE:
+            expired = [k for k, (stored, _) in _impl_cache.items() if now - stored >= IMPL_CACHE_TTL_SECONDS]
+            for k in expired:
+                del _impl_cache[k]
+
+
+def get_current_implementation(proxy_address: str, chain_id: int, use_cache: bool = True) -> str | None:
     """Read the current implementation address of a proxy.
 
     Resolution order: EIP-1967 slot → legacy zeppelinos slot (e.g. USDC's
@@ -262,36 +304,55 @@ def get_current_implementation(proxy_address: str, chain_id: int) -> str | None:
     → common getter functions (e.g. Compound's Unitroller, which exposes
     ``comptrollerImplementation()`` instead of a known slot).
 
+    Successful lookups (including "not a proxy") are cached in memory for
+    ``IMPL_CACHE_TTL_SECONDS``; failed lookups are not cached.
+
     Args:
         proxy_address: The proxy contract address.
         chain_id: Chain ID to query.
+        use_cache: Serve an unexpired cached result when available. Pass False
+            where staleness matters, e.g. the "old" side of an upgrade alert.
+            A fresh read still refreshes the cache.
 
     Returns:
         Current implementation address (checksummed), or None on failure.
     """
+    key = (chain_id, proxy_address.lower())
+    if use_cache and IMPL_CACHE_TTL_SECONDS > 0:
+        hit, cached = _cached_implementation(key)
+        if hit:
+            return cached
     try:
-        chain = Chain.from_chain_id(chain_id)
-        from utils.web3_wrapper import ChainManager
-
-        client = ChainManager.get_client(chain)
-        from web3 import Web3
-
-        checksum_proxy = Web3.to_checksum_address(proxy_address)
-        for slot in (EIP1967_IMPL_SLOT, ZEPPELINOS_IMPL_SLOT):
-            addr = _addr_from_word(client.eth.get_storage_at(checksum_proxy, slot))
-            if addr:
-                return addr
-
-        # A beacon proxy's logic lives one hop away, behind the beacon's getter.
-        beacon = _addr_from_word(client.eth.get_storage_at(checksum_proxy, EIP1967_BEACON_SLOT))
-        if beacon:
-            return _call_impl_getters(client, beacon)
-
-        # Non-standard proxies expose the impl via a getter rather than a slot.
-        return _call_impl_getters(client, checksum_proxy)
+        implementation = _read_implementation(proxy_address, chain_id)
     except Exception:
         logger.debug("Failed to read implementation for %s on chain %s", proxy_address, chain_id, exc_info=True)
         return None
+    if IMPL_CACHE_TTL_SECONDS > 0:
+        _store_implementation(key, implementation)
+    return implementation
+
+
+def _read_implementation(proxy_address: str, chain_id: int) -> str | None:
+    """Read a proxy's implementation over RPC; raises on RPC or chain errors."""
+    chain = Chain.from_chain_id(chain_id)
+    from utils.web3_wrapper import ChainManager
+
+    client = ChainManager.get_client(chain)
+    from web3 import Web3
+
+    checksum_proxy = Web3.to_checksum_address(proxy_address)
+    for slot in (EIP1967_IMPL_SLOT, ZEPPELINOS_IMPL_SLOT):
+        addr = _addr_from_word(client.eth.get_storage_at(checksum_proxy, slot))
+        if addr:
+            return addr
+
+    # A beacon proxy's logic lives one hop away, behind the beacon's getter.
+    beacon = _addr_from_word(client.eth.get_storage_at(checksum_proxy, EIP1967_BEACON_SLOT))
+    if beacon:
+        return _call_impl_getters(client, beacon)
+
+    # Non-standard proxies expose the impl via a getter rather than a slot.
+    return _call_impl_getters(client, checksum_proxy)
 
 
 def build_diff_url(old_impl: str, new_impl: str, chain_id: int) -> str | None:
