@@ -182,6 +182,7 @@ class TestCollectRoleNames(unittest.TestCase):
 
     @patch("utils.llm.ai_explainer.resolve_role_names", return_value={})
     def test_fixed_role_array_and_empty_array(self, mock_resolve: MagicMock) -> None:
+        """Skip malformed byte values and avoid lookups for an empty role array."""
         from utils.llm.ai_explainer import _collect_role_names
 
         call = DecodedCall(
