@@ -49,6 +49,7 @@ def run_with_alert(
     except Exception as exc:  # noqa: BLE001 - top-level safety net by design
         script = name or entrypoint.__module__
         logger.exception("%s crashed", script)
+        # send_telegram_message redacts credentials from the exception text.
         lines = [f"🚨 {script} crashed: {type(exc).__name__}: {exc}"]
         run_url = get_github_run_url()
         if run_url:

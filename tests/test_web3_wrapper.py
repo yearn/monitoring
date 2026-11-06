@@ -163,3 +163,21 @@ class TestDefaultProviderUrls(unittest.TestCase):
         provider = MultiHTTPProvider(["https://custom.example/evm"])
         self.assertEqual(provider.request_kwargs["timeout"], REQUEST_TIMEOUT_SECONDS)
         self.assertLessEqual(REQUEST_TIMEOUT_SECONDS, 120)
+
+
+class TestProviderErrorRedaction(unittest.TestCase):
+    def test_all_providers_failed_error_hides_keys(self):
+        url = "https://eth-mainnet.g.alchemy.com/v2/rpcsecretkey123456789"
+        provider = MultiHTTPProvider([url], max_retries=1, backoff_factor=0)
+        error = RuntimeError(f"429 Client Error: Too Many Requests for url: {url}")
+
+        with (
+            patch.dict(os.environ, {"PROVIDER_URL_MAINNET": url}),
+            patch("web3.providers.rpc.HTTPProvider.make_request", side_effect=error),
+            patch("utils.web3_wrapper.time.sleep"),
+            self.assertRaises(ProviderConnectionError) as ctx,
+        ):
+            provider.make_request("eth_blockNumber", [])
+
+        self.assertNotIn("rpcsecretkey123456789", str(ctx.exception))
+        self.assertIn("eth-mainnet.g.alchemy.com", str(ctx.exception))

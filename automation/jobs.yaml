@@ -15,6 +15,9 @@
 # `--key=value` in the declared order. Cache files resolve against $CACHE_DIR (set to
 # /srv/cache by the systemd unit; see utils/cache.py), so profiles only override a cache
 # *basename* when they need an isolated file (e.g. daily).
+#
+# Every task is killed after `timeout:` seconds (default 3600, see automation/config.py) so a
+# hung script can't hold its profile's flock forever; it then shows up in the failure digest.
 
 profiles:
 
@@ -111,11 +114,12 @@ profiles:
     # Tracked local edits are intentionally discarded in favor of reviewed main.
     # The sync also rewrites the live crontab when profiles or cadences change, and
     # a stale crontab calling a renamed profile still syncs (automation/__main__.py).
-    # NOTE: dependency changes (pyproject.toml/uv.lock) still need a manual
-    # `uv sync --frozen --extra ai` + `systemctl restart monitoring`.
+    # The sync also runs `uv sync --frozen --extra ai`, so dependency changes land
+    # with the code (a running monitoring-api still needs a restart to pick them up).
+    # stables gets a tight timeout: a hang here would stall the code-sync heartbeat.
     sync_before_run: true
     tasks:
-      - { name: "stables", script: protocols/stables/main.py }
+      - { name: "stables", script: protocols/stables/main.py, timeout: 300 }
 
   twenty_minute:
     # Every 20 min, offset 2 min so it never starts mid-sync of the ten_minute profile.

@@ -224,6 +224,43 @@ class TestRunProfileContinuesOnFailure(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("spawn failed", result.failures[0].error or "")
 
+    def test_timed_out_task_is_recorded_and_next_task_runs(self):
+        import subprocess
+
+        profile = _profile([Task(name="hang", script="h.py", timeout=5), Task(name="b", script="b.py")])
+
+        class _Ok:
+            returncode = 0
+
+        timeout = subprocess.TimeoutExpired(["python", "h.py"], 5, output=b"partial", stderr=b"stuck on rpc")
+        with patch("automation.runner.subprocess.run", side_effect=[timeout, _Ok()]) as mock_run:
+            with patch("automation.runner._send_failure_digest") as mock_digest:
+                result = run_profile(profile, repo_root=Path("/"), dry_run=False)
+
+        self.assertEqual(mock_run.call_args_list[0].kwargs["timeout"], 5)
+        self.assertEqual([f.name for f in result.failures], ["hang"])
+        self.assertIn("timed out after 5s", result.failures[0].error or "")
+        self.assertIn("stuck on rpc", result.failures[0].error or "")
+        mock_digest.assert_called_once()
+
+    def test_error_tail_is_redacted(self):
+        profile = _profile([Task(name="x", script="x.py")])
+        url = "https://eth-mainnet.g.alchemy.com/v2/leakedkey1234567890"
+
+        class _Bad:
+            returncode = 1
+            stdout = ""
+            stderr = f"requests.exceptions.HTTPError: 429 for url: {url}"
+
+        with (
+            patch.dict(os.environ, {"PROVIDER_URL_MAINNET": url}),
+            patch("automation.runner.subprocess.run", return_value=_Bad()),
+            patch("automation.runner._send_failure_digest"),
+        ):
+            result = run_profile(profile, repo_root=Path("/"), dry_run=False)
+
+        self.assertNotIn("leakedkey1234567890", result.failures[0].error or "")
+
 
 class TestTelegramSummary(unittest.TestCase):
     def test_lists_failures(self):

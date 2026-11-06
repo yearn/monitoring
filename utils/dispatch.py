@@ -19,6 +19,7 @@ import requests
 from utils.alert import Alert, AlertSeverity
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.logger import get_logger
+from utils.redact import redact_secrets
 
 logger = get_logger("utils.dispatch")
 
@@ -81,8 +82,9 @@ def dispatch_emergency_withdrawal(alert: Alert) -> None:
     Registered by default when ``utils.alert`` is imported (see
     ``_ensure_default_dispatch_hook``) unless a hook was already set; override via
     ``register_alert_hook``.
-    Only dispatches for HIGH and CRITICAL alerts whose protocol is in
-    ``DISPATCHABLE_PROTOCOLS``. Respects a per-protocol cooldown to avoid
+    Only dispatches for HIGH and CRITICAL alerts with ``alert.dispatch`` set whose
+    protocol is in ``DISPATCHABLE_PROTOCOLS``. The signed body carries ``sent_at``
+    (unix seconds) so the receiver can reject stale or replayed requests. Respects a per-protocol cooldown to avoid
     duplicate dispatches from repeated alerts.
 
     The receiving webhook resolves vaults, markets, and chains from its own
@@ -92,6 +94,10 @@ def dispatch_emergency_withdrawal(alert: Alert) -> None:
         alert: The alert that triggered the hook.
     """
     if alert.severity not in (AlertSeverity.HIGH, AlertSeverity.CRITICAL):
+        return
+
+    if not alert.dispatch:
+        logger.info("Alert for %s is not dispatch-eligible (unconfirmed signal), skipping dispatch", alert.protocol)
         return
 
     if os.getenv("LOG_LEVEL", "INFO").upper() == "DEBUG":
@@ -113,10 +119,12 @@ def dispatch_emergency_withdrawal(alert: Alert) -> None:
 
     payload = {
         "event_type": "emergency_withdrawal",
+        # Inside the signed body so the receiver can reject replays of a captured request.
+        "sent_at": int(time.time()),
         "client_payload": {
             "protocol": alert.protocol,
             "severity": alert.severity.value,
-            "message": alert.message,
+            "message": redact_secrets(alert.message),
         },
     }
     body = _serialize_payload(payload)

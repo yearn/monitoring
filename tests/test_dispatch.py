@@ -234,3 +234,32 @@ class TestDispatch(unittest.TestCase):
             # Old dispatch (past cooldown)
             mock_get.return_value = str(time.time() - 7200)
             self.assertFalse(_is_on_cooldown("infinifi", cooldown_seconds=3600))
+
+
+class TestDispatchHardening(unittest.TestCase):
+    @patch("utils.dispatch.requests.post")
+    @patch("utils.dispatch._is_on_cooldown", return_value=False)
+    def test_unconfirmed_alert_is_not_dispatched(self, _mock_cooldown, mock_post):
+        from utils.dispatch import dispatch_emergency_withdrawal
+
+        alert = Alert(severity=AlertSeverity.CRITICAL, message="depeg", protocol="maple", dispatch=False)
+        with patch.dict(os.environ, {"LIQUIDITY_WEBHOOK_SECRET": "s", "LOG_LEVEL": "INFO"}):
+            dispatch_emergency_withdrawal(alert)
+
+        mock_post.assert_not_called()
+
+    @patch("utils.dispatch.requests.post")
+    @patch("utils.dispatch._record_dispatch")
+    @patch("utils.dispatch._is_on_cooldown", return_value=False)
+    def test_signed_body_carries_sent_at(self, _mock_cooldown, _mock_record, mock_post):
+        from utils.dispatch import dispatch_emergency_withdrawal
+
+        mock_post.return_value = MagicMock()
+        alert = Alert(severity=AlertSeverity.HIGH, message="low", protocol="maple")
+        with patch.dict(os.environ, {"LIQUIDITY_WEBHOOK_SECRET": "s", "LOG_LEVEL": "INFO"}):
+            dispatch_emergency_withdrawal(alert)
+
+        body = mock_post.call_args.kwargs["data"]
+        self.assertIsInstance(json.loads(body)["sent_at"], int)
+        expected = "sha256=" + hmac.new(b"s", body, hashlib.sha256).hexdigest()
+        self.assertEqual(mock_post.call_args.kwargs["headers"]["X-Hub-Signature-256"], expected)
