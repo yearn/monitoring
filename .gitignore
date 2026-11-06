@@ -55,3 +55,6 @@ label-cache/
 monitoring.db
 monitoring.db-wal
 monitoring.db-shm
+
+# Durable emergency webhook outbox (including SQLite sidecars)
+emergency_dispatch.sqlite3*
