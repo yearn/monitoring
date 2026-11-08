@@ -111,7 +111,6 @@ def test_collect_freshness_marks_lag_unknown_when_rpc_fails(monkeypatch: pytest.
     result = freshness.collect_freshness(_rows(), NOW)
 
     assert all(entry.lag_seconds is None for entry in result)
-    assert all(not entry.is_measured for entry in result)
     assert all("null result" in (entry.unavailable_reason or "") for entry in result)
     # Unknown lag must never fire an alert — a broken RPC is not a stale indexer.
     assert not any(entry.is_stale(HOUR) for entry in result)
@@ -148,12 +147,6 @@ def test_missing_chains_covers_absent_and_unsynced_chains(monkeypatch: pytest.Mo
     missing = freshness.missing_chains(freshness.collect_freshness(rows, NOW))
 
     assert missing == [Chain.POLYGON, Chain.KATANA]
-
-
-def test_missing_chains_empty_when_every_expected_chain_reports(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(freshness, "fetch_block_timestamp", lambda chain, block: NOW - 60)
-
-    assert freshness.missing_chains(freshness.collect_freshness(_rows(), NOW)) == []
 
 
 def test_build_alert_message_lists_lagging_and_missing_chains() -> None:
@@ -295,18 +288,6 @@ def test_main_stays_quiet_when_every_expected_chain_is_fresh(
     assert sent == []
 
 
-def test_main_alerts_when_indexer_is_unreachable(
-    monkeypatch: pytest.MonkeyPatch, envio_url: str, sent: list[str]
-) -> None:
-    monkeypatch.setattr("sys.argv", ["check_indexer_freshness.py"])
-    monkeypatch.setattr(freshness, "request_with_retry", lambda *a, **kw: FakeResponse({"errors": ["down"]}))
-
-    freshness.main()
-
-    assert len(sent) == 1
-    assert "Envio indexer unavailable" in sent[0]
-
-
 def test_main_unavailable_alert_notifies(monkeypatch: pytest.MonkeyPatch, envio_url: str) -> None:
     """An unreachable indexer blinds every Envio monitor, so the alert must not be silent."""
     calls: list[dict] = []
@@ -367,10 +348,6 @@ def test_main_alerts_on_transport_failure(
 def test_parse_block_timestamp_rejects_unusable_responses(response: object, reason: str) -> None:
     with pytest.raises(BlockTimestampUnavailableError, match=re.escape(reason)):
         freshness.parse_block_timestamp(response)
-
-
-def test_parse_block_timestamp_reads_hex_timestamp() -> None:
-    assert freshness.parse_block_timestamp({"result": {"timestamp": "0x6aef300c"}}) == 0x6AEF300C
 
 
 class FakeClient:

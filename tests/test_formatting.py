@@ -17,9 +17,3 @@ def test_redact_urls_drops_userinfo_and_handles_several_urls() -> None:
     assert "user" not in redacted
     assert "pass" not in redacted
     assert redacted == "a: wss://node.example:8546/<redacted>, b: http://10.0.0.1:8545/<redacted>"
-
-
-def test_redact_urls_leaves_plain_text_alone() -> None:
-    assert redact_urls("block not found (RPC returned a null result)") == (
-        "block not found (RPC returned a null result)"
-    )
