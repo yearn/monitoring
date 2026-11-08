@@ -163,3 +163,57 @@ class TestDefaultProviderUrls(unittest.TestCase):
         provider = MultiHTTPProvider(["https://custom.example/evm"])
         self.assertEqual(provider.request_kwargs["timeout"], REQUEST_TIMEOUT_SECONDS)
         self.assertLessEqual(REQUEST_TIMEOUT_SECONDS, 120)
+
+
+class TestProviderCredentialsStayOutOfDiagnostics(unittest.TestCase):
+    """Provider URLs carry API keys, so logs and errors may only name the host."""
+
+    URLS = ["https://rpc-a.example/v2/KEY_A", "https://rpc-b.example/v2/KEY_B"]
+
+    def _assert_no_keys(self, text: str) -> None:
+        self.assertNotIn("KEY_A", text)
+        self.assertNotIn("KEY_B", text)
+
+    def test_rotation_logs_only_the_host(self):
+        provider = MultiHTTPProvider(self.URLS)
+
+        with self.assertLogs("utils.web3", level="WARNING") as logs:
+            provider._rotate_provider()
+
+        self._assert_no_keys("\n".join(logs.output))
+        self.assertIn("https://rpc-b.example/<redacted>", logs.output[0])
+
+    def test_exhausted_retries_redact_logs_and_the_raised_error(self):
+        """urllib3 repeats the key in a scheme-less path, on top of the URL itself."""
+        provider = _FakeProvider(
+            [
+                ConnectionError(
+                    f"HTTPSConnectionPool(host='rpc.example', port=443): Max retries exceeded with url: /v2/{key}"
+                )
+                for key in ["KEY_A", "KEY_B"]
+            ]
+        )
+        provider.provider_urls = self.URLS
+        provider.endpoint_uri = self.URLS[0]
+        provider.max_retries = 1
+
+        with (
+            patch("utils.web3_wrapper.time.sleep"),
+            self.assertLogs("utils.web3", level="WARNING") as logs,
+            self.assertRaises(ProviderConnectionError) as raised,
+        ):
+            provider.make_request()
+
+        self._assert_no_keys("\n".join(logs.output))
+        self._assert_no_keys(str(raised.exception))
+        self.assertIn("https://rpc-a.example/<redacted>", str(raised.exception))
+
+    def test_invalid_url_is_not_logged(self):
+        """Without a scheme the URL can't be redacted, so it must not be logged at all."""
+        with self.assertLogs("utils.web3", level="WARNING") as logs:
+            valid = MultiHTTPProvider(["rpc-a.example/v2/KEY_A", self.URLS[1]])._validate_urls(
+                ["rpc-a.example/v2/KEY_A"]
+            )
+
+        self.assertEqual(valid, [])
+        self._assert_no_keys("\n".join(logs.output))
