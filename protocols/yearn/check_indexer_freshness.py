@@ -120,7 +120,8 @@ class IndexerUnavailableError(Exception):
 class BlockTimestampUnavailableError(Exception):
     """A block's timestamp could not be resolved, so the chain's lag is unknown.
 
-    The message is a credential-safe diagnostic: provider URLs are redacted.
+    The message is forwarded to Telegram, so it must stay credential-safe: it
+    never includes transport exception text.
     """
 
 
@@ -252,9 +253,11 @@ def fetch_block_timestamp(chain: Chain, block_number: int) -> int:
         try:
             response = client.make_request("eth_getBlockByNumber", [hex(block_number), False])
         except Exception as exc:  # noqa: BLE001 - a dead provider is not a stale indexer
-            # make_request already retried every provider with backoff.
+            # make_request already retried every provider with backoff and logged each
+            # failure. This reason reaches Telegram, so it carries no exception text:
+            # transport errors can echo the credential-bearing request path.
             raise BlockTimestampUnavailableError(
-                f"RPC request failed: {type(exc).__name__}: {redact_urls(str(exc))}"
+                f"RPC request failed ({type(exc).__name__}), see monitor logs"
             ) from exc
         try:
             return parse_block_timestamp(response)

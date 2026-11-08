@@ -401,11 +401,17 @@ def test_fetch_block_timestamp_gives_up_after_bounded_attempts(
     assert client.requests == freshness.BLOCK_TIMESTAMP_ATTEMPTS
 
 
-def test_fetch_block_timestamp_redacts_provider_urls_on_transport_failure(
+def test_fetch_block_timestamp_keeps_transport_error_text_out_of_the_reason(
     monkeypatch: pytest.MonkeyPatch, no_retry_delay: None
 ) -> None:
-    """make_request already rotated every provider; don't retry again, and never leak the key."""
-    error = ConnectionError("All providers failed. Errors:\nhttps://rpc.example.com/v2/SECRET_KEY: timeout")
+    """make_request already rotated every provider; don't retry again, and never leak the key.
+
+    The reason is forwarded to Telegram, and urllib3 reports the request path without a scheme.
+    """
+    error = ConnectionError(
+        "HTTPSConnectionPool(host='rpc.example.com', port=443): Max retries exceeded with url: /v2/SECRET_KEY "
+        "(Caused by NewConnectionError('Failed to establish a new connection'))"
+    )
     client = FakeClient([error])
     _use_client(monkeypatch, client)
 
@@ -413,7 +419,7 @@ def test_fetch_block_timestamp_redacts_provider_urls_on_transport_failure(
         freshness.fetch_block_timestamp(Chain.KATANA, 47317489)
 
     assert "SECRET_KEY" not in str(excinfo.value)
-    assert "https://rpc.example.com/<redacted>" in str(excinfo.value)
+    assert str(excinfo.value) == "RPC request failed (ConnectionError), see monitor logs"
     assert client.requests == 1
 
 

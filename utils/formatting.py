@@ -7,6 +7,8 @@ from urllib.parse import urlsplit
 
 # Any http(s)/ws(s) URL embedded in free text, up to the next whitespace or quote.
 _URL_PATTERN = re.compile(r"\b(?:https?|wss?)://[^\s'\"<>]+")
+# The request path urllib3 reports without a scheme: "Max retries exceeded with url: /v2/<key> (Caused by ...)".
+_BARE_REQUEST_PATH_PATTERN = re.compile(r"\burl: /\S*", re.IGNORECASE)
 
 
 def format_decimal_amount(value: Decimal) -> str:
@@ -162,7 +164,11 @@ def redact_urls(text: str) -> str:
     (``https://eth-mainnet.g.alchemy.com/v2/<key>``), and web3/provider errors
     echo the full URL back. Keeping only the host leaves enough to tell which
     provider failed without leaking the credential into logs or Telegram.
-    Userinfo (``user:pass@``) is dropped along with the path.
+    Userinfo (``user:pass@``) is dropped along with the path, and so is the
+    scheme-less request path in urllib3 connection errors.
+
+    This only recognises those two shapes, so don't rely on it to make arbitrary
+    exception text safe for an external channel: prefer leaving that text out.
     """
 
     def _host_only(match: re.Match[str]) -> str:
@@ -173,4 +179,4 @@ def redact_urls(text: str) -> str:
         host = parts.netloc.rsplit("@", 1)[-1] or "?"
         return f"{parts.scheme}://{host}/<redacted>{url[len(trimmed) :]}"
 
-    return _URL_PATTERN.sub(_host_only, text)
+    return _BARE_REQUEST_PATH_PATTERN.sub("url: /<redacted>", _URL_PATTERN.sub(_host_only, text))
