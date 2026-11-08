@@ -157,6 +157,17 @@ class Web3Client(RetryProviders):
             raise ProviderConnectionError("Rotated provider has no endpoint URI")
         self.endpoint_uri = endpoint_uri
 
+    def rotate_provider(self) -> None:
+        """Move to the next configured provider, if there is more than one.
+
+        `make_request` only rotates on transport errors. A provider that answers
+        with a well-formed but useless body (`"result": null` for a block it has
+        not seen yet) never trips that, so callers validating the body use this
+        to try another provider before giving up.
+        """
+        if len(self.provider_urls) > 1:
+            self._rotate_provider()
+
     def _get_provider_urls(self) -> List[str]:
         """Get provider URLs for the chain from environment variables, or its public RPC if none are set."""
         urls = []

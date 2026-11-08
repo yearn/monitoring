@@ -502,7 +502,7 @@ protocols:
       - protocols/yearn/check_strategy_keepers.py
     monitors:
       - name: "Indexer Freshness"
-        description: "Envio indexer lag per chain; alerts the Envio channel when a chain's newest indexed block is older than 60 minutes or the GraphQL endpoint is down"
+        description: "Envio indexer lag per chain; alerts the Envio channel when a chain's newest indexed block is older than 60 minutes, its lag cannot be measured for 2 consecutive runs, or the GraphQL endpoint is down"
       - name: "Lender-Borrower Risk"
         description: "All configured lender-borrower strategies: collateral and borrow-token prices plus LTV/liquidation risk every 30m; lender and borrow APR availability, 24h net spread, and debt coverage every 6h; alerts go to the internal Yearn maintenance chat"
         severity: "MEDIUM"

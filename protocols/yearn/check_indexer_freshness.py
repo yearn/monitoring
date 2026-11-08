@@ -13,6 +13,12 @@ RPC. Any chain whose newest indexed block is older than the lag threshold
 the indexer reports no sync state for at all, since "nothing was stale" must
 never be mistaken for "everything is fresh".
 
+A chain whose block timestamp cannot be resolved (RPC error, `null` result,
+malformed body) has *unknown* lag: it is neither confirmed fresh nor confirmed
+stale. One such run is logged; once it persists for `--unknown-alert-after-runs`
+consecutive runs the chain alerts as unmeasured coverage, and a note follows
+when its lag is measurable again.
+
 The RPC round-trip is what makes the check meaningful: envio parks
 `chain_metadata.block_height` at the last processed block once a chain looks
 caught up, so a stalled indexer keeps reporting itself as zero blocks behind.
@@ -32,7 +38,7 @@ from dotenv import load_dotenv
 
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import Chain
-from utils.formatting import format_duration
+from utils.formatting import format_duration, redact_urls
 from utils.http_client import request_with_retry
 from utils.logger import get_logger
 from utils.telegram import send_envio_error_message
@@ -59,8 +65,24 @@ DEFAULT_MAX_LAG_MINUTES = 60
 # window, then once more when it recovers.
 DEFAULT_ALERT_COOLDOWN_HOURS = 6
 
+# A single unmeasurable run is usually a provider blip (observed: one `null`
+# block on Katana, fine on the next run), so unknown lag only alerts once it has
+# persisted this many consecutive runs — two hourly runs is about an hour blind,
+# matching the default staleness threshold.
+DEFAULT_UNKNOWN_ALERT_AFTER_RUNS = 2
+
+# Attempts per block-timestamp lookup when the provider answers with an RPC
+# error, a `null` block or a malformed body. Transport failures are not retried
+# here: `make_request` has already rotated through every provider with backoff.
+BLOCK_TIMESTAMP_ATTEMPTS = 3
+BLOCK_TIMESTAMP_RETRY_DELAY_SECONDS = 5
+
 # Keyed per chain so one lagging chain can't suppress an alert for another.
 CACHE_KEY_LAST_ALERT_PREFIX = "YEARN_INDEXER_STALE_ALERT_"
+# Consecutive runs a chain's lag could not be measured (0 = measurable).
+CACHE_KEY_UNKNOWN_RUNS_PREFIX = "YEARN_INDEXER_UNKNOWN_RUNS_"
+# Last unknown-lag alert per chain (0 = none outstanding).
+CACHE_KEY_UNKNOWN_ALERT_PREFIX = "YEARN_INDEXER_UNKNOWN_ALERT_"
 
 # Chains whose indexed events feed monitors here. Every one of them must show up
 # in chain_metadata — a chain that silently drops out of the indexer's config
@@ -95,6 +117,13 @@ class IndexerUnavailableError(Exception):
     """The indexer's GraphQL endpoint could not be queried or returned no chains."""
 
 
+class BlockTimestampUnavailableError(Exception):
+    """A block's timestamp could not be resolved, so the chain's lag is unknown.
+
+    The message is a credential-safe diagnostic: provider URLs are redacted.
+    """
+
+
 @dataclass(frozen=True)
 class ChainFreshness:
     """Freshness of a single indexed chain."""
@@ -103,11 +132,18 @@ class ChainFreshness:
     latest_processed_block: int
     # None when the block timestamp could not be resolved, i.e. lag is unknown.
     lag_seconds: int | None
+    # Why the lag is unknown; None whenever `lag_seconds` is set.
+    unavailable_reason: str | None = None
 
     @property
     def name(self) -> str:
         """Human-readable chain name, e.g. "Mainnet"."""
         return self.chain.name.capitalize()
+
+    @property
+    def is_measured(self) -> bool:
+        """Return True when the lag is known; unknown lag is neither fresh nor stale."""
+        return self.lag_seconds is not None
 
     def is_stale(self, max_lag_seconds: int) -> bool:
         """Return True when the newest indexed block is older than the threshold."""
@@ -145,16 +181,61 @@ def fetch_chain_metadata() -> list[dict]:
     return rows
 
 
-def fetch_block_timestamp(chain: Chain, block_number: int) -> int | None:
+def parse_block_timestamp(response: object) -> int:
+    """Extract the timestamp from a raw `eth_getBlockByNumber` JSON-RPC response.
+
+    The raw call bypasses web3's response handling, so an RPC error or a `null`
+    block comes back as an ordinary dict rather than an exception.
+
+    Args:
+        response: The decoded JSON-RPC response.
+
+    Returns:
+        The block timestamp in seconds.
+
+    Raises:
+        BlockTimestampUnavailableError: The response is an RPC error, a `null`
+            block, or does not carry a hex timestamp.
+    """
+    if not isinstance(response, dict):
+        raise BlockTimestampUnavailableError(f"malformed RPC response ({type(response).__name__})")
+    error = response.get("error")
+    if error:
+        if isinstance(error, dict):
+            raise BlockTimestampUnavailableError(f"RPC error {error.get('code')}: {error.get('message')}")
+        raise BlockTimestampUnavailableError(f"RPC error: {error}")
+    block = response.get("result")
+    if block is None:
+        raise BlockTimestampUnavailableError("block not found (RPC returned a null result)")
+    if not isinstance(block, dict):
+        raise BlockTimestampUnavailableError(f"malformed block ({type(block).__name__} result)")
+    raw_timestamp = block.get("timestamp")
+    try:
+        if not isinstance(raw_timestamp, str):
+            raise ValueError
+        return int(raw_timestamp, 16)
+    except ValueError:
+        raise BlockTimestampUnavailableError(f"malformed block timestamp {raw_timestamp!r}") from None
+
+
+def fetch_block_timestamp(chain: Chain, block_number: int) -> int:
     """Fetch the unix timestamp of a block.
+
+    A response-level failure (RPC error, `null` block, malformed body) is retried
+    up to `BLOCK_TIMESTAMP_ATTEMPTS` times, moving to the next configured
+    provider between attempts: a load-balanced node that has not seen the block
+    yet typically has it seconds later, or another provider does.
 
     Args:
         chain: Chain the block belongs to.
         block_number: Block to look up.
 
     Returns:
-        The block timestamp in seconds, or None when the lookup failed — one
-        unreachable RPC must not mask the other chains' results.
+        The block timestamp in seconds.
+
+    Raises:
+        BlockTimestampUnavailableError: Every attempt failed. Never raised for
+            anything else, so one unreachable RPC cannot abort the other chains.
 
     Note:
         Uses the raw JSON-RPC call rather than `eth.get_block`, which rejects the
@@ -163,11 +244,34 @@ def fetch_block_timestamp(chain: Chain, block_number: int) -> int | None:
     """
     try:
         client = ChainManager.get_client(chain)
-        response = client.make_request("eth_getBlockByNumber", [hex(block_number), False])
-        return int(response["result"]["timestamp"], 16)
-    except Exception as exc:  # noqa: BLE001 - a dead provider is not a stale indexer
-        logger.warning("Failed to fetch block %d timestamp on %s: %s", block_number, chain.name, exc)
-        return None
+    except Exception as exc:  # noqa: BLE001 - no provider configured is a coverage gap, not a crash
+        raise BlockTimestampUnavailableError(f"no RPC client: {redact_urls(str(exc))}") from exc
+
+    reason = "no attempts made"
+    for attempt in range(1, BLOCK_TIMESTAMP_ATTEMPTS + 1):
+        try:
+            response = client.make_request("eth_getBlockByNumber", [hex(block_number), False])
+        except Exception as exc:  # noqa: BLE001 - a dead provider is not a stale indexer
+            # make_request already retried every provider with backoff.
+            raise BlockTimestampUnavailableError(
+                f"RPC request failed: {type(exc).__name__}: {redact_urls(str(exc))}"
+            ) from exc
+        try:
+            return parse_block_timestamp(response)
+        except BlockTimestampUnavailableError as exc:
+            reason = redact_urls(str(exc))
+        logger.warning(
+            "Block %d timestamp on %s unavailable (attempt %d/%d): %s",
+            block_number,
+            chain.name,
+            attempt,
+            BLOCK_TIMESTAMP_ATTEMPTS,
+            reason,
+        )
+        if attempt < BLOCK_TIMESTAMP_ATTEMPTS:
+            client.rotate_provider()
+            time.sleep(BLOCK_TIMESTAMP_RETRY_DELAY_SECONDS)
+    raise BlockTimestampUnavailableError(f"{reason} (after {BLOCK_TIMESTAMP_ATTEMPTS} attempts)")
 
 
 def collect_freshness(rows: list[dict], now: int) -> list[ChainFreshness]:
@@ -198,10 +302,18 @@ def collect_freshness(rows: list[dict], now: int) -> list[ChainFreshness]:
             # `missing_chains` reports it rather than treating it as fresh.
             logger.warning("%s has no processed block yet", chain.name)
             continue
-        block_timestamp = fetch_block_timestamp(chain, latest_block)
-        lag = max(0, now - block_timestamp) if block_timestamp is not None else None
-        lag_text = format_duration(lag) if lag is not None else "unknown"
-        logger.info("%s: block %d, lag %s", chain.name, latest_block, lag_text)
+        try:
+            block_timestamp = fetch_block_timestamp(chain, latest_block)
+        except BlockTimestampUnavailableError as exc:
+            logger.warning("%s: block %d, lag unknown — %s", chain.name, latest_block, exc)
+            freshness.append(
+                ChainFreshness(
+                    chain=chain, latest_processed_block=latest_block, lag_seconds=None, unavailable_reason=str(exc)
+                )
+            )
+            continue
+        lag = max(0, now - block_timestamp)
+        logger.info("%s: block %d, lag %s", chain.name, latest_block, format_duration(lag))
         freshness.append(ChainFreshness(chain=chain, latest_processed_block=latest_block, lag_seconds=lag))
     return sorted(freshness, key=lambda f: f.chain.chain_id)
 
@@ -237,6 +349,35 @@ def build_alert_message(stale: list[ChainFreshness], missing: list[Chain], max_l
         f"Threshold: {format_duration(max_lag_seconds)}",
     ]
     return "\n".join(lines)
+
+
+def build_unknown_alert_message(unknown: list[tuple[ChainFreshness, int]]) -> str:
+    """Build the alert body for chains whose lag could not be measured.
+
+    Args:
+        unknown: Each unmeasured chain with its count of consecutive unknown runs.
+    """
+    lines = [
+        f"Envio indexer freshness unknown on {len(unknown)} chain(s) — block timestamps could not be "
+        "resolved, so lag is unmeasured (neither confirmed fresh nor stale).",
+        "",
+    ]
+    for entry, runs in unknown:
+        lines.append(
+            f"- {entry.name} (chain {entry.chain.chain_id}): unknown for {runs} consecutive check(s), "
+            f"last indexed block {entry.latest_processed_block} — {entry.unavailable_reason}"
+        )
+    return "\n".join(lines)
+
+
+def _get_int(prefix: str, chain_id: int) -> int:
+    """Read a per-chain integer from the cache (0 when unset)."""
+    return int(get_last_value_for_key_from_file(cache_filename, f"{prefix}{chain_id}"))
+
+
+def _set_int(prefix: str, chain_id: int, value: int) -> None:
+    """Write a per-chain integer to the cache."""
+    write_last_value_to_file(cache_filename, f"{prefix}{chain_id}", value)
 
 
 def _last_alert_timestamp(chain_id: int) -> int:
@@ -287,6 +428,61 @@ def report_recovered(fresh: list[ChainFreshness]) -> None:
         _set_last_alert_timestamp(chain.chain.chain_id, 0)
 
 
+def update_unknown_coverage(
+    freshness: list[ChainFreshness], now: int, alert_after_runs: int, cooldown_seconds: int
+) -> list[tuple[ChainFreshness, int]]:
+    """Track consecutive unmeasurable runs per chain and pick which should alert.
+
+    Measured chains reset their streak. Unmeasured chains extend it and alert
+    once it reaches `alert_after_runs`, then at most once per cooldown. The
+    stale-alert state is deliberately untouched either way: unknown lag neither
+    confirms a stale chain recovered nor that a fresh one stalled.
+
+    Args:
+        freshness: Every expected chain with sync state this run.
+        now: Current unix timestamp.
+        alert_after_runs: Consecutive unknown runs before alerting.
+        cooldown_seconds: Minimum gap between two unknown-lag alerts per chain.
+
+    Returns:
+        Unmeasured chains to alert on now, each with its consecutive-run count.
+        The caller records the alert via `_set_int(CACHE_KEY_UNKNOWN_ALERT_PREFIX, ...)`.
+    """
+    to_alert: list[tuple[ChainFreshness, int]] = []
+    for entry in freshness:
+        chain_id = entry.chain.chain_id
+        if entry.is_measured:
+            if _get_int(CACHE_KEY_UNKNOWN_RUNS_PREFIX, chain_id):
+                _set_int(CACHE_KEY_UNKNOWN_RUNS_PREFIX, chain_id, 0)
+            continue
+        runs = _get_int(CACHE_KEY_UNKNOWN_RUNS_PREFIX, chain_id) + 1
+        _set_int(CACHE_KEY_UNKNOWN_RUNS_PREFIX, chain_id, runs)
+        last_alert = _get_int(CACHE_KEY_UNKNOWN_ALERT_PREFIX, chain_id)
+        if runs >= alert_after_runs and now - last_alert >= cooldown_seconds:
+            to_alert.append((entry, runs))
+    return to_alert
+
+
+def report_measurable_again(measured: list[ChainFreshness]) -> None:
+    """Send a note for chains that alerted as unmeasured and now have a known lag.
+
+    Whether the chain turned out fresh or stale is reported alongside; a stale
+    one is also handled by the regular stale alert.
+    """
+    restored = [entry for entry in measured if _get_int(CACHE_KEY_UNKNOWN_ALERT_PREFIX, entry.chain.chain_id) > 0]
+    if not restored:
+        return
+    names = ", ".join(f"{entry.name} ({format_duration(entry.lag_seconds or 0)} behind)" for entry in restored)
+    send_envio_error_message(
+        f"Envio indexer lag measurable again: {names}",
+        PROTOCOL,
+        source="indexer_freshness",
+        alert_protocol=ALERT_PROTOCOL,
+    )
+    for entry in restored:
+        _set_int(CACHE_KEY_UNKNOWN_ALERT_PREFIX, entry.chain.chain_id, 0)
+
+
 def main() -> None:
     """Alert on every expected chain the indexer is lagging on or has lost."""
     args = parse_args()
@@ -312,15 +508,36 @@ def main() -> None:
 
     now = int(time.time())
     freshness = collect_freshness(rows, now)
-    stale = [entry for entry in freshness if entry.is_stale(max_lag_seconds)]
+    measured = [entry for entry in freshness if entry.is_measured]
+    stale = [entry for entry in measured if entry.is_stale(max_lag_seconds)]
     missing = missing_chains(freshness)
     if missing:
         logger.error("No sync state for %s", ", ".join(chain.name for chain in missing))
 
-    report_recovered([entry for entry in freshness if entry not in stale and entry.lag_seconds is not None])
+    report_recovered([entry for entry in measured if entry not in stale])
+    report_measurable_again(measured)
+
+    unknown_to_alert = update_unknown_coverage(freshness, now, args.unknown_alert_after_runs, cooldown_seconds)
+    if unknown_to_alert:
+        send_envio_error_message(
+            build_unknown_alert_message(unknown_to_alert),
+            PROTOCOL,
+            source="indexer_freshness",
+            alert_protocol=ALERT_PROTOCOL,
+        )
+        for entry, _ in unknown_to_alert:
+            _set_int(CACHE_KEY_UNKNOWN_ALERT_PREFIX, entry.chain.chain_id, now)
 
     if not stale and not missing:
-        logger.info("Indexer is fresh on all %d expected chain(s)", len(freshness))
+        unmeasured = [entry.name for entry in freshness if not entry.is_measured]
+        if unmeasured:
+            logger.warning(
+                "Indexer is fresh on %d measured chain(s); lag unknown on %s",
+                len(measured),
+                ", ".join(unmeasured),
+            )
+        else:
+            logger.info("Indexer is fresh on all %d expected chain(s)", len(freshness))
         return
 
     stale_to_alert, missing_to_alert = chains_to_alert(stale, missing, now, cooldown_seconds)
@@ -354,6 +571,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=int(os.getenv("INDEXER_ALERT_COOLDOWN_HOURS", DEFAULT_ALERT_COOLDOWN_HOURS)),
         help=f"Minimum hours between repeat alerts for the same chain (default: {DEFAULT_ALERT_COOLDOWN_HOURS})",
+    )
+    parser.add_argument(
+        "--unknown-alert-after-runs",
+        type=int,
+        default=int(os.getenv("INDEXER_UNKNOWN_ALERT_AFTER_RUNS", DEFAULT_UNKNOWN_ALERT_AFTER_RUNS)),
+        help=(
+            "Alert once a chain's lag has been unmeasurable for this many consecutive runs "
+            f"(default: {DEFAULT_UNKNOWN_ALERT_AFTER_RUNS})"
+        ),
     )
     return parser.parse_args()
 

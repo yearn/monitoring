@@ -1,0 +1,25 @@
+"""Tests for utils.formatting."""
+
+from utils.formatting import redact_urls
+
+
+def test_redact_urls_keeps_only_scheme_and_host() -> None:
+    text = "Failed on https://eth-mainnet.g.alchemy.com/v2/SECRET?key=ALSO_SECRET: 429"
+
+    assert redact_urls(text) == "Failed on https://eth-mainnet.g.alchemy.com/<redacted>: 429"
+
+
+def test_redact_urls_drops_userinfo_and_handles_several_urls() -> None:
+    text = "a: wss://user:pass@node.example:8546/ws, b: http://10.0.0.1:8545"
+
+    redacted = redact_urls(text)
+
+    assert "user" not in redacted
+    assert "pass" not in redacted
+    assert redacted == "a: wss://node.example:8546/<redacted>, b: http://10.0.0.1:8545/<redacted>"
+
+
+def test_redact_urls_leaves_plain_text_alone() -> None:
+    assert redact_urls("block not found (RPC returned a null result)") == (
+        "block not found (RPC returned a null result)"
+    )

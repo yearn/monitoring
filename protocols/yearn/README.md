@@ -15,7 +15,7 @@ Where each script in this folder sends its alerts. "Yearn" is the public channel
 | `check_shadow_debt.py` | Shadow debt | Yearn | — | `yearn` |
 | `check_stuck_triggers.py` | Stuck TKS triggers | Yearn | — | `yearn` |
 | `check_timelock_delay.py` | Timelock min delay below 7 days | Yearn timelock topic (`TELEGRAM_TOPIC_ID_YEARN_TIMELOCK`), mirrored to Yearn timelock internal (`TELEGRAM_CHAT_ID_YEARN_TIMELOCK_INTERNAL`) | — | `yearn` (mirror: `YEARN_TIMELOCK_INTERNAL`) |
-| `check_indexer_freshness.py` | Envio indexer lag / outage | Envio (`TELEGRAM_CHAT_ID_ENVIO`) | Errors, then Yearn | `yearn-internal` |
+| `check_indexer_freshness.py` | Envio indexer lag / unknown lag / outage | Envio (`TELEGRAM_CHAT_ID_ENVIO`) | Errors, then Yearn | `yearn-internal` |
 
 Envio errors raised inside the flow monitors follow the same Envio → errors → Yearn chain; the small-flows monitor stores them as `yearn-internal`. Unhandled crashes from any script go through `run_with_alert` to the errors channel, falling back to Yearn.
 
@@ -364,7 +364,9 @@ Step 2 is what makes the check trustworthy. Envio parks `chain_metadata.block_he
 
 Step 3 covers the inverse trap: an empty result set is not good news. If a chain drops out of the indexer's config, or comes back from a restart with no processed block, it simply stops appearing in `chain_metadata` — and a check that only looks at what it was given would report every remaining chain fresh while that chain's monitors sit blind. `EXPECTED_CHAINS` is therefore the authority on what must be present, and anything absent from it alerts.
 
-`EXPECTED_CHAINS` lists the chains whose indexed events feed monitors here (Mainnet, Polygon, Base, Arbitrum, Katana). It is deliberately spelled out rather than derived from the `Chain` enum, so adding an enum member for an unrelated protocol doesn't start alerting that the indexer is missing a chain it was never asked to index — **add a chain here when its events start feeding a monitor.** Optimism is deliberately absent: the indexer no longer covers it, so it must not be expected. Any other chain the indexer reports is one nothing here reads from; those are logged and skipped. A chain whose RPC is unreachable is skipped too rather than alerted on: a broken provider is not a stale indexer.
+`EXPECTED_CHAINS` lists the chains whose indexed events feed monitors here (Mainnet, Polygon, Base, Arbitrum, Katana). It is deliberately spelled out rather than derived from the `Chain` enum, so adding an enum member for an unrelated protocol doesn't start alerting that the indexer is missing a chain it was never asked to index — **add a chain here when its events start feeding a monitor.** Optimism is deliberately absent: the indexer no longer covers it, so it must not be expected. Any other chain the indexer reports is one nothing here reads from; those are logged and skipped.
+
+A chain whose block timestamp cannot be resolved has **unknown** lag, which is neither fresh nor stale: a broken provider is not a stale indexer, but it is not proof of a healthy one either. The raw `eth_getBlockByNumber` response is validated, so an RPC error, a `null` block (a provider that has not seen the block yet) or a malformed body produces a specific diagnostic rather than a generic exception. Those response-level failures are retried up to 3 times, moving to the next configured `PROVIDER_URL_<CHAIN>_<n>` between attempts; transport failures are not retried again because `make_request` has already cycled every provider. Provider URLs are redacted to their host in every diagnostic, since they usually carry the API key. The other chains are checked regardless.
 
 ### Alerts
 
@@ -372,9 +374,11 @@ This monitor only ever reports Envio indexer problems, so all of its alerts go t
 
 - **Stale or missing chains** — one message listing every lagging chain with its lag and last indexed block, plus every expected chain the indexer reported no sync state for.
 - **Indexer unavailable** — the GraphQL endpoint is unset, unreachable, returned errors, or reported no chains. Sent on every run for as long as it lasts, and — unlike the other Envio messages, which are silent — with a notification, since every Envio-backed monitor is blind until it recovers.
+- **Lag unknown** — a chain's lag could not be measured for `--unknown-alert-after-runs` (default `2`) consecutive runs, i.e. about an hour of blind coverage. Lists each chain's streak, last indexed block and the redacted reason. A single failed run (a provider blip) is only logged, and a measured run resets the streak.
 - **Recovered** — sent once when a previously alerting chain catches up.
+- **Measurable again** — sent once when a chain that alerted as unknown has a measurable lag again, with that lag.
 
-A re-sync can run for days, so each chain alerts on the way into trouble and then at most once per `--alert-cooldown-hours` (default `6`) instead of every hourly run. The cooldown is tracked per chain, so one lagging chain never suppresses another's first alert. The last-alert timestamp is cached under `YEARN_INDEXER_STALE_ALERT_<chain_id>`.
+A re-sync can run for days, so each chain alerts on the way into trouble and then at most once per `--alert-cooldown-hours` (default `6`) instead of every hourly run. The cooldown is tracked per chain, so one lagging chain never suppresses another's first alert, and applies separately to stale/missing and unknown-lag alerts. The last-alert timestamp is cached under `YEARN_INDEXER_STALE_ALERT_<chain_id>`; the unknown streak and last unknown alert under `YEARN_INDEXER_UNKNOWN_RUNS_<chain_id>` and `YEARN_INDEXER_UNKNOWN_ALERT_<chain_id>`. An unmeasurable run leaves the stale state alone: a stale chain whose lag becomes unknown has not caught up, so it gets no recovery note until a measured run shows it fresh.
 
 ### Usage
 
@@ -386,3 +390,4 @@ Optional flags (each also settable via env):
 
 - `--max-lag-minutes` (default `60`, env `INDEXER_MAX_LAG_MINUTES`)
 - `--alert-cooldown-hours` (default `6`, env `INDEXER_ALERT_COOLDOWN_HOURS`)
+- `--unknown-alert-after-runs` (default `2`, env `INDEXER_UNKNOWN_ALERT_AFTER_RUNS`)
