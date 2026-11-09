@@ -1,7 +1,14 @@
 """Common formatting helpers for monitoring scripts."""
 
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
+from urllib.parse import urlsplit
+
+# Any http(s)/ws(s) URL embedded in free text, up to the next whitespace or quote.
+_URL_PATTERN = re.compile(r"\b(?:https?|wss?)://[^\s'\"<>]+")
+# The request path urllib3 reports without a scheme: "Max retries exceeded with url: /v2/<key> (Caused by ...)".
+_BARE_REQUEST_PATH_PATTERN = re.compile(r"\burl: /\S*", re.IGNORECASE)
 
 
 def format_decimal_amount(value: Decimal) -> str:
@@ -148,3 +155,28 @@ def parse_wei(value: object) -> int:
         return int(value)  # ty: ignore[invalid-argument-type]
     except TypeError, ValueError:
         return 0
+
+
+def redact_urls(text: str) -> str:
+    """Reduce every URL in ``text`` to its scheme and host.
+
+    RPC provider URLs usually carry the API key in the path or query string
+    (``https://eth-mainnet.g.alchemy.com/v2/<key>``), and web3/provider errors
+    echo the full URL back. Keeping only the host leaves enough to tell which
+    provider failed without leaking the credential into logs or Telegram.
+    Userinfo (``user:pass@``) is dropped along with the path, and so is the
+    scheme-less request path in urllib3 connection errors.
+
+    This only recognises those two shapes, so don't rely on it to make arbitrary
+    exception text safe for an external channel: prefer leaving that text out.
+    """
+
+    def _host_only(match: re.Match[str]) -> str:
+        url = match.group(0)
+        # Sentence punctuation after a URL ("<url>: timeout") belongs to the text.
+        trimmed = url.rstrip(".,:;)]")
+        parts = urlsplit(trimmed)
+        host = parts.netloc.rsplit("@", 1)[-1] or "?"
+        return f"{parts.scheme}://{host}/<redacted>{url[len(trimmed) :]}"
+
+    return _BARE_REQUEST_PATH_PATTERN.sub("url: /<redacted>", _URL_PATTERN.sub(_host_only, text))

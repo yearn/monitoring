@@ -13,8 +13,9 @@ from web3.providers.rpc import HTTPProvider
 from web3.types import RPCEndpoint, RPCResponse
 
 from utils.chains import PUBLIC_RPC_URLS, Chain
+from utils.formatting import redact_urls
 from utils.logger import get_logger
-from utils.redact import redact_secrets, safe_url
+from utils.redact import redact_secrets
 
 load_dotenv()
 
@@ -65,15 +66,16 @@ def retry_with_provider_rotation(func):
                 # on retry, so fail fast and let the caller handle it.
                 if _is_non_retryable(e):
                     raise
-                # Keep only scheme + host of provider URLs in errors and logs.
-                current_url = safe_url(self.endpoint_uri)
-                errors[current_url] = redact_secrets(str(e))
-                logger.warning("Failed on %s: %s", current_url, errors[current_url])
+                # Keyed by the full URL so providers sharing a host keep separate entries;
+                # only the host is ever logged or raised.
+                current_url = self.endpoint_uri
+                errors[current_url] = redact_secrets(redact_urls(str(e)))
+                logger.warning("Failed on %s: %s", redact_urls(current_url), errors[current_url])
                 time.sleep(min(self.backoff_factor * (2**attempt), MAX_BACKOFF_SECONDS))
                 self._rotate_provider()
 
         raise ProviderConnectionError(
-            "All providers failed. Errors:\n" + "\n".join(f"{url}: {err}" for url, err in errors.items())
+            "All providers failed. Errors:\n" + "\n".join(f"{redact_urls(url)}: {err}" for url, err in errors.items())
         )
 
     return wrapper
@@ -93,7 +95,7 @@ class RetryProviders:
         current_index = self.provider_urls.index(self.endpoint_uri)
         next_index = (current_index + 1) % len(self.provider_urls)
         self.endpoint_uri = self.provider_urls[next_index]
-        logger.warning("Switching to provider: %s", safe_url(self.endpoint_uri))
+        logger.warning("Switching to provider: %s", redact_urls(self.endpoint_uri))
 
 
 class MultiHTTPProvider(HTTPProvider, RetryProviders):
@@ -119,11 +121,12 @@ class MultiHTTPProvider(HTTPProvider, RetryProviders):
             try:
                 parsed = urlparse(url)
                 if not parsed.scheme or not parsed.netloc:
-                    logger.warning("Invalid URL format: %s", safe_url(url))
+                    # Not logged: without a scheme, redact_urls can't recognise it and the key would leak.
+                    logger.warning("Ignoring a provider URL with an invalid format")
                     continue
                 valid_urls.append(url)
             except Exception as e:
-                logger.warning("Error validating URL %s: %s", safe_url(url), e)
+                logger.warning("Ignoring a provider URL that failed validation: %s", type(e).__name__)
         return valid_urls
 
     @retry_with_provider_rotation
@@ -158,6 +161,17 @@ class Web3Client(RetryProviders):
         if endpoint_uri is None:
             raise ProviderConnectionError("Rotated provider has no endpoint URI")
         self.endpoint_uri = endpoint_uri
+
+    def rotate_provider(self) -> None:
+        """Move to the next configured provider, if there is more than one.
+
+        `make_request` only rotates on transport errors. A provider that answers
+        with a well-formed but useless body (`"result": null` for a block it has
+        not seen yet) never trips that, so callers validating the body use this
+        to try another provider before giving up.
+        """
+        if len(self.provider_urls) > 1:
+            self._rotate_provider()
 
     def _get_provider_urls(self) -> List[str]:
         """Get provider URLs for the chain from environment variables, or its public RPC if none are set."""

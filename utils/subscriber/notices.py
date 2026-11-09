@@ -3,7 +3,7 @@
 The worker calls these hooks at the points where things happen; this class turns
 them into deduplicated notices on a ``Notifier``:
 
-- every newly observed event once, at first sighting (a burst becomes one summary);
+- every newly observed event once, at first sighting (bursts are summarized or suppressed per stream);
 - HTTP finding events first while the WebSocket was connected (a WS miss);
 - changed, removed, or restored rows (reorgs);
 - WebSocket down for longer than a threshold, and its recovery;
@@ -37,7 +37,7 @@ BASELINE_STATUS_KEY = "notices_baseline_at"
 class NoticeConfig:
     """Thresholds for pilot notices."""
 
-    # Above this many new events in one batch, post one summary instead of a notice each.
+    # Above this many new events, summarize or suppress the batch according to the stream.
     max_event_notices: int = 10
     ws_down_seconds: float = 300.0
     reconcile_failures: int = 3
@@ -96,7 +96,7 @@ class PilotNotices:
         return [row["event_id"] for row in rows if row["block_timestamp"] >= int(baseline)]
 
     async def new_events(self, source: str, event_ids: list[str] | tuple[str, ...]) -> None:
-        """Post a notice per newly observed event, or one summary per chain for a burst.
+        """Post event notices, summarizing or suppressing bursts according to the stream.
 
         Events from blocks before the baseline are skipped: the first snapshot of a
         fresh pilot holds the newest historical events, which are not news.
@@ -105,6 +105,8 @@ class PilotNotices:
         if not event_ids:
             return
         if len(event_ids) > self.config.max_event_notices:
+            if not self.stream.summarize_event_bursts:
+                return
             by_chain: dict[int, list[str]] = {}
             for event_id in event_ids:
                 by_chain.setdefault(_chain_of(event_id), []).append(event_id)
