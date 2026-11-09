@@ -271,8 +271,13 @@ WebSocket is down, or one of its chains' indexed head has not advanced for
 ### Enabling the Morpho governance stream
 
 The `morpho` stream ([#447](https://github.com/yearn/monitoring/issues/447)) observes
-`MorphoGovernanceEvent` in the same process. It sends no alerts. Enable it only after
-the Envio deployment serves the entity and has backfilled all five chains:
+`MorphoGovernanceEvent` in the same process, and its live consumer delivers according
+to `MORPHO_LIVE_DELIVERY` (below). The indexer and vault subscriptions are
+maintained in [yearn/yearn-envio](https://github.com/yearn/yearn-envio).
+The [hosted GraphQL endpoint](https://indexer.hyperindex.xyz/5a089e4/v1/graphql) serves the Morpho entity.
+Before enabling the stream, check that the monitoring host's `ENVIO_GRAPHQL_URL`
+points to a deployment serving the entity on all five chains. Pass
+`CACHE_DIR=/srv/cache` so the commands open the service's inbox.
 
 ```sh
 cd /srv/monitoring
@@ -298,12 +303,27 @@ alerts. Without an errors chat it only records them (`observe`, also selectable 
 modes. Events from before the consumer's first run are recorded as history and never
 alerted.
 
+**Audit** ([#449](https://github.com/yearn/monitoring/issues/449)): the daily jobs record
+each alert that implies an indexed event, and the consumer checks every five minutes
+that the live path decided that event. `report` shows the counts and `health` fails on a
+divergence from the last seven days or a finding waiting over 24h. New divergences are
+also posted to the errors chat as `[morpho-live-audit]`. Verdicts start three days after
+the stream's first run, because earlier findings may be about events from before it.
+Guardian, sentinel, and allocator changes are daily-only by design and are not audited.
+
 **Cutover to production** ([#450](https://github.com/yearn/monitoring/issues/450)): once a
-shadow period matched the daily Morpho alerts, set `MORPHO_LIVE_DELIVERY=production`
-and restart. Live alerts then go to the Morpho channel within seconds of the event.
+shadow period has no `divergent` audit findings, verify that at least one
+`[morpho-live-shadow]` message actually arrived in the errors chat and agrees
+with the daily alert for the same event. A `matched` verdict alone can also
+mean the live consumer evaluated the event after the daily alert. Once delivery
+and parity are verified and the WebSocket p95 in `report` is within the
+5-second target, set `MORPHO_LIVE_DELIVERY=production` and restart. Live alerts then go to the Morpho channel
+within seconds of the event.
 The daily jobs keep running: both paths take the same per-vault lock in
 `/srv/cache` and share the cache that records what was alerted, so each change is
 alerted once, by whichever path sees it first. To roll back, set `shadow` and restart.
+If a reorg removes an event behind a sent alert, one LOW correction follows in the
+Morpho channel.
 
 Supervision: the unit is `Type=notify` with `WatchdogSec=120`. The heartbeat pings
 the watchdog only while HTTP reconciliation keeps completing, so a wedged worker

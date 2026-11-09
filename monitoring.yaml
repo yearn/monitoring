@@ -296,6 +296,8 @@ protocols:
         description: "Pending supply caps, market removals (HIGH while the vault still supplies the market), timelock decreases, guardian changes"
       - name: "V2 Governance"
         description: "Pending timelocked operations (HIGH for removeAdapter of a funded adapter), owner/curator changes, sentinel/allocator/adapter changes"
+      - name: "Live Governance Events"
+        description: "Continuous Envio subscriber runs the V1/V2 governance checks within seconds of cap, market removal, timelock, timelocked operation, owner/curator, and adapter events; internal shadow delivery until production cutover, audited against the daily jobs"
       - name: "V2 Adapter Share Burns"
         description: "Pending MorphoMarketV1AdapterV2 burnShares (HIGH while the adapter holds the market) and burnShares timelock decreases, via eth_call"
       - name: "V2 Wrapped V1 Coverage"

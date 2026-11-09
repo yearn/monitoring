@@ -15,6 +15,8 @@ ingestion:
   request keeps the revisions of the events it came from: a pending request whose
   events were removed or rewritten by a reorg is ``invalidated`` instead of sent
   (the rewritten event is evaluated again and makes its own request).
+- ``morpho_live_corrections``: production alerts already sent whose source event
+  a reorg then removed, once their correction has gone out.
 """
 
 import json
@@ -24,6 +26,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from typing import Any
 
+from protocols.morpho._alerts import RenderedAlert
 from utils.subscriber.inbox import EventInbox
 
 OUTCOME_ALERTED = "alerted"
@@ -34,6 +37,11 @@ STATUS_OBSERVED = "observed"
 STATUS_PENDING = "pending"
 STATUS_SENT = "sent"
 STATUS_INVALIDATED = "invalidated"
+
+MODE_PRODUCTION = "production"
+
+# Inbox status key: when the consumer first ran on this inbox. Older blocks are history.
+BASELINE_STATUS_KEY = "live_baseline_at"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS morpho_live_decisions (
@@ -68,6 +76,12 @@ CREATE TABLE IF NOT EXISTS morpho_live_alerts (
     sent_at       REAL
 );
 CREATE INDEX IF NOT EXISTS idx_morpho_live_alerts_status ON morpho_live_alerts(status, id);
+
+-- production alerts whose source event a reorg removed, once the correction went out
+CREATE TABLE IF NOT EXISTS morpho_live_corrections (
+    alert_id INTEGER PRIMARY KEY,
+    sent_at  REAL NOT NULL
+);
 """
 
 
@@ -108,6 +122,15 @@ class AlertRequest:
     attempts: int
 
 
+def _same_log(original: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """Compare the governance effect of logs from the same transaction."""
+    return (
+        original["vaultAddress"].lower() == candidate["vaultAddress"].lower()
+        and original["eventName"] == candidate["eventName"]
+        and json.loads(original["argsJson"]) == json.loads(candidate["argsJson"])
+    )
+
+
 class LiveStore:
     """SQLite store for the consumer's decisions and alert requests, in the stream inbox's file."""
 
@@ -115,8 +138,9 @@ class LiveStore:
         self.inbox = inbox
         self.path = inbox.path
         self._events = inbox.stream.table("events")
-        with self._connect():
-            pass
+        self._changes = inbox.stream.table("changes")
+        with self._connect() as conn:
+            conn.executescript(_SCHEMA)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -125,7 +149,6 @@ class LiveStore:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=10000")
-            conn.executescript(_SCHEMA)
             with conn:
                 yield conn
 
@@ -167,42 +190,61 @@ class LiveStore:
     def record(
         self,
         decisions: list[Decision],
-        messages: list[tuple[str, str]],
+        messages: list[RenderedAlert],
         mode: str,
         status: str,
         now: float,
+        sent_at: float | None = None,
     ) -> list[int]:
         """Store one vault batch's decisions and its alert requests in one transaction.
 
         Args:
             decisions: Outcome per event of the batch.
-            messages: ``(severity, message)`` pairs to request, in send order.
+            messages: Rendered alerts with their source events, in send order.
             mode: Delivery mode the requests were made under.
-            status: ``STATUS_OBSERVED`` or ``STATUS_PENDING``.
+            status: ``STATUS_OBSERVED``, ``STATUS_PENDING``, or ``STATUS_SENT``.
             now: Decision time (unix seconds).
+            sent_at: When Telegram accepted the messages, if they were sent already.
 
         Returns:
             The new alert request ids.
         """
-        alerted = [d.event for d in decisions if d.outcome == OUTCOME_ALERTED]
-        alerted_ids = json.dumps([e.event_id for e in alerted])
-        revisions = json.dumps({e.event_id: e.revision for e in alerted})
+        event_revisions = {d.event.event_id: d.event.revision for d in decisions}
+        ids_by_event: dict[str, list[int]] = {}
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             alert_ids = []
             if messages:
                 chain_id, vault = decisions[0].event.chain_id, decisions[0].event.vault_address
-                for severity, message in messages:
+                for part in messages:
+                    revisions = {event_id: event_revisions[event_id] for event_id in part.source_ids}
                     cursor = conn.execute(
                         """
                         INSERT INTO morpho_live_alerts (
                             chain_id, vault_address, mode, severity, message, event_ids, event_revisions,
-                            created_at, status
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            created_at, status, sent_at
+                        ) VALUES (
+                            :chain_id, :vault_address, :mode, :severity, :message, :event_ids, :event_revisions,
+                            :created_at, :status, :sent_at
+                        )
                         """,
-                        (chain_id, vault, mode, severity, message, alerted_ids, revisions, now, status),
+                        {
+                            "chain_id": chain_id,
+                            "vault_address": vault,
+                            "mode": mode,
+                            "severity": part.severity.value,
+                            "message": part.message,
+                            "event_ids": json.dumps(part.source_ids),
+                            "event_revisions": json.dumps(revisions),
+                            "created_at": now,
+                            "status": status,
+                            "sent_at": sent_at,
+                        },
                     )
-                    alert_ids.append(int(cursor.lastrowid or 0))
+                    alert_id = int(cursor.lastrowid or 0)
+                    alert_ids.append(alert_id)
+                    for event_id in part.source_ids:
+                        ids_by_event.setdefault(event_id, []).append(alert_id)
             for decision in decisions:
                 event = decision.event
                 conn.execute(
@@ -210,24 +252,27 @@ class LiveStore:
                     INSERT INTO morpho_live_decisions (
                         event_id, revision, chain_id, vault_address, event_name, block_timestamp, first_seen_at,
                         decided_at, outcome, reason, alert_ids
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (
+                        :event_id, :revision, :chain_id, :vault_address, :event_name, :block_timestamp, :first_seen_at,
+                        :decided_at, :outcome, :reason, :alert_ids
+                    )
                     ON CONFLICT(event_id) DO UPDATE SET
                         revision = excluded.revision, decided_at = excluded.decided_at, outcome = excluded.outcome,
                         reason = excluded.reason, alert_ids = excluded.alert_ids
                     """,
-                    (
-                        event.event_id,
-                        event.revision,
-                        event.chain_id,
-                        event.vault_address,
-                        event.event_name,
-                        event.block_timestamp,
-                        event.first_seen_at,
-                        now,
-                        decision.outcome,
-                        decision.reason,
-                        json.dumps(alert_ids if decision.outcome == OUTCOME_ALERTED else []),
-                    ),
+                    {
+                        "event_id": event.event_id,
+                        "revision": event.revision,
+                        "chain_id": event.chain_id,
+                        "vault_address": event.vault_address,
+                        "event_name": event.event_name,
+                        "block_timestamp": event.block_timestamp,
+                        "first_seen_at": event.first_seen_at,
+                        "decided_at": now,
+                        "outcome": decision.outcome,
+                        "reason": decision.reason,
+                        "alert_ids": json.dumps(ids_by_event.get(event.event_id, [])),
+                    },
                 )
         return alert_ids
 
@@ -277,13 +322,85 @@ class LiveStore:
                 return False
         return True
 
+    def _source_survives(self, conn: sqlite3.Connection, event_id: str, revision: int) -> bool:
+        """Check for the original log, even if its transaction moved to a different block or log index."""
+        row = conn.execute(
+            f"SELECT chain_id, status, revision, payload_json FROM {self._events} WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        if row["revision"] == revision:
+            return row["status"] == "active"
+
+        # Each revision bump records the outgoing payload. Recover the one that
+        # was current when the alert was sent, including for pre-upgrade alerts.
+        previous = conn.execute(
+            f"SELECT old_payload_json FROM {self._changes} WHERE event_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?",
+            (event_id, row["revision"] - revision - 1),
+        ).fetchone()
+        if previous is None or previous["old_payload_json"] is None:
+            return row["status"] == "active"
+        original = json.loads(previous["old_payload_json"])
+        candidates = conn.execute(
+            f"SELECT payload_json FROM {self._events} WHERE chain_id = ? AND transaction_hash = ? AND status = 'active'",
+            (row["chain_id"], original["transactionHash"].lower()),
+        )
+        return any(_same_log(original, json.loads(candidate["payload_json"])) for candidate in candidates)
+
+    def reorged_production_alerts(self, since: float, limit: int = 50) -> list[AlertRequest]:
+        """Return uncorrected production alerts and the IDs of their orphaned source events."""
+        requests = []
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            rows = conn.execute(
+                """
+                SELECT a.* FROM morpho_live_alerts a
+                LEFT JOIN morpho_live_corrections c ON c.alert_id = a.id
+                WHERE a.mode = :mode AND a.status = :status AND a.created_at >= :since AND c.alert_id IS NULL
+                ORDER BY a.id
+                """,
+                {"mode": MODE_PRODUCTION, "status": STATUS_SENT, "since": since},
+            )
+            for row in rows:
+                removed = [
+                    event_id
+                    for event_id, revision in json.loads(row["event_revisions"]).items()
+                    if not self._source_survives(conn, event_id, revision)
+                ]
+                if removed:
+                    requests.append(
+                        AlertRequest(
+                            id=row["id"],
+                            chain_id=row["chain_id"],
+                            vault_address=row["vault_address"],
+                            mode=row["mode"],
+                            severity=row["severity"],
+                            message=row["message"],
+                            event_ids=removed,
+                            attempts=row["attempts"],
+                        )
+                    )
+                    if len(requests) >= limit:
+                        break
+        return requests
+
+    def mark_corrected(self, alert_id: int, now: float) -> None:
+        """Record that a reorged production alert's correction went out."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO morpho_live_corrections (alert_id, sent_at) VALUES (?, ?)", (alert_id, now)
+            )
+
     def mark_sent(self, alert_id: int, now: float) -> None:
         """Record a delivered request."""
         with self._connect() as conn:
             conn.execute(
-                "UPDATE morpho_live_alerts SET status = ?, attempts = attempts + 1, sent_at = ?, last_error = NULL "
-                "WHERE id = ?",
-                (STATUS_SENT, now, alert_id),
+                """
+                UPDATE morpho_live_alerts
+                SET status = :status, attempts = attempts + 1, sent_at = :sent_at, last_error = NULL
+                WHERE id = :alert_id
+                """,
+                {"status": STATUS_SENT, "sent_at": now, "alert_id": alert_id},
             )
 
     def mark_failed(self, alert_id: int, error: str) -> None:

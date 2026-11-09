@@ -13,7 +13,7 @@ from eth_abi import encode as abi_encode
 from web3 import Web3
 
 from protocols.morpho import governance_v2, live_rules
-from protocols.morpho._alerts import LOSS_PREFIX, VaultAlert, render_vault_alerts
+from protocols.morpho._alerts import LOSS_PREFIX, VaultAlert, render_vault_alert_parts, render_vault_alerts
 from protocols.morpho.config import VaultConfig
 from protocols.morpho.daily_governance_cache import check_daily_governance_cache, daily_morpho_filename
 from protocols.morpho.governance import MarketGovernanceState
@@ -162,7 +162,9 @@ def test_v1_submit_cap_alerts_like_the_daily_job_without_writing_its_cache() -> 
         _v1_cache() as write,
         patch.object(live_rules.governance, "load_market_governance_states", return_value=[state]),
     ):
-        result = evaluate_v1(_client(), Chain.MAINNET, V1_CONFIG, [_event("SubmitCap", {"id": MARKET, "cap": "1"})])
+        result = evaluate_v1(
+            _client(), Chain.MAINNET, V1_CONFIG, [_event("SubmitCap", {"id": MARKET, "cap": str(state.pending_cap)})]
+        )
 
     (alert,) = result.alerts
     assert alert.severity == AlertSeverity.MEDIUM and "➕ Adding new market [WETH/USDC (86.00%)]" in alert.body
@@ -195,8 +197,11 @@ def test_v1_operation_no_longer_pending_or_already_alerted_is_not_new() -> None:
 
 
 def test_v1_cap_and_removal_on_one_market_are_checked_once() -> None:
-    state = _state(pending_cap=5, pending_cap_timestamp=VALID_AT, removable_at=VALID_AT)
-    events = [_event("SubmitCap", {"id": MARKET}), _event("SubmitMarketRemoval", {"id": MARKET}, log=1)]
+    state = _state(pending_cap=5, pending_cap_timestamp=VALID_AT, removable_at=VALID_AT, supply_shares=1)
+    events = [
+        _event("SubmitCap", {"id": MARKET, "cap": str(state.pending_cap)}),
+        _event("SubmitMarketRemoval", {"id": MARKET}, log=1),
+    ]
     with (
         _v1_cache(),
         patch.object(live_rules.governance, "load_market_governance_states", return_value=[state]) as load,
@@ -206,6 +211,9 @@ def test_v1_cap_and_removal_on_one_market_are_checked_once() -> None:
     assert len(load.call_args.args[1]) == 1  # one market read
     assert len(result.alerts) == 2  # one cap section, one removal section: not doubled
     assert set(result.reasons.values()) == {REASON_ALERTED}
+    standalone, grouped = render_vault_alert_parts(result.header, result.alerts)
+    assert standalone.source_ids == (events[1].event_id,)
+    assert grouped.source_ids == (events[0].event_id,)
 
 
 def test_rules_wait_for_an_rpc_behind_the_event_block() -> None:
@@ -293,6 +301,21 @@ def test_v2_new_submissions_are_grouped_like_the_daily_job() -> None:
     assert set(result.reasons.values()) == {REASON_ALERTED}
 
 
+def test_v2_split_group_attributes_each_part_to_its_operations() -> None:
+    events = [_submit(ABDICATE), _submit(ADD, log=1)]
+    client = _v2_client({_bytes(ABDICATE): VALID_AT, _bytes(ADD): VALID_AT})
+    with (
+        _v2_cache(),
+        patch.object(live_rules, "load_v2_snapshot", return_value=_snapshot()),
+        patch.object(governance_v2, "_operation_label", side_effect=["x" * 2500, "y" * 2500]),
+    ):
+        result = evaluate_v2(client, Chain.MAINNET, V2_CONFIG, events)
+
+    first, second = render_vault_alert_parts(result.header, result.alerts)
+    assert first.source_ids == (events[0].event_id,)
+    assert second.source_ids == (events[1].event_id,)
+
+
 def test_v2_submit_already_accepted_or_revoked_is_not_new() -> None:
     client = _v2_client({})  # executableAt(data) == 0
     with _v2_cache(), patch.object(live_rules, "load_v2_snapshot", return_value=_snapshot(10**12)):
@@ -355,7 +378,9 @@ class FakeEvaluator:
             raise self.fail.pop(0)
         return VaultEvaluation(
             header=f"[{vault.name}] on {chain.name}",
-            alerts=[VaultAlert(AlertSeverity.MEDIUM, f"📥 Submitted {e.name}") for e in events],
+            alerts=[
+                VaultAlert(AlertSeverity.MEDIUM, f"📥 Submitted {e.name}", source_ids=(e.event_id,)) for e in events
+            ],
             reasons={e.event_id: REASON_ALERTED for e in events},
         )
 

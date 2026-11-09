@@ -3,10 +3,11 @@
 yearn-envio indexes governance events emitted by every vault in ``config.py``
 (V1 ``SubmitCap`` / ``SubmitMarketRemoval`` / ``SubmitTimelock``; V2 ``Submit`` /
 ``Accept`` / ``SetOwner`` / ``SetCurator`` / ``AddAdapter`` / ``RemoveAdapter``) as
-one entity with ABI-named arguments in ``argsJson``. This stream observes them
-with the same WebSocket + HTTP reconciliation as the timelock pilot (#447). It
-sends no alerts: lifecycle rules and delivery are #448, and the daily
-``governance.py`` / ``governance_v2.py`` jobs stay the alerting path.
+one entity with ABI-named arguments in ``argsJson``. This stream ingests them
+with the same WebSocket + HTTP reconciliation as the timelock pilot (#447) and
+sends no alerts itself: ``live_governance`` decides and delivers them, and the
+daily ``governance.py`` / ``governance_v2.py`` jobs keep running as the audit and
+as the only path for guardian, sentinel, and allocator changes.
 """
 
 import json

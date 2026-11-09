@@ -32,7 +32,7 @@ from typing import Any, Dict, List
 from web3 import Web3
 
 from protocols.morpho import adapter_timelocks_v2
-from protocols.morpho._alerts import VaultDiff, due_loss_notice, governance_lock, send_vault_alerts
+from protocols.morpho._alerts import LiveExpectation, VaultDiff, due_loss_notice, governance_lock, send_vault_alerts
 from protocols.morpho._shared import (
     PROTOCOL,
     MorphoV2MonitoringError,
@@ -45,6 +45,7 @@ from protocols.morpho._shared import (
 )
 from protocols.morpho.adapter_timelocks_v2 import AdapterTimelockState
 from protocols.morpho.config import VAULTS_V2_BY_CHAIN, get_vault_query_config
+from protocols.morpho.live_audit import record_daily_findings
 from protocols.morpho.v2_decoders import decode_call, decode_submit, selector_of, submit_data_key
 from utils.alert import AlertSeverity
 from utils.cache import (
@@ -359,21 +360,34 @@ def _loss_body(
     )
 
 
+def _submit_expectation(pc: PendingConfig, lines: range | None = None) -> LiveExpectation:
+    """Return the indexed ``Submit`` event behind one pending operation."""
+    return LiveExpectation(
+        "Submit", {"data": "0x" + pc.data.hex(), "executableAt": pc.valid_at}, pc.tx_hash, lines=lines
+    )
+
+
 def _check_pending_loss(
     snapshot: V2GovernanceSnapshot,
     pc: PendingConfig,
     operation_label: str,
     loss: tuple[int, str],
     diff: VaultDiff,
+    first_seen: bool = False,
 ) -> None:
-    """Alert once on a pending operation that puts funds at risk, then once more near ``validAt``."""
+    """Alert once on a pending operation that puts funds at risk, then once more near ``validAt``.
+
+    ``first_seen`` marks an operation this pass is the first to see, which is the
+    only time a ``Submit`` event should sit behind the alert.
+    """
     addr = snapshot.address.lower()
     loss_key = morpho_key(addr, pc.data_hash, PENDING_LOSS_TYPE)
     reminder_key = morpho_key(addr, pc.data_hash, PENDING_REMINDER_TYPE)
     notice = due_loss_notice(pc.valid_at, _read_int(loss_key), _read_int(reminder_key))
     if notice is None:
         return
-    diff.loss(_loss_body(snapshot, pc, operation_label, loss, reminder=notice.reminder))
+    expected = (_submit_expectation(pc),) if first_seen and not notice.reminder else ()
+    diff.loss(_loss_body(snapshot, pc, operation_label, loss, reminder=notice.reminder), expected)
     diff.defer(_write, loss_key, pc.valid_at)
     if notice.in_window:
         diff.defer(_write, reminder_key, pc.valid_at)
@@ -401,25 +415,28 @@ def alert_pending_new(
             f"📥 Submitted: {operation_label}\n"
             f"⏰ Executable at: {format_ts(pc.valid_at)} {format_countdown(pc.valid_at)}\n"
             f"🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}",
+            (_submit_expectation(pc),),
         )
         return
 
     lines = [f"📥 Submitted {len(pending)} operations:"]
     shared_valid_at = len({pc.valid_at for pc, _ in pending}) == 1
     shared_tx = len({pc.tx_hash for pc, _ in pending}) == 1
-    if shared_valid_at and shared_tx:
-        for _, operation_label in pending:
-            lines.append(f"  • {operation_label}")
+    shared_details = shared_valid_at and shared_tx
+    expected = []
+    for pc, operation_label in pending:
+        start = len(lines)
+        lines.extend(f"  • {operation_label}".split("\n"))
+        if not shared_details:
+            lines.append(f"     ⏰ Executable at: {format_ts(pc.valid_at)} {format_countdown(pc.valid_at)}")
+            lines.append(f"     🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}")
+        expected.append(_submit_expectation(pc, range(start, len(lines))))
+    if shared_details:
         pc0 = pending[0][0]
         lines.append(f"⏰ Executable at: {format_ts(pc0.valid_at)} {format_countdown(pc0.valid_at)}")
         lines.append(f"🔗 Tx: {_explorer_link(snapshot.chain, pc0.tx_hash)}")
-    else:
-        for pc, operation_label in pending:
-            lines.append(f"  • {operation_label}")
-            lines.append(f"     ⏰ Executable at: {format_ts(pc.valid_at)} {format_countdown(pc.valid_at)}")
-            lines.append(f"     🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}")
 
-    diff.alert(AlertSeverity.MEDIUM, "\n".join(lines))
+    diff.alert(AlertSeverity.MEDIUM, "\n".join(lines), tuple(expected))
 
 
 def _alert_pending_resolved(
@@ -446,7 +463,12 @@ def _alert_pending_resolved(
 
 def _alert_role_change(role: str, before: str, after: str, diff: VaultDiff) -> None:
     icon = "👑" if role == "owner" else "🎩"
-    diff.alert(AlertSeverity.HIGH, f"🚨 {icon} {role.capitalize()} changed: `{before}` → `{after}`")
+    name, argument = ("SetOwner", "newOwner") if role == "owner" else ("SetCurator", "newCurator")
+    diff.alert(
+        AlertSeverity.HIGH,
+        f"🚨 {icon} {role.capitalize()} changed: `{before}` → `{after}`",
+        (LiveExpectation(name, {argument: after}),),
+    )
 
 
 def _alert_set_diff(set_name: str, added: set[str], removed: set[str], diff: VaultDiff) -> None:
@@ -456,7 +478,15 @@ def _alert_set_diff(set_name: str, added: set[str], removed: set[str], diff: Vau
         lines.append(f"  + `{addr}`")
     for addr in sorted(removed):
         lines.append(f"  − `{addr}`")
-    diff.alert(AlertSeverity.LOW, f"{icon} {set_name} changed\n" + "\n".join(lines))
+    # Sentinel and allocator changes are daily-only, so only adapters are audited.
+    expected = ()
+    if set_name == "adapters":
+        events = [("AddAdapter", a) for a in sorted(added)] + [("RemoveAdapter", a) for a in sorted(removed)]
+        expected = tuple(
+            LiveExpectation(event, {"account": address}, lines=range(index, index + 1))
+            for index, (event, address) in enumerate(events, start=1)
+        )
+    diff.alert(AlertSeverity.LOW, f"{icon} {set_name} changed\n" + "\n".join(lines), expected)
 
 
 # ----------------------------------------------------------------------------
@@ -486,7 +516,7 @@ def diff_pending_config(
     # at risk still escalates once funds arrive.
     loss = pending_loss(snapshot, pc)
     if loss is not None:
-        _check_pending_loss(snapshot, pc, operation_label, loss, diff)
+        _check_pending_loss(snapshot, pc, operation_label, loss, diff, first_seen=last != pc.valid_at)
     elif last != pc.valid_at:
         new = (pc, operation_label)
     if last != pc.valid_at:
@@ -590,6 +620,7 @@ def diff_and_alert(
             adapter_timelocks_v2.diff_adapter(snapshot.chain, snapshot.total_assets, state, diff)
         send_vault_alerts(vault_header(snapshot), diff.alerts, PROTOCOL)
         diff.commit()
+        record_daily_findings(snapshot.chain, snapshot.address, diff.alerts)
 
 
 # ----------------------------------------------------------------------------
