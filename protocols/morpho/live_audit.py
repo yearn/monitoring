@@ -28,9 +28,8 @@ import os
 import sqlite3
 import time
 from collections.abc import Callable
-from typing import Any
 
-from protocols.morpho._alerts import VaultAlert
+from protocols.morpho._alerts import LiveExpectation, VaultAlert
 from protocols.morpho.governance_stream import MORPHO_GOVERNANCE_STREAM
 from protocols.morpho.live_store import (
     BASELINE_STATUS_KEY,
@@ -87,10 +86,8 @@ class AuditStore(LiveStore):
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
 
-    def add_findings(
-        self, chain_id: int, vault: str, expected: list[tuple[str, dict[str, Any]]], block: int, now: float
-    ) -> None:
-        """Record one ``(event name, args)`` finding per expected event, as waiting."""
+    def add_findings(self, chain_id: int, vault: str, expected: list[LiveExpectation], block: int, now: float) -> None:
+        """Record one finding per expected event, as waiting."""
         with self._connect() as conn:
             conn.executemany(
                 """
@@ -99,8 +96,16 @@ class AuditStore(LiveStore):
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    (chain_id, vault.lower(), name, json.dumps(args, default=str), block, now, STATUS_WAITING)
-                    for name, args in expected
+                    (
+                        chain_id,
+                        vault.lower(),
+                        expectation.event,
+                        _expectation_json(expectation),
+                        block,
+                        now,
+                        STATUS_WAITING,
+                    )
+                    for expectation in expected
                 ],
             )
 
@@ -120,7 +125,7 @@ class AuditStore(LiveStore):
                 FROM {self._events} e
                 LEFT JOIN morpho_live_decisions d ON d.event_id = e.event_id AND d.revision = e.revision
                 WHERE e.chain_id = ? AND lower(e.contract_address) = ? AND e.event_name = ?
-                  AND e.status = 'active' AND e.block_timestamp >= ?
+                  AND e.status = 'active' AND e.block_timestamp >= ? AND e.block_number <= ?
                 ORDER BY e.block_number DESC, e.log_index DESC
                 """,
                 (
@@ -128,6 +133,7 @@ class AuditStore(LiveStore):
                     finding["vault_address"],
                     finding["event_name"],
                     int(finding["observed_at"] - WINDOW_SECONDS),
+                    finding["observed_block"],
                 ),
             ).fetchall()
 
@@ -179,7 +185,7 @@ def record_daily_findings(
         observed_block: Block the job read at; the chain head is read when omitted.
         now: Clock.
     """
-    expected = [(e.event, e.args) for alert in alerts for e in alert.expected]
+    expected = [expectation for alert in alerts for expectation in alert.expected]
     if not expected:
         return
     try:
@@ -194,20 +200,19 @@ def record_daily_findings(
         logger.warning("could not record daily findings for %s on %s", vault_address, chain.name, exc_info=True)
 
 
-def _normalized(value: Any) -> str:
-    """Return an argument in a form that compares across checksum case and integer encodings."""
-    return str(value).lower().removeprefix("0x")
+def _expectation_json(expected: LiveExpectation) -> str:
+    """Persist the expected arguments and optional exact transaction."""
+    return json.dumps({"args": expected.args, "transaction_hash": expected.transaction_hash}, default=str)
 
 
-def _args_match(payload_json: str, expected: dict[str, Any]) -> bool:
+def _matches(payload_json: str, expected: LiveExpectation) -> bool:
     """True when the stored event carries every expected argument."""
     try:
-        args = json.loads(json.loads(payload_json).get("argsJson") or "{}")
+        payload = json.loads(payload_json)
+        args = json.loads(payload.get("argsJson") or "{}")
     except TypeError, ValueError:
         return False
-    return isinstance(args, dict) and all(
-        key in args and _normalized(args[key]) == _normalized(value) for key, value in expected.items()
-    )
+    return isinstance(args, dict) and expected.matches(payload["eventName"], args, payload.get("transactionHash", ""))
 
 
 def _verdict(
@@ -218,15 +223,18 @@ def _verdict(
         return None
     if finding["observed_at"] < baseline + WINDOW_SECONDS:
         return STATUS_OUT_OF_WINDOW, "the event may predate the stream's first run"
-    expected = json.loads(finding["expected_args"])
-    events = [row for row in store.events_with_decisions(finding) if _args_match(row["payload_json"], expected)]
-    if not events:
-        if reconciled_to is None or reconciled_to < finding["observed_block"]:
-            return None
-        return STATUS_DIVERGENT, f"no indexed event through block {reconciled_to}"
-    if any(row["outcome"] == OUTCOME_ALERTED for row in events):
+    if reconciled_to is None or reconciled_to < finding["observed_block"]:
+        return None
+    stored = json.loads(finding["expected_args"])
+    # Earlier findings stored only the argument dictionary.
+    expected = LiveExpectation(finding["event_name"], stored.get("args", stored), stored.get("transaction_hash", ""))
+    newest = next(
+        (row for row in store.events_with_decisions(finding) if _matches(row["payload_json"], expected)), None
+    )
+    if newest is None:
+        return STATUS_DIVERGENT, f"no indexed event through block {finding['observed_block']}"
+    if newest["outcome"] == OUTCOME_ALERTED:
         return STATUS_MATCHED, "the live path alerted this event"
-    newest = events[0]
     if newest["outcome"] is None:
         return None
     if newest["outcome"] == OUTCOME_HISTORICAL:

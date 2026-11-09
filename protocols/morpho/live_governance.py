@@ -39,7 +39,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from protocols.morpho._alerts import governance_lock, render_vault_alerts, split_body
+from protocols.morpho._alerts import governance_lock, render_vault_alert_parts, split_body
 from protocols.morpho._shared import PROTOCOL
 from protocols.morpho.config import VaultConfig
 from protocols.morpho.live_audit import AuditStore, notify_divergences, resolve_findings
@@ -176,8 +176,8 @@ def correction_text(request: AlertRequest) -> str:
     header = request.message.split("\n", 1)[0]
     return (
         f"⚠️ Correction to: {header}\n\n"
-        "A chain reorg removed the event behind this alert, so the change may not have happened. "
-        "If it was included again it is still pending; the next daily check re-reads the vault's state.\n"
+        "A chain reorg removed the event behind part or all of this alert. "
+        "The next daily check re-reads the vault's state.\n"
         f"Events: {', '.join(request.event_ids)}"
     )
 
@@ -366,27 +366,32 @@ class LiveGovernanceConsumer:
             # under the lock they take too, so one change is alerted once.
             with governance_lock(vault.address):
                 evaluation = self.evaluate(chain, vault, first.version, governance_events)
-                rendered = render_vault_alerts(evaluation.header, evaluation.alerts)
+                rendered = render_vault_alert_parts(evaluation.header, evaluation.alerts)
                 decided_at = self.now()  # before sending, so Telegram's time is reported on its own
-                for severity, text in rendered:
-                    self.publish(severity, text)  # raises on failure: nothing is committed or recorded
+                for part in rendered:
+                    self.publish(part.severity, part.message)  # raises on failure: nothing is committed or recorded
                 evaluation.commit()
                 if rendered:
                     sent_at = self.now()
         else:
             evaluation = self.evaluate(chain, vault, first.version, governance_events)
-            rendered = render_vault_alerts(evaluation.header, evaluation.alerts)
+            rendered = render_vault_alert_parts(evaluation.header, evaluation.alerts)
             decided_at = self.now()
-        messages = [(severity.value, text) for severity, text in rendered]
         decisions = []
         for event in events:
             reason = evaluation.reasons.get(event.event_id, "not evaluated")
-            outcome = OUTCOME_ALERTED if reason == REASON_ALERTED and messages else OUTCOME_NO_ALERT
+            outcome = OUTCOME_ALERTED if reason == REASON_ALERTED and rendered else OUTCOME_NO_ALERT
             decisions.append(Decision(event, outcome, reason))
         status = {MODE_SHADOW: STATUS_PENDING, MODE_PRODUCTION: STATUS_SENT}.get(self.config.mode, STATUS_OBSERVED)
-        alert_ids = self.store.record(decisions, messages, self.config.mode, status, decided_at, sent_at)
-        for severity, text in messages:
-            logger.info("live %s %s alert for %s: %s", self.config.mode, severity, vault.name, text.split("\n", 1)[0])
+        alert_ids = self.store.record(decisions, rendered, self.config.mode, status, decided_at, sent_at)
+        for part in rendered:
+            logger.info(
+                "live %s %s alert for %s: %s",
+                self.config.mode,
+                part.severity.value,
+                vault.name,
+                part.message.split("\n", 1)[0],
+            )
         if alert_ids:
             logger.info("recorded %s live alert request(s) %s for %s", len(alert_ids), alert_ids, vault.name)
         return len(events)

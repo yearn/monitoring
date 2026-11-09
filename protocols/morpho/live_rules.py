@@ -123,11 +123,32 @@ def _hex_bytes(value: Any) -> bytes:
     return bytes.fromhex(str(value).removeprefix("0x"))
 
 
-def _attribute(diff: VaultDiff, before: int, ids: list[str], reasons: dict[str, str]) -> None:
-    """Record ``ids`` as alerted when the check added sections since ``before``, else as not new."""
-    reason = REASON_ALERTED if len(diff.alerts) > before else REASON_NOT_NEW
-    for event_id in ids:
-        reasons[event_id] = reason
+def _attribute(alerts: list[VaultAlert], events: list[GovernanceEvent], reasons: dict[str, str]) -> None:
+    """Link alert sections to the latest matching events in chain order."""
+    alerted_ids: set[str] = set()
+    for alert in alerts:
+        sources = list(alert.source_ids)
+        for expected in alert.expected:
+            source = next(
+                (
+                    event
+                    for event in reversed(events)
+                    if expected.matches(event.name, event.args, event.transaction_hash)
+                ),
+                None,
+            )
+            if source is None:
+                continue
+            alerted_ids.add(source.event_id)
+            if expected.lines is None:
+                sources.append(source.event_id)
+            else:
+                for line in expected.lines:
+                    alert.line_source_ids.setdefault(line, []).append(source.event_id)
+        alert.source_ids = tuple(dict.fromkeys(sources))
+        alerted_ids.update(alert.source_ids)
+    for event in events:
+        reasons[event.event_id] = REASON_ALERTED if event.event_id in alerted_ids else REASON_NOT_NEW
 
 
 def evaluate_v1(client: Any, chain: Chain, vault: VaultConfig, events: list[GovernanceEvent]) -> VaultEvaluation:
@@ -137,13 +158,13 @@ def evaluate_v1(client: Any, chain: Chain, vault: VaultConfig, events: list[Gove
     diff = VaultDiff()
     result = VaultEvaluation(header=governance.vault_header(vault.name, vault.address, chain))
 
-    by_market: dict[bytes, list[str]] = {}
-    timelock_ids: list[str] = []
+    by_market: dict[bytes, list[GovernanceEvent]] = {}
+    timelock_events: list[GovernanceEvent] = []
     for event in events:
         if event.name in V1_MARKET_EVENTS and event.args.get("id"):
-            by_market.setdefault(_hex_bytes(event.args["id"]), []).append(event.event_id)
+            by_market.setdefault(_hex_bytes(event.args["id"]), []).append(event)
         elif event.name == "SubmitTimelock":
-            timelock_ids.append(event.event_id)
+            timelock_events.append(event)
         else:
             result.reasons[event.event_id] = REASON_UNSUPPORTED
 
@@ -154,11 +175,11 @@ def evaluate_v1(client: Any, chain: Chain, vault: VaultConfig, events: list[Gove
             # One check per market: a SubmitCap and a SubmitMarketRemoval on the same
             # market in one batch must not render its sections twice.
             governance.check_market_governance_state(vault.name, state, chain, diff)
-            _attribute(diff, before, by_market[market_id], result.reasons)
-    if timelock_ids:
+            _attribute(diff.alerts[before:], by_market[market_id], result.reasons)
+    if timelock_events:
         before = len(diff.alerts)
         governance.check_timelock_and_guardian(contract, client, diff, block)
-        _attribute(diff, before, timelock_ids, result.reasons)
+        _attribute(diff.alerts[before:], timelock_events, result.reasons)
 
     result.alerts = diff.alerts
     result.commit = diff.commit
@@ -244,8 +265,9 @@ def evaluate_v2(client: Any, chain: Chain, vault: VaultConfig, events: list[Gove
             executable_at = client.execute_batch(batch)
         new_pending: list[tuple[PendingConfig, str]] = []
         for event, data, valid_at in zip(submits, datas, executable_at, strict=True):
-            if not valid_at:
-                result.reasons[event.event_id] = REASON_NOT_NEW  # accepted or revoked already
+            expected_deadline = event.args.get("executableAt")
+            if not valid_at or (expected_deadline is not None and int(expected_deadline) != valid_at):
+                result.reasons[event.event_id] = REASON_NOT_NEW  # resolved or replaced already
                 continue
             pc = PendingConfig(
                 valid_at=int(valid_at),
@@ -257,11 +279,12 @@ def evaluate_v2(client: Any, chain: Chain, vault: VaultConfig, events: list[Gove
             new = governance_v2.diff_pending_config(snapshot, pc, diff)
             if new is not None:
                 new_pending.append(new)
-            result.reasons[event.event_id] = (
-                REASON_ALERTED if new is not None or len(diff.alerts) > before else REASON_NOT_NEW
-            )
+            for alert in diff.alerts[before:]:
+                alert.source_ids = (event.event_id,)
         # Same grouping as the daily job: one section for every new non-loss submission.
         governance_v2.alert_pending_new(snapshot, new_pending, diff)
+        eligible = [event for event in submits if event.event_id not in result.reasons]
+        _attribute(diff.alerts, eligible, result.reasons)
 
     checks: list[tuple[set[str], Callable[[], None]]] = [
         ({"SetOwner"}, lambda: governance_v2.diff_single_role(snapshot, "owner", snapshot.owner, diff)),
@@ -272,11 +295,11 @@ def evaluate_v2(client: Any, chain: Chain, vault: VaultConfig, events: list[Gove
         ),
     ]
     for names, check in checks:
-        ids = [e.event_id for e in events if e.name in names]
-        if ids:
+        candidates = [event for event in events if event.name in names]
+        if candidates:
             before = len(diff.alerts)
             check()
-            _attribute(diff, before, ids, result.reasons)
+            _attribute(diff.alerts[before:], candidates, result.reasons)
 
     for event in events:
         if event.event_id not in result.reasons:

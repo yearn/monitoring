@@ -26,6 +26,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from typing import Any
 
+from protocols.morpho._alerts import RenderedAlert
 from utils.subscriber.inbox import EventInbox
 
 OUTCOME_ALERTED = "alerted"
@@ -121,6 +122,15 @@ class AlertRequest:
     attempts: int
 
 
+def _same_log(original: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """Compare the governance effect of logs from the same transaction."""
+    return (
+        original["vaultAddress"].lower() == candidate["vaultAddress"].lower()
+        and original["eventName"] == candidate["eventName"]
+        and json.loads(original["argsJson"]) == json.loads(candidate["argsJson"])
+    )
+
+
 class LiveStore:
     """SQLite store for the consumer's decisions and alert requests, in the stream inbox's file."""
 
@@ -128,6 +138,7 @@ class LiveStore:
         self.inbox = inbox
         self.path = inbox.path
         self._events = inbox.stream.table("events")
+        self._changes = inbox.stream.table("changes")
         with self._connect():
             pass
 
@@ -180,7 +191,7 @@ class LiveStore:
     def record(
         self,
         decisions: list[Decision],
-        messages: list[tuple[str, str]],
+        messages: list[RenderedAlert],
         mode: str,
         status: str,
         now: float,
@@ -190,7 +201,7 @@ class LiveStore:
 
         Args:
             decisions: Outcome per event of the batch.
-            messages: ``(severity, message)`` pairs to request, in send order.
+            messages: Rendered alerts with their source events, in send order.
             mode: Delivery mode the requests were made under.
             status: ``STATUS_OBSERVED``, ``STATUS_PENDING``, or ``STATUS_SENT``.
             now: Decision time (unix seconds).
@@ -199,15 +210,15 @@ class LiveStore:
         Returns:
             The new alert request ids.
         """
-        alerted = [d.event for d in decisions if d.outcome == OUTCOME_ALERTED]
-        alerted_ids = json.dumps([e.event_id for e in alerted])
-        revisions = json.dumps({e.event_id: e.revision for e in alerted})
+        event_revisions = {d.event.event_id: d.event.revision for d in decisions}
+        ids_by_event: dict[str, list[int]] = {}
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             alert_ids = []
             if messages:
                 chain_id, vault = decisions[0].event.chain_id, decisions[0].event.vault_address
-                for severity, message in messages:
+                for part in messages:
+                    revisions = {event_id: event_revisions[event_id] for event_id in part.source_ids}
                     cursor = conn.execute(
                         """
                         INSERT INTO morpho_live_alerts (
@@ -215,9 +226,23 @@ class LiveStore:
                             created_at, status, sent_at
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (chain_id, vault, mode, severity, message, alerted_ids, revisions, now, status, sent_at),
+                        (
+                            chain_id,
+                            vault,
+                            mode,
+                            part.severity.value,
+                            part.message,
+                            json.dumps(part.source_ids),
+                            json.dumps(revisions),
+                            now,
+                            status,
+                            sent_at,
+                        ),
                     )
-                    alert_ids.append(int(cursor.lastrowid or 0))
+                    alert_id = int(cursor.lastrowid or 0)
+                    alert_ids.append(alert_id)
+                    for event_id in part.source_ids:
+                        ids_by_event.setdefault(event_id, []).append(alert_id)
             for decision in decisions:
                 event = decision.event
                 conn.execute(
@@ -241,7 +266,7 @@ class LiveStore:
                         now,
                         decision.outcome,
                         decision.reason,
-                        json.dumps(alert_ids if decision.outcome == OUTCOME_ALERTED else []),
+                        json.dumps(ids_by_event.get(event.event_id, [])),
                     ),
                 )
         return alert_ids
@@ -292,9 +317,36 @@ class LiveStore:
                 return False
         return True
 
+    def _source_survives(self, conn: sqlite3.Connection, event_id: str, revision: int) -> bool:
+        """Check for the original log, even if its transaction moved to a different block or log index."""
+        row = conn.execute(
+            f"SELECT chain_id, status, revision, payload_json FROM {self._events} WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        if row["revision"] == revision:
+            return row["status"] == "active"
+
+        # Each revision bump records the outgoing payload. Recover the one that
+        # was current when the alert was sent, including for pre-upgrade alerts.
+        previous = conn.execute(
+            f"SELECT old_payload_json FROM {self._changes} WHERE event_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?",
+            (event_id, row["revision"] - revision - 1),
+        ).fetchone()
+        if previous is None or previous["old_payload_json"] is None:
+            return row["status"] == "active"
+        original = json.loads(previous["old_payload_json"])
+        candidates = conn.execute(
+            f"SELECT payload_json FROM {self._events} WHERE chain_id = ? AND transaction_hash = ? AND status = 'active'",
+            (row["chain_id"], original["transactionHash"].lower()),
+        )
+        return any(_same_log(original, json.loads(candidate["payload_json"])) for candidate in candidates)
+
     def reorged_production_alerts(self, since: float, limit: int = 50) -> list[AlertRequest]:
-        """Return sent production alerts created since ``since`` whose source event was removed, uncorrected."""
+        """Return uncorrected production alerts and the IDs of their orphaned source events."""
+        requests = []
         with self._connect() as conn:
+            conn.execute("BEGIN")
             rows = conn.execute(
                 """
                 SELECT a.* FROM morpho_live_alerts a
@@ -303,29 +355,29 @@ class LiveStore:
                 ORDER BY a.id
                 """,
                 (MODE_PRODUCTION, STATUS_SENT, since),
-            ).fetchall()
-            reorged = []
-            for row in rows:
-                placeholders = ",".join("?" for _ in json.loads(row["event_ids"]))
-                removed = conn.execute(
-                    f"SELECT 1 FROM {self._events} WHERE status = 'removed' AND event_id IN ({placeholders}) LIMIT 1",
-                    json.loads(row["event_ids"]),
-                ).fetchone()
-                if removed is not None:
-                    reorged.append(row)
-        return [
-            AlertRequest(
-                id=row["id"],
-                chain_id=row["chain_id"],
-                vault_address=row["vault_address"],
-                mode=row["mode"],
-                severity=row["severity"],
-                message=row["message"],
-                event_ids=json.loads(row["event_ids"]),
-                attempts=row["attempts"],
             )
-            for row in reorged[:limit]
-        ]
+            for row in rows:
+                removed = [
+                    event_id
+                    for event_id, revision in json.loads(row["event_revisions"]).items()
+                    if not self._source_survives(conn, event_id, revision)
+                ]
+                if removed:
+                    requests.append(
+                        AlertRequest(
+                            id=row["id"],
+                            chain_id=row["chain_id"],
+                            vault_address=row["vault_address"],
+                            mode=row["mode"],
+                            severity=row["severity"],
+                            message=row["message"],
+                            event_ids=removed,
+                            attempts=row["attempts"],
+                        )
+                    )
+                    if len(requests) >= limit:
+                        break
+        return requests
 
     def mark_corrected(self, alert_id: int, now: float) -> None:
         """Record that a reorged production alert's correction went out."""

@@ -1,5 +1,6 @@
 """Tests for the daily-versus-live audit (#449) and the production delivery bookkeeping around it."""
 
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -76,7 +77,8 @@ def _store(tmp_path: Path, baseline: float | None = BASELINE) -> AuditStore:
 
 
 def _finding(store: AuditStore, args: dict[str, Any] | None = None, at: float = OBSERVED) -> None:
-    store.add_findings(1, VAULT, [("SubmitMarketRemoval", {"id": MARKET} if args is None else args)], BLOCK, at)
+    expected = LiveExpectation("SubmitMarketRemoval", {"id": MARKET} if args is None else args)
+    store.add_findings(1, VAULT, [expected], BLOCK, at)
 
 
 def _event(store: AuditStore, **overrides: Any) -> None:
@@ -102,6 +104,7 @@ def test_a_finding_the_live_path_alerted_is_matched(tmp_path: Path) -> None:
     _event(store)
     _decide(store, OUTCOME_ALERTED, OBSERVED - 80)
     _finding(store)
+    _reconciled(store)
     assert _status(store) == STATUS_MATCHED
 
 
@@ -110,8 +113,13 @@ def test_arguments_compare_across_case_and_integer_encoding(tmp_path: Path) -> N
     _event(store, eventName="SubmitTimelock", argsJson='{"newTimelock":"259200"}')
     _decide(store, OUTCOME_ALERTED, OBSERVED - 80)
     store.add_findings(
-        1, VAULT.upper().replace("0X", "0x"), [("SubmitTimelock", {"newTimelock": 259200})], BLOCK, OBSERVED
+        1,
+        VAULT.upper().replace("0X", "0x"),
+        [LiveExpectation("SubmitTimelock", {"newTimelock": 259200})],
+        BLOCK,
+        OBSERVED,
     )
+    _reconciled(store)
     assert _status(store) == STATUS_MATCHED
 
 
@@ -126,6 +134,40 @@ def test_no_event_is_divergent_only_once_reconciliation_passed_the_daily_block(t
     _reconciled(store)
     assert _status(store) == STATUS_DIVERGENT
     assert "no indexed event through block" in store.findings_since(0)[0]["detail"]
+
+
+def test_older_alert_cannot_mask_the_latest_matching_decision(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _event(store, id="old", blockNumber=BLOCK - 1)
+    _decide(store, OUTCOME_ALERTED, OBSERVED - 80)
+    _finding(store)
+
+    _reconciled(store, BLOCK - 1)
+    assert _status(store) == STATUS_WAITING
+
+    _event(store)
+    _decide(store, OUTCOME_NO_ALERT, OBSERVED - 50, REASON_NOT_NEW)
+    _reconciled(store)
+    assert _status(store) == STATUS_DIVERGENT
+
+
+def test_same_submit_arguments_from_another_transaction_cannot_match(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    args = {"data": "0x1234", "executableAt": 1000}
+    _event(store, eventName="Submit", argsJson=json.dumps(args), transactionHash="0x" + "11" * 32)
+    _decide(store, OUTCOME_ALERTED, OBSERVED - 80)
+    store.add_findings(1, VAULT, [LiveExpectation("Submit", args, "0x" + "22" * 32)], BLOCK, OBSERVED)
+    _reconciled(store)
+    assert _status(store) == STATUS_DIVERGENT
+
+
+def test_event_after_the_daily_snapshot_cannot_match_it(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _event(store, blockNumber=BLOCK + 1)
+    _decide(store, OUTCOME_ALERTED, OBSERVED + 80)
+    _finding(store)
+    _reconciled(store)
+    assert _status(store) == STATUS_DIVERGENT
 
 
 def test_an_event_for_another_market_is_not_a_match(tmp_path: Path) -> None:
@@ -169,6 +211,7 @@ def test_evaluating_after_the_daily_alert_is_catching_up_not_divergence(tmp_path
     _event(store)
     _decide(store, OUTCOME_NO_ALERT, OBSERVED + 50, REASON_NOT_NEW)
     _finding(store)
+    _reconciled(store)
     assert _status(store) == STATUS_MATCHED
 
 
@@ -177,6 +220,7 @@ def test_deciding_no_alert_before_the_daily_alert_is_divergent(tmp_path: Path) -
     _event(store)
     _decide(store, OUTCOME_NO_ALERT, OBSERVED - 50, REASON_NOT_NEW)
     _finding(store)
+    _reconciled(store)
     assert _status(store) == STATUS_DIVERGENT
     assert REASON_NOT_NEW in store.findings_since(0)[0]["detail"]
 
@@ -193,6 +237,7 @@ def test_a_historical_event_is_out_of_window(tmp_path: Path) -> None:
     _event(store)
     _decide(store, OUTCOME_HISTORICAL, OBSERVED - 80)
     _finding(store)
+    _reconciled(store)
     assert _status(store) == STATUS_OUT_OF_WINDOW
 
 
@@ -292,8 +337,8 @@ def test_v2_new_submissions_expect_their_submit_calldata() -> None:
     with patch.object(governance_v2, "_explorer_link", return_value="tx"):
         governance_v2.alert_pending_new(_snapshot(), pending, diff)
     assert diff.alerts[0].expected == (
-        LiveExpectation("Submit", {"data": "0xaa"}),
-        LiveExpectation("Submit", {"data": "0xbb"}),
+        LiveExpectation("Submit", {"data": "0xaa", "executableAt": 5}, "0x" + "11" * 32),
+        LiveExpectation("Submit", {"data": "0xbb", "executableAt": 5}, "0x" + "11" * 32),
     )
 
 
@@ -358,7 +403,15 @@ def test_v1_escalation_of_a_seen_removal_has_no_event_to_expect() -> None:
 def _evaluate(chain: Chain, vault: VaultConfig, version: int, events: list[Any]) -> VaultEvaluation:
     return VaultEvaluation(
         header=f"[{vault.name}]",
-        alerts=[VaultAlert(AlertSeverity.MEDIUM, "📥 Submitted")],
+        alerts=[
+            VaultAlert(
+                AlertSeverity.HIGH if index == 0 else AlertSeverity.MEDIUM,
+                f"📥 Submitted {event.event_id}",
+                standalone=index == 0 and len(events) > 1,
+                source_ids=(event.event_id,),
+            )
+            for index, event in enumerate(events)
+        ],
         reasons={e.event_id: REASON_ALERTED for e in events},
     )
 
@@ -435,6 +488,55 @@ def test_a_rewritten_event_is_the_same_change_and_needs_no_correction(tmp_path: 
 
     assert consumer.correct_reorged_alerts() == 0
     publish.assert_not_called()
+
+
+@pytest.mark.parametrize("changes", [{"transactionHash": "0x" + "dd" * 32}, {"argsJson": '{"id":"0x12"}'}])
+def test_a_replaced_event_at_the_same_log_position_requires_correction(tmp_path: Path, changes: dict[str, str]) -> None:
+    store = _store(tmp_path, baseline=900.0)
+    consumer = _sent_alert(store, MagicMock(), [1_000.0])
+    replacement = {**make_morpho_event(1, BLOCK, ts=990, address=VAULT.lower()), **changes}
+    store.inbox.observe([replacement], SOURCE_HTTP, 1_001.0)
+    # Another revision must not hide the alert's original source.
+    store.inbox.observe([{**replacement, "blockHash": "0x" + "ee" * 32}], SOURCE_HTTP, 1_002.0)
+    assert consumer.correct_reorged_alerts() == 1
+
+
+def test_a_replacement_vault_is_used_for_live_evaluation(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    original = make_morpho_event(1, BLOCK, address=VAULT.lower())
+    replacement_vault = "0x" + "ee" * 20
+    replacement = {**original, "vaultAddress": replacement_vault}
+    store.inbox.observe([original], SOURCE_WS, OBSERVED - 90)
+    store.inbox.observe([replacement], SOURCE_HTTP, OBSERVED - 80)
+    (pending,) = store.undecided()
+    assert pending.vault_address == replacement_vault
+
+
+def test_a_source_transaction_reincluded_at_a_new_position_survives(tmp_path: Path) -> None:
+    store = _store(tmp_path, baseline=900.0)
+    consumer = _sent_alert(store, MagicMock(), [1_000.0])
+    original = make_morpho_event(1, BLOCK, ts=990, address=VAULT.lower())
+    moved = make_morpho_event(1, BLOCK + 1, ts=991, address=VAULT.lower(), transactionHash=original["transactionHash"])
+    store.inbox.observe([moved], SOURCE_HTTP, 1_001.0)
+    store.inbox.mark_missing(1, BLOCK, BLOCK, set(), SOURCE_HTTP, 1_001.0)
+    assert consumer.correct_reorged_alerts() == 0
+
+
+def test_reorg_corrects_only_the_message_with_the_removed_source(tmp_path: Path) -> None:
+    store = _store(tmp_path, baseline=900.0)
+    publish = MagicMock()
+    consumer = _production(store, publish, [1_000.0])
+    events = [make_morpho_event(1, block, ts=990, address=VAULT.lower()) for block in (BLOCK, BLOCK + 1)]
+    store.inbox.observe(events, SOURCE_WS, 995.0)
+    consumer.process_once()
+
+    alerts = store.alerts_since(0)
+    assert [json.loads(alert["event_ids"]) for alert in alerts] == [[events[0]["id"]], [events[1]["id"]]]
+    publish.reset_mock()
+    store.inbox.mark_missing(1, BLOCK, BLOCK, set(), SOURCE_HTTP, 1_001.0)
+    assert consumer.correct_reorged_alerts() == 1
+    publish.assert_called_once()
+    assert "POTENTIAL VAULT LOSS" in publish.call_args.args[1]
 
 
 def test_old_alerts_are_not_rechecked_for_reorgs(tmp_path: Path) -> None:

@@ -360,9 +360,11 @@ def _loss_body(
     )
 
 
-def _submit_expectation(pc: PendingConfig) -> LiveExpectation:
+def _submit_expectation(pc: PendingConfig, lines: range | None = None) -> LiveExpectation:
     """Return the indexed ``Submit`` event behind one pending operation."""
-    return LiveExpectation("Submit", {"data": "0x" + pc.data.hex()})
+    return LiveExpectation(
+        "Submit", {"data": "0x" + pc.data.hex(), "executableAt": pc.valid_at}, pc.tx_hash, lines=lines
+    )
 
 
 def _check_pending_loss(
@@ -406,7 +408,6 @@ def alert_pending_new(
     if not pending:
         return
 
-    expected = tuple(_submit_expectation(pc) for pc, _ in pending)
     if len(pending) == 1:
         pc, operation_label = pending[0]
         diff.alert(
@@ -414,26 +415,28 @@ def alert_pending_new(
             f"📥 Submitted: {operation_label}\n"
             f"⏰ Executable at: {format_ts(pc.valid_at)} {format_countdown(pc.valid_at)}\n"
             f"🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}",
-            expected,
+            (_submit_expectation(pc),),
         )
         return
 
     lines = [f"📥 Submitted {len(pending)} operations:"]
     shared_valid_at = len({pc.valid_at for pc, _ in pending}) == 1
     shared_tx = len({pc.tx_hash for pc, _ in pending}) == 1
-    if shared_valid_at and shared_tx:
-        for _, operation_label in pending:
-            lines.append(f"  • {operation_label}")
+    shared_details = shared_valid_at and shared_tx
+    expected = []
+    for pc, operation_label in pending:
+        start = len(lines)
+        lines.extend(f"  • {operation_label}".split("\n"))
+        if not shared_details:
+            lines.append(f"     ⏰ Executable at: {format_ts(pc.valid_at)} {format_countdown(pc.valid_at)}")
+            lines.append(f"     🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}")
+        expected.append(_submit_expectation(pc, range(start, len(lines))))
+    if shared_details:
         pc0 = pending[0][0]
         lines.append(f"⏰ Executable at: {format_ts(pc0.valid_at)} {format_countdown(pc0.valid_at)}")
         lines.append(f"🔗 Tx: {_explorer_link(snapshot.chain, pc0.tx_hash)}")
-    else:
-        for pc, operation_label in pending:
-            lines.append(f"  • {operation_label}")
-            lines.append(f"     ⏰ Executable at: {format_ts(pc.valid_at)} {format_countdown(pc.valid_at)}")
-            lines.append(f"     🔗 Tx: {_explorer_link(snapshot.chain, pc.tx_hash)}")
 
-    diff.alert(AlertSeverity.MEDIUM, "\n".join(lines), expected)
+    diff.alert(AlertSeverity.MEDIUM, "\n".join(lines), tuple(expected))
 
 
 def _alert_pending_resolved(
@@ -478,8 +481,10 @@ def _alert_set_diff(set_name: str, added: set[str], removed: set[str], diff: Vau
     # Sentinel and allocator changes are daily-only, so only adapters are audited.
     expected = ()
     if set_name == "adapters":
-        expected = tuple(LiveExpectation("AddAdapter", {"account": a}) for a in sorted(added)) + tuple(
-            LiveExpectation("RemoveAdapter", {"account": a}) for a in sorted(removed)
+        events = [("AddAdapter", a) for a in sorted(added)] + [("RemoveAdapter", a) for a in sorted(removed)]
+        expected = tuple(
+            LiveExpectation(event, {"account": address}, lines=range(index, index + 1))
+            for index, (event, address) in enumerate(events, start=1)
         )
     diff.alert(AlertSeverity.LOW, f"{icon} {set_name} changed\n" + "\n".join(lines), expected)
 

@@ -310,9 +310,12 @@ the stream's first run, because earlier findings may be about events from before
 Guardian, sentinel, and allocator changes are daily-only by design and are not audited.
 
 **Cutover to production** ([#450](https://github.com/yearn/monitoring/issues/450)): once a
-shadow period has at least one `matched` audit finding, no `divergent` ones, and a
-WebSocket p95 within the 5-second target in `report`, set
-`MORPHO_LIVE_DELIVERY=production` and restart. Live alerts then go to the Morpho channel
+shadow period has no `divergent` audit findings, verify that at least one
+`[morpho-live-shadow]` message actually arrived in the errors chat and agrees
+with the daily alert for the same event. A `matched` verdict alone can also
+mean the live consumer evaluated the event after the daily alert. Once delivery
+and parity are verified and the WebSocket p95 in `report` is within the
+5-second target, set `MORPHO_LIVE_DELIVERY=production` and restart. Live alerts then go to the Morpho channel
 within seconds of the event.
 The daily jobs keep running: both paths take the same per-vault lock in
 `/srv/cache` and share the cache that records what was alerted, so each change is

@@ -252,7 +252,8 @@ def _check_pending_cap(name: str, state: MarketGovernanceState, chain: Chain, di
             f"{current_cap} → {pending_cap}, difference: {difference:.2f}%.\n"
             f"Queued for {queued_for}"
         )
-    diff.alert(AlertSeverity.MEDIUM, body, (LiveExpectation("SubmitCap", {"id": state.market_id}),))
+    expected = LiveExpectation("SubmitCap", {"id": state.market_id, "cap": state.pending_cap})
+    diff.alert(AlertSeverity.MEDIUM, body, (expected,))
     diff.defer(
         write_last_executed_morpho_to_file,
         state.vault_address,
