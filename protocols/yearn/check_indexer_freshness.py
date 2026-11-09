@@ -164,7 +164,7 @@ def fetch_chain_metadata() -> list[dict]:
     if not ENVIO_GRAPHQL_URL:
         raise IndexerUnavailableError(
             "ENVIO_GRAPHQL_URL is not set. Set it to the Envio GraphQL endpoint, "
-            "e.g. export ENVIO_GRAPHQL_URL='https://envio-gql.yearn.dev/v1/graphql'."
+            "e.g. export ENVIO_GRAPHQL_URL='https://indexer.hyperindex.xyz/5a089e4/v1/graphql'."
         )
 
     try:

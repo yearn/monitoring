@@ -272,10 +272,12 @@ WebSocket is down, or one of its chains' indexed head has not advanced for
 
 The `morpho` stream ([#447](https://github.com/yearn/monitoring/issues/447)) observes
 `MorphoGovernanceEvent` in the same process, and its live consumer delivers according
-to `MORPHO_LIVE_DELIVERY` (below). Enable it only after the Envio deployment serves
-the entity and has backfilled all five chains. Always pass `CACHE_DIR=/srv/cache` to
-these commands: without it `report` and `health` open an empty database in the current
-directory and print zeros.
+to `MORPHO_LIVE_DELIVERY` (below). The indexer and vault subscriptions are
+maintained in [yearn/yearn-envio](https://github.com/yearn/yearn-envio).
+The [hosted GraphQL endpoint](https://indexer.hyperindex.xyz/5a089e4/v1/graphql) serves the Morpho entity.
+Before enabling the stream, check that the monitoring host's `ENVIO_GRAPHQL_URL`
+points to a deployment serving the entity on all five chains. Pass
+`CACHE_DIR=/srv/cache` so the commands open the service's inbox.
 
 ```sh
 cd /srv/monitoring
