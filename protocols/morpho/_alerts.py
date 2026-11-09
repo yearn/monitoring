@@ -87,6 +87,19 @@ def due_loss_notice(deadline: int, loss_alerted_at: int, reminded_at: int) -> Lo
     return None
 
 
+@dataclass(frozen=True)
+class LiveExpectation:
+    """The indexed event a daily finding implies, which the live path should have decided.
+
+    ``args`` holds the ABI-named arguments that identify the occurrence. Findings
+    with no expectation (reminders, resolutions, guardian, sentinel, and allocator
+    changes) are daily-only and are not audited.
+    """
+
+    event: str
+    args: dict[str, Any] = field(default_factory=dict)
+
+
 @dataclass
 class VaultAlert:
     """One section of a vault's grouped Telegram message.
@@ -98,6 +111,7 @@ class VaultAlert:
     severity: AlertSeverity
     body: str
     standalone: bool = False
+    expected: tuple[LiveExpectation, ...] = ()
 
 
 @dataclass
@@ -107,13 +121,13 @@ class VaultDiff:
     alerts: List[VaultAlert] = field(default_factory=list)
     writes: List[Callable[[], None]] = field(default_factory=list)
 
-    def alert(self, severity: AlertSeverity, body: str) -> None:
+    def alert(self, severity: AlertSeverity, body: str, expected: tuple[LiveExpectation, ...] = ()) -> None:
         """Buffer one section of the vault's grouped message."""
-        self.alerts.append(VaultAlert(severity, body))
+        self.alerts.append(VaultAlert(severity, body, expected=expected))
 
-    def loss(self, body: str) -> None:
+    def loss(self, body: str, expected: tuple[LiveExpectation, ...] = ()) -> None:
         """Buffer a HIGH potential-loss finding, sent as its own message."""
-        self.alerts.append(VaultAlert(AlertSeverity.HIGH, body, standalone=True))
+        self.alerts.append(VaultAlert(AlertSeverity.HIGH, body, standalone=True, expected=expected))
 
     def defer(self, write: Callable[..., Any], *args: Any) -> None:
         """Buffer a cache write to apply once the alert is delivered."""
@@ -125,21 +139,34 @@ class VaultDiff:
             write()
 
 
+def _wrap_line(line: str, budget: int) -> List[str]:
+    """Break one line longer than ``budget``, at a space when one falls in its second half."""
+    pieces: List[str] = []
+    while len(line) > budget:
+        cut = line.rfind(" ", budget // 2, budget)
+        if cut <= 0:
+            cut = budget
+        pieces.append(line[:cut])
+        line = line[cut:].lstrip(" ")
+    pieces.append(line)
+    return pieces
+
+
 def split_body(body: str, budget: int) -> List[str]:
-    """Split one oversized section on line boundaries so nothing is truncated.
+    """Split one oversized section so nothing is truncated.
 
     A single section can exceed the budget on its own — a batched multicall
     submit renders one bullet per operation, and 30 of them do not fit. Splitting
-    between lines keeps every operation intact; only a single line longer than
-    the whole budget (which no rendered line comes close to) would still be cut
-    by Telegram.
+    between lines keeps every operation intact; a single line longer than the
+    whole budget is wrapped, because Telegram would otherwise cut its tail while
+    the send still counts as delivered.
     """
     if len(body) <= budget:
         return [body]
     chunks: List[str] = []
     current: List[str] = []
     size = 0
-    for line in body.split("\n"):
+    for line in (piece for raw in body.split("\n") for piece in _wrap_line(raw, budget)):
         cost = len(line) + 1
         if current and size + cost > budget:
             chunks.append("\n".join(current))

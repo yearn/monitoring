@@ -4,7 +4,7 @@ from typing import Any
 
 from web3 import Web3
 
-from protocols.morpho._alerts import VaultDiff, due_loss_notice, governance_lock, send_vault_alerts
+from protocols.morpho._alerts import LiveExpectation, VaultDiff, due_loss_notice, governance_lock, send_vault_alerts
 from protocols.morpho._shared import (
     MORPHO_BLUE_ABI_PATH,
     PROTOCOL,
@@ -20,6 +20,7 @@ from protocols.morpho._shared import (
     to_assets_down,
 )
 from protocols.morpho.config import VAULTS_V1_BY_CHAIN
+from protocols.morpho.live_audit import record_daily_findings
 from utils.abi import load_abi
 from utils.alert import AlertSeverity
 from utils.cache import (
@@ -251,7 +252,7 @@ def _check_pending_cap(name: str, state: MarketGovernanceState, chain: Chain, di
             f"{current_cap} → {pending_cap}, difference: {difference:.2f}%.\n"
             f"Queued for {queued_for}"
         )
-    diff.alert(AlertSeverity.MEDIUM, body)
+    diff.alert(AlertSeverity.MEDIUM, body, (LiveExpectation("SubmitCap", {"id": state.market_id}),))
     diff.defer(
         write_last_executed_morpho_to_file,
         state.vault_address,
@@ -300,8 +301,10 @@ def _check_market_removal(state: MarketGovernanceState, chain: Chain, diff: Vaul
         REMOVABLE_AT_TYPE,
     )
     seen = state.removable_at <= last_timestamp
+    # An already-seen removal that escalates or reminds has no new event behind it.
+    expected = () if seen else (LiveExpectation("SubmitMarketRemoval", {"id": state.market_id}),)
     if state.supply_shares > 0:
-        _check_removal_loss(state, chain, diff)
+        _check_removal_loss(state, chain, diff, expected)
     elif not seen:
         market_url = get_market_url(state.market_id, chain)
         market_name, _ = fetch_market_info(state.market_id, chain)
@@ -309,6 +312,7 @@ def _check_market_removal(state: MarketGovernanceState, chain: Chain, diff: Vaul
             AlertSeverity.MEDIUM,
             f"➖ Queued to remove market [{market_name}]({market_url}) at {format_ts(state.removable_at)} "
             "(no vault supply in the market)",
+            expected,
         )
     else:
         logger.info(
@@ -326,7 +330,12 @@ def _check_market_removal(state: MarketGovernanceState, chain: Chain, diff: Vaul
         )
 
 
-def _check_removal_loss(state: MarketGovernanceState, chain: Chain, diff: VaultDiff) -> None:
+def _check_removal_loss(
+    state: MarketGovernanceState,
+    chain: Chain,
+    diff: VaultDiff,
+    expected: tuple[LiveExpectation, ...] = (),
+) -> None:
     """Alert once on a queued removal of a supplied market, then once more near ``removableAt``."""
     vault, market = state.vault_address, state.market_id
     notice = due_loss_notice(
@@ -336,7 +345,7 @@ def _check_removal_loss(state: MarketGovernanceState, chain: Chain, diff: VaultD
     )
     if notice is None:
         return
-    diff.loss(_removal_loss_body(state, chain, reminder=notice.reminder))
+    diff.loss(_removal_loss_body(state, chain, reminder=notice.reminder), expected)
     diff.defer(write_last_executed_morpho_to_file, vault, market, REMOVAL_LOSS_TYPE, state.removable_at)
     if notice.in_window:
         diff.defer(write_last_executed_morpho_to_file, vault, market, REMOVAL_REMINDER_TYPE, state.removable_at)
@@ -369,11 +378,12 @@ def check_pending_role_change(
     timestamp: int,
     diff: VaultDiff,
     message: str | None = None,
+    expected: tuple[LiveExpectation, ...] = (),
 ) -> None:
     """Alert HIGH once per pending ``role_type`` change, keyed by its ``validAt`` timestamp."""
     market_id = ""  # use empty string for all markets because the value is used per vault
     if timestamp > get_last_executed_morpho_from_file(morpho_contract.address, market_id, role_type):
-        diff.alert(AlertSeverity.HIGH, message or f"🚨 {role_type.capitalize()} is changing")
+        diff.alert(AlertSeverity.HIGH, message or f"🚨 {role_type.capitalize()} is changing", expected)
         diff.defer(write_last_executed_morpho_to_file, morpho_contract.address, market_id, role_type, timestamp)
 
 
@@ -407,7 +417,8 @@ def check_timelock_and_guardian(
     timelock_message = None
     if timelock_valid_at > 0:
         timelock_message = format_timelock_decrease(current_timelock, pending_timelock_value, timelock_valid_at)
-    check_pending_role_change(morpho_contract, "timelock", timelock_valid_at, diff, timelock_message)
+    timelock_event = (LiveExpectation("SubmitTimelock", {"newTimelock": pending_timelock_value}),)
+    check_pending_role_change(morpho_contract, "timelock", timelock_valid_at, diff, timelock_message, timelock_event)
     check_pending_role_change(morpho_contract, "guardian", guardian_valid_at, diff)
 
 
@@ -437,6 +448,7 @@ def get_data_for_chain(chain: Chain) -> None:
             check_timelock_and_guardian(morpho_contract, client, diff, block_number)
             send_vault_alerts(vault_header(vault.name, vault.address, chain), diff.alerts, PROTOCOL)
             diff.commit()
+            record_daily_findings(chain, vault.address, diff.alerts, block_number)
 
 
 def main() -> None:

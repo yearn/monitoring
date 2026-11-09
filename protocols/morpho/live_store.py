@@ -15,6 +15,8 @@ ingestion:
   request keeps the revisions of the events it came from: a pending request whose
   events were removed or rewritten by a reorg is ``invalidated`` instead of sent
   (the rewritten event is evaluated again and makes its own request).
+- ``morpho_live_corrections``: production alerts already sent whose source event
+  a reorg then removed, once their correction has gone out.
 """
 
 import json
@@ -34,6 +36,11 @@ STATUS_OBSERVED = "observed"
 STATUS_PENDING = "pending"
 STATUS_SENT = "sent"
 STATUS_INVALIDATED = "invalidated"
+
+MODE_PRODUCTION = "production"
+
+# Inbox status key: when the consumer first ran on this inbox. Older blocks are history.
+BASELINE_STATUS_KEY = "live_baseline_at"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS morpho_live_decisions (
@@ -68,6 +75,12 @@ CREATE TABLE IF NOT EXISTS morpho_live_alerts (
     sent_at       REAL
 );
 CREATE INDEX IF NOT EXISTS idx_morpho_live_alerts_status ON morpho_live_alerts(status, id);
+
+-- production alerts whose source event a reorg removed, once the correction went out
+CREATE TABLE IF NOT EXISTS morpho_live_corrections (
+    alert_id INTEGER PRIMARY KEY,
+    sent_at  REAL NOT NULL
+);
 """
 
 
@@ -171,6 +184,7 @@ class LiveStore:
         mode: str,
         status: str,
         now: float,
+        sent_at: float | None = None,
     ) -> list[int]:
         """Store one vault batch's decisions and its alert requests in one transaction.
 
@@ -178,8 +192,9 @@ class LiveStore:
             decisions: Outcome per event of the batch.
             messages: ``(severity, message)`` pairs to request, in send order.
             mode: Delivery mode the requests were made under.
-            status: ``STATUS_OBSERVED`` or ``STATUS_PENDING``.
+            status: ``STATUS_OBSERVED``, ``STATUS_PENDING``, or ``STATUS_SENT``.
             now: Decision time (unix seconds).
+            sent_at: When Telegram accepted the messages, if they were sent already.
 
         Returns:
             The new alert request ids.
@@ -197,10 +212,10 @@ class LiveStore:
                         """
                         INSERT INTO morpho_live_alerts (
                             chain_id, vault_address, mode, severity, message, event_ids, event_revisions,
-                            created_at, status
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            created_at, status, sent_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (chain_id, vault, mode, severity, message, alerted_ids, revisions, now, status),
+                        (chain_id, vault, mode, severity, message, alerted_ids, revisions, now, status, sent_at),
                     )
                     alert_ids.append(int(cursor.lastrowid or 0))
             for decision in decisions:
@@ -276,6 +291,48 @@ class LiveStore:
             if row is None or row["status"] != "active" or row["revision"] != revision:
                 return False
         return True
+
+    def reorged_production_alerts(self, since: float, limit: int = 50) -> list[AlertRequest]:
+        """Return sent production alerts created since ``since`` whose source event was removed, uncorrected."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.* FROM morpho_live_alerts a
+                LEFT JOIN morpho_live_corrections c ON c.alert_id = a.id
+                WHERE a.mode = ? AND a.status = ? AND a.created_at >= ? AND c.alert_id IS NULL
+                ORDER BY a.id
+                """,
+                (MODE_PRODUCTION, STATUS_SENT, since),
+            ).fetchall()
+            reorged = []
+            for row in rows:
+                placeholders = ",".join("?" for _ in json.loads(row["event_ids"]))
+                removed = conn.execute(
+                    f"SELECT 1 FROM {self._events} WHERE status = 'removed' AND event_id IN ({placeholders}) LIMIT 1",
+                    json.loads(row["event_ids"]),
+                ).fetchone()
+                if removed is not None:
+                    reorged.append(row)
+        return [
+            AlertRequest(
+                id=row["id"],
+                chain_id=row["chain_id"],
+                vault_address=row["vault_address"],
+                mode=row["mode"],
+                severity=row["severity"],
+                message=row["message"],
+                event_ids=json.loads(row["event_ids"]),
+                attempts=row["attempts"],
+            )
+            for row in reorged[:limit]
+        ]
+
+    def mark_corrected(self, alert_id: int, now: float) -> None:
+        """Record that a reorged production alert's correction went out."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO morpho_live_corrections (alert_id, sent_at) VALUES (?, ?)", (alert_id, now)
+            )
 
     def mark_sent(self, alert_id: int, now: float) -> None:
         """Record a delivered request."""

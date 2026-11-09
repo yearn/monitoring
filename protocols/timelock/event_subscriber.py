@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Continuous event subscriber (observation pilot) for named Envio event streams.
+"""Continuous event subscriber for named Envio event streams.
 
 Runs alongside the scheduled monitors and never replaces them: for each selected
 stream (``timelock``: ``TimelockEvent``; ``morpho``: ``MorphoGovernanceEvent``) it
 observes the entity over an Envio WebSocket subscription and bounded HTTP
-reconciliation, records provenance and timing in the stream's own SQLite inbox,
-and sends no alerts. With ``--notify errors`` it posts diagnostic notices to the
-internal errors chat. See ``protocols/timelock/README.md``.
+reconciliation and records provenance and timing in the stream's own SQLite inbox.
+The timelock stream sends no alerts; the Morpho stream's live consumer delivers
+according to ``MORPHO_LIVE_DELIVERY``. With ``--notify errors`` it posts diagnostic
+notices to the internal errors chat. See ``protocols/timelock/README.md``.
 
 The script lives here because the timelock pilot came first and its systemd unit
 runs this path; every stream shares the process, the HTTP session, and the
@@ -34,6 +35,7 @@ from dotenv import load_dotenv
 # Before anything imports utils.cache: live Morpho checks must use the daily jobs' cache namespace.
 from protocols.morpho.daily_governance_cache import check_daily_governance_cache  # isort: skip
 from protocols.morpho.governance_stream import MORPHO_GOVERNANCE_STREAM, morpho_governance_scope
+from protocols.morpho.live_audit import AuditStore, audit_health, audit_summary
 from protocols.morpho.live_governance import DELIVERY_MODES, MODE_SHADOW, build_consumer, live_health, live_summary
 from protocols.morpho.live_store import LiveStore
 from protocols.timelock.event_stream import TIMELOCK_STREAM, timelock_scope
@@ -169,7 +171,9 @@ def cmd_report(args: argparse.Namespace) -> None:
         return
     sections = [format_report(r) for r in reports.values()]
     if MORPHO_GOVERNANCE_STREAM.name in reports:
-        sections.append(live_summary(LiveStore(EventInbox(MORPHO_GOVERNANCE_STREAM)), args.hours, time.time()))
+        store = AuditStore(EventInbox(MORPHO_GOVERNANCE_STREAM))
+        sections.append(live_summary(store, args.hours, time.time()))
+        sections.append(audit_summary(store, args.hours, time.time()))
     print("\n\n".join(sections))
 
 
@@ -201,6 +205,7 @@ def cmd_health(args: argparse.Namespace) -> None:
         stream_problems = heartbeat_problems(status, now)
         if stream is MORPHO_GOVERNANCE_STREAM:
             stream_problems += live_health(LiveStore(inbox), now)
+            stream_problems += audit_health(AuditStore(inbox), now)
         problems += [f"{stream.name}: {problem}" for problem in stream_problems]
         streams[stream.name] = {"problems": stream_problems, "heartbeat": status.get("heartbeat", (None, 0.0))[0]}
     print(json.dumps({"ok": not problems, "problems": problems, "streams": streams}, indent=2))

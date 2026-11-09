@@ -27,10 +27,14 @@ and stores the decision and the alert requests durably (``live_store``):
   each change is alerted once by whichever path sees it first. A failed send
   commits nothing and leaves the events undecided: they are re-evaluated and
   re-sent on retry (a duplicate beats a missed alert, as in the daily jobs).
-  Enable it only after shadow mode matched the daily alerts (#450).
+  Enable it only after shadow mode matched the daily alerts (#450). If a reorg
+  later removes an event behind a sent alert, one LOW correction follows it.
+- **Audit** (#449): a separate loop settles the daily jobs' findings against these
+  decisions (``live_audit``) and reports divergences to the internal errors chat.
 """
 
 import asyncio
+import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -38,6 +42,7 @@ from dataclasses import dataclass
 from protocols.morpho._alerts import governance_lock, render_vault_alerts, split_body
 from protocols.morpho._shared import PROTOCOL
 from protocols.morpho.config import VaultConfig
+from protocols.morpho.live_audit import AuditStore, notify_divergences, resolve_findings
 from protocols.morpho.live_rules import (
     REASON_ALERTED,
     GovernanceEvent,
@@ -48,6 +53,8 @@ from protocols.morpho.live_rules import (
     vault_config,
 )
 from protocols.morpho.live_store import (
+    BASELINE_STATUS_KEY,
+    MODE_PRODUCTION,
     OUTCOME_ALERTED,
     OUTCOME_HISTORICAL,
     OUTCOME_NO_ALERT,
@@ -70,11 +77,11 @@ logger = get_logger("morpho.live_governance")
 
 MODE_OBSERVE = "observe"
 MODE_SHADOW = "shadow"
-MODE_PRODUCTION = "production"
 DELIVERY_MODES = (MODE_OBSERVE, MODE_SHADOW, MODE_PRODUCTION)
 
-# Inbox status key: when the consumer first ran on this inbox. Older blocks are history.
-BASELINE_STATUS_KEY = "live_baseline_at"
+# Reorgs surface within reconciliation's overlap; older alerts are not worth rechecking.
+CORRECTION_WINDOW_SECONDS = 24 * 60 * 60
+
 SHADOW_LABEL = "morpho-live-shadow"
 # Alert-history key: internal-only, so shadow messages stay off the public Morpho page.
 SHADOW_ALERT_PROTOCOL = "yearn-internal"
@@ -143,6 +150,38 @@ def send_shadow(request: AlertRequest) -> None:
             raise NotDelivered("errors chat skipped the shadow message (missing Telegram credentials?)")
 
 
+def send_audit_notice(text: str) -> None:
+    """Post one audit divergence to the internal errors chat; only logged when none is configured.
+
+    Raises:
+        NotDelivered: Telegram skipped it, so the divergence stays unnotified and is retried.
+    """
+    if not error_channel_configured():
+        return
+    delivered = send_telegram_message(
+        text,
+        ERROR_CHANNEL,
+        True,
+        plain_text=True,
+        source="morpho_live_audit",
+        origin_protocol=SHADOW_ALERT_PROTOCOL,
+        channel=ERROR_CHANNEL,
+    )
+    if not delivered:
+        raise NotDelivered("errors chat skipped the audit notice (missing Telegram credentials?)")
+
+
+def correction_text(request: AlertRequest) -> str:
+    """Return the follow-up for a production alert whose source event a reorg removed."""
+    header = request.message.split("\n", 1)[0]
+    return (
+        f"⚠️ Correction to: {header}\n\n"
+        "A chain reorg removed the event behind this alert, so the change may not have happened. "
+        "If it was included again it is still pending; the next daily check re-reads the vault's state.\n"
+        f"Events: {', '.join(request.event_ids)}"
+    )
+
+
 def publish_to_morpho(severity: AlertSeverity, message: str) -> None:
     """Send one rendered message to the Morpho channel, as ``send_vault_alerts`` does.
 
@@ -165,6 +204,8 @@ class LiveConfig:
     retry_max: float = 300.0
     delivery_interval: float = 1.0
     batch_limit: int = 500
+    correction_interval: float = 60.0
+    audit_interval: float = 300.0
 
 
 class LiveGovernanceConsumer:
@@ -178,6 +219,8 @@ class LiveGovernanceConsumer:
         send: SendFn = send_shadow,
         now: Callable[[], float] = time.time,
         publish: PublishFn = publish_to_morpho,
+        audit: AuditStore | None = None,
+        notify_audit: Callable[[str], None] = send_audit_notice,
     ) -> None:
         if config.mode not in DELIVERY_MODES:
             raise ValueError(f"delivery mode must be one of {DELIVERY_MODES}, got {config.mode!r}")
@@ -186,6 +229,8 @@ class LiveGovernanceConsumer:
         self.evaluate = evaluate
         self.send = send
         self.publish = publish
+        self.audit = audit
+        self.notify_audit = notify_audit
         self.now = now
         self.baseline: float | None = None
         self._wake = asyncio.Event()
@@ -208,12 +253,44 @@ class LiveGovernanceConsumer:
         return self.baseline
 
     async def run(self) -> None:
-        """Run the evaluation loop, and the delivery loop in shadow mode, until cancelled."""
+        """Run the evaluation loop and the loops its mode needs until cancelled."""
         await asyncio.to_thread(self.load_baseline)
         loops = [self._evaluation_loop()]
         if self.config.mode == MODE_SHADOW:
             loops.append(self._delivery_loop())
+        if self.config.mode == MODE_PRODUCTION:
+            loops.append(
+                self._periodic("reorg correction", self.correct_reorged_alerts, self.config.correction_interval)
+            )
+        if self.audit is not None:
+            loops.append(self._periodic("audit", self.audit_once, self.config.audit_interval))
         await asyncio.gather(*loops)
+
+    async def _periodic(self, name: str, step: Callable[[], int], interval: float) -> None:
+        """Run ``step`` every ``interval`` seconds; a failure is logged and retried next time."""
+        while True:
+            try:
+                await asyncio.to_thread(step)
+            except Exception:  # noqa: BLE001 - a failing side loop must not end the consumer
+                logger.exception("live governance %s pass failed", name)
+            await asyncio.sleep(interval)
+
+    def correct_reorged_alerts(self) -> int:
+        """Send one LOW correction per sent production alert whose source event a reorg removed."""
+        now = self.now()
+        requests = self.store.reorged_production_alerts(now - CORRECTION_WINDOW_SECONDS)
+        for request in requests:
+            self.publish(AlertSeverity.LOW, correction_text(request))
+            self.store.mark_corrected(request.id, self.now())
+        return len(requests)
+
+    def audit_once(self) -> int:
+        """Settle what the audit can and report new divergences; return how many were settled."""
+        if self.audit is None:
+            return 0
+        settled = resolve_findings(self.audit, self.now())
+        notify_divergences(self.audit, self.notify_audit, self.now())
+        return settled
 
     async def _evaluation_loop(self) -> None:
         """Evaluate pending events whenever woken, or every ``poll_interval``."""
@@ -283,18 +360,23 @@ class LiveGovernanceConsumer:
             self._record(events, OUTCOME_NO_ALERT, "vault not in config.py")
             return len(events)
         governance_events = [GovernanceEvent.from_payload(e.payload) for e in events]
+        sent_at = None
         if self.config.mode == MODE_PRODUCTION:
             # Same contract as the daily jobs: check, send, then record as alerted, all
             # under the lock they take too, so one change is alerted once.
             with governance_lock(vault.address):
                 evaluation = self.evaluate(chain, vault, first.version, governance_events)
                 rendered = render_vault_alerts(evaluation.header, evaluation.alerts)
+                decided_at = self.now()  # before sending, so Telegram's time is reported on its own
                 for severity, text in rendered:
                     self.publish(severity, text)  # raises on failure: nothing is committed or recorded
                 evaluation.commit()
+                if rendered:
+                    sent_at = self.now()
         else:
             evaluation = self.evaluate(chain, vault, first.version, governance_events)
             rendered = render_vault_alerts(evaluation.header, evaluation.alerts)
+            decided_at = self.now()
         messages = [(severity.value, text) for severity, text in rendered]
         decisions = []
         for event in events:
@@ -302,7 +384,7 @@ class LiveGovernanceConsumer:
             outcome = OUTCOME_ALERTED if reason == REASON_ALERTED and messages else OUTCOME_NO_ALERT
             decisions.append(Decision(event, outcome, reason))
         status = {MODE_SHADOW: STATUS_PENDING, MODE_PRODUCTION: STATUS_SENT}.get(self.config.mode, STATUS_OBSERVED)
-        alert_ids = self.store.record(decisions, messages, self.config.mode, status, self.now())
+        alert_ids = self.store.record(decisions, messages, self.config.mode, status, decided_at, sent_at)
         for severity, text in messages:
             logger.info("live %s %s alert for %s: %s", self.config.mode, severity, vault.name, text.split("\n", 1)[0])
         if alert_ids:
@@ -332,7 +414,7 @@ def build_consumer(store: LiveStore, mode: str) -> LiveGovernanceConsumer:
     if mode == MODE_SHADOW and not error_channel_configured():
         logger.warning("MORPHO_LIVE_DELIVERY=shadow but no errors chat is configured; observing only")
         mode = MODE_OBSERVE
-    return LiveGovernanceConsumer(store, LiveConfig(mode=mode))
+    return LiveGovernanceConsumer(store, LiveConfig(mode=mode), audit=AuditStore(store.inbox))
 
 
 # Undecided events or undelivered shadow alerts older than this make `health` fail.
@@ -353,25 +435,36 @@ def live_health(store: LiveStore, now: float) -> list[str]:
     return problems
 
 
+def _delay_stats(delays: list[float]) -> str:
+    """Return ``delays`` (seconds) as a p50/p95 summary."""
+    if not delays:
+        return "n/a"
+    ordered = sorted(delays)
+    p95 = ordered[max(0, -(-len(ordered) * 95 // 100) - 1)]
+    return f"p50 {ordered[len(ordered) // 2]:.1f}s, p95 {p95:.1f}s"
+
+
 def live_summary(store: LiveStore, hours: float, now: float) -> str:
-    """Summarize the consumer's decisions and alert requests over the last ``hours``."""
+    """Summarize the consumer's decisions, alert requests, and delivery delays over the last ``hours``."""
     since = now - hours * 3600
     decisions = store.decisions_since(since)
     alerts = store.alerts_since(since)
     by_outcome: dict[str, int] = {}
     for row in decisions:
         by_outcome[row["outcome"]] = by_outcome.get(row["outcome"], 0) + 1
-    delays = sorted(
-        row["decided_at"] - row["block_timestamp"] for row in decisions if row["outcome"] != OUTCOME_HISTORICAL
-    )
+    delays = [row["decided_at"] - row["block_timestamp"] for row in decisions if row["outcome"] != OUTCOME_HISTORICAL]
     by_status: dict[str, int] = {}
     for row in alerts:
         by_status[row["status"]] = by_status.get(row["status"], 0) + 1
-    p95 = delays[max(0, -(-len(delays) * 95 // 100) - 1)] if delays else None
+    event_blocks = {row["event_id"]: row["block_timestamp"] for row in decisions}
+    sent = [(row, [event_blocks[e] for e in json.loads(row["event_ids"]) if e in event_blocks]) for row in alerts]
+    sent = [(row, blocks) for row, blocks in sent if row["sent_at"] is not None]
     lines = [
         f"Live governance decisions, last {hours:g}h",
         f"  decisions: {len(decisions)} {dict(sorted(by_outcome.items()))}",
-        "  block → decision: " + ("n/a" if p95 is None else f"p50 {delays[len(delays) // 2]:.1f}s, p95 {p95:.1f}s"),
+        f"  block → decision: {_delay_stats(delays)}",
+        f"  decision → Telegram: {_delay_stats([row['sent_at'] - row['created_at'] for row, _ in sent])}",
+        f"  block → Telegram: {_delay_stats([row['sent_at'] - min(blocks) for row, blocks in sent if blocks])}",
         f"  alert requests: {len(alerts)} {dict(sorted(by_status.items()))}",
     ]
     for row in alerts[-10:]:
