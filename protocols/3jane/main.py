@@ -47,6 +47,7 @@ from utils.cache import (
     write_last_value_with_timestamp_to_file,
 )
 from utils.chains import Chain
+from utils.drawdown import peak_drawdown_dispatch_eligible
 from utils.formatting import format_age, format_duration, format_usd, format_with_suffix
 from utils.logger import get_logger
 from utils.telegram import escape_markdown
@@ -87,12 +88,12 @@ CACHE_KEY_USD3_TVL = "3JANE_USD3_TVL"
 CACHE_KEY_SUSD3_TVL = "3JANE_SUSD3_TVL"
 CACHE_KEY_SHUTDOWN_USD3 = "3JANE_SHUTDOWN_USD3"
 CACHE_KEY_SHUTDOWN_SUSD3 = "3JANE_SHUTDOWN_SUSD3"
-# A PPS drawdown smaller than this (percent) still alerts but does not trigger
+# A PPS drawdown smaller than this (basis points) still alerts but does not trigger
 # the emergency withdrawal dispatch: float PPS and share-rounding noise can
 # produce tiny decreases that are not losses. The drawdown is measured from the
 # peak PPS since the last dispatch-eligible alert, so a loss spread over many
 # small steps still dispatches once it adds up.
-PPS_DISPATCH_MIN_DECREASE_PCT = 0.01
+PPS_DISPATCH_MIN_DECREASE_BPS = 1
 CACHE_KEY_USD3_PPS_PEAK = "3JANE_USD3_PPS_PEAK"
 CACHE_KEY_SUSD3_PPS_PEAK = "3JANE_SUSD3_PPS_PEAK"
 
@@ -580,17 +581,15 @@ def _pps_dispatch_eligible(peak_key: str, previous_pps: float, current_pps: floa
         current_pps: PPS from this run.
 
     Returns:
-        True when the drawdown from the peak reaches ``PPS_DISPATCH_MIN_DECREASE_PCT``.
+        True when the drawdown from the peak reaches ``PPS_DISPATCH_MIN_DECREASE_BPS``.
     """
-    stored_peak = get_cache_value(peak_key)
-    peak = max(stored_peak, previous_pps)
-    drawdown_pct = (peak - current_pps) / peak * 100 if peak > 0 else 0.0
-    eligible = current_pps < previous_pps and drawdown_pct >= PPS_DISPATCH_MIN_DECREASE_PCT
-    # After a dispatch-eligible alert the next leg is measured from the new level.
-    new_peak = current_pps if eligible else max(peak, current_pps)
-    if new_peak != stored_peak:
-        set_cache_value(peak_key, new_peak)
-    return eligible
+    return peak_drawdown_dispatch_eligible(
+        previous_pps,
+        current_pps,
+        PPS_DISPATCH_MIN_DECREASE_BPS,
+        read_peak=lambda: get_cache_value(peak_key),
+        write_peak=lambda peak: set_cache_value(peak_key, peak),
+    )
 
 
 def check_pps(usd3_pps_float: float, susd3_pps_float: float) -> None:

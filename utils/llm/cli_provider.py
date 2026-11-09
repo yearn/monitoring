@@ -17,7 +17,6 @@ credit errors) raises ``LLMUnavailableError`` so the fallback chain moves on.
 
 import json
 import os
-import signal
 import subprocess
 import tempfile
 from pathlib import Path
@@ -25,6 +24,7 @@ from typing import Any
 
 from utils.llm.base import LLMError, LLMProvider, LLMUnavailableError
 from utils.logger import get_logger
+from utils.process_groups import kill_process_group, register_process_group, unregister_process_group
 
 logger = get_logger("utils.llm.cli_provider")
 
@@ -129,14 +129,6 @@ def _tail(text: str) -> str:
     return text.strip()[-_ERROR_SNIPPET_CHARS:]
 
 
-def _kill_process_group(pgid: int) -> None:
-    """SIGKILL every process in ``pgid``; a group that's already gone is fine."""
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-
-
 def _run_cli(
     label: str, args: list[str], prompt: str, cwd: Path, timeout: int, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -171,15 +163,18 @@ def _run_cli(
             raise LLMUnavailableError(f"{label}: binary not found ({args[0]})") from e
         except OSError as e:
             raise LLMUnavailableError(f"{label}: failed to start: {e}") from e
+        # The group is outside the script's own, so a terminating script must kill it explicitly.
+        register_process_group(proc.pid)
         try:
             proc.communicate(input=prompt, timeout=timeout)
         except subprocess.TimeoutExpired as e:
-            _kill_process_group(proc.pid)
+            kill_process_group(proc.pid)
             proc.wait()
             raise LLMUnavailableError(f"{label}: timed out after {timeout}s") from e
         finally:
             # Leftover agent-spawned processes; also covers the timeout path's raise.
-            _kill_process_group(proc.pid)
+            kill_process_group(proc.pid)
+            unregister_process_group(proc.pid)
         out.seek(0)
         err.seek(0)
         result = subprocess.CompletedProcess(args, proc.returncode, out.read(), err.read())

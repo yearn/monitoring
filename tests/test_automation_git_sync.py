@@ -36,7 +36,7 @@ class TestSyncToRemoteMain(unittest.TestCase):
             repo = Path(d)
             (repo / ".git").mkdir()
 
-            with patch("automation.git_sync._run", side_effect=[_Result(), _Result()]) as mock_run:
+            with patch("automation.git_sync.run_with_graceful_timeout", side_effect=[_Result(), _Result()]) as mock_run:
                 result = sync_to_remote_main(repo)
 
         self.assertTrue(result.ok)
@@ -53,7 +53,9 @@ class TestSyncToRemoteMain(unittest.TestCase):
             repo = Path(d)
             (repo / ".git").mkdir()
 
-            with patch("automation.git_sync._run", return_value=_Result(1, stderr="network down")) as mock_run:
+            with patch(
+                "automation.git_sync.run_with_graceful_timeout", return_value=_Result(1, stderr="network down")
+            ) as mock_run:
                 result = sync_to_remote_main(repo)
 
         self.assertFalse(result.ok)
@@ -66,7 +68,7 @@ class TestSyncToRemoteMain(unittest.TestCase):
             (repo / ".git").mkdir()
 
             with patch(
-                "automation.git_sync._run",
+                "automation.git_sync.run_with_graceful_timeout",
                 side_effect=[_Result(), _Result(128, stderr="cannot lock ref")],
             ):
                 result = sync_to_remote_main(repo)
@@ -82,7 +84,7 @@ class TestSyncToRemoteMain(unittest.TestCase):
             (repo / ".git").mkdir()
             hung = subprocess.TimeoutExpired(["git", "fetch"], GIT_FETCH_TIMEOUT_SECONDS)
 
-            with patch("automation.git_sync._run", side_effect=hung) as mock_run:
+            with patch("automation.git_sync.run_with_graceful_timeout", side_effect=hung) as mock_run:
                 result = sync_to_remote_main(repo)
 
         self.assertFalse(result.ok)
@@ -95,7 +97,7 @@ class TestGracefulTimeout(unittest.TestCase):
         import subprocess
         import sys
 
-        from automation.git_sync import _run
+        from automation.process import run_with_graceful_timeout
 
         with TemporaryDirectory() as d:
             marker = Path(d) / "terminated"
@@ -106,14 +108,14 @@ class TestGracefulTimeout(unittest.TestCase):
                 "time.sleep(30)\n"
             )
             with self.assertRaises(subprocess.TimeoutExpired):
-                _run([sys.executable, "-c", script], timeout=3)
+                run_with_graceful_timeout([sys.executable, "-c", script], timeout=3)
 
             self.assertTrue(marker.exists())
 
     def test_timeout_stops_descendants_holding_the_pipes(self):
         import subprocess
 
-        from automation.git_sync import _run
+        from automation.process import run_with_graceful_timeout
 
         with TemporaryDirectory() as d:
             pid_file = Path(d) / "child.pid"
@@ -122,10 +124,10 @@ class TestGracefulTimeout(unittest.TestCase):
             script = f"sh -c 'trap \"\" TERM; echo $$ > {pid_file}; exec sleep 30' & wait"
             start = time.monotonic()
             with (
-                patch("automation.git_sync.TERMINATE_GRACE_SECONDS", 0.5),
+                patch("automation.process.TERMINATE_GRACE_SECONDS", 0.5),
                 self.assertRaises(subprocess.TimeoutExpired),
             ):
-                _run(["sh", "-c", script], timeout=0.5)
+                run_with_graceful_timeout(["sh", "-c", script], timeout=0.5)
 
             self.assertLess(time.monotonic() - start, 5)
             child_pid = int(pid_file.read_text())
@@ -137,6 +139,19 @@ class TestGracefulTimeout(unittest.TestCase):
                 time.sleep(0.05)
             else:
                 self.fail("descendant survived the timeout")
+
+    def test_timeout_carries_the_captured_output(self):
+        import subprocess
+        import sys
+
+        from automation.process import run_with_graceful_timeout
+
+        script = "import sys, time\nprint('partial', flush=True)\nprint('stuck', file=sys.stderr, flush=True)\ntime.sleep(30)"
+        with self.assertRaises(subprocess.TimeoutExpired) as raised:
+            run_with_graceful_timeout([sys.executable, "-c", script], timeout=2)
+
+        self.assertIn("partial", str(raised.exception.stdout))
+        self.assertIn("stuck", str(raised.exception.stderr))
 
     def test_stale_lock_is_removed_and_fresh_lock_kept(self):
         with TemporaryDirectory() as d:
@@ -152,7 +167,7 @@ class TestGracefulTimeout(unittest.TestCase):
             os.utime(stale, (old, old))
             os.utime(stale_ref, (old, old))
 
-            with patch("automation.git_sync._run", side_effect=[_Result(), _Result()]):
+            with patch("automation.git_sync.run_with_graceful_timeout", side_effect=[_Result(), _Result()]):
                 result = sync_to_remote_main(repo)
 
             self.assertTrue(result.ok)
@@ -165,7 +180,9 @@ class TestSyncDependencies(unittest.TestCase):
     def test_runs_frozen_uv_sync_in_repo(self):
         with (
             patch.dict(os.environ, {"CACHE_DIR": "/srv/cache", "VIRTUAL_ENV": "/elsewhere"}, clear=True),
-            patch("automation.git_sync._run", return_value=_Result(stderr="Checked 64 packages")) as mock_run,
+            patch(
+                "automation.git_sync.run_with_graceful_timeout", return_value=_Result(stderr="Checked 64 packages")
+            ) as mock_run,
         ):
             result = sync_dependencies(Path("/srv/repo"))
 
@@ -182,14 +199,16 @@ class TestSyncDependencies(unittest.TestCase):
     def test_respects_operator_uv_cache_dir(self):
         with (
             patch.dict(os.environ, {"CACHE_DIR": "/srv/cache", "UV_CACHE_DIR": "/custom"}, clear=True),
-            patch("automation.git_sync._run", return_value=_Result()) as mock_run,
+            patch("automation.git_sync.run_with_graceful_timeout", return_value=_Result()) as mock_run,
         ):
             sync_dependencies(Path("/srv/repo"))
 
         self.assertEqual(mock_run.call_args.kwargs["env"]["UV_CACHE_DIR"], "/custom")
 
     def test_failure_is_reported(self):
-        with patch("automation.git_sync._run", return_value=_Result(2, stderr="lockfile out of date")):
+        with patch(
+            "automation.git_sync.run_with_graceful_timeout", return_value=_Result(2, stderr="lockfile out of date")
+        ):
             result = sync_dependencies(Path("/srv/repo"))
 
         self.assertFalse(result.ok)
@@ -198,14 +217,16 @@ class TestSyncDependencies(unittest.TestCase):
     def test_hung_uv_sync_times_out(self):
         import subprocess
 
-        with patch("automation.git_sync._run", side_effect=subprocess.TimeoutExpired(UV_SYNC_ARGV, 600)):
+        with patch(
+            "automation.git_sync.run_with_graceful_timeout", side_effect=subprocess.TimeoutExpired(UV_SYNC_ARGV, 600)
+        ):
             result = sync_dependencies(Path("/srv/repo"))
 
         self.assertFalse(result.ok)
         self.assertIn("timed out", result.output)
 
     def test_missing_uv_is_reported(self):
-        with patch("automation.git_sync._run", side_effect=FileNotFoundError("uv")):
+        with patch("automation.git_sync.run_with_graceful_timeout", side_effect=FileNotFoundError("uv")):
             result = sync_dependencies(Path("/srv/repo"))
 
         self.assertFalse(result.ok)

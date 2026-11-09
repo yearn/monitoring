@@ -18,6 +18,7 @@ from pathlib import Path
 
 from automation import crontab, git_sync
 from automation.config import Profile, Task
+from automation.process import run_with_graceful_timeout
 from utils.redact import redact_secrets
 from utils.telegram import TelegramError, escape_markdown, send_telegram_message
 
@@ -224,14 +225,12 @@ def _run_task(task: Task, *, profile: Profile, repo_root: Path, dry_run: bool) -
     logger.info("running task %s: %s", task.name, " ".join(argv))
     start = time.monotonic()
     try:
-        completed = subprocess.run(
-            argv, cwd=repo_root, env=env, check=False, capture_output=True, text=True, timeout=task.timeout
-        )
+        completed = run_with_graceful_timeout(argv, timeout=task.timeout, cwd=repo_root, env=env)
     except subprocess.TimeoutExpired as exc:
         duration = time.monotonic() - start
         output = _decode_output(exc.stderr) + _decode_output(exc.stdout)
         logger.error(
-            "task %s timed out after %ds and was killed%s",
+            "task %s timed out after %ds and was stopped%s",
             task.name,
             task.timeout,
             f"\n{output.rstrip()}" if output.strip() else "",

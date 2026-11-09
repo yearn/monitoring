@@ -24,11 +24,12 @@ from __future__ import annotations
 
 import logging
 import os
-import signal
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from automation.process import run_with_graceful_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +42,6 @@ UV_SYNC_ARGV: list[str] = ["uv", "sync", "--frozen", "--extra", "ai"]
 GIT_FETCH_TIMEOUT_SECONDS = 120
 GIT_RESET_TIMEOUT_SECONDS = 60
 UV_SYNC_TIMEOUT_SECONDS = 600
-# On timeout a step gets SIGTERM and this long to exit before SIGKILL. git
-# removes its lock files on SIGTERM; a SIGKILL leaves them behind.
-TERMINATE_GRACE_SECONDS = 10
 # A git lock file older than this cannot belong to a live sync step (each one is
 # bounded well below it), so it was left by a killed process and is removed.
 # Otherwise every later sync fails with "index.lock: File exists".
@@ -56,66 +54,6 @@ class SyncResult:
 
     ok: bool
     output: str
-
-
-def _run(
-    argv: list[str],
-    timeout: float,
-    cwd: Path | None = None,
-    env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
-    """Run ``argv`` capturing text output, terminating it gracefully on timeout.
-
-    ``subprocess.run(timeout=...)`` sends SIGKILL, which leaves git lock files in
-    place. This sends SIGTERM first and only kills after ``TERMINATE_GRACE_SECONDS``.
-    The process runs in its own process group and the signals go to the whole
-    group, so helpers it spawned (git-remote-https, uv workers) are stopped too.
-    Draining their output is bounded as well: a descendant that escaped the group
-    and still holds the pipes cannot keep the sync profile locked.
-
-    Args:
-        argv: Command and arguments.
-        timeout: Seconds before the process is terminated.
-        cwd: Working directory for the process.
-        env: Environment for the process; inherits the current one when None.
-
-    Returns:
-        The completed process.
-
-    Raises:
-        subprocess.TimeoutExpired: If the process outlived ``timeout``.
-        OSError: If the process could not be spawned.
-    """
-    with subprocess.Popen(
-        argv,
-        cwd=cwd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        encoding="utf-8",
-        errors="replace",
-        start_new_session=True,
-    ) as proc:
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            for sig in (signal.SIGTERM, signal.SIGKILL):
-                _signal_group(proc, sig)
-                try:
-                    proc.communicate(timeout=TERMINATE_GRACE_SECONDS)
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
-            raise subprocess.TimeoutExpired(argv, timeout) from None
-    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
-
-
-def _signal_group(proc: subprocess.Popen[str], sig: signal.Signals) -> None:
-    """Send ``sig`` to the process group led by ``proc``, ignoring an already-empty group."""
-    try:
-        os.killpg(proc.pid, sig)
-    except ProcessLookupError:
-        pass
 
 
 def _remove_stale_git_locks(repo_root: Path) -> None:
@@ -150,7 +88,7 @@ def sync_to_remote_main(repo_root: Path) -> SyncResult:
 
     _remove_stale_git_locks(repo_root)
     try:
-        fetch = _run(
+        fetch = run_with_graceful_timeout(
             ["git", "-C", str(repo_root), "fetch", "--quiet", "origin", "main"],
             timeout=GIT_FETCH_TIMEOUT_SECONDS,
         )
@@ -158,7 +96,7 @@ def sync_to_remote_main(repo_root: Path) -> SyncResult:
             output = (fetch.stdout + fetch.stderr).strip()
             return SyncResult(ok=False, output=output or f"fetch exited {fetch.returncode}")
 
-        reset = _run(
+        reset = run_with_graceful_timeout(
             ["git", "-C", str(repo_root), "reset", "--hard", "--quiet", "origin/main"],
             timeout=GIT_RESET_TIMEOUT_SECONDS,
         )
@@ -201,7 +139,9 @@ def sync_dependencies(repo_root: Path) -> SyncResult:
         is uv's combined output (it reports installs on stderr). Never raises.
     """
     try:
-        completed = _run(UV_SYNC_ARGV, timeout=UV_SYNC_TIMEOUT_SECONDS, cwd=repo_root, env=_uv_env())
+        completed = run_with_graceful_timeout(
+            UV_SYNC_ARGV, timeout=UV_SYNC_TIMEOUT_SECONDS, cwd=repo_root, env=_uv_env()
+        )
     except subprocess.TimeoutExpired as exc:
         # An interrupted install can leave the venv partly updated; the next tick
         # re-runs `uv sync` unconditionally and repairs it.

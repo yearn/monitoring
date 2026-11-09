@@ -451,6 +451,43 @@ class TestTelegramHardening(unittest.TestCase):
         self.assertNotIn("parse_mode", payload)
 
     @patch("utils.telegram.requests.post")
+    def test_lone_surrogate_is_replaced_and_still_sent(self, mock_post):
+        mock_post.return_value = mock.Mock(status_code=200, raise_for_status=mock.Mock(return_value=None))
+
+        with patch.dict(os.environ, self._ENV):
+            self.assertTrue(send_telegram_message("cut mid-emoji \ud83d here 🚨", "test"))
+
+        text = mock_post.call_args.kwargs["json"]["text"]
+        self.assertEqual(text, "cut mid-emoji \ufffd here 🚨")
+        text.encode("utf-8")
+
+    @patch("utils.telegram.requests.post")
+    def test_test_chat_label_is_counted_in_the_limit(self, mock_post):
+        mock_post.return_value = mock.Mock(status_code=200, raise_for_status=mock.Mock(return_value=None))
+        env = {"TELEGRAM_BOT_TOKEN_DEFAULT": "123:tok", "TELEGRAM_TEST_CHAT_ID": "dummy", "LOG_LEVEL": "INFO"}
+
+        for body in ("x" * 5000, "y" * 4096, "🚨" * 2048):
+            with self.subTest(length=len(body)), patch.dict(os.environ, env):
+                send_telegram_message(body, "yearn_timelock")
+
+                payload = mock_post.call_args.kwargs["json"]
+                self.assertLessEqual(len(payload["text"].encode("utf-16-le")) // 2, 4096)
+                self.assertTrue(payload["text"].startswith("[yearn_timelock] "))
+                self.assertNotIn("parse_mode", payload)
+
+    @patch("utils.telegram.requests.post")
+    def test_test_chat_label_stays_escaped_when_it_fits(self, mock_post):
+        mock_post.return_value = mock.Mock(status_code=200, raise_for_status=mock.Mock(return_value=None))
+        env = {"TELEGRAM_BOT_TOKEN_DEFAULT": "123:tok", "TELEGRAM_TEST_CHAT_ID": "dummy", "LOG_LEVEL": "INFO"}
+
+        with patch.dict(os.environ, env):
+            send_telegram_message("short", "yearn_timelock")
+
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["text"], "\\[yearn\\_timelock] short")
+        self.assertEqual(payload["parse_mode"], "Markdown")
+
+    @patch("utils.telegram.requests.post")
     def test_test_chat_override_retries_parse_errors_as_plain_text(self, mock_post):
         bad = mock.Mock(status_code=400, text="Bad Request: can't parse entities")
         bad.json.return_value = {}

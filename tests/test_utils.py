@@ -89,6 +89,31 @@ class TestDefiLlama(unittest.TestCase):
             headers={"Accept": "application/json"},
         )
 
+    @patch("utils.defillama.request_with_retry")
+    def test_fetch_price_points_keeps_the_sample_timestamp(self, mock_request):
+        from decimal import Decimal
+
+        from utils.defillama import PricePoint, fetch_price_points
+
+        response = MagicMock()
+        response.json.return_value = {
+            "coins": {
+                "ethereum:0xa": {"price": 1.01, "timestamp": 1794244939},
+                "ethereum:0xb": {"price": 2},
+                "ethereum:0xc": {"price": 3, "timestamp": "soon"},
+            }
+        }
+        mock_request.return_value = response
+
+        self.assertEqual(
+            fetch_price_points(["ethereum:0xa", "ethereum:0xb", "ethereum:0xc"]),
+            {
+                "ethereum:0xa": PricePoint(Decimal("1.01"), 1794244939),
+                "ethereum:0xb": PricePoint(Decimal("2"), None),
+                "ethereum:0xc": PricePoint(Decimal("3"), None),
+            },
+        )
+
     @patch("utils.defillama.request_with_retry", side_effect=RuntimeError("upstream timeout"))
     def test_fetch_prices_raises_on_api_error(self, _mock_request):
         from utils.defillama import fetch_prices

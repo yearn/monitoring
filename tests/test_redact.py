@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import requests
 
-from utils.redact import REDACTED, redact_secrets, safe_url
+from utils.redact import REDACTED, _mask_url, redact_secrets
 from utils.telegram import escape_markdown
 
 
@@ -150,21 +150,57 @@ class TestRedactSecrets(unittest.TestCase):
             self.assertEqual(redact_secrets(text), text)
 
 
-class TestSafeUrl(unittest.TestCase):
+class TestMaskUrl(unittest.TestCase):
     def test_strips_path_and_query(self):
         self.assertEqual(
-            safe_url("https://eth-mainnet.g.alchemy.com/v2/key"), "https://eth-mainnet.g.alchemy.com/REDACTED"
+            _mask_url("https://eth-mainnet.g.alchemy.com/v2/key"), "https://eth-mainnet.g.alchemy.com/REDACTED"
         )
-        self.assertEqual(safe_url("https://rpc.example/?key=1"), "https://rpc.example/REDACTED")
+        self.assertEqual(_mask_url("https://rpc.example/?key=1"), "https://rpc.example/REDACTED")
 
     def test_masks_schemeless_url(self):
-        self.assertEqual(safe_url("eth-mainnet.g.alchemy.com/v2/key"), "eth-mainnet.g.alchemy.com/REDACTED")
-        self.assertEqual(safe_url("localhost:8545/secret"), "localhost:8545/REDACTED")
-        self.assertEqual(safe_url("abcDEF1234567890xyz"), "REDACTED")
-        self.assertEqual(safe_url("rpc.example.org"), "rpc.example.org")
+        self.assertEqual(_mask_url("eth-mainnet.g.alchemy.com/v2/key"), "eth-mainnet.g.alchemy.com/REDACTED")
+        self.assertEqual(_mask_url("localhost:8545/secret"), "localhost:8545/REDACTED")
+        self.assertEqual(_mask_url("abcDEF1234567890xyz"), "REDACTED")
+        self.assertIsNone(_mask_url("rpc.example.org"))
 
     def test_keeps_bare_public_rpc(self):
-        self.assertEqual(safe_url("https://mainnet.base.org"), "https://mainnet.base.org")
+        self.assertIsNone(_mask_url("https://mainnet.base.org"))
+
+
+class TestOrdinaryLinksSurvive(unittest.TestCase):
+    """The fallback patterns run on every alert, so they must not mangle normal links."""
+
+    def test_token_address_query_param_is_kept(self):
+        url = "https://app.example.com/pool?token=0x6B175474E89094C44Da98b954EedeAC495271d0F&chain=1"
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(redact_secrets(url), url)
+
+    def test_word_slug_after_version_is_kept(self):
+        for url in (
+            "https://docs.example.org/v2/introduction-to-the-protocol",
+            "https://docs.example.org/v1/some_long_snake_case_page",
+        ):
+            with self.subTest(url=url), patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(redact_secrets(url), url)
+
+    def test_key_shaped_values_stay_masked(self):
+        cases = {
+            "https://rpc.example/v1/123e4567-e89b-12d3-a456-426614174000": "/v1/REDACTED",
+            "https://rpc.example/v2/mostly-words-but-Then-A-Capital": "/v2/REDACTED",
+            "https://rpc.example/v2/abcdefghijklmnopqrstuvwxyz": "/v2/REDACTED",
+            "https://rpc.example/?token=0x6B175474E89094C44Da98b954EedeAC495271d0F00": "?token=REDACTED",
+            "https://rpc.example/?key=0x" + "ab" * 32: "?key=REDACTED",
+        }
+        for url, expected in cases.items():
+            with self.subTest(url=url), patch.dict(os.environ, {}, clear=True):
+                self.assertIn(expected, redact_secrets(url))
+
+    def test_drpc_dkey_is_masked(self):
+        url = "https://lb.drpc.org/ogrpc?network=base&dkey=AbCdEf0123456789"
+        with patch.dict(os.environ, {}, clear=True):
+            redacted = redact_secrets(url)
+        self.assertNotIn("AbCdEf0123456789", redacted)
+        self.assertIn("network=base&dkey=REDACTED", redacted)
 
 
 if __name__ == "__main__":

@@ -41,20 +41,28 @@ _MARKDOWN_SPECIALS = "\\_*`["
 # Credential characters, plus "\" so a value passed through escape_markdown
 # ("ab\_cd") is still matched as one run.
 _CRED = r"[A-Za-z0-9_\\-]"
+# A lowercase kebab/snake-case path segment made only of letters, such as
+# "introduction-to-the-protocol". Random keys and UUIDs contain digits or capitals.
+_WORDS_SLUG = r"[a-z]+(?:\\?[-_][a-z]+)+"
 
 _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # Telegram bot token in API URLs: bot<id>:<token>
     (re.compile(rf"bot\d+:{_CRED}+"), "bot" + REDACTED),
     # Bare Telegram bot token: <bot id>:AA<secret>
     (re.compile(rf"(?<![\w/])\d{{6,12}}:AA{_CRED}{{30,}}"), REDACTED),
-    # Credentials in query strings: ?apikey=..., &api_key=..., &token=... Anchored on
-    # ?/& so log text like "token=0x..." (an address) is left alone.
+    # Credentials in query strings: ?apikey=..., &dkey=..., &token=... Anchored on ?/&
+    # so bare log text is left alone, and a 40-hex value is an on-chain address in a
+    # link such as ?token=0x6B17..., not a credential.
     (
-        re.compile(r"(?i)([?&](?:apikey|api_key|api-key|key|token|access_token|auth|secret)=)[^&\s\"'<>)]+"),
+        re.compile(
+            r"(?i)([?&](?:apikey|api_key|api-key|dkey|key|token|access_token|auth|secret)=)"
+            r"(?!0x[0-9a-f]{40}(?![0-9a-z]))[^&\s\"'<>)]+"
+        ),
         r"\1" + REDACTED,
     ),
-    # Credentials in versioned provider paths: /v2/<key>, /v3/<key>, etc.
-    (re.compile(rf"(https?://[^\s/]+/v\d+/){_CRED}{{16,}}"), r"\1" + REDACTED),
+    # Credentials in versioned provider paths: /v2/<key>, /v3/<key>, etc. Plain-word
+    # slugs are documentation links (/v2/introduction-to-the-protocol).
+    (re.compile(rf"(https?://[^\s/]+/v\d+/)(?!{_WORDS_SLUG}(?!{_CRED})){_CRED}{{16,}}"), r"\1" + REDACTED),
     # Providers that put the credential as the first path segment.
     (
         re.compile(
@@ -167,15 +175,3 @@ def redact_secrets(text: str) -> str:
     for pattern, replacement in _PATTERNS:
         text = pattern.sub(replacement, text)
     return text
-
-
-def safe_url(url: str) -> str:
-    """Return a loggable form of ``url``: only scheme and host when it carries a path or query.
-
-    Args:
-        url: A provider URL, possibly malformed or missing its scheme.
-
-    Returns:
-        The masked URL, or ``url`` unchanged when it holds nothing sensitive.
-    """
-    return _mask_url(url) or url

@@ -8,6 +8,7 @@ from utils.abi import load_abi
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import cache_filename, get_last_value_for_key_from_file, write_last_value_to_file
 from utils.chains import Chain
+from utils.drawdown import peak_drawdown_dispatch_eligible
 from utils.logger import get_logger
 from utils.web3_wrapper import ChainManager
 
@@ -107,16 +108,13 @@ def _assets_per_share_dispatch_eligible(previous: int, current: int) -> bool:
     Returns:
         True when the drawdown from the peak reaches ``ASSETS_PER_SHARE_DISPATCH_MIN_DECREASE_BPS``.
     """
-    stored_peak = _cache_int(CACHE_KEY_STCUSD_ASSETS_PER_SHARE_PEAK)
-    peak = max(stored_peak, previous)
-    # A drop to zero is a complete loss and must dispatch, so only `current < previous`
-    # is required (`previous` is then positive).
-    eligible = current < previous and (peak - current) * 10_000 >= peak * ASSETS_PER_SHARE_DISPATCH_MIN_DECREASE_BPS
-    # After a dispatch-eligible alert the next leg is measured from the new level.
-    new_peak = current if eligible else max(peak, current)
-    if new_peak != stored_peak:
-        write_last_value_to_file(cache_filename, CACHE_KEY_STCUSD_ASSETS_PER_SHARE_PEAK, new_peak)
-    return eligible
+    return peak_drawdown_dispatch_eligible(
+        previous,
+        current,
+        ASSETS_PER_SHARE_DISPATCH_MIN_DECREASE_BPS,
+        read_peak=lambda: _cache_int(CACHE_KEY_STCUSD_ASSETS_PER_SHARE_PEAK),
+        write_peak=lambda peak: write_last_value_to_file(cache_filename, CACHE_KEY_STCUSD_ASSETS_PER_SHARE_PEAK, peak),
+    )
 
 
 def check_stcusd_assets_per_share(current_assets_per_share: int) -> None:

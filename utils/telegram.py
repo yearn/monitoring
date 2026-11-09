@@ -53,6 +53,16 @@ YEARN_MAINTENANCE_CHANNEL = "yearn_maintenance"
 MAX_RETRY_AFTER_SECONDS = 30
 
 
+def _replace_lone_surrogates(text: str) -> str:
+    """Swap unpaired UTF-16 surrogates for U+FFFD.
+
+    Text cut mid-emoji by an upstream API arrives through ``json.loads`` with a lone
+    surrogate, which can't be encoded as UTF-8 or UTF-16 and would otherwise crash
+    the send or be rejected when stored.
+    """
+    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+
+
 def _utf16_len(text: str) -> int:
     """Length as Telegram counts it (UTF-16 code units, so most emoji count as 2)."""
     return len(text.encode("utf-16-le")) // 2
@@ -228,7 +238,7 @@ def send_telegram_message(
     """
     # Last line of defense: alerts quote exception text, which can carry RPC/API
     # keys. Redact before the message is stored, exposed by the API, or sent.
-    message = redact_secrets(message)
+    message = redact_secrets(_replace_lone_surrogates(message))
     logger.debug("Sending telegram message:\n%s", message)
 
     # Truncate long messages; disable Markdown to avoid broken entities. Telegram
@@ -283,9 +293,11 @@ def send_telegram_message(
         # which would trip a 400 parse error and drop the comparison alert. The
         # message body is left as-is (it's already valid Markdown or plain).
         label = f"[{protocol}] "
-        if not plain_text:
-            label = escape_markdown(label)
-        sent_message = f"{label}{message}"
+        sent_message = f"{label if plain_text else escape_markdown(label)}{message}"
+        if _utf16_len(sent_message) > MAX_MESSAGE_LENGTH:
+            # Truncated text goes out plain, so the label needs no escaping.
+            sent_message = _truncate_utf16(f"{label}{message}", MAX_MESSAGE_LENGTH)
+            plain_text = True
         alert_id = _record_alert_safe(
             message=sent_message,
             protocol=logical_protocol,
