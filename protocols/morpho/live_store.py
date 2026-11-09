@@ -139,8 +139,8 @@ class LiveStore:
         self.path = inbox.path
         self._events = inbox.stream.table("events")
         self._changes = inbox.stream.table("changes")
-        with self._connect():
-            pass
+        with self._connect() as conn:
+            conn.executescript(_SCHEMA)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -149,7 +149,6 @@ class LiveStore:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=10000")
-            conn.executescript(_SCHEMA)
             with conn:
                 yield conn
 
@@ -224,20 +223,23 @@ class LiveStore:
                         INSERT INTO morpho_live_alerts (
                             chain_id, vault_address, mode, severity, message, event_ids, event_revisions,
                             created_at, status, sent_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (
+                            :chain_id, :vault_address, :mode, :severity, :message, :event_ids, :event_revisions,
+                            :created_at, :status, :sent_at
+                        )
                         """,
-                        (
-                            chain_id,
-                            vault,
-                            mode,
-                            part.severity.value,
-                            part.message,
-                            json.dumps(part.source_ids),
-                            json.dumps(revisions),
-                            now,
-                            status,
-                            sent_at,
-                        ),
+                        {
+                            "chain_id": chain_id,
+                            "vault_address": vault,
+                            "mode": mode,
+                            "severity": part.severity.value,
+                            "message": part.message,
+                            "event_ids": json.dumps(part.source_ids),
+                            "event_revisions": json.dumps(revisions),
+                            "created_at": now,
+                            "status": status,
+                            "sent_at": sent_at,
+                        },
                     )
                     alert_id = int(cursor.lastrowid or 0)
                     alert_ids.append(alert_id)
@@ -250,24 +252,27 @@ class LiveStore:
                     INSERT INTO morpho_live_decisions (
                         event_id, revision, chain_id, vault_address, event_name, block_timestamp, first_seen_at,
                         decided_at, outcome, reason, alert_ids
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (
+                        :event_id, :revision, :chain_id, :vault_address, :event_name, :block_timestamp, :first_seen_at,
+                        :decided_at, :outcome, :reason, :alert_ids
+                    )
                     ON CONFLICT(event_id) DO UPDATE SET
                         revision = excluded.revision, decided_at = excluded.decided_at, outcome = excluded.outcome,
                         reason = excluded.reason, alert_ids = excluded.alert_ids
                     """,
-                    (
-                        event.event_id,
-                        event.revision,
-                        event.chain_id,
-                        event.vault_address,
-                        event.event_name,
-                        event.block_timestamp,
-                        event.first_seen_at,
-                        now,
-                        decision.outcome,
-                        decision.reason,
-                        json.dumps(ids_by_event.get(event.event_id, [])),
-                    ),
+                    {
+                        "event_id": event.event_id,
+                        "revision": event.revision,
+                        "chain_id": event.chain_id,
+                        "vault_address": event.vault_address,
+                        "event_name": event.event_name,
+                        "block_timestamp": event.block_timestamp,
+                        "first_seen_at": event.first_seen_at,
+                        "decided_at": now,
+                        "outcome": decision.outcome,
+                        "reason": decision.reason,
+                        "alert_ids": json.dumps(ids_by_event.get(event.event_id, [])),
+                    },
                 )
         return alert_ids
 
@@ -351,10 +356,10 @@ class LiveStore:
                 """
                 SELECT a.* FROM morpho_live_alerts a
                 LEFT JOIN morpho_live_corrections c ON c.alert_id = a.id
-                WHERE a.mode = ? AND a.status = ? AND a.created_at >= ? AND c.alert_id IS NULL
+                WHERE a.mode = :mode AND a.status = :status AND a.created_at >= :since AND c.alert_id IS NULL
                 ORDER BY a.id
                 """,
-                (MODE_PRODUCTION, STATUS_SENT, since),
+                {"mode": MODE_PRODUCTION, "status": STATUS_SENT, "since": since},
             )
             for row in rows:
                 removed = [
@@ -390,9 +395,12 @@ class LiveStore:
         """Record a delivered request."""
         with self._connect() as conn:
             conn.execute(
-                "UPDATE morpho_live_alerts SET status = ?, attempts = attempts + 1, sent_at = ?, last_error = NULL "
-                "WHERE id = ?",
-                (STATUS_SENT, now, alert_id),
+                """
+                UPDATE morpho_live_alerts
+                SET status = :status, attempts = attempts + 1, sent_at = :sent_at, last_error = NULL
+                WHERE id = :alert_id
+                """,
+                {"status": STATUS_SENT, "sent_at": now, "alert_id": alert_id},
             )
 
     def mark_failed(self, alert_id: int, error: str) -> None:

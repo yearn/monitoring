@@ -93,18 +93,20 @@ class AuditStore(LiveStore):
                 """
                 INSERT INTO morpho_live_audit (
                     chain_id, vault_address, event_name, expected_args, observed_block, observed_at, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (
+                    :chain_id, :vault_address, :event_name, :expected_args, :observed_block, :observed_at, :status
+                )
                 """,
                 [
-                    (
-                        chain_id,
-                        vault.lower(),
-                        expectation.event,
-                        _expectation_json(expectation),
-                        block,
-                        now,
-                        STATUS_WAITING,
-                    )
+                    {
+                        "chain_id": chain_id,
+                        "vault_address": vault.lower(),
+                        "event_name": expectation.event,
+                        "expected_args": _expectation_json(expectation),
+                        "observed_block": block,
+                        "observed_at": now,
+                        "status": STATUS_WAITING,
+                    }
                     for expectation in expected
                 ],
             )
@@ -124,25 +126,30 @@ class AuditStore(LiveStore):
                 SELECT e.payload_json, d.outcome, d.reason, d.decided_at
                 FROM {self._events} e
                 LEFT JOIN morpho_live_decisions d ON d.event_id = e.event_id AND d.revision = e.revision
-                WHERE e.chain_id = ? AND lower(e.contract_address) = ? AND e.event_name = ?
-                  AND e.status = 'active' AND e.block_timestamp >= ? AND e.block_number <= ?
+                WHERE e.chain_id = :chain_id AND lower(e.contract_address) = :vault_address
+                  AND e.event_name = :event_name AND e.status = 'active'
+                  AND e.block_timestamp >= :window_start AND e.block_number <= :observed_block
                 ORDER BY e.block_number DESC, e.log_index DESC
                 """,
-                (
-                    finding["chain_id"],
-                    finding["vault_address"],
-                    finding["event_name"],
-                    int(finding["observed_at"] - WINDOW_SECONDS),
-                    finding["observed_block"],
-                ),
+                {
+                    "chain_id": finding["chain_id"],
+                    "vault_address": finding["vault_address"],
+                    "event_name": finding["event_name"],
+                    "window_start": int(finding["observed_at"] - WINDOW_SECONDS),
+                    "observed_block": finding["observed_block"],
+                },
             ).fetchall()
 
     def settle(self, finding_id: int, status: str, detail: str, now: float) -> None:
         """Record a finding's verdict."""
         with self._connect() as conn:
             conn.execute(
-                "UPDATE morpho_live_audit SET status = ?, detail = ?, resolved_at = ? WHERE id = ?",
-                (status, detail, now, finding_id),
+                """
+                UPDATE morpho_live_audit
+                SET status = :status, detail = :detail, resolved_at = :resolved_at
+                WHERE id = :finding_id
+                """,
+                {"status": status, "detail": detail, "resolved_at": now, "finding_id": finding_id},
             )
 
     def unnotified_divergent(self) -> list[sqlite3.Row]:
