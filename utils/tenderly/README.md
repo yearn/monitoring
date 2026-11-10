@@ -19,15 +19,27 @@ normal hourly and daily cron bursts. Weekly jobs or unusually expensive legitima
 runs can still trigger an alert; a spike alone does not establish a leaked key.
 
 Partial hours are excluded. Missing, stale, malformed, or duplicate hourly data
-fails the check and is reported through the normal crash-alert path. The monitor
+fails the check and is reported through the normal crash-alert path. Whole-valued
+float timestamps are accepted and normalized to integer hourly timestamps. The monitor
 uses the dashboard's undocumented usage endpoint with `timespan=1w` to obtain
 hourly buckets; a Tenderly API change may require updating the parser.
 
 Spike messages go to `TELEGRAM_CHAT_ID_YEARN_MAINTENANCE`, falling back to the Yearn
-channel. Alert history is stored under `yearn-internal`. A delivered hour is
-deduplicated in the existing monitor state store; skipped or failed sends can be
-retried. `--dry-run` does not send messages or write state; failures exit nonzero
-and are logged locally instead of sending a crash alert.
+channel. Alert history is stored under `yearn-internal`. On first startup the
+monitor checkpoints the latest settled hour before requesting data. It then
+processes pending hours chronologically, advancing the checkpoint after a normal
+hour or a successfully delivered spike. API failures, missing data, and skipped
+or failed sends leave that hour pending for the next hourly run, even after the
+clock moves to a later hour. Catch-up uses one weekly history response per run.
+
+If a pending hour or its 24-hour baseline falls outside Tenderly's available
+history, the monitor reports an error and retains the checkpoint. Investigate
+the missing coverage before manually resetting the account's cursor in the
+`tenderly_usage` monitor-state namespace; hours are never silently skipped.
+
+`--dry-run` evaluates only the latest settled hour, without reading or writing
+monitor state or sending messages. Failures exit nonzero and are logged locally
+instead of sending a crash alert.
 
 This is an organization-wide check: a small leak may be hidden by normal traffic,
 and sustained high usage becomes part of the next hour's baseline. It detects

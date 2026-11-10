@@ -84,23 +84,34 @@ def _usage_points(payload: dict[str, Any]) -> list[Any]:
     return usages["TUsConsumed"]
 
 
+def _parse_timestamp(value: Any) -> int:
+    """Normalize integer or whole-valued float timestamps without rounding."""
+    if type(value) not in (int, float) or not math.isfinite(value) or value < 0 or value % HOUR_SECONDS:
+        raise ValueError("Tenderly usage history must contain UTC hourly bucket timestamps")
+    return int(value)
+
+
 def _parse_point(point: Any) -> tuple[int, float]:
     """Validate a TU value and its UTC hourly bucket timestamp."""
     if not isinstance(point, dict):
         raise ValueError("Tenderly usage history contains a malformed point")
-    timestamp, tus = point.get("timestamp"), point.get("value")
-    if type(timestamp) is not int or timestamp % HOUR_SECONDS:
-        raise ValueError("Tenderly usage history must contain UTC hourly bucket timestamps")
+    timestamp, tus = _parse_timestamp(point.get("timestamp")), point.get("value")
     if type(tus) not in (int, float) or not math.isfinite(tus) or tus < 0:
         raise ValueError("Tenderly usage history must contain finite, non-negative TU values")
     return timestamp, tus
 
 
-def evaluate_usage(payload: dict[str, Any], now: int) -> UsageCheck:
-    """Compare the last settled hour with the preceding 24 complete hours.
+def evaluate_usage(payload: dict[str, Any], hour: int) -> UsageCheck:
+    """Compare a selected hour with the preceding 24 complete hours.
 
     Missing or duplicate buckets fail the check rather than lowering its baseline.
-    The current partial hour and hours ended less than five minutes ago are ignored.
+
+    Args:
+        payload: The organization-wide hourly usage API response.
+        hour: UTC bucket start timestamp, selected after the settling delay.
+
+    Returns:
+        The selected hour's usage and its preceding hourly peak.
     """
     history: dict[int, float] = {}
     for point in _usage_points(payload):
@@ -108,10 +119,13 @@ def evaluate_usage(payload: dict[str, Any], now: int) -> UsageCheck:
         if timestamp in history:
             raise ValueError("Tenderly usage history contains duplicate hourly buckets")
         history[timestamp] = tus
-    hour = (now - SETTLE_SECONDS) // HOUR_SECONDS * HOUR_SECONDS - HOUR_SECONDS
     required = [hour - offset * HOUR_SECONDS for offset in range(BASELINE_HOURS + 1)]
     if any(timestamp not in history for timestamp in required):
-        raise ValueError("Tenderly usage history is stale or missing one of the required 25 hourly buckets")
+        start = datetime.fromtimestamp(hour, UTC).isoformat()
+        raise ValueError(
+            f"Tenderly usage history is stale or missing one of the required 25 hourly buckets for {start}; "
+            "the pending hour is retained for retry. Check Tenderly history before resetting its cursor."
+        )
     return UsageCheck(hour, history[hour], max(history[timestamp] for timestamp in required[1:]))
 
 
@@ -131,10 +145,23 @@ def build_message(account: str, check: UsageCheck) -> str:
     )
 
 
-def check_usage(*, dry_run: bool = False) -> None:
-    """Evaluate account usage and alert once per anomalous hour after delivery."""
-    account = os.getenv("TENDERLY_ACCOUNT", "yearn")
-    check = evaluate_usage(fetch_usage(account), int(time.time()))
+def _pending_hour(account: str, latest_hour: int) -> int:
+    """Checkpoint the first pending hour before fetching data so failures can retry."""
+    saved = store.state_get(STATE_NAMESPACE, account)
+    if saved is None:
+        store.state_set(STATE_NAMESPACE, account, str(latest_hour))
+        return latest_hour
+    try:
+        hour = int(saved)
+    except ValueError:
+        raise ValueError(f"Invalid Tenderly usage cursor for {account}; inspect the monitor state") from None
+    if hour < 0 or hour % HOUR_SECONDS or hour > latest_hour + HOUR_SECONDS:
+        raise ValueError(f"Invalid Tenderly usage cursor for {account}; check the monitor state and system clock")
+    return hour
+
+
+def _process_hour(account: str, check: UsageCheck, *, dry_run: bool) -> bool:
+    """Report an evaluated hour and return whether its cursor may advance."""
     logger.info(
         "Tenderly %s: hour=%s usage=%.0f TUs previous_peak=%.0f threshold=%.0f spike=%s",
         account,
@@ -145,23 +172,40 @@ def check_usage(*, dry_run: bool = False) -> None:
         check.is_spike,
     )
     if not check.is_spike:
-        return
+        return True
     message = build_message(account, check)
     if dry_run:
         logger.warning("Dry run would alert: %s", message.replace("\n", " | "))
-        return
-    if store.state_get(STATE_NAMESPACE, account) == str(check.hour):
-        logger.info("Already alerted for this Tenderly usage hour")
-        return
-    if send_telegram_message(
+        return True
+    return send_telegram_message(
         message,
         resolve_channel(YEARN_MAINTENANCE_CHANNEL, PROTOCOL),
         plain_text=True,
         origin_protocol=ALERT_PROTOCOL,
         source="tenderly_usage",
         severity="MEDIUM",
-    ):
-        store.state_set(STATE_NAMESPACE, account, str(check.hour))
+    )
+
+
+def check_usage(*, dry_run: bool = False) -> None:
+    """Process pending settled hours in order, retaining failed hours for retry.
+
+    First startup begins with the latest settled hour. Later runs catch up from
+    the persistent cursor using a single weekly history response. Dry runs only
+    evaluate the latest settled hour and do not access persistent state.
+    """
+    account = os.getenv("TENDERLY_ACCOUNT", "yearn")
+    latest_hour = (int(time.time()) - SETTLE_SECONDS) // HOUR_SECONDS * HOUR_SECONDS - HOUR_SECONDS
+    next_hour = latest_hour if dry_run else _pending_hour(account, latest_hour)
+    if next_hour > latest_hour:
+        logger.info("Already processed all settled Tenderly usage hours")
+        return
+    payload = fetch_usage(account)
+    for hour in range(next_hour, latest_hour + HOUR_SECONDS, HOUR_SECONDS):
+        if not _process_hour(account, evaluate_usage(payload, hour), dry_run=dry_run):
+            return
+        if not dry_run:
+            store.state_set(STATE_NAMESPACE, account, str(hour + HOUR_SECONDS))
 
 
 def main() -> None:

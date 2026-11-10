@@ -45,19 +45,21 @@ def test_ignores_partial_hour_and_uses_prior_peak() -> None:
     """A normal hourly cron burst stays below the threshold despite a huge partial hour."""
     payload = history(current=600_000)
     payload["timeseries"][0]["usages"]["TUsConsumed"][12]["value"] = 500_000
-    check = usage.evaluate_usage(payload, NOW)
+    check = usage.evaluate_usage(payload, LATEST_HOUR)
     assert check.hour == LATEST_HOUR
     assert check.baseline_peak == 500_000
     assert check.threshold == 1_500_000
     assert not check.is_spike
 
 
-def test_waits_five_minutes_after_hour_ends() -> None:
+def test_waits_five_minutes_after_hour_ends(
+    monitor: tuple[MagicMock, MagicMock, dict[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The just-ended high-usage hour is not evaluated before the settling delay."""
-    check = usage.evaluate_usage(history(), NOW - 1)
-    assert check.hour == LATEST_HOUR - usage.HOUR_SECONDS
-    assert check.tus == 100_000
-    assert not check.is_spike
+    monkeypatch.setattr(usage.time, "time", lambda: NOW - 1)
+    usage.check_usage()
+    monitor[1].assert_not_called()
+    assert monitor[2] == {"test-account": str(LATEST_HOUR)}
 
 
 @pytest.mark.parametrize(
@@ -74,21 +76,21 @@ def test_waits_five_minutes_after_hour_ends() -> None:
 )
 def test_requires_relative_spike_and_absolute_increase(current: float, baseline: float, spike: bool) -> None:
     """Small traffic increases do not alert merely because the baseline is near zero."""
-    assert usage.evaluate_usage(history(current=current, baseline=baseline), NOW).is_spike is spike
+    assert usage.evaluate_usage(history(current=current, baseline=baseline), LATEST_HOUR).is_spike is spike
 
 
 def test_daily_cron_is_in_baseline() -> None:
     """The corresponding prior-day hour is included in the peak comparison."""
     payload = history(current=1_000_000)
     payload["timeseries"][0]["usages"]["TUsConsumed"][24]["value"] = 1_000_000
-    assert not usage.evaluate_usage(payload, NOW).is_spike
+    assert not usage.evaluate_usage(payload, LATEST_HOUR).is_spike
 
 
 def test_order_does_not_change_the_comparison() -> None:
     """Provider rows may arrive in either chronological order."""
     payload = history()
     payload["timeseries"][0]["usages"]["TUsConsumed"].reverse()
-    assert usage.evaluate_usage(payload, NOW).is_spike
+    assert usage.evaluate_usage(payload, LATEST_HOUR).is_spike
 
 
 @pytest.mark.parametrize("missing_offset", [0, 1, 24])
@@ -97,7 +99,7 @@ def test_missing_or_stale_hour_is_not_treated_as_zero(missing_offset: int) -> No
     payload = history()
     payload["timeseries"][0]["usages"]["TUsConsumed"].pop(missing_offset)
     with pytest.raises(ValueError, match="stale or missing"):
-        usage.evaluate_usage(payload, NOW)
+        usage.evaluate_usage(payload, LATEST_HOUR)
 
 
 @pytest.mark.parametrize(
@@ -116,7 +118,7 @@ def test_missing_or_stale_hour_is_not_treated_as_zero(missing_offset: int) -> No
 def test_rejects_missing_or_grouped_usage(payload: dict[str, Any]) -> None:
     """A changed provider schema cannot silently narrow the account coverage."""
     with pytest.raises(ValueError, match="Tenderly"):
-        usage.evaluate_usage(payload, NOW)
+        usage.evaluate_usage(payload, LATEST_HOUR)
 
 
 @pytest.mark.parametrize(
@@ -125,6 +127,10 @@ def test_rejects_missing_or_grouped_usage(payload: dict[str, Any]) -> None:
         None,
         {},
         {"timestamp": True, "value": 100},
+        {"timestamp": float("nan"), "value": 100},
+        {"timestamp": float("inf"), "value": 100},
+        {"timestamp": LATEST_HOUR + 0.5, "value": 100},
+        {"timestamp": -usage.HOUR_SECONDS, "value": 100},
         {"timestamp": LATEST_HOUR + 900, "value": 100},
         {"timestamp": LATEST_HOUR, "value": "100"},
         {"timestamp": LATEST_HOUR, "value": -1},
@@ -138,7 +144,7 @@ def test_rejects_malformed_points(point: Any) -> None:
     payload = history()
     payload["timeseries"][0]["usages"]["TUsConsumed"][0] = point
     with pytest.raises(ValueError, match="Tenderly"):
-        usage.evaluate_usage(payload, NOW)
+        usage.evaluate_usage(payload, LATEST_HOUR)
 
 
 def test_duplicate_buckets_are_rejected() -> None:
@@ -147,7 +153,137 @@ def test_duplicate_buckets_are_rejected() -> None:
     points = payload["timeseries"][0]["usages"]["TUsConsumed"]
     points.append(points[0])
     with pytest.raises(ValueError, match="duplicate"):
-        usage.evaluate_usage(payload, NOW)
+        usage.evaluate_usage(payload, LATEST_HOUR)
+
+
+def test_accepts_whole_valued_float_timestamps() -> None:
+    """JSON numeric timestamps have identical meaning with or without a decimal point."""
+    payload = history()
+    for point in payload["timeseries"][0]["usages"]["TUsConsumed"]:
+        point["timestamp"] = float(point["timestamp"])
+    assert usage.evaluate_usage(payload, LATEST_HOUR).is_spike
+
+
+@pytest.mark.parametrize("failure", ["api", "missing", "skipped", "delivery"])
+def test_retries_missed_spike_after_hour_rollover(
+    monitor: tuple[MagicMock, MagicMock, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """A later cron run must recover an earlier spike even when the new hour is normal."""
+    request, send, state = monitor
+    first = history()
+    if failure == "api":
+        request.side_effect = requests.Timeout("timeout")
+    elif failure == "missing":
+        first["timeseries"][0]["usages"]["TUsConsumed"].pop(0)
+    elif failure == "skipped":
+        send.return_value = False
+    else:
+        send.side_effect = requests.Timeout("delivery timeout")
+    request.return_value.json.return_value = first
+    if failure == "skipped":
+        usage.check_usage()
+    else:
+        with pytest.raises((requests.Timeout, ValueError)):
+            usage.check_usage()
+
+    request.side_effect = None
+    send.reset_mock(side_effect=True, return_value=True)
+    send.return_value = True
+    second = history()
+    second["timeseries"][0]["usages"]["TUsConsumed"][-1]["value"] = 100_000
+    request.return_value.json.return_value = second
+    monkeypatch.setattr(usage.time, "time", lambda: NOW + usage.HOUR_SECONDS)
+    usage.check_usage()
+    send.assert_called_once()
+    assert "400,000 TUs" in send.call_args.args[0]
+    assert state == {"test-account": str(LATEST_HOUR + 2 * usage.HOUR_SECONDS)}
+
+
+def test_catches_up_multiple_hours_with_one_request(
+    monitor: tuple[MagicMock, MagicMock, dict[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recovery evaluates every pending hour in order without resending processed spikes."""
+    request, send, state = monitor
+    state["test-account"] = str(LATEST_HOUR)
+    payload = history()
+    points = payload["timeseries"][0]["usages"]["TUsConsumed"]
+    points[-1]["value"] = 100_000
+    points.extend(
+        [
+            {"timestamp": LATEST_HOUR + 2 * usage.HOUR_SECONDS, "value": 1_500_000},
+            {"timestamp": LATEST_HOUR + 3 * usage.HOUR_SECONDS, "value": 100_000},
+        ]
+    )
+    request.return_value.json.return_value = payload
+    monkeypatch.setattr(usage.time, "time", lambda: NOW + 3 * usage.HOUR_SECONDS)
+    usage.check_usage()
+    assert send.call_count == 2
+    assert "400,000 TUs" in send.call_args_list[0].args[0]
+    assert "1,500,000 TUs" in send.call_args_list[1].args[0]
+    assert state == {"test-account": str(LATEST_HOUR + 4 * usage.HOUR_SECONDS)}
+    usage.check_usage()
+    assert send.call_count == 2
+    request.assert_called_once()
+
+
+def test_retains_progress_before_later_delivery_failure(
+    monitor: tuple[MagicMock, MagicMock, dict[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed later spike retries without repeating an earlier delivered spike."""
+    request, send, state = monitor
+    state["test-account"] = str(LATEST_HOUR)
+    payload = history()
+    payload["timeseries"][0]["usages"]["TUsConsumed"][-1]["value"] = 1_500_000
+    request.return_value.json.return_value = payload
+    monkeypatch.setattr(usage.time, "time", lambda: NOW + usage.HOUR_SECONDS)
+    send.side_effect = [True, False]
+    usage.check_usage()
+    assert state == {"test-account": str(LATEST_HOUR + usage.HOUR_SECONDS)}
+    send.side_effect = None
+    send.return_value = True
+    usage.check_usage()
+    assert send.call_count == 3
+    assert "1,500,000 TUs" in send.call_args.args[0]
+    assert state == {"test-account": str(LATEST_HOUR + 2 * usage.HOUR_SECONDS)}
+
+
+def test_does_not_skip_gap_in_pending_history(monitor: tuple[MagicMock, MagicMock, dict[str, str]]) -> None:
+    """Unavailable history, including an expired baseline, keeps the pending cursor visible."""
+    request, send, state = monitor
+    pending = LATEST_HOUR - 7 * 24 * usage.HOUR_SECONDS
+    state["test-account"] = str(pending)
+    with pytest.raises(ValueError, match="Check Tenderly history before resetting its cursor"):
+        usage.check_usage()
+    request.assert_called_once()
+    send.assert_not_called()
+    assert state == {"test-account": str(pending)}
+
+
+@pytest.mark.parametrize("cursor", ["invalid", "0.5", "-3600", str(LATEST_HOUR + 900), str(NOW + 24 * 3600)])
+def test_corrupt_cursor_is_not_silently_reset(
+    monitor: tuple[MagicMock, MagicMock, dict[str, str]], cursor: str
+) -> None:
+    """Bad saved state requires inspection rather than silently discarding unprocessed hours."""
+    request, send, state = monitor
+    state["test-account"] = cursor
+    with pytest.raises(ValueError, match="Invalid Tenderly usage cursor"):
+        usage.check_usage()
+    request.assert_not_called()
+    send.assert_not_called()
+    assert state == {"test-account": cursor}
+
+
+def test_first_start_does_not_alert_on_old_history(monitor: tuple[MagicMock, MagicMock, dict[str, str]]) -> None:
+    """First startup monitors the newest settled hour without historical alert spam."""
+    request, send, state = monitor
+    payload = history(current=100_000)
+    payload["timeseries"][0]["usages"]["TUsConsumed"][2]["value"] = 1_500_000
+    request.return_value.json.return_value = payload
+    usage.check_usage()
+    send.assert_not_called()
+    assert state == {"test-account": str(LATEST_HOUR + usage.HOUR_SECONDS)}
 
 
 def test_sends_once_and_records_only_delivered_hour(monitor: tuple[MagicMock, MagicMock, dict[str, str]]) -> None:
@@ -166,7 +302,7 @@ def test_sends_once_and_records_only_delivered_hour(monitor: tuple[MagicMock, Ma
     assert "test-key" not in message
     assert channel == "yearn_maintenance"
     assert send.call_args.kwargs["origin_protocol"] == "yearn-internal"
-    assert state == {"test-account": str(LATEST_HOUR)}
+    assert state == {"test-account": str(LATEST_HOUR + usage.HOUR_SECONDS)}
 
 
 def test_falls_back_to_yearn_channel(
@@ -178,13 +314,13 @@ def test_falls_back_to_yearn_channel(
     assert monitor[1].call_args.args[1] == "yearn"
 
 
-def test_normal_usage_does_not_alert_or_write(monitor: tuple[MagicMock, MagicMock, dict[str, str]]) -> None:
-    """A healthy sample needs neither delivery nor a persistent cursor."""
+def test_normal_usage_advances_without_alerting(monitor: tuple[MagicMock, MagicMock, dict[str, str]]) -> None:
+    """Normal hours advance the cursor so they do not need to be checked again."""
     request, send, state = monitor
     request.return_value.json.return_value = history(current=100_000)
     usage.check_usage()
     send.assert_not_called()
-    assert not state
+    assert state == {"test-account": str(LATEST_HOUR + usage.HOUR_SECONDS)}
 
 
 def test_dry_run_has_no_delivery_or_state_writes(monitor: tuple[MagicMock, MagicMock, dict[str, str]]) -> None:
@@ -200,7 +336,7 @@ def test_skipped_send_can_retry(monitor: tuple[MagicMock, MagicMock, dict[str, s
     _, send, state = monitor
     send.return_value = False
     usage.check_usage()
-    assert not state
+    assert state == {"test-account": str(LATEST_HOUR)}
     send.return_value = True
     usage.check_usage()
     assert send.call_count == 2
@@ -213,7 +349,7 @@ def test_failed_send_can_retry(monitor: tuple[MagicMock, MagicMock, dict[str, st
     send.side_effect = RuntimeError("Telegram unavailable")
     with pytest.raises(RuntimeError, match="Telegram unavailable"):
         usage.check_usage()
-    assert not state
+    assert state == {"test-account": str(LATEST_HOUR)}
 
 
 def test_missing_key_fails_before_network(
@@ -238,7 +374,7 @@ def test_fetch_failure_does_not_mark_hour_delivered(
     with pytest.raises(type(error)):
         usage.check_usage()
     send.assert_not_called()
-    assert not state
+    assert state == {"test-account": str(LATEST_HOUR)}
 
 
 def test_non_object_response_fails(monitor: tuple[MagicMock, MagicMock, dict[str, str]]) -> None:

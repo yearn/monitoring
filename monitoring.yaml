@@ -423,7 +423,7 @@ protocols:
       - utils/tenderly/tenderly.py
     monitors:
       - name: "Usage Spikes"
-        description: "Hourly: settled organization usage >=3x the preceding 24-hour peak and >=100,000 extra TUs; alerts the internal Yearn maintenance chat"
+        description: "Hourly: settled organization usage >=3x the preceding 24-hour peak and >=100,000 extra TUs; retries missed hours and alerts the internal Yearn maintenance chat"
         severity: "MEDIUM"
       - name: "Alert Configuration"
         description: "Daily: SAM alert configurations must match the stored snapshot"
