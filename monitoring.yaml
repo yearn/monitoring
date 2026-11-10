@@ -414,6 +414,20 @@ protocols:
       - name: "Safe Multisig"
         description: "Strata Admin Multisig queue"
 
+  tenderly:
+    display_name: "Tenderly"
+    description: "Tenderly alert configuration and organization-wide TU usage monitoring"
+    cadence: "Hourly / Daily"
+    tasks:
+      - utils/tenderly/usage.py
+      - utils/tenderly/tenderly.py
+    monitors:
+      - name: "Usage Spikes"
+        description: "Hourly: settled organization usage >=3x the preceding 24-hour peak and >=100,000 extra TUs; alerts the internal Yearn maintenance chat"
+        severity: "MEDIUM"
+      - name: "Alert Configuration"
+        description: "Daily: SAM alert configurations must match the stored snapshot"
+
   timelock:
     display_name: "Timelock Alerts"
     description: "Cross-protocol timelock event monitoring"

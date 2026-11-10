@@ -1,6 +1,37 @@
-# Tenderly Alerts Monitoring
+# Tenderly Monitoring
 
-Monitors Tenderly alerts to ensure they haven't been changed unexpectedly.
+Monitors Tenderly usage spikes and unexpected changes to SAM alert configurations.
+
+## Hourly Usage Check
+
+`usage.py` runs in the hourly profile in [automation/jobs.yaml](../../automation/jobs.yaml).
+It checks organization-wide Tenderly Unit (TU) consumption using `TENDERLY_API_KEY`
+and `TENDERLY_ACCOUNT` (default: `yearn`). It makes one read-only usage API request per run.
+
+```bash
+uv run utils/tenderly/usage.py --dry-run
+```
+
+The monitor compares the last UTC hour that ended at least five minutes ago with
+the **busiest hour in the preceding 24 hours**. It alerts only when consumption is
+both **at least 3× that peak** and **at least 100,000 TUs above it**. This tolerates
+normal hourly and daily cron bursts. Weekly jobs or unusually expensive legitimate
+runs can still trigger an alert; a spike alone does not establish a leaked key.
+
+Partial hours are excluded. Missing, stale, malformed, or duplicate hourly data
+fails the check and is reported through the normal crash-alert path. The monitor
+uses the dashboard's undocumented usage endpoint with `timespan=1w` to obtain
+hourly buckets; a Tenderly API change may require updating the parser.
+
+Spike messages go to `TELEGRAM_CHAT_ID_YEARN_MAINTENANCE`, falling back to the Yearn
+channel. Alert history is stored under `yearn-internal`. A delivered hour is
+deduplicated in the existing monitor state store; skipped or failed sends can be
+retried. `--dry-run` does not send messages or write state; failures exit nonzero
+and are logged locally instead of sending a crash alert.
+
+This is an organization-wide check: a small leak may be hidden by normal traffic,
+and sustained high usage becomes part of the next hour's baseline. It detects
+sudden changes, rather than enforcing a spending budget.
 
 ## Overview
 
@@ -8,7 +39,8 @@ This script verifies that Tenderly alerts match a stored snapshot (`alerts.json`
 
 ## Files
 
-- `tenderly.py` - Main monitoring script
+- `usage.py` - Hourly organization-wide TU spike check
+- `tenderly.py` - Daily SAM alert configuration check
 - `alerts.json` - Stored snapshot of alerts (backup for recovery)
 
 ## Usage

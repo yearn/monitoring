@@ -54,6 +54,7 @@ profiles:
       # 3jane borrower watch) goes quiet rather than loud when the indexer
       # stalls, so the freshness check tells us the silence is not good news.
       - { name: "yearn-check-indexer-freshness", script: protocols/yearn/check_indexer_freshness.py }
+      - { name: "tenderly-usage",         script: utils/tenderly/usage.py }
       - { name: "apyusd",                 script: protocols/apyusd/main.py }
       - { name: "3jane",                  script: protocols/3jane/main.py }
       - { name: "morpho-markets",         script: protocols/morpho/markets.py }
