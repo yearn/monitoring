@@ -109,3 +109,9 @@ For more details about this repository, check out AI generated docs using DeepWi
 ## License
 
 This repository is licensed under the GNU Affero General Public License v3.0. See [LICENSE](./LICENSE).
+
+## Emergency webhook delivery
+
+[Durable emergency delivery](utils/dispatch.md) documents the independent liquidity-monitoring
+and optional vaults-mommy destinations, signed payload compatibility, severity-aware cooldowns,
+recurring retries, persistent outbox and explicit recovery of terminal errors.

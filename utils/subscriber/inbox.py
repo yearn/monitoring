@@ -356,13 +356,14 @@ class EventInbox:
                         f"""
                         UPDATE {self._events} SET
                             status = 'active', revision = revision + 1, fingerprint = ?, payload_json = ?,
-                            block_hash = ?, block_timestamp = ?, transaction_hash = ?, event_name = ?,
-                            operation_id = ?
+                            contract_address = ?, block_hash = ?, block_timestamp = ?, transaction_hash = ?,
+                            event_name = ?, operation_id = ?
                         WHERE event_id = ?
                         """,
                         (
                             fingerprint,
                             json.dumps(event, sort_keys=True, default=str),
+                            str(event[self.stream.address_field]).lower(),
                             _lower(event.get("blockHash")),
                             int(event["blockTimestamp"]),
                             str(event["transactionHash"]).lower(),

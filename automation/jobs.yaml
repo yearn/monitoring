@@ -21,6 +21,14 @@
 
 profiles:
 
+  emergency_delivery:
+    cron: "* * * * *"
+    description: "Drain durable emergency webhook retries even when no new alert fires."
+    tasks:
+      # A drain is bounded (at most 20 rounds x 2 destinations x 13s HTTP timeout), so 10 min only
+      # fires on a real hang; the default hour would block retries behind the flock.
+      - { name: "emergency-delivery-retries", script: utils/dispatch_retry.py, timeout: 600 }
+
   half_hourly:
     cron: "*/30 * * * *"
     description: "Thirty-minute risk monitoring for active Yearn strategies, and timelock alerts."
@@ -51,6 +59,7 @@ profiles:
       # 3jane borrower watch) goes quiet rather than loud when the indexer
       # stalls, so the freshness check tells us the silence is not good news.
       - { name: "yearn-check-indexer-freshness", script: protocols/yearn/check_indexer_freshness.py }
+      - { name: "tenderly-usage",         script: utils/tenderly/usage.py }
       - { name: "apyusd",                 script: protocols/apyusd/main.py }
       - { name: "3jane",                  script: protocols/3jane/main.py }
       - { name: "morpho-markets",         script: protocols/morpho/markets.py }

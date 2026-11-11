@@ -296,6 +296,8 @@ protocols:
         description: "Pending supply caps, market removals (HIGH while the vault still supplies the market), timelock decreases, guardian changes"
       - name: "V2 Governance"
         description: "Pending timelocked operations (HIGH for removeAdapter of a funded adapter), owner/curator changes, sentinel/allocator/adapter changes"
+      - name: "Live Governance Events"
+        description: "Continuous Envio subscriber runs the V1/V2 governance checks within seconds of cap, market removal, timelock, timelocked operation, owner/curator, and adapter events; internal shadow delivery until production cutover, audited against the daily jobs"
       - name: "V2 Adapter Share Burns"
         description: "Pending MorphoMarketV1AdapterV2 burnShares (HIGH while the adapter holds the market) and burnShares timelock decreases, via eth_call"
       - name: "V2 Wrapped V1 Coverage"
@@ -411,6 +413,20 @@ protocols:
         description: "48h and 24h timelock events via Envio"
       - name: "Safe Multisig"
         description: "Strata Admin Multisig queue"
+
+  tenderly:
+    display_name: "Tenderly"
+    description: "Tenderly alert configuration and organization-wide TU usage monitoring"
+    cadence: "Hourly / Daily"
+    tasks:
+      - utils/tenderly/usage.py
+      - utils/tenderly/tenderly.py
+    monitors:
+      - name: "Usage Spikes"
+        description: "Hourly: settled organization usage >=3x the preceding 24-hour peak and >=100,000 extra TUs; retries missed hours and alerts the internal Yearn maintenance chat"
+        severity: "MEDIUM"
+      - name: "Alert Configuration"
+        description: "Daily: SAM alert configurations must match the stored snapshot"
 
   timelock:
     display_name: "Timelock Alerts"

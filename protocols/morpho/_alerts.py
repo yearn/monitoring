@@ -87,6 +87,43 @@ def due_loss_notice(deadline: int, loss_alerted_at: int, reminded_at: int) -> Lo
     return None
 
 
+@dataclass(frozen=True)
+class LiveExpectation:
+    """The indexed event a daily finding implies, which the live path should have decided.
+
+    ``args`` holds the ABI-named arguments that identify the occurrence. Findings
+    with no expectation (reminders, resolutions, guardian, sentinel, and allocator
+    changes) are not audited. When present, ``lines`` identifies the zero-based
+    lines in a grouped section that render this event.
+    """
+
+    event: str
+    args: dict[str, Any] = field(default_factory=dict)
+    transaction_hash: str = ""
+    lines: range | None = field(default=None, compare=False)
+
+    def matches(self, event: str, args: dict[str, Any], transaction_hash: str) -> bool:
+        """Return whether this event carries the expected arguments and transaction."""
+        return (
+            self.event == event
+            and (not self.transaction_hash or self.transaction_hash.lower() == transaction_hash.lower())
+            and all(name in args and _arg_matches(args[name], expected) for name, expected in self.args.items())
+        )
+
+
+def _arg_matches(value: Any, expected: Any) -> bool:
+    """Compare ABI arguments across hex casing and JSON integer encodings."""
+    if type(expected) is int:
+        if not isinstance(value, str):
+            return type(value) is int and value == expected
+        try:
+            base = 16 if value.lower().startswith("0x") else 10
+            return int(value, base) == expected
+        except ValueError:
+            return False
+    return str(value).lower().removeprefix("0x") == str(expected).lower().removeprefix("0x")
+
+
 @dataclass
 class VaultAlert:
     """One section of a vault's grouped Telegram message.
@@ -98,6 +135,18 @@ class VaultAlert:
     severity: AlertSeverity
     body: str
     standalone: bool = False
+    expected: tuple[LiveExpectation, ...] = ()
+    source_ids: tuple[str, ...] = ()
+    line_source_ids: dict[int, list[str]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RenderedAlert:
+    """A Telegram message and the indexed events behind its sections."""
+
+    severity: AlertSeverity
+    message: str
+    source_ids: tuple[str, ...]
 
 
 @dataclass
@@ -107,13 +156,13 @@ class VaultDiff:
     alerts: List[VaultAlert] = field(default_factory=list)
     writes: List[Callable[[], None]] = field(default_factory=list)
 
-    def alert(self, severity: AlertSeverity, body: str) -> None:
+    def alert(self, severity: AlertSeverity, body: str, expected: tuple[LiveExpectation, ...] = ()) -> None:
         """Buffer one section of the vault's grouped message."""
-        self.alerts.append(VaultAlert(severity, body))
+        self.alerts.append(VaultAlert(severity, body, expected=expected))
 
-    def loss(self, body: str) -> None:
+    def loss(self, body: str, expected: tuple[LiveExpectation, ...] = ()) -> None:
         """Buffer a HIGH potential-loss finding, sent as its own message."""
-        self.alerts.append(VaultAlert(AlertSeverity.HIGH, body, standalone=True))
+        self.alerts.append(VaultAlert(AlertSeverity.HIGH, body, standalone=True, expected=expected))
 
     def defer(self, write: Callable[..., Any], *args: Any) -> None:
         """Buffer a cache write to apply once the alert is delivered."""
@@ -125,56 +174,83 @@ class VaultDiff:
             write()
 
 
+def _wrap_line(line: str, budget: int) -> List[str]:
+    """Break one line longer than ``budget``, at a space when one falls in its second half."""
+    pieces: List[str] = []
+    while len(line) > budget:
+        cut = line.rfind(" ", budget // 2, budget)
+        if cut <= 0:
+            cut = budget
+        pieces.append(line[:cut])
+        line = line[cut:].lstrip(" ")
+    pieces.append(line)
+    return pieces
+
+
 def split_body(body: str, budget: int) -> List[str]:
-    """Split one oversized section on line boundaries so nothing is truncated.
+    """Split one oversized section so nothing is truncated.
 
     A single section can exceed the budget on its own — a batched multicall
     submit renders one bullet per operation, and 30 of them do not fit. Splitting
-    between lines keeps every operation intact; only a single line longer than
-    the whole budget (which no rendered line comes close to) would still be cut
-    by Telegram.
+    between lines keeps every operation intact; a single line longer than the
+    whole budget is wrapped, because Telegram would otherwise cut its tail while
+    the send still counts as delivered.
     """
+    return [text for text, _ in _split_section(body, budget, {})]
+
+
+def _split_section(body: str, budget: int, line_source_ids: dict[int, list[str]]) -> list[tuple[str, tuple[str, ...]]]:
+    """Split a section and keep each line's provenance with its message part."""
     if len(body) <= budget:
-        return [body]
-    chunks: List[str] = []
-    current: List[str] = []
+        return [(body, tuple(dict.fromkeys(event_id for ids in line_source_ids.values() for event_id in ids)))]
+    chunks: list[tuple[str, tuple[str, ...]]] = []
+    current: list[str] = []
+    sources: dict[str, None] = {}
     size = 0
-    for line in body.split("\n"):
-        cost = len(line) + 1
-        if current and size + cost > budget:
-            chunks.append("\n".join(current))
-            current = []
-            size = 0
-        current.append(line)
-        size += cost
+    for index, raw in enumerate(body.split("\n")):
+        for line in _wrap_line(raw, budget):
+            cost = len(line) + 1
+            if current and size + cost > budget:
+                chunks.append(("\n".join(current), tuple(sources)))
+                current = []
+                sources = {}
+                size = 0
+            current.append(line)
+            sources.update(dict.fromkeys(line_source_ids.get(index, ())))
+            size += cost
     if current:
-        chunks.append("\n".join(current))
+        chunks.append(("\n".join(current), tuple(sources)))
     return chunks
 
 
-def split_into_messages(alerts: List[VaultAlert], budget: int) -> List[List[str]]:
-    """Pack section bodies into groups that each fit within ``budget`` chars."""
-    parts: List[List[str]] = [[]]
+def split_into_messages(alerts: List[VaultAlert], budget: int) -> List[List[tuple[str, tuple[str, ...]]]]:
+    """Pack section bodies and their sources into groups that fit within ``budget`` chars."""
+    parts: List[List[tuple[str, tuple[str, ...]]]] = [[]]
     size = 0
     for alert in alerts:
-        for body in split_body(alert.body, budget):
+        for body, line_ids in _split_section(alert.body, budget, alert.line_source_ids):
             cost = len(body) + len(SECTION_SEPARATOR)
             if parts[-1] and size + cost > budget:
                 parts.append([])
                 size = 0
-            parts[-1].append(body)
+            parts[-1].append((body, alert.source_ids + line_ids))
             size += cost
     return parts
 
 
 def render_vault_alerts(header: str, alerts: List[VaultAlert]) -> List[tuple[AlertSeverity, str]]:
-    """Render buffered sections into the ``(severity, message)`` pairs ``send_vault_alerts`` sends.
+    """Render buffered sections into the ``(severity, message)`` pairs ``send_vault_alerts`` sends."""
+    return [(part.severity, part.message) for part in render_vault_alert_parts(header, alerts)]
+
+
+def render_vault_alert_parts(header: str, alerts: List[VaultAlert]) -> list[RenderedAlert]:
+    """Render buffered sections and keep their source IDs on each message.
 
     Standalone (potential-loss) sections come first, one message each, under a
     ``LOSS_PREFIX`` header; the remaining sections are grouped under ``header`` at
     their highest severity and split into "(i/N)" parts if long.
     """
-    messages: List[tuple[AlertSeverity, str]] = []
+    messages: list[RenderedAlert] = []
     for alert in alerts:
         if alert.standalone:
             messages += _render_group(f"{LOSS_PREFIX} — {header}", [alert])
@@ -194,7 +270,7 @@ def send_vault_alerts(header: str, alerts: List[VaultAlert], protocol: str) -> N
         send_alert(Alert(severity, message, protocol))
 
 
-def _render_group(header: str, alerts: List[VaultAlert]) -> List[tuple[AlertSeverity, str]]:
+def _render_group(header: str, alerts: List[VaultAlert]) -> list[RenderedAlert]:
     """Render sections under one header at their highest severity, split into parts if long."""
     if not alerts:
         return []
@@ -202,7 +278,9 @@ def _render_group(header: str, alerts: List[VaultAlert]) -> List[tuple[AlertSeve
     parts = split_into_messages(alerts, MAX_MESSAGE_LENGTH - _MESSAGE_OVERHEAD - len(header))
     total = len(parts)
     messages = []
-    for index, bodies in enumerate(parts, start=1):
+    for index, sections in enumerate(parts, start=1):
         suffix = f" ({index}/{total})" if total > 1 else ""
-        messages.append((severity, f"{header}{suffix}\n\n" + SECTION_SEPARATOR.join(bodies)))
+        body = SECTION_SEPARATOR.join(text for text, _ in sections)
+        sources = tuple(dict.fromkeys(event_id for _, ids in sections for event_id in ids))
+        messages.append(RenderedAlert(severity, f"{header}{suffix}\n\n{body}", sources))
     return messages
