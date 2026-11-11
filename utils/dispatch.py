@@ -13,6 +13,7 @@ import requests
 from utils.alert import Alert, AlertSeverity
 from utils.dispatch_queue import Destination, DispatchQueue
 from utils.logger import get_logger
+from utils.redact import redact_secrets
 
 logger = get_logger("utils.dispatch")
 DEFAULT_WEBHOOK_URL = "http://127.0.0.1:8080/webhook/emergency"
@@ -139,11 +140,22 @@ def drain_emergency_deliveries(*, queue: DispatchQueue | None = None, limit: int
 
 
 def dispatch_emergency_withdrawal(alert: Alert) -> None:
-    """Persist fanout before sending; CRITICAL bypasses HIGH's destination cooldown."""
+    """Persist fanout before sending; CRITICAL bypasses HIGH's destination cooldown.
+
+    Only HIGH/CRITICAL alerts for ``DISPATCHABLE_PROTOCOLS`` with ``alert.dispatch``
+    set are queued. Unconfirmed signals (``dispatch=False``) still reach Telegram but
+    never move funds. The message is redacted before it is persisted or sent.
+
+    Args:
+        alert: The alert that triggered the hook.
+    """
     if (
         alert.severity not in (AlertSeverity.HIGH, AlertSeverity.CRITICAL)
         or alert.protocol not in DISPATCHABLE_PROTOCOLS
     ):
+        return
+    if not alert.dispatch:
+        logger.info("Alert for %s is not dispatch-eligible (unconfirmed signal), skipping dispatch", alert.protocol)
         return
     if os.getenv("LOG_LEVEL", "INFO").upper() == "DEBUG":
         logger.debug("Skipping dispatch (LOG_LEVEL=DEBUG)")
@@ -153,5 +165,5 @@ def dispatch_emergency_withdrawal(alert: Alert) -> None:
         logger.warning("No emergency webhook secrets configured; dispatch disabled")
         return
     queue = DispatchQueue()
-    queue.enqueue(alert.protocol, alert.severity.value, alert.message, configured)
+    queue.enqueue(alert.protocol, alert.severity.value, redact_secrets(alert.message), configured)
     drain_emergency_deliveries(queue=queue)

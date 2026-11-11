@@ -15,6 +15,7 @@ from web3.types import RPCEndpoint, RPCResponse
 from utils.chains import PUBLIC_RPC_URLS, Chain
 from utils.formatting import redact_urls
 from utils.logger import get_logger
+from utils.redact import redact_secrets
 
 load_dotenv()
 
@@ -65,8 +66,10 @@ def retry_with_provider_rotation(func):
                 # on retry, so fail fast and let the caller handle it.
                 if _is_non_retryable(e):
                     raise
+                # Keyed by the full URL so providers sharing a host keep separate entries;
+                # only the host is ever logged or raised.
                 current_url = self.endpoint_uri
-                errors[current_url] = redact_urls(str(e))
+                errors[current_url] = redact_secrets(redact_urls(str(e)))
                 logger.warning("Failed on %s: %s", redact_urls(current_url), errors[current_url])
                 time.sleep(min(self.backoff_factor * (2**attempt), MAX_BACKOFF_SECONDS))
                 self._rotate_provider()
@@ -202,7 +205,7 @@ class Web3Client(RetryProviders):
         try:
             return operation(*args, **kwargs)
         except Exception as e:
-            raise ProviderConnectionError(f"Operation failed on {self.chain.name}: {str(e)}")
+            raise ProviderConnectionError(f"Operation failed on {self.chain.name}: {redact_secrets(str(e))}")
 
     @property
     def eth(self):

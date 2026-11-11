@@ -23,6 +23,11 @@ success timestamps, never webhook secrets. New code starts a new cooldown histor
 legacy `dispatch_last_<protocol>` cache values are retained but are not consulted.
 The first alert after upgrading can therefore be delivered again.
 
+Alerts created with `dispatch=False` (unconfirmed signals such as a single depeg
+sample) still go to Telegram but are never queued. `client_payload.message` is passed
+through `utils.redact.redact_secrets` before it is persisted, so RPC keys and tokens
+never reach the database or the receivers.
+
 Liquidity receives the existing `event_type`/`client_payload` envelope unchanged.
 Vaults-mommy additionally receives top-level `event_id` inside the signed body.
 The ID and exact UTF-8 payload bytes remain stable across retries and process restarts.

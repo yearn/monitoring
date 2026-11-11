@@ -146,6 +146,39 @@ The restart re-reads the env and re-renders the crontab. Anyone who could read
 the file has seen the old values, so a leaked credential should be rotated at
 the provider, not just edited here.
 
+`monitoring-api` does not load this file (it needs no credentials, and the unit
+makes `/etc/monitoring` inaccessible to it), so it needs no restart on rotation.
+
+Outbound text (logs, Telegram alerts, crash alerts, the automation digest and
+alert history) passes through `utils/redact.py`, which masks the values of
+`PROVIDER_URL_*` and every `*_KEY` / `*_TOKEN` / `*_SECRET` / `*_PASSWORD` env
+var, including suffixed names such as `TELEGRAM_BOT_TOKEN_DEFAULT` or
+`SAFE_API_KEY_2`. Masked values appear as `REDACTED`.
+
+---
+
+## Security baseline
+
+The box hard-resets to `origin/main` every 10 minutes and runs it with every
+secret in `/etc/monitoring/.env`, so write access to `main` is effectively code
+execution on the VPS. Keep these in place:
+
+- **Branch protection on `main`:** required PR review, required CI, no force
+  pushes or deletions, and ideally signed commits. Limit who can merge.
+- **Read-only repo credentials on the box:** a fine-grained token scoped to this
+  repo with `Contents: read` only, or a read-only SSH deploy key. `install.sh`
+  no longer copies a personal `gh` login token.
+- **Caddy:** tokens are 64-hex (`openssl rand -hex 32`); add the
+  `ExecStartPre` check from `deploy/Caddyfile` so Caddy refuses to start without
+  `ALERTS_API_TOKENS`.
+- **Emergency dispatch receivers:** keep both webhooks bound to `127.0.0.1`.
+  Retries resend the exact signed bytes (see `utils/dispatch.md`), so the body
+  carries no send timestamp. Vaults-mommy can dedupe on the signed `event_id`.
+  The liquidity envelope has no ID, so a captured request can be replayed by
+  anyone with local access. Only unconfirmed signals (`Alert.dispatch=False`) are
+  held back from dispatch. Messages are redacted before they are written to the
+  outbox database.
+
 ---
 
 ## Test / staging run (route every alert to one dummy group)

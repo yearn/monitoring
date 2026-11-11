@@ -15,6 +15,10 @@ from typing import Any
 import yaml
 
 REPO_ROOT: Path = Path(os.environ.get("REPO_ROOT", Path(__file__).resolve().parent.parent))
+# Hard cap on one task's runtime. A hung task would otherwise hold the profile's
+# `flock` forever, so every later tick of that profile (and, for the sync profile,
+# code sync itself) is skipped. Override per task with `timeout:` (seconds).
+DEFAULT_TASK_TIMEOUT_SECONDS: int = 3600
 DEFAULT_JOBS_CONFIG_PATH: Path = REPO_ROOT / "automation" / "jobs.yaml"
 
 
@@ -28,6 +32,7 @@ class Task:
     script: str
     args: dict[str, str] = field(default_factory=dict)
     enabled: bool = True
+    timeout: int = DEFAULT_TASK_TIMEOUT_SECONDS
 
 
 @dataclass
@@ -55,7 +60,7 @@ class JobsConfig:
 
 
 _TASK_REQUIRED = ("name", "script")
-_TASK_ALLOWED = (*_TASK_REQUIRED, "args", "enabled")
+_TASK_ALLOWED = (*_TASK_REQUIRED, "args", "enabled", "timeout")
 _PROFILE_REQUIRED = ("cron",)
 _PROFILE_ALLOWED = (*_PROFILE_REQUIRED, "tasks", "env", "enabled", "description", "sync_before_run")
 
@@ -117,11 +122,16 @@ def _parse_task(profile: str, idx: int, body: Any, source: Path) -> Task:
         raise JobsConfigError(f"{source}: profile `{profile}` task #{idx}.args must be a mapping")
     args = {str(k): str(v) for k, v in args_raw.items()}
 
+    timeout = body.get("timeout", DEFAULT_TASK_TIMEOUT_SECONDS)
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+        raise JobsConfigError(f"{source}: profile `{profile}` task #{idx}.timeout must be a positive integer")
+
     return Task(
         name=str(body["name"]),
         script=str(body["script"]),
         args=args,
         enabled=bool(body.get("enabled", True)),
+        timeout=timeout,
     )
 
 

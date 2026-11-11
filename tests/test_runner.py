@@ -1,6 +1,15 @@
 """Tests for utils.runner.run_with_alert."""
 
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import textwrap
+import threading
+import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from utils.runner import run_with_alert
@@ -97,6 +106,118 @@ class TestRunWithAlert(unittest.TestCase):
 
         message = mock_send.call_args.args[0]
         self.assertIn(boom.__module__, message)
+
+
+class TestRunWithAlertRedaction(unittest.TestCase):
+    def test_crash_alert_redacts_provider_url(self) -> None:
+        import os
+
+        url = "https://eth-mainnet.g.alchemy.com/v2/crashkey1234567890ab"
+
+        def boom() -> None:
+            raise RuntimeError(f"All providers failed. Errors:\n{url}: 429")
+
+        # Redaction happens in send_telegram_message, so follow the alert down to
+        # the point where it is stored (every delivery path records it first).
+        with (
+            patch.dict(os.environ, {"PROVIDER_URL_MAINNET": url}, clear=True),
+            patch("utils.telegram._record_alert_safe") as record,
+        ):
+            run_with_alert(boom, "aave", name="aave.main")
+
+        message = record.call_args.kwargs["message"]
+        self.assertNotIn("crashkey1234567890ab", message)
+        self.assertIn("eth-mainnet.g.alchemy.com/REDACTED", message)
+
+
+def _wait_for(predicate, timeout: float = 30) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _process_gone(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+class TestSigtermCleanup(unittest.TestCase):
+    """A task stopped by the automation runner must take its detached CLI agent with it."""
+
+    # The agent writes its pid, then outlives any reasonable test unless it is killed.
+    SCRIPT = """
+        import pathlib
+        import sys
+        from concurrent.futures import ThreadPoolExecutor
+
+        from utils.llm.cli_provider import _run_cli
+        from utils.runner import run_with_alert
+
+        marker = sys.argv[1]
+        use_thread = sys.argv[2] == "thread"
+        agent = ["sh", "-c", f"echo $$ > {marker}; exec sleep 60"]
+
+
+        def call_agent():
+            _run_cli("agent", agent, "", pathlib.Path("."), 55)
+
+
+        def main():
+            if use_thread:
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    pool.submit(call_agent).result()
+            else:
+                call_agent()
+
+
+        run_with_alert(main, "test")
+    """
+
+    def _assert_agent_stops_on_sigterm(self, mode: str) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "agent.pid"
+            script = Path(directory) / "task.py"
+            script.write_text(textwrap.dedent(self.SCRIPT))
+            repo_root = Path(__file__).resolve().parent.parent
+            env = {**os.environ, "PYTHONPATH": str(repo_root), "LOG_LEVEL": "DEBUG"}
+            task = subprocess.Popen([sys.executable, str(script), str(marker), mode], cwd=repo_root, env=env)
+            try:
+                self.assertTrue(
+                    _wait_for(lambda: marker.exists() and marker.read_text().strip() != ""), "agent never started"
+                )
+                agent_pid = int(marker.read_text())
+
+                task.send_signal(signal.SIGTERM)
+
+                self.assertEqual(task.wait(timeout=20), 128 + signal.SIGTERM)
+                self.assertTrue(_wait_for(lambda: _process_gone(agent_pid), timeout=5), "agent survived SIGTERM")
+            finally:
+                task.kill()
+                task.wait()
+
+    def test_agent_started_on_the_main_thread_is_stopped(self) -> None:
+        self._assert_agent_stops_on_sigterm("main")
+
+    def test_agent_started_on_a_worker_thread_is_stopped(self) -> None:
+        self._assert_agent_stops_on_sigterm("thread")
+
+    def test_previous_handler_is_restored(self) -> None:
+        before = signal.getsignal(signal.SIGTERM)
+        run_with_alert(lambda: None, "test")
+        self.assertEqual(signal.getsignal(signal.SIGTERM), before)
+
+    def test_runs_on_a_non_main_thread(self) -> None:
+        called = threading.Event()
+        thread = threading.Thread(target=run_with_alert, args=(called.set, "test"))
+        thread.start()
+        thread.join()
+        self.assertTrue(called.is_set())
 
 
 if __name__ == "__main__":

@@ -9,12 +9,38 @@ Usage:
         run_with_alert(main, PROTOCOL)
 """
 
+import signal
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from types import FrameType
 from typing import Callable
 
 from utils.logger import get_logger
+from utils.process_groups import kill_registered_process_groups
 from utils.telegram import get_github_run_url, send_error_message
 
 logger = get_logger("utils.runner")
+
+
+def _terminate_on_sigterm(signum: int, _frame: FrameType | None) -> None:
+    """Stop this script's detached agents, then exit so ``finally`` blocks still run."""
+    kill_registered_process_groups()
+    raise SystemExit(128 + signum)
+
+
+@contextmanager
+def _sigterm_cleanup() -> Iterator[None]:
+    """Make SIGTERM (sent by the automation runner on task timeout) clean up instead of dying outright."""
+    if threading.current_thread() is not threading.main_thread():
+        # Signal handlers can only be installed from the main thread.
+        yield
+        return
+    previous = signal.signal(signal.SIGTERM, _terminate_on_sigterm)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def run_with_alert(
@@ -43,12 +69,14 @@ def run_with_alert(
             public protocol page.
     """
     try:
-        entrypoint()
+        with _sigterm_cleanup():
+            entrypoint()
     except KeyboardInterrupt, SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 - top-level safety net by design
         script = name or entrypoint.__module__
         logger.exception("%s crashed", script)
+        # send_telegram_message redacts credentials from the exception text.
         lines = [f"🚨 {script} crashed: {type(exc).__name__}: {exc}"]
         run_url = get_github_run_url()
         if run_url:

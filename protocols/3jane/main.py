@@ -47,6 +47,7 @@ from utils.cache import (
     write_last_value_with_timestamp_to_file,
 )
 from utils.chains import Chain
+from utils.drawdown import peak_drawdown_dispatch_eligible
 from utils.formatting import format_age, format_duration, format_usd, format_with_suffix
 from utils.logger import get_logger
 from utils.telegram import escape_markdown
@@ -87,6 +88,15 @@ CACHE_KEY_USD3_TVL = "3JANE_USD3_TVL"
 CACHE_KEY_SUSD3_TVL = "3JANE_SUSD3_TVL"
 CACHE_KEY_SHUTDOWN_USD3 = "3JANE_SHUTDOWN_USD3"
 CACHE_KEY_SHUTDOWN_SUSD3 = "3JANE_SHUTDOWN_SUSD3"
+# A PPS drawdown smaller than this (basis points) still alerts but does not trigger
+# the emergency withdrawal dispatch: float PPS and share-rounding noise can
+# produce tiny decreases that are not losses. The drawdown is measured from the
+# peak PPS since the last dispatch-eligible alert, so a loss spread over many
+# small steps still dispatches once it adds up.
+PPS_DISPATCH_MIN_DECREASE_BPS = 1
+CACHE_KEY_USD3_PPS_PEAK = "3JANE_USD3_PPS_PEAK"
+CACHE_KEY_SUSD3_PPS_PEAK = "3JANE_SUSD3_PPS_PEAK"
+
 CACHE_KEY_DEBT_CAP = "3JANE_DEBT_CAP"
 CACHE_KEY_NOMINAL_FLOOR = "3JANE_NOMINAL_FLOOR"
 CACHE_KEY_FLOOR_BREACH = "3JANE_FLOOR_BREACH"
@@ -562,6 +572,26 @@ def check_borrower_default_watch(grace_period_seconds: int, delinquency_period_s
         check_borrower_default_watch_snapshot(snapshot)
 
 
+def _pps_dispatch_eligible(peak_key: str, previous_pps: float, current_pps: float) -> bool:
+    """Return whether a PPS decrease warrants dispatch, and advance the stored peak.
+
+    Args:
+        peak_key: Cache key holding the peak PPS since the last dispatch-eligible alert.
+        previous_pps: PPS from the previous run (0 when unknown).
+        current_pps: PPS from this run.
+
+    Returns:
+        True when the drawdown from the peak reaches ``PPS_DISPATCH_MIN_DECREASE_BPS``.
+    """
+    return peak_drawdown_dispatch_eligible(
+        previous_pps,
+        current_pps,
+        PPS_DISPATCH_MIN_DECREASE_BPS,
+        read_peak=lambda: get_cache_value(peak_key),
+        write_peak=lambda peak: set_cache_value(peak_key, peak),
+    )
+
+
 def check_pps(usd3_pps_float: float, susd3_pps_float: float) -> None:
     """Check Price Per Share for USD3 and sUSD3, alert on any decrease.
 
@@ -575,6 +605,7 @@ def check_pps(usd3_pps_float: float, susd3_pps_float: float) -> None:
     # --- USD3 PPS ---
     previous_usd3_pps = get_cache_value(CACHE_KEY_USD3_PPS)
     logger.info("USD3 PPS: %.8f (previous: %.8f)", usd3_pps_float, previous_usd3_pps)
+    usd3_dispatch = _pps_dispatch_eligible(CACHE_KEY_USD3_PPS_PEAK, previous_usd3_pps, usd3_pps_float)
 
     if previous_usd3_pps > 0 and usd3_pps_float < previous_usd3_pps:
         decrease_pct = (previous_usd3_pps - usd3_pps_float) / previous_usd3_pps * 100
@@ -585,7 +616,7 @@ def check_pps(usd3_pps_float: float, susd3_pps_float: float) -> None:
             f"⚠️ Possible loan markdown or default\n"
             f"🔗 [USD3](https://etherscan.io/address/{USD3_ADDRESS})"
         )
-        send_alert(Alert(AlertSeverity.CRITICAL, message, PROTOCOL))
+        send_alert(Alert(AlertSeverity.CRITICAL, message, PROTOCOL, dispatch=usd3_dispatch))
 
     if usd3_pps_float != previous_usd3_pps:
         set_cache_value(CACHE_KEY_USD3_PPS, usd3_pps_float)
@@ -593,6 +624,7 @@ def check_pps(usd3_pps_float: float, susd3_pps_float: float) -> None:
     # --- sUSD3 PPS ---
     previous_susd3_pps = get_cache_value(CACHE_KEY_SUSD3_PPS)
     logger.info("sUSD3 PPS: %.8f (previous: %.8f)", susd3_pps_float, previous_susd3_pps)
+    susd3_dispatch = _pps_dispatch_eligible(CACHE_KEY_SUSD3_PPS_PEAK, previous_susd3_pps, susd3_pps_float)
 
     if previous_susd3_pps > 0 and susd3_pps_float < previous_susd3_pps:
         decrease_pct = (previous_susd3_pps - susd3_pps_float) / previous_susd3_pps * 100
@@ -603,7 +635,7 @@ def check_pps(usd3_pps_float: float, susd3_pps_float: float) -> None:
             f"⚠️ Junior tranche absorbing losses — first-loss buffer impacted\n"
             f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
         )
-        send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL))
+        send_alert(Alert(AlertSeverity.HIGH, message, PROTOCOL, dispatch=susd3_dispatch))
 
     if susd3_pps_float != previous_susd3_pps:
         set_cache_value(CACHE_KEY_SUSD3_PPS, susd3_pps_float)

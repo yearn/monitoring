@@ -4,7 +4,7 @@
 
 3Jane is a credit-based money market on Ethereum (modified Morpho Blue fork) with unsecured lending. USD3 is the senior tranche ERC-4626 vault backed by USDC deposits. sUSD3 is the junior (first-loss) tranche created by staking USD3.
 
-- **PPS (Price Per Share):** `convertToAssets(1e6)` on USD3 and sUSD3 vs cached prior run. Alerts on any decrease — indicates loan markdowns or defaults (critical since loans are unsecured).
+- **PPS (Price Per Share):** `convertToAssets(1e6)` on USD3 and sUSD3 vs cached prior run. Alerts on any decrease — indicates loan markdowns or defaults (critical since loans are unsecured). Emergency dispatch needs a drawdown of at least **0.01%** (`PPS_DISPATCH_MIN_DECREASE_BPS`) from the peak PPS since the last dispatch-eligible alert, so float noise alerts without moving funds while a loss spread over several small drops still dispatches.
 - **TVL (Total Value Locked):** `totalAssets()` on both vaults vs cached prior run. Alerts when absolute change is **≥15%**.
 - **USD3 Protection (OC + Junior Buffer):** A single consistent protection check derived from sUSD3 backing and deployed credit. OC is `Deployed / (Deployed - sUSD3)` and the equivalent junior buffer is `sUSD3 / Deployed`. Alerts below **111% OC / 9.91% buffer** as HIGH and below **106% OC / 5.66% buffer** as CRITICAL. Both values appear in one alert, eliminating contradictory thresholds for the same first-loss protection. Deduped: re-alerts only when OC drops below the last alerted value; recovery above 111% re-arms. This excludes indirect enhancement from underlying credit-line assets and warehouse equity slices.
 - **Insurance Fund:** Tracks the fund's raw waUSDC share balance and alerts when an outflow is worth **≥$50k USDC**. Caching shares instead of asset value prevents waUSDC yield from masking withdrawals.
@@ -29,8 +29,8 @@
 
 | Metric | Threshold | Severity |
 |--------|-----------|----------|
-| USD3 PPS decrease | Any decrease vs cached prior | CRITICAL |
-| sUSD3 PPS decrease | Any decrease vs cached prior | HIGH |
+| USD3 PPS decrease | Any decrease vs cached prior (dispatch at ≥0.01% drawdown from peak) | CRITICAL |
+| sUSD3 PPS decrease | Any decrease vs cached prior (dispatch at ≥0.01% drawdown from peak) | HIGH |
 | TVL change | ≥15% absolute change vs prior run | LOW |
 | USD3 protection low | OC < 111% (equivalent junior buffer < 9.91%) | HIGH |
 | USD3 protection critical | OC < 106% (equivalent junior buffer < 5.66%) | CRITICAL |
@@ -119,11 +119,11 @@ The 95%/99% bands are temporary test thresholds while Accountable's report exclu
 
 ## Alert dispatch
 
-Alerts use the structured `send_alert` path. HIGH and CRITICAL alerts invoke the default emergency-dispatch hook after Telegram delivery, and `3jane` is enabled in `utils.dispatch.DISPATCHABLE_PROTOCOLS`. Accountable ratio, freshness, and availability alerts use the same `3jane` protocol key as the onchain checks — a second Accountable feed is a new `AccountableFeedConfig` with that protocol's key, not a special-case name.
+Alerts use the structured `send_alert` path. HIGH and CRITICAL alerts invoke the default emergency-dispatch hook before the Telegram send, so a slow or failed Telegram delivery cannot delay or block it, and `3jane` is enabled in `utils.dispatch.DISPATCHABLE_PROTOCOLS`. Accountable ratio, freshness, and availability alerts use the same `3jane` protocol key as the onchain checks — a second Accountable feed is a new `AccountableFeedConfig` with that protocol's key, not a special-case name.
 
 The sender posts a signed `emergency_withdrawal` webhook using protocol key `3jane`. Dispatch requires `LIQUIDITY_WEBHOOK_SECRET`, is skipped in `LOG_LEVEL=DEBUG`, and has a 60-minute per-protocol cooldown. The receiving liquidity-monitoring deployment must independently map `3jane` to the vaults, collateral names, and markets whose caps should be zeroed.
 
-Only HIGH and CRITICAL alerts dispatch. LOW and MEDIUM alerts—including insurance-fund outflows and Accountable staleness—remain Telegram/database alerts only.
+Only HIGH and CRITICAL alerts dispatch, and PPS alerts below the 0.01% drawdown gate are sent with dispatch disabled. LOW and MEDIUM alerts—including insurance-fund outflows and Accountable staleness—remain Telegram/database alerts only.
 
 ## Governance
 

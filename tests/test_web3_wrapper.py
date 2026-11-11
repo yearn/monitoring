@@ -165,6 +165,24 @@ class TestDefaultProviderUrls(unittest.TestCase):
         self.assertLessEqual(REQUEST_TIMEOUT_SECONDS, 120)
 
 
+class TestProviderErrorRedaction(unittest.TestCase):
+    def test_all_providers_failed_error_hides_keys(self):
+        url = "https://eth-mainnet.g.alchemy.com/v2/rpcsecretkey123456789"
+        provider = MultiHTTPProvider([url], max_retries=1, backoff_factor=0)
+        error = RuntimeError(f"429 Client Error: Too Many Requests for url: {url}")
+
+        with (
+            patch.dict(os.environ, {"PROVIDER_URL_MAINNET": url}),
+            patch("web3.providers.rpc.HTTPProvider.make_request", side_effect=error),
+            patch("utils.web3_wrapper.time.sleep"),
+            self.assertRaises(ProviderConnectionError) as ctx,
+        ):
+            provider.make_request("eth_blockNumber", [])
+
+        self.assertNotIn("rpcsecretkey123456789", str(ctx.exception))
+        self.assertIn("eth-mainnet.g.alchemy.com", str(ctx.exception))
+
+
 class TestProviderCredentialsStayOutOfDiagnostics(unittest.TestCase):
     """Provider URLs carry API keys, so logs and errors may only name the host."""
 
@@ -207,6 +225,31 @@ class TestProviderCredentialsStayOutOfDiagnostics(unittest.TestCase):
         self._assert_no_keys("\n".join(logs.output))
         self._assert_no_keys(str(raised.exception))
         self.assertIn("https://rpc-a.example/<redacted>", str(raised.exception))
+
+    def test_providers_on_the_same_host_keep_separate_errors(self):
+        provider = _FakeProvider([RuntimeError("429 rate limited"), RuntimeError("401 invalid key")])
+        provider.provider_urls = ["https://rpc.example/v2/KEY_A", "https://rpc.example/v2/KEY_B"]
+        provider.endpoint_uri = provider.provider_urls[0]
+        provider.max_retries = 1
+
+        with patch("utils.web3_wrapper.time.sleep"), self.assertRaises(ProviderConnectionError) as raised:
+            provider.make_request()
+
+        message = str(raised.exception)
+        self.assertIn("429 rate limited", message)
+        self.assertIn("401 invalid key", message)
+        self._assert_no_keys(message)
+
+    def test_malformed_url_in_an_error_does_not_replace_the_error(self):
+        provider = _FakeProvider([RuntimeError("bad https://[broken/v2/KEY_A"), RuntimeError("bad again")])
+        provider.provider_urls = ["https://rpc-a.example/v2/KEY_A", "https://rpc-b.example/v2/KEY_B"]
+        provider.endpoint_uri = provider.provider_urls[0]
+        provider.max_retries = 1
+
+        with patch("utils.web3_wrapper.time.sleep"), self.assertRaises(ProviderConnectionError) as raised:
+            provider.make_request()
+
+        self._assert_no_keys(str(raised.exception))
 
     def test_invalid_url_is_not_logged(self):
         """Without a scheme the URL can't be redacted, so it must not be logged at all."""

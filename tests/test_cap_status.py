@@ -107,6 +107,52 @@ def test_stcusd_assets_per_share_decrease_is_critical(monkeypatch: pytest.Monkey
     assert alerts[0].severity == status.AlertSeverity.CRITICAL
     assert "Decrease: 0.010000 cUSD per stcUSD" in alerts[0].message
     assert cache[status.CACHE_KEY_STCUSD_ASSETS_PER_SHARE] == "1090000000000000000"
+    assert alerts[0].dispatch
+
+
+def test_stcusd_rounding_decrease_alerts_without_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(status, "send_alert", alerts.append)
+
+    status.check_stcusd_assets_per_share(1_100_000_000_000_000_000)
+    status.check_stcusd_assets_per_share(1_099_999_999_999_999_998)
+
+    assert len(alerts) == 1
+    assert not alerts[0].dispatch
+
+
+def test_stcusd_drop_to_zero_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(status, "send_alert", alerts.append)
+
+    status.check_stcusd_assets_per_share(10**18)
+    status.check_stcusd_assets_per_share(0)
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == status.AlertSeverity.CRITICAL
+    assert alerts[0].dispatch
+
+
+def test_stcusd_small_steps_dispatch_once_cumulative_drop_crosses_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[Alert] = []
+    stub_cache(monkeypatch)
+    monkeypatch.setattr(status, "send_alert", alerts.append)
+
+    start = 10**18
+    status.check_stcusd_assets_per_share(start)
+    # 0.4 bp per run: no single step reaches the 1 bp gate, the third run's
+    # cumulative 1.2 bp drawdown does.
+    step = start * 4 // 100_000
+    for i in range(1, 4):
+        status.check_stcusd_assets_per_share(start - i * step)
+
+    assert [alert.dispatch for alert in alerts] == [False, False, True]
+
+    # After a dispatch-eligible alert the next small step is measured from the new level.
+    status.check_stcusd_assets_per_share(start - 4 * step)
+    assert alerts[-1].dispatch is False
 
 
 def test_stcusd_assets_per_share_increase_does_not_alert(monkeypatch: pytest.MonkeyPatch) -> None:

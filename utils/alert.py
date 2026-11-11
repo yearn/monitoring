@@ -76,12 +76,17 @@ class Alert:
     Args:
         protocol: The actual protocol name (used by hooks/dispatch).
         channel: Telegram channel for routing. Falls back to ``protocol`` if empty.
+        dispatch: Whether a HIGH/CRITICAL alert may trigger the emergency
+            withdrawal hook. Set False for signals that are not yet confirmed
+            (single third-party sample, rounding-sized moves) so they notify
+            without moving funds.
     """
 
     severity: AlertSeverity
     message: str
     protocol: str
     channel: str = ""
+    dispatch: bool = True
 
 
 def _ensure_default_dispatch_hook() -> None:
@@ -132,7 +137,16 @@ def send_alert(
     if silent is None:
         silent = _SEVERITY_SILENT_DEFAULT[alert.severity.value]
 
-    delivered = send_telegram_message(
+    # The hook (emergency dispatch) runs before Telegram: during an alert burst
+    # Telegram is rate limited and a send can wait out 429s and a plain-text
+    # retry, and a failed send must not stop the dispatch.
+    if alert.severity in (AlertSeverity.HIGH, AlertSeverity.CRITICAL) and _alert_hook is not None:
+        try:
+            _alert_hook(alert)
+        except Exception:
+            logger.exception("Alert hook failed for %s alert", alert.severity.value)
+
+    return send_telegram_message(
         message,
         alert.channel or alert.protocol,
         silent,
@@ -142,14 +156,6 @@ def send_alert(
         origin_protocol=alert.protocol,
         channel=alert.channel or alert.protocol,
     )
-
-    # Invoke hook for HIGH and CRITICAL alerts
-    if alert.severity in (AlertSeverity.HIGH, AlertSeverity.CRITICAL) and _alert_hook is not None:
-        try:
-            _alert_hook(alert)
-        except Exception:
-            logger.exception("Alert hook failed for %s alert", alert.severity.value)
-    return delivered
 
 
 # After AlertSeverity / Alert exist so utils.dispatch can import this module safely.

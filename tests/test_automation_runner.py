@@ -44,7 +44,7 @@ class TestBuildArgv(unittest.TestCase):
 class TestRunProfileDryRun(unittest.TestCase):
     def test_dry_run_does_not_invoke_subprocess(self):
         profile = _profile([Task(name="x", script="x.py"), Task(name="y", script="y.py")])
-        with patch("automation.runner.subprocess.run") as mock_run:
+        with patch("automation.runner.run_with_graceful_timeout") as mock_run:
             result = run_profile(profile, repo_root=Path("/tmp"), dry_run=True)
         mock_run.assert_not_called()
         self.assertEqual(len(result.tasks), 2)
@@ -62,7 +62,7 @@ class TestRunProfileSuccess(unittest.TestCase):
         class _Result:
             returncode = 0
 
-        with patch("automation.runner.subprocess.run", return_value=_Result()) as mock_run:
+        with patch("automation.runner.run_with_graceful_timeout", return_value=_Result()) as mock_run:
             run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
 
         mock_run.assert_called_once()
@@ -70,7 +70,6 @@ class TestRunProfileSuccess(unittest.TestCase):
         self.assertEqual(args[0], [sys.executable, "x.py"])
         self.assertEqual(kwargs["cwd"], Path("/srv/repo"))
         self.assertEqual(kwargs["env"]["CACHE_FILENAME"], "/srv/cache/foo.txt")
-        self.assertFalse(kwargs["check"])
 
     def test_sync_before_run_forces_remote_main_sync(self):
         profile = _profile([Task(name="x", script="x.py")], sync_before_run=True)
@@ -83,7 +82,7 @@ class TestRunProfileSuccess(unittest.TestCase):
             patch("automation.runner.git_sync.sync_to_remote_main") as mock_sync,
             patch("automation.runner.git_sync.sync_dependencies", return_value=SyncResult(ok=True, output="")),
             patch("automation.runner.crontab.refresh_live_crontab"),
-            patch("automation.runner.subprocess.run", return_value=_Result()),
+            patch("automation.runner.run_with_graceful_timeout", return_value=_Result()),
         ):
             run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
 
@@ -98,7 +97,7 @@ class TestRunProfileSuccess(unittest.TestCase):
         with (
             patch.dict(os.environ, {}),
             patch("automation.runner.git_sync.sync_to_remote_main") as mock_sync,
-            patch("automation.runner.subprocess.run", return_value=_Result()),
+            patch("automation.runner.run_with_graceful_timeout", return_value=_Result()),
         ):
             os.environ.pop(CRONTAB_PATH_ENV, None)
             run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
@@ -116,7 +115,7 @@ class TestRunProfileSuccess(unittest.TestCase):
             patch("automation.runner.git_sync.sync_to_remote_main", return_value=SyncResult(ok=True, output="")),
             patch("automation.runner.git_sync.sync_dependencies", return_value=SyncResult(ok=True, output="")),
             patch("automation.runner.crontab.refresh_live_crontab") as mock_refresh,
-            patch("automation.runner.subprocess.run", return_value=_Result()),
+            patch("automation.runner.run_with_graceful_timeout", return_value=_Result()),
         ):
             run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
 
@@ -132,7 +131,7 @@ class TestRunProfileSuccess(unittest.TestCase):
             patch.dict(os.environ, {CRONTAB_PATH_ENV: "/tmp/crontab"}),
             patch("automation.runner.git_sync.sync_to_remote_main", return_value=SyncResult(ok=False, output="boom")),
             patch("automation.runner.crontab.refresh_live_crontab") as mock_refresh,
-            patch("automation.runner.subprocess.run", return_value=_Result()),
+            patch("automation.runner.run_with_graceful_timeout", return_value=_Result()),
         ):
             run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
 
@@ -151,7 +150,7 @@ class TestRunProfileSuccess(unittest.TestCase):
                 "automation.runner.git_sync.sync_dependencies", return_value=SyncResult(ok=True, output="")
             ) as mock_deps,
             patch("automation.runner.crontab.refresh_live_crontab"),
-            patch("automation.runner.subprocess.run", return_value=_Result()),
+            patch("automation.runner.run_with_graceful_timeout", return_value=_Result()),
         ):
             run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
 
@@ -167,7 +166,7 @@ class TestRunProfileSuccess(unittest.TestCase):
             patch.dict(os.environ, {CRONTAB_PATH_ENV: "/tmp/crontab"}),
             patch("automation.runner.git_sync.sync_to_remote_main", return_value=SyncResult(ok=False, output="boom")),
             patch("automation.runner.git_sync.sync_dependencies") as mock_deps,
-            patch("automation.runner.subprocess.run", return_value=_Result()),
+            patch("automation.runner.run_with_graceful_timeout", return_value=_Result()),
         ):
             run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
 
@@ -187,7 +186,7 @@ class TestRunProfileSuccess(unittest.TestCase):
                 return_value=SyncResult(ok=False, output="no interpreter found"),
             ),
             patch("automation.runner.crontab.refresh_live_crontab") as mock_refresh,
-            patch("automation.runner.subprocess.run", return_value=_Result()) as mock_run,
+            patch("automation.runner.run_with_graceful_timeout", return_value=_Result()) as mock_run,
             self.assertLogs("automation.runner", level="WARNING") as logs,
         ):
             run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)
@@ -207,7 +206,7 @@ class TestRunProfileContinuesOnFailure(unittest.TestCase):
         class _Bad:
             returncode = 2
 
-        with patch("automation.runner.subprocess.run", side_effect=[_Bad(), _Ok()]) as mock_run:
+        with patch("automation.runner.run_with_graceful_timeout", side_effect=[_Bad(), _Ok()]) as mock_run:
             with patch("automation.runner._send_failure_digest") as mock_digest:
                 result = run_profile(profile, repo_root=Path("/"), dry_run=False)
 
@@ -218,11 +217,48 @@ class TestRunProfileContinuesOnFailure(unittest.TestCase):
 
     def test_spawn_failure_recorded(self):
         profile = _profile([Task(name="x", script="x.py")])
-        with patch("automation.runner.subprocess.run", side_effect=OSError("no such file")):
+        with patch("automation.runner.run_with_graceful_timeout", side_effect=OSError("no such file")):
             with patch("automation.runner._send_failure_digest"):
                 result = run_profile(profile, repo_root=Path("/"), dry_run=False)
         self.assertFalse(result.ok)
         self.assertIn("spawn failed", result.failures[0].error or "")
+
+    def test_timed_out_task_is_recorded_and_next_task_runs(self):
+        import subprocess
+
+        profile = _profile([Task(name="hang", script="h.py", timeout=5), Task(name="b", script="b.py")])
+
+        class _Ok:
+            returncode = 0
+
+        timeout = subprocess.TimeoutExpired(["python", "h.py"], 5, output=b"partial", stderr=b"stuck on rpc")
+        with patch("automation.runner.run_with_graceful_timeout", side_effect=[timeout, _Ok()]) as mock_run:
+            with patch("automation.runner._send_failure_digest") as mock_digest:
+                result = run_profile(profile, repo_root=Path("/"), dry_run=False)
+
+        self.assertEqual(mock_run.call_args_list[0].kwargs["timeout"], 5)
+        self.assertEqual([f.name for f in result.failures], ["hang"])
+        self.assertIn("timed out after 5s", result.failures[0].error or "")
+        self.assertIn("stuck on rpc", result.failures[0].error or "")
+        mock_digest.assert_called_once()
+
+    def test_error_tail_is_redacted(self):
+        profile = _profile([Task(name="x", script="x.py")])
+        url = "https://eth-mainnet.g.alchemy.com/v2/leakedkey1234567890"
+
+        class _Bad:
+            returncode = 1
+            stdout = ""
+            stderr = f"requests.exceptions.HTTPError: 429 for url: {url}"
+
+        with (
+            patch.dict(os.environ, {"PROVIDER_URL_MAINNET": url}),
+            patch("automation.runner.run_with_graceful_timeout", return_value=_Bad()),
+            patch("automation.runner._send_failure_digest"),
+        ):
+            result = run_profile(profile, repo_root=Path("/"), dry_run=False)
+
+        self.assertNotIn("leakedkey1234567890", result.failures[0].error or "")
 
 
 class TestTelegramSummary(unittest.TestCase):
@@ -311,7 +347,7 @@ class TestSuccessfulTaskWarnings(unittest.TestCase):
     def _run(self, stdout: str) -> list[str]:
         profile = _profile([Task(name="timelock-alerts", script="t.py")])
         with (
-            patch("automation.runner.subprocess.run", return_value=self._result(stdout)),
+            patch("automation.runner.run_with_graceful_timeout", return_value=self._result(stdout)),
             self.assertLogs("automation.runner", level="INFO") as logs,
         ):
             run_profile(profile, repo_root=Path("/srv/repo"), dry_run=False, send_digest=False)

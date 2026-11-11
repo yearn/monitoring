@@ -175,7 +175,11 @@ def redact_urls(text: str) -> str:
         url = match.group(0)
         # Sentence punctuation after a URL ("<url>: timeout") belongs to the text.
         trimmed = url.rstrip(".,:;)]")
-        parts = urlsplit(trimmed)
+        try:
+            parts = urlsplit(trimmed)
+        except ValueError:
+            # Malformed (e.g. "https://[broken/..."): nothing can be shown as the host.
+            return f"<redacted>{url[len(trimmed) :]}"
         host = parts.netloc.rsplit("@", 1)[-1] or "?"
         return f"{parts.scheme}://{host}/<redacted>{url[len(trimmed) :]}"
 

@@ -25,13 +25,27 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from automation.process import run_with_graceful_timeout
 
 logger = logging.getLogger(__name__)
 
 # Mirrors deploy/install.sh: the production venv carries the `ai` extra (LLM clients).
 UV_SYNC_ARGV: list[str] = ["uv", "sync", "--frozen", "--extra", "ai"]
+
+# Bounds on each step. A stalled `git fetch` (half-open TCP to GitHub) would
+# otherwise block the sync profile forever: its flock stays held, so every later
+# tick — and with it code sync — is skipped.
+GIT_FETCH_TIMEOUT_SECONDS = 120
+GIT_RESET_TIMEOUT_SECONDS = 60
+UV_SYNC_TIMEOUT_SECONDS = 600
+# A git lock file older than this cannot belong to a live sync step (each one is
+# bounded well below it), so it was left by a killed process and is removed.
+# Otherwise every later sync fails with "index.lock: File exists".
+STALE_LOCK_SECONDS = 30 * 60
 
 
 @dataclass
@@ -40,6 +54,23 @@ class SyncResult:
 
     ok: bool
     output: str
+
+
+def _remove_stale_git_locks(repo_root: Path) -> None:
+    """Delete git lock files left behind by a killed git process.
+
+    Args:
+        repo_root: Path to the git checkout.
+    """
+    git_dir = repo_root / ".git"
+    cutoff = time.time() - STALE_LOCK_SECONDS
+    for lock in (*git_dir.glob("*.lock"), *git_dir.glob("refs/**/*.lock")):
+        try:
+            if lock.stat().st_mtime < cutoff:
+                lock.unlink()
+                logger.warning("Removed stale git lock %s", lock)
+        except OSError as exc:
+            logger.warning("Could not remove stale git lock %s: %s", lock, exc)
 
 
 def sync_to_remote_main(repo_root: Path) -> SyncResult:
@@ -55,23 +86,22 @@ def sync_to_remote_main(repo_root: Path) -> SyncResult:
     if not (repo_root / ".git").exists():
         return SyncResult(ok=False, output=f"{repo_root} is not a git checkout")
 
+    _remove_stale_git_locks(repo_root)
     try:
-        fetch = subprocess.run(
+        fetch = run_with_graceful_timeout(
             ["git", "-C", str(repo_root), "fetch", "--quiet", "origin", "main"],
-            capture_output=True,
-            text=True,
-            check=False,
+            timeout=GIT_FETCH_TIMEOUT_SECONDS,
         )
         if fetch.returncode != 0:
             output = (fetch.stdout + fetch.stderr).strip()
             return SyncResult(ok=False, output=output or f"fetch exited {fetch.returncode}")
 
-        reset = subprocess.run(
+        reset = run_with_graceful_timeout(
             ["git", "-C", str(repo_root), "reset", "--hard", "--quiet", "origin/main"],
-            capture_output=True,
-            text=True,
-            check=False,
+            timeout=GIT_RESET_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired as exc:
+        return SyncResult(ok=False, output=f"git sync timed out after {exc.timeout}s: {' '.join(exc.cmd)}")
     except OSError as exc:
         return SyncResult(ok=False, output=f"git sync failed to spawn: {exc}")
 
@@ -109,14 +139,13 @@ def sync_dependencies(repo_root: Path) -> SyncResult:
         is uv's combined output (it reports installs on stderr). Never raises.
     """
     try:
-        completed = subprocess.run(
-            UV_SYNC_ARGV,
-            cwd=repo_root,
-            env=_uv_env(),
-            capture_output=True,
-            text=True,
-            check=False,
+        completed = run_with_graceful_timeout(
+            UV_SYNC_ARGV, timeout=UV_SYNC_TIMEOUT_SECONDS, cwd=repo_root, env=_uv_env()
         )
+    except subprocess.TimeoutExpired as exc:
+        # An interrupted install can leave the venv partly updated; the next tick
+        # re-runs `uv sync` unconditionally and repairs it.
+        return SyncResult(ok=False, output=f"uv sync timed out after {exc.timeout}s")
     except OSError as exc:
         return SyncResult(ok=False, output=f"uv sync failed to spawn: {exc}")
 

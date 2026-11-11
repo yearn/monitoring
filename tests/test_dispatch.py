@@ -302,3 +302,28 @@ def test_configured_secrets_are_not_stored(configured: list[float], post: Mock) 
     for path in Path(queue.path).parent.glob(Path(queue.path).name + "*"):
         assert b"liquidity-test-key" not in path.read_bytes()
         assert b"mommy-test-key" not in path.read_bytes()
+
+
+def test_unconfirmed_alert_is_not_enqueued_or_sent(configured: list[float], post: Mock) -> None:
+    unconfirmed = Alert(AlertSeverity.CRITICAL, "depeg (unconfirmed)", "maple", dispatch=False)
+    dispatch.dispatch_emergency_withdrawal(unconfirmed)
+    assert not DispatchQueue().records()
+    post.assert_not_called()
+
+
+def test_message_is_redacted_before_persisting_and_sending(
+    configured: list[float], post: Mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PROVIDER_URL", "https://eth-mainnet.example.com/v2/rpc-path-key-1234567890")
+    leaky = Alert(
+        AlertSeverity.HIGH,
+        "crash: https://eth-mainnet.example.com/v2/rpc-path-key-1234567890 unreachable",
+        "maple",
+    )
+    queue = DispatchQueue()
+    dispatch.dispatch_emergency_withdrawal(leaky)
+    assert post.call_count == 2
+    for call in post.call_args_list:
+        assert b"rpc-path-key-1234567890" not in call.kwargs["data"]
+    for path in Path(queue.path).parent.glob(Path(queue.path).name + "*"):
+        assert b"rpc-path-key-1234567890" not in path.read_bytes()
