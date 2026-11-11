@@ -112,33 +112,43 @@ class TestGracefulTimeout(unittest.TestCase):
 
             self.assertTrue(marker.exists())
 
-    def test_timeout_stops_descendants_holding_the_pipes(self):
+    def test_timeout_stops_descendants_with_inherited_or_redirected_pipes(self) -> None:
+        """Stop SIGTERM-resistant descendants even after the parent's pipes close."""
+        import signal
         import subprocess
 
         from automation.process import run_with_graceful_timeout
 
-        with TemporaryDirectory() as d:
-            pid_file = Path(d) / "child.pid"
-            # The backgrounded child inherits stdout/stderr and ignores SIGTERM, so
-            # only a group-wide SIGKILL with bounded draining returns promptly.
-            script = f"sh -c 'trap \"\" TERM; echo $$ > {pid_file}; exec sleep 30' & wait"
-            start = time.monotonic()
-            with (
-                patch("automation.process.TERMINATE_GRACE_SECONDS", 0.5),
-                self.assertRaises(subprocess.TimeoutExpired),
-            ):
-                run_with_graceful_timeout(["sh", "-c", script], timeout=0.5)
-
-            self.assertLess(time.monotonic() - start, 5)
-            child_pid = int(pid_file.read_text())
-            for _ in range(50):
+        for redirection in ("", " >/dev/null 2>&1"):
+            with self.subTest(redirection=redirection), TemporaryDirectory() as d:
+                pid_file = Path(d) / "child.pid"
+                # EOF can arrive as soon as the parent exits when the child has
+                # redirected its output, even though that child is still alive.
+                script = f"sh -c 'trap \"\" TERM; echo $$ > {pid_file}; exec sleep 30'{redirection} & wait"
+                start = time.monotonic()
                 try:
-                    os.kill(child_pid, 0)
-                except ProcessLookupError:
-                    break
-                time.sleep(0.05)
-            else:
-                self.fail("descendant survived the timeout")
+                    with (
+                        patch("automation.process.TERMINATE_GRACE_SECONDS", 0.5),
+                        self.assertRaises(subprocess.TimeoutExpired),
+                    ):
+                        run_with_graceful_timeout(["sh", "-c", script], timeout=0.5)
+
+                    self.assertLess(time.monotonic() - start, 5)
+                    child_pid = int(pid_file.read_text())
+                    for _ in range(50):
+                        try:
+                            os.kill(child_pid, 0)
+                        except ProcessLookupError:
+                            break
+                        time.sleep(0.05)
+                    else:
+                        self.fail("descendant survived the timeout")
+                finally:
+                    if pid_file.exists():
+                        try:
+                            os.kill(int(pid_file.read_text()), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
 
     def test_timeout_carries_the_captured_output(self):
         import subprocess

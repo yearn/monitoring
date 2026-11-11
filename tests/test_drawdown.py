@@ -1,5 +1,7 @@
 """Tests for utils/drawdown.py."""
 
+import pytest
+
 from utils.drawdown import peak_drawdown_dispatch_eligible
 
 
@@ -30,6 +32,23 @@ def test_increase_is_not_eligible_and_raises_the_peak() -> None:
 def test_threshold_is_inclusive() -> None:
     assert _Peak().check(10_000, 9_999) is True
     assert _Peak().check(100_000, 99_991) is False
+
+
+@pytest.mark.parametrize("previous,current", [(1.0, 0.9999), (2.0, 1.9998), (1.1, 1.09989)])
+def test_float_threshold_is_inclusive(previous: float, current: float) -> None:
+    """Dispatch an exact one-basis-point loss despite binary float rounding."""
+    assert _Peak().check(previous, current) is True
+
+
+def test_float_just_below_threshold_is_not_eligible() -> None:
+    """Keep the threshold strict instead of accepting nearby sub-threshold losses."""
+    assert _Peak().check(1.0, 0.9999000000000001) is False
+
+
+def test_integer_just_below_threshold_is_not_eligible() -> None:
+    """Preserve wei precision when a loss misses the threshold by one wei."""
+    previous = 10**18
+    assert _Peak().check(previous, previous - previous // 10_000 + 1) is False
 
 
 def test_cumulative_drawdown_from_peak_is_eligible() -> None:

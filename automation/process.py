@@ -22,7 +22,8 @@ def run_with_graceful_timeout(
 
     ``subprocess.run(timeout=...)`` sends SIGKILL to the direct child only, which
     leaves git lock files in place and gives a task no chance to clean up. This
-    sends SIGTERM first and only kills after ``TERMINATE_GRACE_SECONDS``. The
+    sends SIGTERM first and allows the child up to ``TERMINATE_GRACE_SECONDS``
+    to exit, then kills any remaining members of its process group. The
     process runs in its own process group and the signals go to the whole group,
     so helpers it spawned (git-remote-https, uv workers) are stopped too.
     Draining their output is bounded as well: a descendant that escaped the group
@@ -63,6 +64,9 @@ def run_with_graceful_timeout(
                     break
                 except subprocess.TimeoutExpired as drain_exc:
                     stdout, stderr = drain_exc.stdout, drain_exc.stderr
+            # Closed pipes and an exited parent do not prove its group is empty:
+            # a descendant may ignore SIGTERM and have redirected its output.
+            _signal_group(proc, signal.SIGKILL)
             raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr) from None
         except BaseException:
             # Ctrl-C only reaches the foreground group, which no longer includes the

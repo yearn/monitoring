@@ -1,6 +1,7 @@
 """Peak-drawdown gate deciding whether a share-price decrease may trigger emergency dispatch."""
 
 from collections.abc import Callable
+from fractions import Fraction
 
 BPS_DENOMINATOR = 10_000
 
@@ -32,7 +33,12 @@ def peak_drawdown_dispatch_eligible[T: (int, float)](
     """
     stored_peak = read_peak()
     peak = max(stored_peak, previous)
-    eligible = current < previous and (peak - current) * BPS_DENOMINATOR >= peak * min_decrease_bps
+    # Compare decimal values exactly: binary subtraction makes 1.0 -> 0.9999
+    # appear just below one bp. Fractions also preserve wei-sized differences
+    # for integer callers and do not depend on the global Decimal precision.
+    exact_peak = Fraction(str(peak))
+    exact_current = Fraction(str(current))
+    eligible = current < previous and (exact_peak - exact_current) * BPS_DENOMINATOR >= exact_peak * min_decrease_bps
     # After a dispatch-eligible alert the next leg is measured from the new level.
     new_peak = current if eligible else max(peak, current)
     if new_peak != stored_peak:
