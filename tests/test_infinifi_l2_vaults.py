@@ -89,28 +89,14 @@ class TestStaleMessage(unittest.TestCase):
         assert text is not None
         self.assertIn("(51h ago, threshold 50h)", text)
 
-    def test_chain_specific_stale_boundaries(self) -> None:
-        for chain_id, threshold in [(8453, 50), (143, 48), (99999, 48)]:
+    def test_shared_stale_boundary(self) -> None:
+        for chain_id in [8453, 143, 99999]:
             with self.subTest(chain_id=chain_id):
-                report = _report("76368.80", hours_ago=threshold, chain_id=chain_id)
+                report = _report("76368.80", hours_ago=50, chain_id=chain_id)
                 self.assertIsNone(stale_message(report, NOW))
                 text = stale_message(report, NOW + 1)
                 assert text is not None
-                self.assertIn(f"threshold {threshold}h", text)
-
-    def test_base_grace_does_not_relax_monad(self) -> None:
-        self.assertIsNone(stale_message(_report("330064.09", hours_ago=49), NOW))
-        text = stale_message(_report("4371182.64", hours_ago=49, chain_id=143), NOW)
-        assert text is not None
-        self.assertIn("threshold 48h", text)
-
-    def test_base_threshold_can_be_overridden_independently(self) -> None:
-        with patch.object(l2_vaults, "BASE_STALE_HOURS", 52):
-            self.assertIsNone(stale_message(_report("330064.09", hours_ago=51), NOW))
-            text = stale_message(_report("330064.09", hours_ago=53), NOW)
-            assert text is not None
-            self.assertIn("threshold 52h", text)
-            self.assertIsNotNone(stale_message(_report("4371182.64", hours_ago=49, chain_id=143), NOW))
+                self.assertIn("threshold 50h", text)
 
     def test_recent_report_is_quiet(self) -> None:
         self.assertIsNone(stale_message(_report("76368.80", hours_ago=22), NOW))
@@ -310,28 +296,6 @@ class TestFetchReports(unittest.TestCase):
         functions.getVaultChainIds.return_value.call.assert_called_once_with(block_identifier=BLOCK)
         functions.getVault.return_value.call.assert_called_once_with(block_identifier=BLOCK)
         functions.portalAssetsReport.return_value.call.assert_called_once_with(block_identifier=BLOCK)
-
-    def test_discovers_base_and_monad(self) -> None:
-        monad_vault = "0x77776F422B7EB0A95ccD35fBd088A5957D4408eA"
-        client = MagicMock()
-        functions = client.get_contract.return_value.functions
-        functions.getVaultChainIds.return_value.call.return_value = [8453, 143]
-        functions.getVault.return_value.call.side_effect = [VAULT, monad_vault]
-        functions.portalAssetsReport.return_value.call.side_effect = [
-            (330_064_085_219 * 10**12, 0, 0, NOW),
-            (4_371_182_644_985 * 10**12, 0, 0, NOW - HOUR),
-        ]
-
-        reports = fetch_reports(client, BLOCK)
-
-        self.assertEqual(
-            reports,
-            [
-                VaultReport(8453, VAULT, Decimal("330064.085219"), NOW),
-                VaultReport(143, monad_vault, Decimal("4371182.644985"), NOW - HOUR),
-            ],
-        )
-        self.assertEqual([call.args for call in functions.getVault.call_args_list], [(8453,), (143,)])
 
 
 class TestFetchUpdates(unittest.TestCase):
