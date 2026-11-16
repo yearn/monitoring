@@ -15,7 +15,8 @@ For every chain the PortalHub lists, this script alerts (MEDIUM) when:
   ``INFINIFI_L2_VAULT_DROP_THRESHOLD`` (default 50%), including a fall to 0,
   and at least ``INFINIFI_L2_VAULT_MIN_VALUE`` USD (default 10,000);
 - the vault has not received a report for ``INFINIFI_L2_VAULT_STALE_HOURS``
-  (default 48h) while it holds at least the minimum value.
+  (default 48h), or ``INFINIFI_L2_VAULT_STALE_HOURS_BASE`` for Base (default
+  50h), while it holds at least the minimum value.
 
 The monitor uses only mainnet reads. Comparing the mirrored value with L2 farm
 totals produces false mismatches while outbound transfers await settlement,
@@ -55,6 +56,7 @@ EXPLORER = "https://etherscan.io/address"
 DROP_THRESHOLD = Decimal(Config.get_env("INFINIFI_L2_VAULT_DROP_THRESHOLD", "0.5") or "0.5")
 MIN_VALUE = Decimal(Config.get_env("INFINIFI_L2_VAULT_MIN_VALUE", "10000") or "10000")
 STALE_HOURS = Config.get_env_int("INFINIFI_L2_VAULT_STALE_HOURS", 48)
+BASE_STALE_HOURS = Config.get_env_int("INFINIFI_L2_VAULT_STALE_HOURS_BASE", 50)
 LOG_BLOCK_RANGE = 2000
 
 _HUB_ABI = [
@@ -209,15 +211,16 @@ def drop_message(report: VaultReport, update: VaultUpdate) -> str | None:
 
 def stale_message(report: VaultReport, now: int) -> str | None:
     """Alert text when a vault holding real value has not been updated recently, else None."""
+    stale_hours = BASE_STALE_HOURS if report.chain_id == Chain.BASE.chain_id else STALE_HOURS
     age_hours = (now - report.last_update) / 3600
-    if report.value < MIN_VALUE or age_hours <= STALE_HOURS:
+    if report.value < MIN_VALUE or age_hours <= stale_hours:
         return None
     return (
         "⚠️ *Infinifi L2 Vault Report Stale*\n\n"
         f"Chain: {_chain_name(report.chain_id)}\n"
         f"Vault: {_link(report.vault)}\n"
         f"Reported value: ${report.value:,.2f}\n"
-        f"Last assets update: {_time(report.last_update)} ({age_hours:.0f}h ago, threshold {STALE_HOURS}h)\n\n"
+        f"Last assets update: {_time(report.last_update)} ({age_hours:.0f}h ago, threshold {stale_hours}h)\n\n"
         "Mainnet is carrying this chain's deposits at a value nobody has confirmed recently."
     )
 
