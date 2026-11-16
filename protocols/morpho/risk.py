@@ -55,6 +55,7 @@ MARKETS_RISK_1 = {
         "0x4bc9c84a5271f5196357c0ed18af783614851f23ac11652e78b9934e34baa5d1",  # vbETH/vbUSDT -> lltv 86%, oracle: Api3 ETH/USD and Api3 USDT/USD
         "0x9c95ce191559ba7652c7a2d74568590824c1166a2994fcef696b413c18efe7ee",  # vbWBTC/vbUSDT -> lltv 86%, oracle: Api3 BTC/USD and Api3 USDT/USD
         "0x1e74d36ffbda65b8a45d72754b349cdd5ce807c5fa814f91ba8e3cd27881c34b",  # weETH/vbETH -> lltv 91.5%, oracle: Redstone weETH/ETH fundamental price
+        "0x94a3931fcbae5bd6a5ace3fc6d351097020ae4c186d6c5f64d25560f31ba4a46",  # weETH/vbETH -> lltv 91.5%, oracle: Chainlink weETH/ETH; no quote feed (vbETH = ETH).
         "0x22f9f76056c10ee3496dea6fefeaf2f98198ef597eda6f480c148c6d3aaa70db",  # wstETH/vbETH -> lltv 91.5%, oracle: Redstone wstETH/ETH fundamental price
         "0xc149387c455f7abf7a1f430ccc6639df55fcd366a2f5b055f611289ed1b8a956",  # LBTC/vbUSDT -> lltv 86%, oracle: Redstone LBTC/BTC fundamental price and Redstone BTC/USD
         "0xa0cd6b9d1fcc6baded4f7f8f93697dbe7f24f6e1fc22602a625c7a80b8e8e6ef",  # LBTC/vbUSDC -> lltv 86%, oracle: Chainlink LBTC/USD and Chainlink USDC/USD
@@ -71,7 +72,9 @@ MARKETS_RISK_1 = {
         "0xa6ce59291d90ae348b2fa956cc66f31df605a3304a9325e494c94e2cf5b0485a",  # weETH/vbUSDT -> lltv 77%, oracle: RedStone weETH/ETH fundamental price, Chainlink ETH/USD and Chainlink USDT/USD.
         "0x76e311d4b0e2e6ae88ad9bab18063452a6d39837d7104c430ff62457b91cb2cb",  # weETH/vbUSDC -> lltv 77%, oracle: RedStone weETH/ETH fundamental price, Chainlink ETH/USD and Chainlink USDC/USD.
         "0x9f24e1fc2d1779d1e741327e109de381321e2ed862f295221043ceac2576b76e",  # weETH/vbUSDC -> lltv 86%, oracle: RedStone weETH/ETH fundamental price, Chainlink ETH/USD and Chainlink USDC/USD. Same oracle as the 77% weETH/vbUSDC market.
+        "0xe92be41d66ac51b51d60ccf46cefb2ea3abb2c64ab4f9d5864e82a3b3d582cdd",  # weETH/vbUSDC -> lltv 86%, oracle: Chainlink weETH/ETH, Chainlink ETH/USD and Chainlink USDC/USD.
         "0xbb4fb94ca819744df6a8f3932fffad47d31e8d76d3c48216878295c4cf588caf",  # weETH/vbUSDT -> lltv 86%, oracle: RedStone weETH/ETH fundamental price, Chainlink ETH/USD and Chainlink USDT/USD.
+        "0x0a8f3fd0965bfa6e94339cca629bec6ddac99f697ac74d808aa2d9f2c46b5f68",  # weETH/vbUSDT -> lltv 86%, oracle: Chainlink weETH/ETH, Chainlink ETH/USD and Chainlink USDT/USD.
         "0x80e60fe453223b0f84a567724f88190bef708420d24397157067d424429783e9",  # avKAT/KAT -> llt 77%, oracle ERC4626 avKAT/KAT vault rate
     ],
 }
