@@ -45,7 +45,9 @@ Each `OutlandVault` on mainnet mirrors infiniFi's deposits on one L2 (`PortalHub
 `l2_vaults.py` sends MEDIUM alerts when:
 
 - **Booked loss**: an executed `PortalUpdate` reduces the vault's farm-share value by more than `INFINIFI_L2_VAULT_DROP_THRESHOLD` (default `0.5`), including a fall to 0, and the loss is at least `INFINIFI_L2_VAULT_MIN_VALUE` (default `10000`) USD. Each event's `oldAssets` and `newAssets` values determine the loss. Transfers that only move liquidity do not trigger this alert, even if an assets update executes between readings.
-- **Stale report**: a vault holding at least the minimum value has had no assets update for `INFINIFI_L2_VAULT_STALE_HOURS` (default `48`). Base normally reports every 6–22h.
+- **Stale report**: a vault holding at least the minimum value has had no assets update for more than `INFINIFI_L2_VAULT_STALE_HOURS` (default `50` hours for all chains, including Base and Monad). Base had three intervals of roughly 48h 22m–48h 32m between November 1–15, 2026; the shared 50-hour threshold allows for those observed intervals plus delivery, processing and finality delays.
+
+The hourly monitor discovers every registered chain from PortalHub, including Base (8453) and Monad (143). For Monad, it monitors the mainnet OutlandVault's processed reports and booked losses. It does not track individual CCIP accounting messages or CCTP USDC transfers through to completion.
 
 This monitor reads only mainnet contracts. The API mismatch check was removed because outbound bridge transfers raise the mirrored L2 value before the assets reach L2 farms. On October 12, 2026, an $800,000 transfer produced a mismatch while CCTP awaited Ethereum finality. The API matched live Monad accounting before settlement and lagged after the funds arrived. Replacing the API with L2 RPC reads would still produce a temporary gap during settlement. A reliable cross-chain comparison would need to reconcile transfers in flight and snapshot timing. The reserves and allocation monitor in `main.py` still uses the API.
 

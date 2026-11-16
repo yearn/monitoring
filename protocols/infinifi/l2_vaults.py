@@ -15,7 +15,7 @@ For every chain the PortalHub lists, this script alerts (MEDIUM) when:
   ``INFINIFI_L2_VAULT_DROP_THRESHOLD`` (default 50%), including a fall to 0,
   and at least ``INFINIFI_L2_VAULT_MIN_VALUE`` USD (default 10,000);
 - the vault has not received a report for ``INFINIFI_L2_VAULT_STALE_HOURS``
-  (default 48h) while it holds at least the minimum value.
+  (default 50h) while it holds at least the minimum value.
 
 The monitor uses only mainnet reads. Comparing the mirrored value with L2 farm
 totals produces false mismatches while outbound transfers await settlement,
@@ -54,7 +54,7 @@ EXPLORER = "https://etherscan.io/address"
 
 DROP_THRESHOLD = Decimal(Config.get_env("INFINIFI_L2_VAULT_DROP_THRESHOLD", "0.5") or "0.5")
 MIN_VALUE = Decimal(Config.get_env("INFINIFI_L2_VAULT_MIN_VALUE", "10000") or "10000")
-STALE_HOURS = Config.get_env_int("INFINIFI_L2_VAULT_STALE_HOURS", 48)
+STALE_HOURS = Config.get_env_int("INFINIFI_L2_VAULT_STALE_HOURS", 50)
 LOG_BLOCK_RANGE = 2000
 
 _HUB_ABI = [

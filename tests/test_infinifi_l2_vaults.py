@@ -85,9 +85,18 @@ class TestDropMessage(unittest.TestCase):
 
 class TestStaleMessage(unittest.TestCase):
     def test_old_report_with_value_alerts(self) -> None:
-        text = stale_message(_report("76368.80", hours_ago=50), NOW)
+        text = stale_message(_report("76368.80", hours_ago=51), NOW)
         assert text is not None
-        self.assertIn("(50h ago, threshold 48h)", text)
+        self.assertIn("(51h ago, threshold 50h)", text)
+
+    def test_shared_stale_boundary(self) -> None:
+        for chain_id in [8453, 143, 99999]:
+            with self.subTest(chain_id=chain_id):
+                report = _report("76368.80", hours_ago=50, chain_id=chain_id)
+                self.assertIsNone(stale_message(report, NOW))
+                text = stale_message(report, NOW + 1)
+                assert text is not None
+                self.assertIn("threshold 50h", text)
 
     def test_recent_report_is_quiet(self) -> None:
         self.assertIsNone(stale_message(_report("76368.80", hours_ago=22), NOW))

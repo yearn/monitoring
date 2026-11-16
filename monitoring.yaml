@@ -190,7 +190,7 @@ protocols:
       - name: "L2 Vault Reports"
         description: >-
           Finalized assets update books a farm-share value loss >50% and at least $10k,
-          or assets update stale >48h with at least $10k mirrored value. Liquidity
+          or assets update stale >50h with at least $10k mirrored value. Liquidity
           transfers alone do not trigger loss alerts.
       - name: "Timelock"
         description: "Longtimelock and Shorttimelock events via Envio"
