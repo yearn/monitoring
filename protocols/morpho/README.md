@@ -37,8 +37,6 @@ Additional insights on Morpho vault risks are available at [Llama Risk blog](htt
 
 The overall risk level of a Morpho Vault is determined by the risk levels of its markets. Markets and thresholds are defined in [risk.py](./risk.py); vault scores are defined in [config.py](./config.py). Both are mutable operating configuration and are intentionally not fixed by tests. Level 1 represents the safest configuration.
 
-Katana's Chainlink weETH/vbUSDC and weETH/vbUSDT markets at 86% LLTV and weETH/vbETH market at 91.5% LLTV use Risk Level 1, matching their RedStone counterparts. The stablecoin markets combine Chainlink weETH/ETH and ETH/USD with the corresponding USDC/USD or USDT/USD quote feed; the vbETH market uses only Chainlink weETH/ETH.
-
 ### Oracle validation
 
 When adding or checking market rows in [risk.py](./risk.py), use [morpho-oracle-validation.md](./morpho-oracle-validation.md): resolve `uniqueKey` and `oracle.address` via the Morpho GraphQL API, validate feeds on-chain (typically `MorphoChainlinkOracleV2` getters and `description()`), then classify feeds (Chainlink, RedStone, Chronicle, API3, or unknown) using on-chain hints plus official listings — [Chainlink](https://docs.chain.link/data-feeds/price-feeds/addresses) / [data.chain.link](https://data.chain.link), [RedStone](https://docs.redstone.finance/), [Chronicle Oracles](https://chroniclelabs.org/dashboard/oracles), [Api3 Market](https://market.api3.org/) (see §4 in that doc).
