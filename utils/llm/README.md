@@ -165,7 +165,7 @@ Without this, a Safe tx that schedules or executes a timelock batch of upgrades 
 When an upgrade is detected the pipeline:
 
 1. Reads the **current implementation** from the EIP-1967 storage slot (`0x360894a...`) of the proxy, falling back to the legacy zeppelinos slot (`0x7050c9e...`) for pre-EIP-1967 proxies like USDC's `FiatTokenProxy`, then to the EIP-1967 beacon slot (`0xa3f0ad7...`) followed by the beacon's `implementation()`, then to `implementation()` / `comptrollerImplementation()` on the proxy itself. Every proxy-follow path (source context, parameter names, labels, state reads, ABI probes) goes through this one resolver — before beacon support, a `BeaconProxy` target (3Jane's per-facility `LCCVault`s) left the model with no source, no parameter names and the label "BeaconProxy".
-2. Safe and timelock alerts use either the explorer comparison or the Wavey Gist for implementation pairs approved in `WAVEY_PUBLIC_UPGRADE_DIFFS`. The full report lists the same comparison link for each proxy.
+2. Safe and timelock alerts link to a Wavey Gist with the verified source diff and deployment metadata of both implementations, falling back to the explorer comparison when the gist is unavailable. The full report lists the same comparison link for each proxy.
 3. Fetches the verified record of **both** implementations (`utils/verified_contract.py`) and diffs them (`utils/impl_diff.py`) in separated categories, each line carrying the contract and file it came from:
    - **External ABI changes** (`utils/abi_surface.py`) — additions, removals and `stateMutability` changes keyed by canonical signature (`setCaps((bytes32,uint128)[])`), derived from each implementation's own ABI. Generated public getters are included naturally; interfaces, comments, and internal/private functions never are.
    - **Target-defined function changes** (`utils/solidity_text.py`) — scoped to the deployed contract's own definition in its own file: bodies that changed under an unchanged signature (with a short unified diff), plus internal/private members added or removed (added ones carry their source). ABI equality is not behavioral equality, and neither is an unchanged function list — comparing only the functions both sides share would miss behavior *moved* into a new internal helper, or a deleted transfer hook. External additions stay in the ABI section, so nothing is reported twice.
@@ -666,7 +666,6 @@ All configuration is via environment variables:
 | `LLM_STRUCTURED_OUTPUT` | *(per provider)* | `true`/`false` to force JSON-schema output. Default: on for anthropic/openai/venice (all verified live), off for groq/custom |
 | `LLM_CREDIT_ALERT_THRESHOLD_USD` | `1` | Venice only: alert when what the key can still spend (DIEM + bundled credits + USD) drops below this (see [Credit Alert](#credit-alert)) |
 | `WAVEY_GIST_API_KEY` | *(required for Wavey links)* | API key for publishing detailed AI reports and proxy upgrade source diffs to Wavey Gist |
-| `WAVEY_PUBLIC_UPGRADE_DIFFS` | *(empty)* | Comma-separated `chain_id:old_implementation:new_implementation` pairs approved for public diff publishing |
 | `ETHERSCAN_TOKEN` | *(optional)* | Etherscan v2 multichain API key for source context |
 | `TENDERLY_API_KEY` | *(optional)* | Tenderly API key for simulation |
 | `TENDERLY_ACCOUNT` | `yearn` | Tenderly account slug |

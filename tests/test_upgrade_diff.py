@@ -1,5 +1,6 @@
 """Tests for publishing complete upgrade source diffs."""
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from threading import Event
@@ -7,13 +8,17 @@ from unittest.mock import patch
 
 import pytest
 
-from utils.upgrade_diff import UpgradeDiffLink, publish_upgrade_diff, resolve_upgrade_diff_links
+from utils.upgrade_diff import (
+    REQUEST_TIMEOUT_SECONDS,
+    UpgradeDiffLink,
+    publish_upgrade_diff,
+    resolve_upgrade_diff_links,
+)
 from utils.verified_contract import VerifiedContract
 
 OLD_IMPL = "0x" + "a" * 40
 NEW_IMPL = "0x" + "b" * 40
 GIST_URL = "https://gist.wavey.info/contract-diff"
-ALLOWLIST_ENTRY = f"1:{OLD_IMPL}:{NEW_IMPL}"
 EXPLORER_DIFF = f"https://etherscan.io/contractdiffchecker?a1={OLD_IMPL}&a2={NEW_IMPL}"
 UPGRADE = UpgradeDiffLink("0x" + "c" * 40, OLD_IMPL, NEW_IMPL, EXPLORER_DIFF)
 
@@ -27,7 +32,6 @@ def _verified(sources: dict[str, str]) -> VerifiedContract:
 def _wavey_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep tests independent of the local Wavey configuration."""
     monkeypatch.setenv("WAVEY_GIST_API_KEY", "test-key")
-    monkeypatch.setenv("WAVEY_PUBLIC_UPGRADE_DIFFS", ALLOWLIST_ENTRY)
 
 
 def test_publishes_every_changed_file_and_hunk() -> None:
@@ -45,9 +49,11 @@ def test_publishes_every_changed_file_and_hunk() -> None:
         assert publish_upgrade_diff(OLD_IMPL, NEW_IMPL, 1) == GIST_URL
 
     assert [call.args for call in fetch.call_args_list] == [(1, OLD_IMPL), (1, NEW_IMPL)]
-    assert all(call.kwargs["retries"] == 0 for call in fetch.call_args_list)
+    for call in [*fetch.call_args_list, upload.call_args]:
+        assert call.kwargs["retries"] == 0
+        assert 0 < call.kwargs["timeout"] <= REQUEST_TIMEOUT_SECONDS
+    assert all(call.kwargs["require_constructor_arguments"] for call in fetch.call_args_list)
     assert upload.call_args.kwargs["title"] == "Vault upgrade source diff"
-    assert upload.call_args.kwargs["retries"] == 0
     body = upload.call_args.args[0]
     assert f"https://etherscan.io/address/{OLD_IMPL}#code" in body
     assert f"https://etherscan.io/address/{NEW_IMPL}#code" in body
@@ -64,16 +70,6 @@ def test_missing_key_skips_source_fetch(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.delenv("WAVEY_GIST_API_KEY")
     with patch("utils.upgrade_diff.fetch_verified_contract") as fetch:
         assert publish_upgrade_diff(OLD_IMPL, NEW_IMPL, 1) == ""
-    fetch.assert_not_called()
-
-
-@pytest.mark.parametrize("allowlist", ["", f"8453:{OLD_IMPL}:{NEW_IMPL}", f"1:{NEW_IMPL}:{OLD_IMPL}"])
-def test_unapproved_pending_upgrade_cannot_publish(allowlist: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Require approval for the exact chain and ordered implementation pair."""
-    monkeypatch.setenv("WAVEY_PUBLIC_UPGRADE_DIFFS", allowlist)
-    with patch("utils.upgrade_diff.fetch_verified_contract") as fetch:
-        assert publish_upgrade_diff(OLD_IMPL, NEW_IMPL, 1) == ""
-        assert resolve_upgrade_diff_links([UPGRADE], 1) == {}
     fetch.assert_not_called()
 
 
@@ -141,8 +137,8 @@ def test_moved_files_keep_paths_and_unusual_line_breaks() -> None:
     assert "/dev/null" not in body
 
 
-def test_upload_is_reused_across_proxies_and_until_disallowed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Use one gist for the same pair, including during overlapping alerts."""
+def test_upload_is_reused_across_proxies() -> None:
+    """Use one gist for the same pair; an overlapping alert waits for it."""
     started, release = Event(), Event()
 
     def wait_and_upload(*_args: object, **_kwargs: object) -> str:
@@ -157,18 +153,20 @@ def test_upload_is_reused_across_proxies_and_until_disallowed(monkeypatch: pytes
             side_effect=[_verified({"a.sol": "old"}), _verified({"a.sol": "new"})],
         ) as fetch,
         patch("utils.upgrade_diff.upload_to_gist", side_effect=wait_and_upload) as upload,
-        ThreadPoolExecutor(max_workers=1) as pool,
+        ThreadPoolExecutor(max_workers=2) as pool,
     ):
         job = pool.submit(publish_upgrade_diff, OLD_IMPL, NEW_IMPL, 1)
         try:
             assert started.wait(3)
-            assert resolve_upgrade_diff_links([replace(UPGRADE, proxy="0x" + "d" * 40)], 1) == {}
+            # A second alert waits for the in-flight publication and reuses it.
+            other_proxy = replace(UPGRADE, proxy="0x" + "d" * 40)
+            overlapping = pool.submit(resolve_upgrade_diff_links, [other_proxy], 1)
+            assert not overlapping.done()
         finally:
             release.set()
         assert job.result() == GIST_URL
+        assert overlapping.result(timeout=5) == {EXPLORER_DIFF: GIST_URL}
         assert resolve_upgrade_diff_links([UPGRADE], 1) == {EXPLORER_DIFF: GIST_URL}
-        monkeypatch.delenv("WAVEY_PUBLIC_UPGRADE_DIFFS")
-        assert publish_upgrade_diff(OLD_IMPL, NEW_IMPL, 1) == ""
     assert fetch.call_count == 2
     upload.assert_called_once()
 
@@ -178,11 +176,11 @@ def test_batch_deadline_leaves_explorer_fallback(monkeypatch: pytest.MonkeyPatch
     other_impl = "0x" + "d" * 40
     other_explorer = f"https://etherscan.io/contractdiffchecker?a1={OLD_IMPL}&a2={other_impl}"
     other_upgrade = replace(UPGRADE, new_impl=other_impl, explorer_url=other_explorer)
-    monkeypatch.setenv("WAVEY_PUBLIC_UPGRADE_DIFFS", f"{ALLOWLIST_ENTRY},1:{OLD_IMPL}:{other_impl}")
-    monkeypatch.setattr("utils.upgrade_diff.DIFF_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr("utils.upgrade_diff.DIFF_DEADLINE_SECONDS", 0.2)
+    monkeypatch.setattr("utils.upgrade_diff.DEADLINE_GRACE_SECONDS", 0)
     release = Event()
 
-    def upload(_old: str, new: str, _chain: int) -> str:
+    def upload(_old: str, new: str, _chain: int, **_kwargs: object) -> str:
         """Keep the first comparison in flight while the second finishes."""
         if new == NEW_IMPL:
             release.wait(2)
@@ -203,3 +201,48 @@ def test_publish_failure_logs_exception_and_leaves_explorer_fallback() -> None:
     ):
         assert resolve_upgrade_diff_links([UPGRADE], 1) == {}
     log.assert_called_once()
+
+
+def test_jobs_share_one_alert_deadline() -> None:
+    """Give every comparison in the alert the same absolute deadline."""
+    other = replace(UPGRADE, new_impl="0x" + "d" * 40, explorer_url="other")
+    with patch("utils.upgrade_diff.publish_upgrade_diff", return_value="") as publish:
+        before = time.monotonic()
+        resolve_upgrade_diff_links([UPGRADE, other], 1)
+    deadlines = {call.kwargs["deadline"] for call in publish.call_args_list}
+    assert len(deadlines) == 1
+    assert deadlines.pop() >= before + 60
+
+
+def test_no_upload_after_deadline() -> None:
+    """Never publish a gist the alert has stopped waiting for."""
+    clock = iter([0.0, 0.0, 30.0, 59.5])
+
+    with (
+        patch("utils.upgrade_diff.monotonic", side_effect=lambda: next(clock)),
+        patch(
+            "utils.upgrade_diff.fetch_verified_contract",
+            side_effect=[_verified({"a.sol": "old"}), _verified({"a.sol": "new"})],
+        ) as fetch,
+        patch("utils.upgrade_diff.upload_to_gist") as upload,
+    ):
+        assert publish_upgrade_diff(OLD_IMPL, NEW_IMPL, 1, deadline=60.0) == ""
+    assert [call.kwargs["timeout"] for call in fetch.call_args_list] == [20, 20]
+    upload.assert_not_called()
+
+
+def test_request_timeout_is_capped_by_remaining_deadline() -> None:
+    """Keep a late request from running past the alert deadline."""
+    clock = iter([0.0, 50.0, 55.0, 57.5])
+
+    with (
+        patch("utils.upgrade_diff.monotonic", side_effect=lambda: next(clock)),
+        patch(
+            "utils.upgrade_diff.fetch_verified_contract",
+            side_effect=[_verified({"a.sol": "old"}), _verified({"a.sol": "new"})],
+        ) as fetch,
+        patch("utils.upgrade_diff.upload_to_gist", return_value=GIST_URL) as upload,
+    ):
+        assert publish_upgrade_diff(OLD_IMPL, NEW_IMPL, 1, deadline=60.0) == GIST_URL
+    assert [call.kwargs["timeout"] for call in fetch.call_args_list] == [10, 5]
+    assert upload.call_args.kwargs["timeout"] == 2.5

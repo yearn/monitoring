@@ -12,7 +12,9 @@ explicitly named best-effort *search* helper for natspec lookups.
 The record is JSON-round-trippable so it can live in the on-disk source cache.
 ``CACHE_SCHEMA_VERSION`` is part of the cache namespace: positive source entries
 never expire, so any change to this shape needs a namespace bump to avoid
-reading stale records written by an older version.
+reading stale records written by an older version. An optional field may be
+added without a bump when a missing value reads as "unknown" (``None``), as
+``constructor_arguments`` does: bumping would refetch every cached contract.
 """
 
 import json
@@ -23,7 +25,7 @@ from utils.solidity_text import declares_contract
 
 logger = get_logger("utils.verified_contract")
 
-CACHE_SCHEMA_VERSION = 3
+CACHE_SCHEMA_VERSION = 2
 
 _NOT_VERIFIED_ABI = "Contract source code not verified"
 
@@ -39,7 +41,8 @@ class VerifiedContract:
     settings: dict = field(default_factory=dict)  # standard-json settings (remappings, optimizer, …)
     abi: list[dict] = field(default_factory=list)
     contract_file: str | None = None  # resolved compilation target, None if ambiguous
-    constructor_arguments: str | None = None  # Etherscan hex, None when unavailable
+    # Etherscan hex. None when unavailable, including records cached before the field existed.
+    constructor_arguments: str | None = None
 
     @property
     def compilation_target(self) -> tuple[str, str] | None:

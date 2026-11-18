@@ -22,6 +22,7 @@ from utils.source_context import (
     get_source_context,
     reset_cache,
 )
+from utils.verified_contract import VerifiedContract
 
 # Inlined copy of the InfiniFi Farm.sol natspec + setMaxSlippage + maxSlippage declaration.
 # This is the real-world example that motivated the fix.
@@ -377,6 +378,43 @@ class TestFetchedRecordShape(unittest.TestCase):
         contract = fetch_verified_contract(1, "0xabc")
         assert contract is not None
         self.assertEqual(list(contract.sources.values()), ["contract Foo {}"])
+
+
+class TestConstructorArgumentsRefresh(unittest.TestCase):
+    """Records cached before constructor arguments were stored stay valid."""
+
+    ENTRY = {"SourceCode": "contract Foo {}", "ContractName": "Foo", "ABI": "[]", "ConstructorArguments": "0x01"}
+
+    def setUp(self) -> None:
+        reset_cache()
+
+    @patch.dict("os.environ", {"ETHERSCAN_TOKEN": "test-key"})
+    @patch("utils.source_context.fetch_json")
+    def test_legacy_record_is_reused_unless_constructor_arguments_are_required(self, mock_fetch: MagicMock) -> None:
+        from utils.source_context import _disk_key, _source_disk_cache
+
+        legacy = VerifiedContract(
+            contract_name="Foo", compiler_version="v0.8.28", language="Solidity", sources={"Foo.sol": "contract Foo {}"}
+        ).to_cache_dict()
+        legacy.pop("constructor_arguments")
+        _source_disk_cache.set_positive(_disk_key(1, "0xabc"), legacy)
+        mock_fetch.return_value = {"status": "1", "result": [self.ENTRY]}
+
+        cached = fetch_verified_contract(1, "0xabc")
+        assert cached is not None
+        self.assertIsNone(cached.constructor_arguments)
+        mock_fetch.assert_not_called()
+
+        refreshed = fetch_verified_contract(1, "0xabc", require_constructor_arguments=True)
+        assert refreshed is not None
+        self.assertEqual(refreshed.constructor_arguments, "01")
+        mock_fetch.assert_called_once()
+
+        reset_cache()  # the refreshed record replaced the legacy one on disk
+        again = fetch_verified_contract(1, "0xabc", require_constructor_arguments=True)
+        assert again is not None
+        self.assertEqual(again.constructor_arguments, "01")
+        mock_fetch.assert_called_once()
 
 
 class TestGetSourceContext(unittest.TestCase):

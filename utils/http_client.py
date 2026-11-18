@@ -16,7 +16,7 @@ def request_with_retry(
     url: str,
     retries: int | None = None,
     backoff_factor: float | None = None,
-    timeout: int | None = None,
+    timeout: float | None = None,
     log_errors: bool = True,
     session: requests.Session | None = None,
     **kwargs: Any,
@@ -87,7 +87,7 @@ def request_with_retry(
 def fetch_json(
     url: str,
     method: str = "get",
-    timeout: int | None = None,
+    timeout: float | None = None,
     **kwargs: Any,
 ) -> dict | None:
     """Fetch JSON from a URL with retry and error handling.
