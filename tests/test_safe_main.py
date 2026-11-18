@@ -344,6 +344,10 @@ class TestCheckForPendingTransactions(unittest.TestCase):
             patch.object(safe_main, "send_telegram_message") as mock_send,
             patch.object(safe_main, "write_last_executed_nonce_to_file"),
             patch("utils.proxy.get_current_implementation", return_value="0xOldImpl"),
+            patch(
+                "utils.proxy.publish_upgrade_diff",
+                side_effect=["https://gist.wavey.info/oracle-diff", "https://gist.wavey.info/cusd-diff"],
+            ),
         ):
             safe_main.check_for_pending_transactions(safe_address, "mainnet", "CAP")
 
@@ -351,7 +355,8 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         self.assertIn(f"🅿️ Proxy: `{ORACLE}` (via executeBatch call 1)", message)
         self.assertIn(f"🅿️ Proxy: `{CUSD}` (via executeBatch call 2)", message)
         self.assertIn(f"🔄 Upgrade: `0xOldImpl` → `{NEW_CUSD_IMPL}`", message)
-        self.assertIn("📊 [Diff](https://etherscan.io/contractdiffchecker?a1=0xOldImpl", message)
+        self.assertIn("📊 [Diff](https://gist.wavey.info/oracle-diff)", message)
+        self.assertIn("📊 [Diff](https://gist.wavey.info/cusd-diff)", message)
 
     def test_multisend_upgrade_path_names_the_inner_call(self):
         from tests.test_calldata_wrappers import NEW_ORACLE_IMPL, ORACLE, upgrade_to_and_call

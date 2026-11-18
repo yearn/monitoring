@@ -1,7 +1,7 @@
 """Proxy upgrade detection utilities.
 
-Detects proxy upgrade transactions (EIP-1967) and generates diff links
-to compare old vs new implementation source code on Etherscan.
+Detects proxy upgrade transactions (EIP-1967) and generates links
+comparing the old and new implementation source code.
 """
 
 import os
@@ -16,6 +16,7 @@ from utils.calldata.decoder import decode_calldata
 from utils.calldata.wrappers import unwrap_calls
 from utils.chains import EXPLORER_URLS, Chain
 from utils.logger import get_logger
+from utils.upgrade_diff import publish_upgrade_diff
 
 if TYPE_CHECKING:
     from utils.web3_wrapper import Web3Client
@@ -183,7 +184,12 @@ def format_upgrade_lines(upgrade: ProxyUpgrade, target: str, chain_id: int) -> l
         lines.append(f"🔄 New impl: `{new_impl}`")
         return lines
     lines.append(f"🔄 Upgrade: `{old_impl}` → `{new_impl}`")
-    diff_url = build_diff_url(old_impl, new_impl, chain_id)
+    try:
+        diff_url = publish_upgrade_diff(old_impl, new_impl, chain_id)
+    except Exception:  # noqa: BLE001 - diff publishing is best-effort alert enrichment
+        logger.warning("Failed to publish source diff for chain=%s old=%s new=%s", chain_id, old_impl, new_impl)
+        diff_url = ""
+    diff_url = diff_url or build_diff_url(old_impl, new_impl, chain_id)
     if diff_url:
         lines.append(f"📊 [Diff]({diff_url})")
     return lines

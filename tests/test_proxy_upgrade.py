@@ -388,9 +388,12 @@ class TestFormatUpgradeLines(unittest.TestCase):
         format_upgrade_lines(ProxyUpgrade(ORACLE, NEW_ORACLE_IMPL), ORACLE, 1)
         impl.assert_called_once_with(ORACLE, 1, use_cache=False)
 
+    @patch("utils.proxy.publish_upgrade_diff", side_effect=ValueError("invalid upstream response"))
     @patch("utils.proxy.get_current_implementation", return_value=OLD_IMPL)
-    def test_direct_upgrade_keeps_the_timelock_alert_format(self, _impl) -> None:
+    def test_failed_gist_upload_falls_back_to_the_explorer(self, _impl, publish) -> None:
+        """Keep the upgrade alert and its explorer link if publishing raises."""
         lines = format_upgrade_lines(ProxyUpgrade(ORACLE, NEW_ORACLE_IMPL), ORACLE, 1)
+        publish.assert_called_once_with(OLD_IMPL, NEW_ORACLE_IMPL, 1)
         self.assertEqual(
             lines,
             [
