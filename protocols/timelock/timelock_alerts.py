@@ -23,6 +23,12 @@ from utils.logger import get_logger
 from utils.proxy import find_proxy_upgrades, format_upgrade_lines
 from utils.safe_tx import unwrap_safe_exec_transaction
 from utils.telegram import MAX_MESSAGE_LENGTH, escape_markdown, send_envio_error_message, send_telegram_message
+from utils.upgrade_diff import (
+    UpgradeDiffLink,
+    apply_upgrade_diff_links,
+    format_upgrade_report_links,
+    resolve_upgrade_diff_links,
+)
 from utils.web3_wrapper import ChainManager
 
 load_dotenv()
@@ -235,7 +241,14 @@ def _format_delay_info(delay: int | None, timelock_type: str) -> str | None:
     return f"⏳ Delay: {format_delay(delay_val)}"
 
 
-def _build_call_info(event: dict, explorer: str | None, show_index: bool, chain_id: int = 0) -> list[str]:
+def _build_call_info(
+    event: dict,
+    explorer: str | None,
+    show_index: bool,
+    chain_id: int = 0,
+    *,
+    diffs: list[UpgradeDiffLink] | None = None,
+) -> list[str]:
     """Build call info lines for TimelockController/Compound events."""
     lines: list[str] = []
     target = event.get("target")
@@ -260,7 +273,7 @@ def _build_call_info(event: dict, explorer: str | None, show_index: bool, chain_
     # Proxy upgrade detection: show diff link between old and new implementation
     if len(data_hex) >= 10 and chain_id:
         for upgrade in find_proxy_upgrades(data_hex, target):
-            lines.extend(format_upgrade_lines(upgrade, target, chain_id))
+            lines.extend(format_upgrade_lines(upgrade, target, chain_id, diffs=diffs))
 
     value = event.get("value")
     if value and int(value) > 0:
@@ -492,6 +505,7 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
 
     # Type-specific call details (truncated first when message is too long)
     call_lines: list[str] = []
+    diffs: list[UpgradeDiffLink] = []
     if timelock_type == "Aave":
         votes_for = first.get("votesFor")
         votes_against = first.get("votesAgainst")
@@ -518,15 +532,21 @@ def build_alert_message(events: list[dict], timelock_info: TimelockConfig) -> st
 
     elif timelock_type in ("TimelockController", "Compound"):
         for event in events:
-            call_lines.extend(_build_call_info(event, explorer, len(events) > 1, chain_id))
+            call_lines.extend(_build_call_info(event, explorer, len(events) > 1, chain_id, diffs=diffs))
 
     # AI explanation (best-effort, non-blocking). Skipped for protocols whose
     # governance proposals are already monitored by a dedicated script.
-    ai_line = ""
+    explanation = None
     if timelock_info.protocol.upper() not in SKIP_AI_SUMMARY_PROTOCOLS:
         explanation = get_ai_explanation(events, timelock_info, chain_id)
-        if explanation:
-            ai_line = format_explanation_line(explanation)
+
+    urls = resolve_upgrade_diff_links(diffs, chain_id)
+    call_lines = apply_upgrade_diff_links(call_lines, urls)
+    ai_line = ""
+    if explanation:
+        ai_line = format_explanation_line(
+            explanation, upgrade_diff_links=format_upgrade_report_links(diffs, urls, chain_id)
+        )
 
     if explorer:
         footer = f"🔗 Tx: [{tx_hash}]({explorer}/tx/{tx_hash})"

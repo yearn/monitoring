@@ -111,7 +111,7 @@ def diff_source_files(old_sources: dict[str, str], new_sources: dict[str, str]) 
     only_old = {p: old_sources[p] for p in old_sources if p not in new_sources}
     only_new = {p: new_sources[p] for p in new_sources if p not in old_sources}
     moved: list[tuple[str, str]] = []
-    for old_path, new_path in _pair_unmatched(only_old, only_new):
+    for old_path, new_path in pair_moved_sources(only_old, only_new):
         old_text, new_text = only_old.pop(old_path), only_new.pop(new_path)
         if old_text == new_text:
             moved.append((old_path, new_path))
@@ -203,8 +203,16 @@ def format_source_files(diff: SourceFilesDiff, label: str) -> list[str]:
     return lines
 
 
-def _pair_unmatched(only_old: dict[str, str], only_new: dict[str, str]) -> list[tuple[str, str]]:
-    """Pair files present on one side only: identical content first, then a unique basename."""
+def pair_moved_sources(only_old: dict[str, str], only_new: dict[str, str]) -> list[tuple[str, str]]:
+    """Pair files present on one side only, by identical content then by unique basename.
+
+    Args:
+        only_old: Verified source files whose paths appear only in the old bundle.
+        only_new: Verified source files whose paths appear only in the new bundle.
+
+    Returns:
+        Old and new paths for the matched files.
+    """
     pairs: list[tuple[str, str]] = []
     taken_new: set[str] = set()
     # Several files can share content (identical interfaces, empty markers), so

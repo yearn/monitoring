@@ -16,7 +16,7 @@ from utils.calldata.decoder import decode_calldata
 from utils.calldata.wrappers import unwrap_calls
 from utils.chains import EXPLORER_URLS, Chain
 from utils.logger import get_logger
-from utils.upgrade_diff import publish_upgrade_diff
+from utils.upgrade_diff import UpgradeDiffLink
 
 if TYPE_CHECKING:
     from utils.web3_wrapper import Web3Client
@@ -166,12 +166,19 @@ def _find_upgrades(data_hex: str, target: str, via: str, depth: int) -> list[Pro
     return found
 
 
-def format_upgrade_lines(upgrade: ProxyUpgrade, target: str, chain_id: int) -> list[str]:
-    """Telegram alert lines for one upgrade: proxy, old → new implementation, diff link.
+def format_upgrade_lines(
+    upgrade: ProxyUpgrade, target: str, chain_id: int, *, diffs: list[UpgradeDiffLink] | None = None
+) -> list[str]:
+    """Build Telegram lines for an upgrade and collect its diff for optional publication.
 
-    ``target`` is the call's own target. The proxy is named explicitly when it
-    differs — a ProxyAdmin-routed upgrade, or one nested inside a wrapper — so
-    recipients know which contract is changing.
+    Args:
+        upgrade: Detected proxy upgrade.
+        target: Outer call target, used to identify a separately named proxy.
+        chain_id: Chain on which the proxy is deployed.
+        diffs: Optional collector for the alert's implementation comparisons.
+
+    Returns:
+        Upgrade lines with the explorer diff link when available.
     """
     lines: list[str] = []
     if upgrade.proxy_address.lower() != target.lower():
@@ -184,14 +191,11 @@ def format_upgrade_lines(upgrade: ProxyUpgrade, target: str, chain_id: int) -> l
         lines.append(f"🔄 New impl: `{new_impl}`")
         return lines
     lines.append(f"🔄 Upgrade: `{old_impl}` → `{new_impl}`")
-    try:
-        diff_url = publish_upgrade_diff(old_impl, new_impl, chain_id)
-    except Exception:  # noqa: BLE001 - diff publishing is best-effort alert enrichment
-        logger.warning("Failed to publish source diff for chain=%s old=%s new=%s", chain_id, old_impl, new_impl)
-        diff_url = ""
-    diff_url = diff_url or build_diff_url(old_impl, new_impl, chain_id)
+    diff_url = build_diff_url(old_impl, new_impl, chain_id)
     if diff_url:
         lines.append(f"📊 [Diff]({diff_url})")
+        if diffs is not None:
+            diffs.append(UpgradeDiffLink(upgrade.proxy_address, old_impl, new_impl, diff_url))
     return lines
 
 

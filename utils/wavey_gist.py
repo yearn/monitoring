@@ -33,13 +33,15 @@ def _response_detail(error: Exception) -> str:
     return f" — response body: {body}"
 
 
-def upload_to_gist(content: str, title: str = "") -> str:
+def upload_to_gist(content: str, title: str = "", *, timeout: int = 10, retries: int | None = None) -> str:
     """Publish markdown ``content`` to Wavey Gist and return the rendered-page URL.
 
     Args:
         content: The markdown text to upload.
         title: Optional title, prepended as a top-level markdown heading and used
             as the gist's display title.
+        timeout: HTTP timeout in seconds per attempt.
+        retries: Retry count. None uses the configured HTTP default.
 
     Returns:
         The URL of the created gist, or an empty string on failure.
@@ -69,7 +71,8 @@ def upload_to_gist(content: str, title: str = "") -> str:
             WAVEY_GIST_API_URL,
             json=payload,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            timeout=10,
+            timeout=timeout,
+            retries=retries,
         )
         body = response.json()
     except (requests.RequestException, ValueError) as e:

@@ -329,34 +329,55 @@ class TestCheckForPendingTransactions(unittest.TestCase):
             execute_batch,
             upgrade_to_and_call,
         )
+        from utils.llm.ai_explainer import Explanation
 
         safe_main = self._import_safe_main()
         safe_address = "0xb8FC49402dF3ee4f8587268FB89fda4d621a8793"
         timelock = "0xD8236031d8279d82E615aF2BFab5FC0127A329ab"
         data = execute_batch([ORACLE, CUSD], [upgrade_to_and_call(NEW_ORACLE_IMPL), upgrade_to_and_call(NEW_CUSD_IMPL)])
         tx = {**self._tx(249), "to": timelock, "data": data, "operation": 0}
+        old_impl = "0x" + "ab" * 20
+        urls = {
+            NEW_ORACLE_IMPL: "https://gist.wavey.info/oracle-diff",
+            NEW_CUSD_IMPL: "https://gist.wavey.info/cusd-diff",
+        }
 
         with (
+            patch.dict(
+                "os.environ",
+                {
+                    "WAVEY_GIST_API_KEY": "test-key",
+                    "WAVEY_PUBLIC_UPGRADE_DIFFS": f"1:{old_impl}:{NEW_ORACLE_IMPL},1:{old_impl}:{NEW_CUSD_IMPL}",
+                },
+            ),
             patch.object(safe_main, "get_pending_transactions", return_value=[tx]),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
             patch.object(safe_main, "_pending_filter_diag", return_value=self._DIAG),
-            patch.object(safe_main, "_explain_safe_tx", return_value=None),
+            patch.object(safe_main, "_explain_safe_tx", return_value=Explanation("Upgrades CAP.", "Contract details.")),
             patch.object(safe_main, "send_telegram_message") as mock_send,
             patch.object(safe_main, "write_last_executed_nonce_to_file"),
-            patch("utils.proxy.get_current_implementation", return_value="0xOldImpl"),
+            patch("utils.proxy.get_current_implementation", return_value=old_impl),
             patch(
-                "utils.proxy.publish_upgrade_diff",
-                side_effect=["https://gist.wavey.info/oracle-diff", "https://gist.wavey.info/cusd-diff"],
+                "utils.upgrade_diff.publish_upgrade_diff",
+                side_effect=lambda _old, new, _chain: urls[new],
             ),
+            patch(
+                "utils.llm.ai_explainer.upload_to_gist", return_value="https://gist.wavey.info/report"
+            ) as mock_report,
         ):
             safe_main.check_for_pending_transactions(safe_address, "mainnet", "CAP")
 
         message = mock_send.call_args.args[0]
         self.assertIn(f"🅿️ Proxy: `{ORACLE}` (via executeBatch call 1)", message)
         self.assertIn(f"🅿️ Proxy: `{CUSD}` (via executeBatch call 2)", message)
-        self.assertIn(f"🔄 Upgrade: `0xOldImpl` → `{NEW_CUSD_IMPL}`", message)
+        self.assertIn(f"🔄 Upgrade: `{old_impl}` → `{NEW_CUSD_IMPL}`", message)
         self.assertIn("📊 [Diff](https://gist.wavey.info/oracle-diff)", message)
         self.assertIn("📊 [Diff](https://gist.wavey.info/cusd-diff)", message)
+        report = mock_report.call_args.args[0]
+        self.assertIn(
+            f"`{ORACLE}`](https://etherscan.io/address/{ORACLE}) [source diff]({urls[NEW_ORACLE_IMPL]})", report
+        )
+        self.assertIn(f"`{CUSD}`](https://etherscan.io/address/{CUSD}) [source diff]({urls[NEW_CUSD_IMPL]})", report)
 
     def test_multisend_upgrade_path_names_the_inner_call(self):
         from tests.test_calldata_wrappers import NEW_ORACLE_IMPL, ORACLE, upgrade_to_and_call
