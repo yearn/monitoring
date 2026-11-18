@@ -6,14 +6,13 @@ Pendle's important contracts are owned by a 2/4 Safe Multisig on each network. T
 
 Additionally, other contracts like vePENDLE, PENDLE, RewardDistributor, and Voting are also owned by these multisigs, allowing them to change parameters and trigger emergency functions within these contracts.
 
-    Mainnet Safe Multisig: 0x8119EC16F0573B7dAc7C0CB94EB504FB32456ee1
-    Arbitrum Safe Multisig: 0x7877AdFaDEd756f3248a0EBfe8Ac2E2eF87b75Ac
+The [Safe monitor](../safe/README.md) alerts on queued proxy upgrades from the [Ethereum governance Safe `0x8119EC16F0573B7dAc7C0CB94EB504FB32456ee1`](https://app.safe.global/transactions/queue?safe=eth:0x8119EC16F0573B7dAc7C0CB94EB504FB32456ee1).
 
 The owner of SY contracts was changed to [governance proxy contract](https://etherscan.io/address/0x2aD631F72fB16d91c4953A7f4260A97C2fE2f31e) with an additional guardian role that can only pause SY contracts. The governance proxy contract owner is multisig defined above.
 
 ## AI governance context
 
-PendleSwap upgrade alerts on Ethereum and Arbitrum include the proxy's live owner,
+PendleSwap upgrade alerts on Ethereum include the proxy's live owner,
 current/proposed verified swap and authorization code, and a pinned reference for
 the standard router integration. This distinguishes the optional aggregator leg
 from market, PT/YT and SY contracts, and makes swap payload/enum changes visible

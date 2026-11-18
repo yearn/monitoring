@@ -4,7 +4,18 @@ import re
 import unittest
 from unittest.mock import Mock, patch
 
+import pytest
 import requests
+
+
+@pytest.fixture(autouse=True)
+def _isolate_safe_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Use test credentials even when a developer has Safe API keys configured."""
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+    for name in tuple(os.environ):
+        if name.startswith("SAFE_API_KEY_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("SAFE_API_KEY", "test-key")
 
 
 class TestSafePendingTransactions(unittest.TestCase):
@@ -32,7 +43,7 @@ class TestSafePendingTransactions(unittest.TestCase):
             ),
             patch.object(safe_main, "write_last_executed_nonce_to_file") as mock_write,
         ):
-            pending = safe_main.get_pending_transactions(safe_address, "arbitrum-main")
+            pending = safe_main.get_pending_transactions(safe_address, "base-main")
 
         mock_write.assert_called_once_with(safe_address, 22)
         self.assertEqual(pending, [{"nonce": 23}])
@@ -54,7 +65,7 @@ class TestSafePendingTransactions(unittest.TestCase):
             ) as mock_get,
             patch.object(safe_main.time, "sleep") as mock_sleep,
         ):
-            result = safe_main.get_safe_transactions("0xSafe", "arbitrum-main")
+            result = safe_main.get_safe_transactions("0xSafe", "base-main")
 
         self.assertEqual(result, [{"nonce": 5}])
         self.assertEqual(mock_get.call_count, 2)
@@ -71,7 +82,7 @@ class TestSafePendingTransactions(unittest.TestCase):
             ) as mock_get,
             patch.object(safe_main.time, "sleep"),
         ):
-            result = safe_main.get_safe_transactions("0xSafe", "arbitrum-main", max_retries=3)
+            result = safe_main.get_safe_transactions("0xSafe", "katana-main", max_retries=3)
 
         self.assertEqual(result, [])
         self.assertEqual(mock_get.call_count, 3)
@@ -502,6 +513,14 @@ class TestPendingFilterDiag(unittest.TestCase):
 
         self.assertEqual(diag["chain_baseline"], 41)
         self.assertEqual(diag["baseline"], 100)  # max(100, 41)
+
+
+def test_watched_safes_use_supported_networks() -> None:
+    """Require each watched Safe to have a queue link and a transaction service."""
+    from protocols.safe.addresses import ALL_SAFE_ADDRESSES, safe_address_network_prefix, safe_apis
+
+    assert safe_apis.keys() == safe_address_network_prefix.keys()
+    assert {network for _, network, *_ in ALL_SAFE_ADDRESSES} <= safe_apis.keys()
 
 
 if __name__ == "__main__":

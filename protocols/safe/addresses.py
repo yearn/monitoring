@@ -6,10 +6,6 @@ Split out from safe/main.py to keep that file focused on logic.
 # Maps Safe API network names to short prefixes used in app.safe.global URLs.
 safe_address_network_prefix = {
     "mainnet": "eth",
-    "arbitrum-main": "arb1",
-    "optimism-main": "oeth",
-    "polygon-main": "matic",
-    "optim-yearn": "oeth",
     "base-main": "base",
     "katana-main": "katana",
 }
@@ -17,12 +13,8 @@ safe_address_network_prefix = {
 # Maps Safe API network names to their transaction-service base URL.
 safe_apis = {
     "mainnet": "https://api.safe.global/tx-service/eth",
-    "arbitrum-main": "https://api.safe.global/tx-service/arb1",
-    "optimism-main": "https://api.safe.global/tx-service/oeth",
-    "polygon-main": "https://api.safe.global/tx-service/pol",
     "base-main": "https://api.safe.global/tx-service/base",
     "katana-main": "https://api.safe.global/tx-service/katana",
-    # "optim-yearn": "https://safe-transaction-optimism.safe.global",
 }
 
 PROXY_UPGRADE_SIGNATURES = [
@@ -46,22 +38,17 @@ ALL_SAFE_ADDRESSES = [
         "0x73b047fe6337183A454c5217241D780a932777bD",
     ],  # https://docs.lido.fi/multisigs/emergency-brakes/#12-emergency-brakes-ethereum
     ["PENDLE", "mainnet", "0x8119EC16F0573B7dAc7C0CB94EB504FB32456ee1"],
-    ["PENDLE", "arbitrum-main", "0x7877AdFaDEd756f3248a0EBfe8Ac2E2eF87b75Ac"],
     ["EULER", "mainnet", "0xcAD001c30E96765aC90307669d578219D4fb1DCe"],
     [
         "AAVE",
         "mainnet",
         "0x2CFe3ec4d5a6811f4B8067F0DE7e47DfA938Aa30",
     ],  # aave Protocol Guardian Safe: https://app.aave.com/governance/v3/proposal/?proposalId=184
-    ["AAVE", "polygon-main", "0xCb45E82419baeBCC9bA8b1e5c7858e48A3B26Ea6"],
-    ["AAVE", "arbitrum-main", "0xCb45E82419baeBCC9bA8b1e5c7858e48A3B26Ea6"],
     [
         "AAVE",
         "mainnet",
         "0xCe52ab41C40575B072A18C9700091Ccbe4A06710",
     ],  # aave Governance Guardian Safe
-    ["AAVE", "polygon-main", "0x1A0581dd5C7C3DA4Ba1CDa7e0BcA7286afc4973b"],
-    ["AAVE", "arbitrum-main", "0x1A0581dd5C7C3DA4Ba1CDa7e0BcA7286afc4973b"],
     [
         "SPARK",
         "mainnet",
@@ -92,18 +79,6 @@ ALL_SAFE_ADDRESSES = [
         "0x9F6e831c8F8939DC0C830C6e492e7cEf4f9C2F5f",
         "tBTC bridge owner multisig. aka, Council Multisig",
     ],  # tBTC bridge owner multisig (Council Multisig)
-    # [
-    #     "USDAI",
-    #     "arbitrum-main",
-    #     "0xF223F8d92465CfC303B3395fA3A25bfaE02AED51",
-    #     "USDai Admin Safe",
-    # ],
-    # [
-    #     "USDAI",
-    #     "arbitrum-main",
-    #     "0x783B08aA21DE056717173f72E04Be0E91328A07b",
-    #     "sUSDai Admin Safe",
-    # ],
     [
         "CAP",
         "mainnet",

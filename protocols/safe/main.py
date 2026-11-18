@@ -43,7 +43,6 @@ logger = get_logger("safe")
 
 SAFE_WEBSITE_URL = "https://app.safe.global/transactions/queue?safe="
 provider_url_mainnet = os.getenv("PROVIDER_URL_MAINNET")
-provider_url_arb = os.getenv("PROVIDER_URL_ARBITRUM")
 
 # Values treated as "no key": unset env templates and serialized nulls.
 _PLACEHOLDER_KEYS = {"null", "none", "nil", "undefined", "false", "0", "changeme"}
@@ -515,8 +514,6 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
                 try:
                     if network_name == "mainnet":
                         message += handle_pendle(provider_url_mainnet, hex_data)
-                    elif network_name == "arbitrum-main":
-                        message += handle_pendle(provider_url_arb, hex_data)
                 except Exception as e:
                     logger.error("Cannot decode Pendle aggregate calls: %s", e)
 
