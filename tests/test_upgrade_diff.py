@@ -114,10 +114,29 @@ def test_matching_sources_show_deployment_changes() -> None:
     ):
         assert publish_upgrade_diff(OLD_IMPL, NEW_IMPL, 1) == GIST_URL
     body = upload.call_args.args[0]
-    assert "No source file changes" in body
+    assert "No source file changes." in body
+    assert body.index("## Verified source") < body.index("## Deployment changes")
     assert "compiler: v0.8.28 → v0.8.29" in body
     assert f"linked library Lib: {OLD_IMPL} → {NEW_IMPL}" in body
-    assert "Constructor arguments differ" in body
+    assert "constructor arguments: differ" in body
+
+
+@pytest.mark.parametrize("constructor_arguments", [("00", "00"), (None, "01")])
+def test_unchanged_deployment_is_not_listed(constructor_arguments: tuple[str | None, str | None]) -> None:
+    """Omit the deployment section when nothing changed or nothing can be compared."""
+    base = _verified({"a.sol": "contract Vault {}\n"})
+    old = replace(base, constructor_arguments=constructor_arguments[0])
+    new = replace(
+        base, sources={"a.sol": "contract Vault { uint256 x; }\n"}, constructor_arguments=constructor_arguments[1]
+    )
+    with (
+        patch("utils.upgrade_diff.fetch_verified_contract", side_effect=[old, new]),
+        patch("utils.upgrade_diff.upload_to_gist", return_value=GIST_URL) as upload,
+    ):
+        assert publish_upgrade_diff(OLD_IMPL, NEW_IMPL, 1) == GIST_URL
+    body = upload.call_args.args[0]
+    assert "Deployment" not in body
+    assert "constructor" not in body
 
 
 def test_moved_files_keep_paths_and_unusual_line_breaks() -> None:

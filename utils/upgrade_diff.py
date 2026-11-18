@@ -208,7 +208,9 @@ def _create_upgrade_diff(old_impl: str, new_impl: str, chain_id: int, deadline: 
     old_link = _address_link(old_impl, chain_id, code=True)
     new_link = _address_link(new_impl, chain_id, code=True)
     body = f"Chain ID {chain_id}\n\n- Old implementation {old_link}\n- New implementation {new_link}\n\n"
-    body += _format_deployment_metadata(old, new) + "\n\n" + _format_source_diff(old.sources, new.sources)
+    body += _format_source_diff(old.sources, new.sources)
+    if deployment := _format_deployment_changes(old, new):
+        body += "\n\n" + deployment
     if len(f"# {title}\n\n{body}".encode("utf-8")) > MAX_GIST_BYTES:
         logger.info("Source diff for chain=%s old=%s new=%s exceeds Wavey Gist limit", chain_id, old_impl, new_impl)
         return ""
@@ -221,28 +223,28 @@ def _create_upgrade_diff(old_impl: str, new_impl: str, chain_id: int, deadline: 
     return upload_to_gist(body, title=title, timeout=timeout, retries=0)
 
 
-def _format_deployment_metadata(old: VerifiedContract, new: VerifiedContract) -> str:
-    """Show verified deployment differences and the coverage of the comparison."""
-    settings = diff_compiler_settings(old, new)
-    lines = ["## Deployment metadata", ""]
-    if settings.changes:
-        changes = "\n".join(str(change) for change in settings.changes)
-        fence = _backtick_fence(changes, minimum=3)
-        lines.extend((f"{fence}text\n{changes}\n{fence}", ""))
-    if not settings.complete:
-        lines.extend(
-            ("Full compiler settings and linked libraries are unavailable for at least one implementation.", "")
-        )
-    elif not settings.changes:
-        lines.extend(("The compared compiler settings and linked library addresses match.", ""))
-    if old.constructor_arguments is None or new.constructor_arguments is None:
-        args = "Constructor arguments are unavailable for at least one implementation."
-    elif old.constructor_arguments != new.constructor_arguments:
-        args = "Constructor arguments differ. See the linked deployments for the encoded values."
-    else:
-        args = "The reported constructor arguments match."
-    lines.extend((args, "", "This comparison covers verified source and reported deployment metadata only."))
-    return "\n".join(lines)
+def _format_deployment_changes(old: VerifiedContract, new: VerifiedContract) -> str:
+    """List compiler, linked-library and constructor-argument changes, or "" when none differ.
+
+    Identical source can still deploy different behavior: constructor arguments
+    set immutables, and linked libraries decide which external code runs.
+
+    Args:
+        old: Verified record of the current implementation.
+        new: Verified record of the proposed implementation.
+
+    Returns:
+        A Markdown section listing each change, or an empty string.
+    """
+    changes = [str(change) for change in diff_compiler_settings(old, new).changes]
+    args = (old.constructor_arguments, new.constructor_arguments)
+    if None not in args and args[0] != args[1]:
+        changes.append("constructor arguments: differ (see the linked deployments for the encoded values)")
+    if not changes:
+        return ""
+    text = "\n".join(changes)
+    fence = _backtick_fence(text, minimum=3)
+    return f"## Deployment changes\n\n{fence}text\n{text}\n{fence}"
 
 
 def _backtick_fence(text: str, minimum: int = 1) -> str:
@@ -297,5 +299,5 @@ def _format_source_diff(old_sources: dict[str, str], new_sources: dict[str, str]
         fence = _backtick_fence(patch, minimum=3)
         sections.append(f"{heading}\n\n{fence}diff\n{patch}{fence}")
 
-    content = "\n\n".join(sections) if sections else "No source file changes. See deployment metadata above."
+    content = "\n\n".join(sections) if sections else "No source file changes."
     return f"## Verified source\n\n{content}"
