@@ -587,7 +587,7 @@ The gist is the artifact a reviewer actually opens, so it carries more than the 
 - **Contract:** Infinifi Shorttimelock — [`0x4B17…7c32`](https://etherscan.io/address/0x4B17…)
 - **Chain:** Mainnet (chain id 1)
 - **Risk:** MEDIUM
-- **Model:** codex-cli:my-configured-model / claude-cli:claude-opus-5-5
+- **Model:** codex-cli:gpt-6.2-sol / claude-cli:claude-opus-5-5
 - **Time:** 10.0s
 
 ## Summary
@@ -607,7 +607,7 @@ Registers a new type-2 farm in FarmRegistry. …
 
 The header's **Model** line lists the distinct models that produced a summary, revision, passing critique or detail, in first-use order. Failed and empty responses do not add a model to that line. Model identifiers are escaped as single-line Markdown text. Claude's CLI reports its resolved model in the event stream: the provider reads the last assistant message's `model`, or the initialization event's `model` when no assistant model is available. This resolves aliases such as `opus` without another CLI call. If neither event reports a model, the label uses `LLM_CLAUDE_MODEL` or `claude-cli`.
 
-Codex reads the resolved model from its startup diagnostic and uses the destination of any reroute reported in the JSON event stream. The report shows a label such as `codex-cli(gpt-6.2-sol)`. If the CLI supplies neither signal, the label uses `LLM_CODEX_MODEL` when set and `codex-cli` otherwise.
+Codex reads the resolved model slug from its `codex_otel.trace_safe` diagnostics, preferring the `codex.conversation_starts` event, and uses the destination of any reroute reported in the JSON event stream. The report shows a label such as `codex-cli:gpt-6.2-sol`, matching Claude's `claude-cli:<model>` format. If a reroute is reported but its destination cannot be parsed, the label is `codex-cli:rerouted` so the requested model is not credited with the answer. If the CLI supplies neither signal, the provider logs a warning once and the label uses `LLM_CODEX_MODEL` when set and `codex-cli` otherwise. INFO and lower trace lines are removed from stderr quoted in errors; WARN and ERROR lines are kept.
 
 **Time** measures total LLM generation time, including retries and refinement, and excludes context gathering and gist upload. These fields are omitted for deterministic reports that do not use an LLM.
 

@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -44,13 +45,22 @@ _NO_TOOLS_INSTRUCTIONS = (
 # Codex items that are model output or status, not tool use. ``todo_list`` is the
 # plan tool's checklist and touches nothing outside the model.
 _CODEX_BENIGN_ITEMS = ("agent_message", "reasoning", "todo_list", "error")
+# The resolved model is only reported in Codex's OpenTelemetry trace events, so
+# INFO is enabled for that one target. RUST_LOG cannot select a single event by
+# field, so the whole target is enabled: about 26 short lines (~10 KB) per call
+# with CLI 0.170.0, since stream events are logged once each, not per delta.
 _CODEX_TRACE_TARGET = "codex_otel.trace_safe"
 _CODEX_LOG_FILTER = f"error,opentelemetry_sdk=off,opentelemetry_otlp=off,{_CODEX_TRACE_TARGET}=info"
-_CODEX_STARTUP_MODEL = re.compile(
-    rf'\b{re.escape(_CODEX_TRACE_TARGET)}: event\.name="codex\.conversation_starts" [^\r\n]*'
-    r"\bslug=([\w./:@-]+)(?=\s|$)"
+_CODEX_TRACE_LINE = re.compile(rf"\b(?P<level>TRACE|DEBUG|INFO|WARN|ERROR)\s+{re.escape(_CODEX_TRACE_TARGET)}\b")
+_CODEX_SLUG = re.compile(r'\bslug=(?:"(?P<quoted>[^"\s]+)"|(?P<bare>[^\s"]+))')
+_CODEX_REROUTE_NOTICE = re.compile(r"model\s+rerouted", re.IGNORECASE)
+_CODEX_REROUTED_MODEL = re.compile(
+    r"model\s+rerouted\s*:?\s*(?:from\s+)?[`'\"]?[^\s`'\"]+[`'\"]?\s*(?:->|→|=>|\bto\b)\s*[`'\"]?(?P<model>[^\s`'\"(),;]+)",
+    re.IGNORECASE,
 )
-_CODEX_REROUTED_MODEL = re.compile(r"model rerouted: \S+ -> ([\w./:@-]+) \(\w+\)")
+# Label used when Codex reports a reroute whose destination cannot be parsed, so
+# the report does not credit the requested model with the answer.
+CODEX_UNKNOWN_REROUTE = "rerouted"
 
 
 def _cli_environment(provider: str) -> dict[str, str]:
@@ -92,20 +102,69 @@ def _codex_tool_events(events: list[dict[str, Any]]) -> list[str]:
     return tools
 
 
-def _codex_model(events: list[dict[str, Any]], stderr: str) -> str:
-    """Read the last reported reroute or the resolved model from Codex startup diagnostics."""
+def _codex_reroute(events: list[dict[str, Any]]) -> str:
+    """Return the destination of the last reroute notice in a Codex event stream.
+
+    Returns:
+        The destination model, ``CODEX_UNKNOWN_REROUTE`` if a reroute was reported
+        but its destination could not be parsed, or ``""`` if there was no reroute.
+    """
     for event in reversed(events):
         item = event.get("item")
         if event.get("type") != "item.completed" or not isinstance(item, dict) or item.get("type") != "error":
             continue
         message = item.get("message")
-        if not isinstance(message, str):
+        if not isinstance(message, str) or not _CODEX_REROUTE_NOTICE.search(message):
             continue
-        reroute = _CODEX_REROUTED_MODEL.fullmatch(message)
-        if reroute:
-            return reroute[1]
-    startup = _CODEX_STARTUP_MODEL.search(stderr)
-    return startup[1] if startup else ""
+        reroute = _CODEX_REROUTED_MODEL.search(message)
+        model = reroute["model"].rstrip(".:") if reroute else ""
+        if model:
+            return model
+        logger.warning("codex: could not parse reroute destination from %r", _tail(message))
+        return CODEX_UNKNOWN_REROUTE
+    return ""
+
+
+def _codex_trace_slug(stderr: str) -> str:
+    """Read the model slug from Codex trace lines, preferring the conversation start event."""
+    slugs = []
+    for line in stderr.splitlines():
+        if not _CODEX_TRACE_LINE.search(line):
+            continue
+        match = _CODEX_SLUG.search(line)
+        if not match:
+            continue
+        slug = match["quoted"] or match["bare"]
+        if "codex.conversation_starts" in line:
+            return slug
+        slugs.append(slug)
+    return slugs[-1] if slugs else ""
+
+
+def _codex_model(events: list[dict[str, Any]], stderr: str) -> str:
+    """Return the model that answered: a reported reroute wins over the traced model slug."""
+    return _codex_reroute(events) or _codex_trace_slug(stderr)
+
+
+def _codex_error_stderr(stderr: str) -> str:
+    """Drop Codex's INFO-and-below trace lines from stderr quoted in errors.
+
+    WARN and ERROR trace lines are kept because they explain failures. Indented
+    or blank lines directly after a dropped line are treated as its continuation.
+    """
+    kept = []
+    dropping = False
+    for line in stderr.splitlines():
+        trace = _CODEX_TRACE_LINE.search(line)
+        if trace:
+            dropping = trace["level"] not in ("WARN", "ERROR")
+        elif dropping and (not line.strip() or line[0].isspace()):
+            continue
+        else:
+            dropping = False
+        if not dropping:
+            kept.append(line)
+    return "\n".join(kept)
 
 
 def _claude_tool_events(events: list[dict[str, Any]]) -> list[str]:
@@ -154,7 +213,13 @@ def _tail(text: str) -> str:
 
 
 def _run_cli(
-    label: str, args: list[str], prompt: str, cwd: Path, timeout: int, env: dict[str, str] | None = None
+    label: str,
+    args: list[str],
+    prompt: str,
+    cwd: Path,
+    timeout: int,
+    env: dict[str, str] | None = None,
+    error_stderr: Callable[[str], str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a CLI with ``prompt`` on stdin, mapping process failures to ``LLMUnavailableError``.
 
@@ -171,6 +236,8 @@ def _run_cli(
         cwd: Working directory for the process.
         timeout: Seconds before the process group is killed.
         env: Explicit child environment. ``None`` is for process handling tests.
+        error_stderr: Optional filter applied to stderr before it is quoted in
+            the non-zero exit error, e.g. to drop provider diagnostics.
 
     Returns:
         The completed process (exit code 0).
@@ -204,9 +271,7 @@ def _run_cli(
         result = subprocess.CompletedProcess(args, proc.returncode, out.read(), err.read())
     if result.returncode != 0:
         # Only stderr: stdout is the event stream, which carries prompt-derived text.
-        stderr = result.stderr
-        if label == "codex":
-            stderr = "\n".join(line for line in stderr.splitlines() if f"{_CODEX_TRACE_TARGET}:" not in line)
+        stderr = error_stderr(result.stderr) if error_stderr else result.stderr
         detail = _tail(stderr) or "no stderr"
         raise LLMUnavailableError(f"{label}: exited with code {result.returncode}: {detail}")
     return result
@@ -237,6 +302,7 @@ class CodexCLIProvider(LLMProvider):
         self._binary = binary
         self._model = model
         self._reported_model = ""
+        self._warned_missing_model = False
         self._timeout = timeout
         logger.info("Initialized Codex CLI provider: binary=%s model=%s", binary, model or "<cli default>")
 
@@ -319,7 +385,7 @@ class CodexCLIProvider(LLMProvider):
             args.append("-")  # read the prompt from stdin
 
             env = {**_cli_environment("codex"), "RUST_LOG": _CODEX_LOG_FILTER}
-            proc = _run_cli("codex", args, prompt, workdir, self._timeout, env)
+            proc = _run_cli("codex", args, prompt, workdir, self._timeout, env, _codex_error_stderr)
             events = _jsonl_events("codex", proc.stdout)
             unexpected = _codex_tool_events(events)
             if unexpected:
@@ -330,13 +396,17 @@ class CodexCLIProvider(LLMProvider):
         if not text:
             raise LLMError("codex: empty response")
         self._reported_model = _codex_model(events, proc.stderr)
+        if not self._reported_model and not self._warned_missing_model:
+            # Usually a CLI change to the trace format; the label falls back silently otherwise.
+            logger.warning("codex: no model slug in CLI diagnostics; labelling reports as %s", self.model_name)
+            self._warned_missing_model = True
         return text
 
     @property
     def model_name(self) -> str:
         """Return the reported model, falling back to the configured model or CLI label."""
         model = self._reported_model or self._model
-        return f"codex-cli({model})" if model else "codex-cli"
+        return f"codex-cli:{model}" if model else "codex-cli"
 
 
 class ClaudeCLIProvider(LLMProvider):
