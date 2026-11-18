@@ -343,13 +343,7 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         }
 
         with (
-            patch.dict(
-                "os.environ",
-                {
-                    "WAVEY_GIST_API_KEY": "test-key",
-                    "WAVEY_PUBLIC_UPGRADE_DIFFS": f"1:{old_impl}:{NEW_ORACLE_IMPL},1:{old_impl}:{NEW_CUSD_IMPL}",
-                },
-            ),
+            patch.dict("os.environ", {"WAVEY_GIST_API_KEY": "test-key"}),
             patch.object(safe_main, "get_pending_transactions", return_value=[tx]),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
             patch.object(safe_main, "_pending_filter_diag", return_value=self._DIAG),
@@ -359,7 +353,7 @@ class TestCheckForPendingTransactions(unittest.TestCase):
             patch("utils.proxy.get_current_implementation", return_value=old_impl),
             patch(
                 "utils.upgrade_diff.publish_upgrade_diff",
-                side_effect=lambda _old, new, _chain: urls[new],
+                side_effect=lambda _old, new, _chain, **_kw: urls[new],
             ),
             patch(
                 "utils.llm.ai_explainer.upload_to_gist", return_value="https://gist.wavey.info/report"

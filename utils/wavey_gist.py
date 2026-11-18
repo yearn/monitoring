@@ -33,7 +33,7 @@ def _response_detail(error: Exception) -> str:
     return f" — response body: {body}"
 
 
-def upload_to_gist(content: str, title: str = "", *, timeout: int = 10, retries: int | None = None) -> str:
+def upload_to_gist(content: str, title: str = "", *, timeout: float = 10, retries: int | None = None) -> str:
     """Publish markdown ``content`` to Wavey Gist and return the rendered-page URL.
 
     Args:

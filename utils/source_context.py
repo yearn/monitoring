@@ -140,8 +140,18 @@ class SourceContext:
     function_body: str = ""  # the body's statements, when short enough to show in full
 
 
+def _is_usable(record: VerifiedContract | None, require_constructor_arguments: bool) -> bool:
+    """Whether a cached record (or cached negative) can answer this lookup."""
+    return not (require_constructor_arguments and record is not None and record.constructor_arguments is None)
+
+
 def _fetch_etherscan_contract(
-    chain_id: int, address: str, *, timeout: int | None = None, retries: int | None = None
+    chain_id: int,
+    address: str,
+    *,
+    timeout: float | None = None,
+    retries: int | None = None,
+    require_constructor_arguments: bool = False,
 ) -> VerifiedContract | None:
     """Internal: fetch and cache the structured verified-contract record.
 
@@ -154,13 +164,13 @@ def _fetch_etherscan_contract(
 
     cache_key = (chain_id, address.lower())
     with _source_cache_lock:
-        if cache_key in _source_cache:
+        if cache_key in _source_cache and _is_usable(_source_cache[cache_key], require_constructor_arguments):
             _record_cache_event("memory", True, cache_key)
             return _source_cache[cache_key]
 
     with _lock_for_key(cache_key):
         with _source_cache_lock:
-            if cache_key in _source_cache:
+            if cache_key in _source_cache and _is_usable(_source_cache[cache_key], require_constructor_arguments):
                 _record_cache_event("memory", True, cache_key)
                 return _source_cache[cache_key]
 
@@ -174,11 +184,12 @@ def _fetch_etherscan_contract(
                     _source_cache[cache_key] = None
                 return None
             record = VerifiedContract.from_cache_dict(disk_val)
-            if record is not None:
+            if record is not None and _is_usable(record, require_constructor_arguments):
                 with _source_cache_lock:
                     _source_cache[cache_key] = record
                 return record
-            # Unexpected shape (or an older schema) — fall through to a live fetch.
+            # Unexpected shape (or an older schema), or a record cached before
+            # constructor arguments were stored — fall through to a live fetch.
         else:
             _record_cache_event("disk", False, cache_key)
 
@@ -215,7 +226,12 @@ def _fetch_etherscan_contract(
 
 
 def fetch_verified_contract(
-    chain_id: int, address: str, *, timeout: int | None = None, retries: int | None = None
+    chain_id: int,
+    address: str,
+    *,
+    timeout: float | None = None,
+    retries: int | None = None,
+    require_constructor_arguments: bool = False,
 ) -> VerifiedContract | None:
     """Fetch the structured verified-contract record for ``address``, or None.
 
@@ -228,11 +244,19 @@ def fetch_verified_contract(
         address: Address of the deployed contract.
         timeout: Optional timeout in seconds per HTTP attempt.
         retries: Optional HTTP retry count.
+        require_constructor_arguments: Refetch a cached record that predates stored
+            constructor arguments instead of returning it without them.
 
     Returns:
         Verified contract data when available.
     """
-    return _fetch_etherscan_contract(chain_id, address, timeout=timeout, retries=retries)
+    return _fetch_etherscan_contract(
+        chain_id,
+        address,
+        timeout=timeout,
+        retries=retries,
+        require_constructor_arguments=require_constructor_arguments,
+    )
 
 
 def fetch_source(chain_id: int, address: str) -> tuple[str, str] | None:

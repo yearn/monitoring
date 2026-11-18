@@ -11,9 +11,7 @@ Monitors all timelock contract types (TimelockController, Aave, Compound, Lido, 
 
 The script runs every 30 minutes (the `half_hourly` profile) via the [monitoring runner](../../automation/jobs.yaml). Every monitored timelock delays operations by at least 24h (Infinifi's short timelock has been at 24h since 2026-08-16), so detection takes a small share of the reaction window.
 
-Proxy upgrade alerts use the same [source diff publication settings as Safe alerts](../safe/README.md).
-The explorer link is the default for queued operations. Exact implementation pairs approved
-in `WAVEY_PUBLIC_UPGRADE_DIFFS` can use a Wavey Gist.
+Proxy upgrade alerts link to the same [Wavey Gist source diff as Safe alerts](../safe/README.md).
 
 ## Continuous Subscriber Pilot
 

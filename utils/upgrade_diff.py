@@ -6,6 +6,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
+from time import monotonic
 
 from utils.chains import EXPLORER_URLS
 from utils.disk_cache import DiskCache
@@ -20,7 +21,16 @@ logger = get_logger("utils.upgrade_diff")
 
 # Wavey Gist's total file content limit (https://gist.wavey.info/llms.txt).
 MAX_GIST_BYTES = 1024 * 1024
-DIFF_TIMEOUT_SECONDS = 4
+# Longest an alert waits for its gists. Every request is bounded by what is
+# left of this deadline, and nothing is uploaded after it passes, so a late
+# comparison cannot publish a gist that no alert links to.
+DIFF_DEADLINE_SECONDS = 60
+# Per Etherscan or Wavey request, capped further by the remaining deadline.
+REQUEST_TIMEOUT_SECONDS = 20
+# Skip a request when less than this is left: it would almost certainly time out.
+MIN_REQUEST_SECONDS = 1
+# Extra wait after the deadline for a job finishing its last bounded request.
+DEADLINE_GRACE_SECONDS = 2
 MAX_DIFF_WORKERS = 4
 _diff_cache = DiskCache("wavey-upgrade-diffs-v1", max_entries=2048)
 
@@ -40,39 +50,43 @@ def _pair_key(old_impl: str, new_impl: str, chain_id: int) -> str:
     return f"{chain_id}:{old_impl.lower()}:{new_impl.lower()}"
 
 
-def _approved_pairs() -> set[str]:
-    """Read explicitly approved pairs for public disclosure."""
-    if not os.getenv("WAVEY_GIST_API_KEY"):
-        return set()
-    entries = os.getenv("WAVEY_PUBLIC_UPGRADE_DIFFS", "").lower().split(",")
-    return {key for item in entries if re.fullmatch(r"\d+:0x[0-9a-f]{40}:0x[0-9a-f]{40}", key := item.strip())}
+def _request_timeout(deadline: float) -> float | None:
+    """Return the timeout for the next request, or None once the deadline is too close."""
+    remaining = deadline - monotonic()
+    return None if remaining < MIN_REQUEST_SECONDS else min(REQUEST_TIMEOUT_SECONDS, remaining)
 
 
-def publish_upgrade_diff(old_impl: str, new_impl: str, chain_id: int) -> str:
-    """Get or publish the Wavey Gist for an approved implementation pair.
+def publish_upgrade_diff(old_impl: str, new_impl: str, chain_id: int, *, deadline: float | None = None) -> str:
+    """Get or publish the Wavey Gist for an implementation pair.
 
     Args:
         old_impl: Current implementation address.
         new_impl: Proposed implementation address.
         chain_id: Chain on which both implementations are deployed.
+        deadline: ``time.monotonic()`` value after which no request or upload starts.
+            Defaults to ``DIFF_DEADLINE_SECONDS`` from now.
 
     Returns:
         A public URL, or an empty string when publishing is disabled or unavailable.
     """
-    key = _pair_key(old_impl, new_impl, chain_id)
-    if key not in _approved_pairs():
+    if not os.getenv("WAVEY_GIST_API_KEY"):
         return ""
+    key = _pair_key(old_impl, new_impl, chain_id)
+    if deadline is None:
+        deadline = monotonic() + DIFF_DEADLINE_SECONDS
 
     # Both alert jobs can encounter the same pair before either writes the cache.
     cached = _diff_cache.get(key)
     if isinstance(cached, str):
         return cached
     try:
-        with file_lock(f"wavey-upgrade-diff-{key}", timeout=0):
+        # Another alert job publishing the same pair writes the cache before it
+        # releases the lock, so waiting for it reuses that gist.
+        with file_lock(f"wavey-upgrade-diff-{key}", timeout=max(0.0, deadline - monotonic())):
             cached = _diff_cache.get(key)
             if isinstance(cached, str):
                 return cached
-            url = _create_upgrade_diff(old_impl, new_impl, chain_id)
+            url = _create_upgrade_diff(old_impl, new_impl, chain_id, deadline)
             if url:
                 _diff_cache.set_positive(key, url)
             return url
@@ -81,7 +95,7 @@ def publish_upgrade_diff(old_impl: str, new_impl: str, chain_id: int) -> str:
 
 
 def resolve_upgrade_diff_links(upgrades: list[UpgradeDiffLink], chain_id: int) -> dict[str, str]:
-    """Resolve approved comparisons in parallel within one alert's time budget.
+    """Resolve the alert's comparisons in parallel within one time budget.
 
     Args:
         upgrades: Proxy upgrades and their explorer fallback links in this alert.
@@ -90,25 +104,20 @@ def resolve_upgrade_diff_links(upgrades: list[UpgradeDiffLink], chain_id: int) -
     Returns:
         A mapping from explorer URLs to Wavey URLs that were ready by the deadline.
     """
-    if not upgrades:
+    if not upgrades or not os.getenv("WAVEY_GIST_API_KEY"):
         return {}
-    approved = _approved_pairs()
-    pending = {
-        _pair_key(upgrade.old_impl, upgrade.new_impl, chain_id): upgrade
-        for upgrade in upgrades
-        if _pair_key(upgrade.old_impl, upgrade.new_impl, chain_id) in approved
-    }
-    if not pending:
-        return {}
+    # Proxies upgraded to the same implementation pair share one gist.
+    pending = {_pair_key(upgrade.old_impl, upgrade.new_impl, chain_id): upgrade for upgrade in upgrades}
 
     ready: dict[str, str] = {}
+    deadline = monotonic() + DIFF_DEADLINE_SECONDS
     pool = ThreadPoolExecutor(max_workers=min(MAX_DIFF_WORKERS, len(pending)))
     try:
         jobs = {
-            pool.submit(publish_upgrade_diff, upgrade.old_impl, upgrade.new_impl, chain_id): key
+            pool.submit(publish_upgrade_diff, upgrade.old_impl, upgrade.new_impl, chain_id, deadline=deadline): key
             for key, upgrade in pending.items()
         }
-        finished, delayed = wait(jobs, timeout=DIFF_TIMEOUT_SECONDS)
+        finished, delayed = wait(jobs, timeout=DIFF_DEADLINE_SECONDS + DEADLINE_GRACE_SECONDS)
         if delayed:
             logger.info("Wavey source diff deadline reached for %s comparison(s) on chain %s", len(delayed), chain_id)
         for job in finished:
@@ -127,6 +136,7 @@ def resolve_upgrade_diff_links(upgrades: list[UpgradeDiffLink], chain_id: int) -
             if url:
                 ready[key] = url
     finally:
+        # Unfinished jobs stop at the deadline: they start no further request or upload.
         pool.shutdown(wait=False, cancel_futures=True)
     return {
         upgrade.explorer_url: ready[key]
@@ -176,12 +186,20 @@ def _address_link(address: str, chain_id: int, *, code: bool = False) -> str:
     return f"[`{address}`]({explorer}/address/{address}{anchor})" if explorer else f"`{address}`"
 
 
-def _create_upgrade_diff(old_impl: str, new_impl: str, chain_id: int) -> str:
-    """Render and upload the verified source and deployment metadata."""
-    old = fetch_verified_contract(chain_id, old_impl, timeout=DIFF_TIMEOUT_SECONDS, retries=0)
+def _fetch_for_diff(chain_id: int, address: str, deadline: float) -> VerifiedContract | None:
+    """Fetch one implementation's verified record within the alert deadline."""
+    timeout = _request_timeout(deadline)
+    if timeout is None:
+        return None
+    return fetch_verified_contract(chain_id, address, timeout=timeout, retries=0, require_constructor_arguments=True)
+
+
+def _create_upgrade_diff(old_impl: str, new_impl: str, chain_id: int, deadline: float) -> str:
+    """Render and upload the verified source and deployment metadata before the deadline."""
+    old = _fetch_for_diff(chain_id, old_impl, deadline)
     if not old or not old.sources:
         return ""
-    new = fetch_verified_contract(chain_id, new_impl, timeout=DIFF_TIMEOUT_SECONDS, retries=0)
+    new = _fetch_for_diff(chain_id, new_impl, deadline)
     if not new or not new.sources:
         return ""
 
@@ -190,35 +208,43 @@ def _create_upgrade_diff(old_impl: str, new_impl: str, chain_id: int) -> str:
     old_link = _address_link(old_impl, chain_id, code=True)
     new_link = _address_link(new_impl, chain_id, code=True)
     body = f"Chain ID {chain_id}\n\n- Old implementation {old_link}\n- New implementation {new_link}\n\n"
-    body += _format_deployment_metadata(old, new) + "\n\n" + _format_source_diff(old.sources, new.sources)
+    body += _format_source_diff(old.sources, new.sources)
+    if deployment := _format_deployment_changes(old, new):
+        body += "\n\n" + deployment
     if len(f"# {title}\n\n{body}".encode("utf-8")) > MAX_GIST_BYTES:
         logger.info("Source diff for chain=%s old=%s new=%s exceeds Wavey Gist limit", chain_id, old_impl, new_impl)
         return ""
-    return upload_to_gist(body, title=title, timeout=DIFF_TIMEOUT_SECONDS, retries=0)
-
-
-def _format_deployment_metadata(old: VerifiedContract, new: VerifiedContract) -> str:
-    """Show verified deployment differences and the coverage of the comparison."""
-    settings = diff_compiler_settings(old, new)
-    lines = ["## Deployment metadata", ""]
-    if settings.changes:
-        changes = "\n".join(str(change) for change in settings.changes)
-        fence = _backtick_fence(changes, minimum=3)
-        lines.extend((f"{fence}text\n{changes}\n{fence}", ""))
-    if not settings.complete:
-        lines.extend(
-            ("Full compiler settings and linked libraries are unavailable for at least one implementation.", "")
+    timeout = _request_timeout(deadline)
+    if timeout is None:
+        logger.info(
+            "Source diff deadline passed before upload for chain=%s old=%s new=%s", chain_id, old_impl, new_impl
         )
-    elif not settings.changes:
-        lines.extend(("The compared compiler settings and linked library addresses match.", ""))
-    if old.constructor_arguments is None or new.constructor_arguments is None:
-        args = "Constructor arguments are unavailable for at least one implementation."
-    elif old.constructor_arguments != new.constructor_arguments:
-        args = "Constructor arguments differ. See the linked deployments for the encoded values."
-    else:
-        args = "The reported constructor arguments match."
-    lines.extend((args, "", "This comparison covers verified source and reported deployment metadata only."))
-    return "\n".join(lines)
+        return ""
+    return upload_to_gist(body, title=title, timeout=timeout, retries=0)
+
+
+def _format_deployment_changes(old: VerifiedContract, new: VerifiedContract) -> str:
+    """List compiler, linked-library and constructor-argument changes, or "" when none differ.
+
+    Identical source can still deploy different behavior: constructor arguments
+    set immutables, and linked libraries decide which external code runs.
+
+    Args:
+        old: Verified record of the current implementation.
+        new: Verified record of the proposed implementation.
+
+    Returns:
+        A Markdown section listing each change, or an empty string.
+    """
+    changes = [str(change) for change in diff_compiler_settings(old, new).changes]
+    args = (old.constructor_arguments, new.constructor_arguments)
+    if None not in args and args[0] != args[1]:
+        changes.append("constructor arguments: differ (see the linked deployments for the encoded values)")
+    if not changes:
+        return ""
+    text = "\n".join(changes)
+    fence = _backtick_fence(text, minimum=3)
+    return f"## Deployment changes\n\n{fence}text\n{text}\n{fence}"
 
 
 def _backtick_fence(text: str, minimum: int = 1) -> str:
@@ -273,5 +299,5 @@ def _format_source_diff(old_sources: dict[str, str], new_sources: dict[str, str]
         fence = _backtick_fence(patch, minimum=3)
         sections.append(f"{heading}\n\n{fence}diff\n{patch}{fence}")
 
-    content = "\n\n".join(sections) if sections else "No source file changes. See deployment metadata above."
+    content = "\n\n".join(sections) if sections else "No source file changes."
     return f"## Verified source\n\n{content}"
