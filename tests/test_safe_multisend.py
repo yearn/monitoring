@@ -130,10 +130,10 @@ class TestIsSimulatableMultisend(unittest.TestCase):
 
 
 class TestBuildContextNote(unittest.TestCase):
-    def test_simulated_multisend_says_so(self) -> None:
+    def test_simulatable_multisend_describes_the_model(self) -> None:
         tx = {"to": MULTISEND_CALL_ONLY, "operation": 1}
-        note = build_context_note(tx, "0xSafe", simulated=True)
-        self.assertIn("simulated as one ordered bundle", note)
+        note = build_context_note(tx, "0xSafe", simulate_as_bundle=True)
+        self.assertIn("can be simulated as one ordered bundle", note)
         self.assertNotIn("skipped", note)
 
     def test_delegatecall_into_known_multisend(self) -> None:

@@ -46,6 +46,7 @@ from utils.proxy import (
     find_proxy_upgrades,
     get_current_implementation,
 )
+from utils.redact import redact_secrets
 from utils.related_tokens import RelatedToken, format_related_tokens_block, resolve_related_tokens
 from utils.revert_decoder import decode_revert
 from utils.risk_anchors import RiskAnchor, format_anchors_block
@@ -463,8 +464,8 @@ class _PreparedCall:
     # True when simulated in batch order on the state left by the earlier calls;
     # False for an independent simulation against the current chain state.
     sequential: bool = False
-    # Why a batch call has no simulation: ``bundle_unavailable`` when the
-    # bundle request failed, ``not_reached`` when an earlier call reverted
+    # Why a batch call has no simulation: ``bundle_unavailable`` when there is
+    # no usable bundle result, ``not_reached`` when an earlier call reverted
     # first. Empty otherwise.
     unsimulated_reason: str = ""
     # 1-based index of the call whose revert stopped the bundle, for ``not_reached``.
@@ -564,12 +565,11 @@ def _simulation_note(
     simulation says why, so a missing line is never mistaken for a pass.
     """
     if unsimulated_reason == "bundle_unavailable":
-        return (
-            "**Batch simulation:** unavailable — the Tenderly bundle request failed, so no call in this batch "
-            "was simulated (calls are not simulated one by one: out of batch order they revert falsely)"
-        )
+        return "**Batch simulation:** unavailable — no usable Tenderly result for the ordered bundle"
     if unsimulated_reason == "not_reached":
         return f"**Batch simulation:** not reached — call {reverted_at} reverted first in batch order"
+    if unsimulated_reason == "unavailable":
+        return "**Simulation:** unavailable — no usable Tenderly result"
     if sim is None:
         return ""
     if sim.success:
@@ -580,7 +580,10 @@ def _simulation_note(
             return f"**Independent simulation:** SUCCESS{gas} (does not prove the batch succeeds atomically)"
         return f"**Simulation:** SUCCESS{gas}"
     error = f"reverted with `{sim.error_message}`" if sim.error_message else "reverted"
-    handling = "shown to the risk prompt" if _is_informative_revert(sim) else "omitted from the risk prompt"
+    if _is_informative_revert(sim):
+        handling = "reason included in the risk prompt"
+    else:
+        handling = "reason omitted from the risk prompt" if sim.error_message else "no revert reason available"
     if sequential:
         return (
             f"**Batch simulation diagnostic:** {error} when run in batch order — not a predicted governance "
@@ -650,6 +653,32 @@ def _simulation_diagnostic(sim: SimulationResult | None, call: str) -> str:
     if sim is None or not _is_informative_revert(sim):
         return ""
     return f"{call} reverted in simulation with {sim.error_message}."
+
+
+def _simulation_log_context(chain_id: int, sender: str, safe_tx_hash: str, *, target: str = "") -> str:
+    """Identify the call using public chain and transaction fields."""
+    context = f"chain_id={chain_id} sender={sender}"
+    if target:
+        context += f" target={target}"
+    if safe_tx_hash:
+        context += f" safe_tx_hash={safe_tx_hash}"
+    return context
+
+
+def _single_simulation_diagnostic(
+    sim: SimulationResult | None, *, chain_id: int, sender: str, target: str, safe_tx_hash: str
+) -> str:
+    """Warn on a missing or reverted simulation and describe its evidence to the model."""
+    if sim is not None and sim.success:
+        return ""
+    context = _simulation_log_context(chain_id, sender, safe_tx_hash, target=target)
+    if sim is None:
+        logger.warning("Simulation unavailable %s", context)
+        return "Simulation unavailable. Assess the call from the decoded calldata and other available evidence."
+    logger.warning("Simulation reverted %s reason=%r", context, redact_secrets(sim.error_message))
+    if diagnostic := _simulation_diagnostic(sim, "This call"):
+        return f"{diagnostic}\n{SIMULATION_PREREQUISITE_NOTE}"
+    return "This call reverted in simulation. Do not infer how the queued transaction will execute."
 
 
 def _collect_state_reads(
@@ -1475,7 +1504,7 @@ def _format_batch_simulation_section(items: list[_PreparedCall], labels: dict[st
     """
     if any(item.unsimulated_reason == "bundle_unavailable" for item in items):
         return (
-            "Batch simulation unavailable: the bundle request failed, so no call was simulated. "
+            "Batch simulation unavailable. Tenderly did not provide a usable result for the ordered bundle. "
             "Do not infer that any call succeeds or reverts."
         )
     blocks: list[str] = []
@@ -2187,6 +2216,8 @@ def explain_transaction(
     refine: bool = True,
     description: str = "",
     label_address: str = "",
+    *,
+    safe_tx_hash: str = "",
 ) -> Explanation | None:
     """Generate an AI explanation for a governance transaction.
 
@@ -2219,6 +2250,7 @@ def explain_transaction(
             Contract header. Defaults to ``from_address`` — pass it explicitly
             when the label describes something else (e.g. a Safe multisend
             utility rather than the Safe itself).
+        safe_tx_hash: Public Safe transaction hash for simulation warnings.
 
     Returns:
         Explanation with summary and detail, or None on failure.
@@ -2275,8 +2307,7 @@ def explain_transaction(
         address_labels.setdefault(address, context_label)
 
     simulation: SimulationResult | None = None
-    simulation_for_report: SimulationResult | None = None
-    single_diagnostic = ""
+    simulation_section = ""
     if not skip_simulation:
         simulation = _with_onchain_symbols(
             simulate_transaction(
@@ -2289,21 +2320,14 @@ def explain_transaction(
             chain_id,
         )
         simulation = _with_revert_reason(simulation, target, chain_id)
-        simulation_for_report = simulation
-        if simulation:
+        if simulation is not None:
             logger.info("Simulation completed: success=%s gas=%s", simulation.success, simulation.gas_used)
-            if not simulation.success:
-                single_diagnostic = _simulation_diagnostic(simulation, "This call")
-                # Tenderly often misreports legitimate governance calls as reverting
-                # (wrong msg.sender, missing storage overrides). Including a failed
-                # sim in the prompt biases the LLM toward "this tx will revert"
-                # and inflates risk — drop it so the LLM works from calldata only.
-                logger.warning("Simulation reported failure (%s); omitting from prompt", simulation.error_message)
-                simulation = None
-        else:
-            logger.info("Simulation unavailable, proceeding with decoded calldata only")
+        simulation_section = _single_simulation_diagnostic(
+            simulation, chain_id=chain_id, sender=from_address, target=target, safe_tx_hash=safe_tx_hash
+        )
 
-    sim_addresses = _label_simulation_counterparties([simulation], chain_id, address_labels)
+    successful_simulation = simulation if simulation is not None and simulation.success else None
+    sim_addresses = _label_simulation_counterparties([successful_simulation], chain_id, address_labels)
     addresses = list(
         dict.fromkeys([*collect_unique_addresses([(target, decoded)]), *protocol_ctx.addresses, *sim_addresses])
     )
@@ -2313,7 +2337,7 @@ def explain_transaction(
         target=target,
         value=value,
         decoded_calls=decoded_calls,
-        simulation=simulation,
+        simulation=successful_simulation,
         protocol=protocol,
         label=label,
         token_flows=token_flows,
@@ -2329,7 +2353,7 @@ def explain_transaction(
         address_links=address_links,
         related_tokens=format_related_tokens_block(related_tokens, address_labels),
         protocol_context=protocol_ctx.prompt,
-        simulation_section=f"{single_diagnostic}\n{SIMULATION_PREREQUISITE_NOTE}" if single_diagnostic else "",
+        simulation_section=simulation_section,
     )
     logger.info("Full AI context for %s:\n%s", target, prompt)
 
@@ -2345,7 +2369,11 @@ def explain_transaction(
                 raw_calldata=calldata,
                 original_index=1,
                 decode_status="decoded",
-                simulation_note=_simulation_note(simulation_for_report, independent=False),
+                simulation_note=_simulation_note(
+                    simulation,
+                    independent=False,
+                    unsimulated_reason="unavailable" if simulation is None and not skip_simulation else "",
+                ),
             )
         ],
         chain_id=chain_id,
@@ -2378,6 +2406,8 @@ def _prepare_batch_items(
     chain_id: int,
     from_address: str,
     skip_simulation: bool,
+    *,
+    safe_tx_hash: str = "",
 ) -> list[_PreparedCall]:
     """Decode and optionally simulate each input call, preserving original indices.
 
@@ -2406,7 +2436,9 @@ def _prepare_batch_items(
             from_address=from_address,
         )
         if bundle is None:
-            logger.warning("Bundle simulation unavailable; batch calls left unsimulated")
+            logger.warning(
+                "Bundle simulation unavailable %s", _simulation_log_context(chain_id, from_address, safe_tx_hash)
+            )
     reverted_at = next(
         (decoded_items[pos][0] for pos, sim in enumerate(bundle or []) if sim is not None and not sim.success),
         None,
@@ -2428,9 +2460,10 @@ def _prepare_batch_items(
                     unsimulated_reason = "not_reached"
                 elif not simulation.success:
                     logger.warning(
-                        "Batch call %d simulation reported failure in batch order (%s); omitting from prompt",
+                        "Bundle simulation reverted %s call_index=%d reason=%r",
+                        _simulation_log_context(chain_id, from_address, safe_tx_hash, target=target),
                         i,
-                        simulation.error_message,
+                        redact_secrets(simulation.error_message),
                     )
         items.append(
             _PreparedCall(
@@ -2596,6 +2629,8 @@ def explain_batch_transaction(
     refine: bool = True,
     description: str = "",
     label_address: str = "",
+    *,
+    safe_tx_hash: str = "",
 ) -> Explanation | None:
     """Generate an AI explanation for a batch/multicall governance transaction.
 
@@ -2620,6 +2655,7 @@ def explain_batch_transaction(
             Contract header. Defaults to ``from_address`` — pass it explicitly
             when the label describes something else (e.g. a Safe multisend
             utility rather than the Safe itself).
+        safe_tx_hash: Public Safe transaction hash for simulation warnings.
 
     Returns:
         Explanation with summary and detail, or None on failure.
@@ -2633,7 +2669,7 @@ def explain_batch_transaction(
         logger.error("Failed to generate batch AI explanation: %s", e)
         return None
 
-    items = _prepare_batch_items(calls, chain_id, from_address, skip_simulation)
+    items = _prepare_batch_items(calls, chain_id, from_address, skip_simulation, safe_tx_hash=safe_tx_hash)
     decoded_items = [item for item in items if item.decoded is not None]
     decoded_with_target = [(item.target, item.decoded) for item in decoded_items if item.decoded is not None]
     decoded_calls = [item.decoded for item in decoded_items if item.decoded is not None]

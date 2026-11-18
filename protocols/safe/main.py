@@ -1,6 +1,7 @@
 import hashlib
 import itertools
 import os
+import re
 import time
 from dataclasses import replace
 
@@ -31,7 +32,7 @@ from utils.cache import (
 )
 from utils.chains import Chain, safe_network_to_chain_id
 from utils.formatting import parse_wei
-from utils.llm.ai_explainer import explain_batch_transaction, explain_transaction, format_explanation_line
+from utils.llm.ai_explainer import Explanation, explain_batch_transaction, explain_transaction, format_explanation_line
 from utils.llm.credits import check_llm_credits
 from utils.logger import get_logger
 from utils.proxy import ProxyUpgrade, dedupe_upgrades, find_proxy_upgrades, format_upgrade_lines
@@ -345,7 +346,7 @@ def _explain_safe_tx(
     protocol: str,
     safe_address: str,
     additional_info: str | None,
-):
+) -> Explanation | None:
     """Pick the right AI explainer path for a Safe transaction.
 
     Safe txs with operation=DELEGATECALL into a multisend utility go to the
@@ -355,12 +356,15 @@ def _explain_safe_tx(
     multisend executes. An inner DELEGATECALL can't be modeled, so those
     batches skip simulation.
     """
+    safe_tx_hash = tx.get("safeTxHash")
+    if not isinstance(safe_tx_hash, str) or not re.fullmatch(r"0x[0-9a-fA-F]{64}", safe_tx_hash):
+        safe_tx_hash = ""
     operation = int(tx.get("operation", 0) or 0)
     inner_calls = extract_inner_calls(tx) if operation == 1 else []
 
     if inner_calls:
         simulate = is_simulatable_multisend(tx, inner_calls)
-        context_note = build_context_note(tx, safe_address, simulated=simulate)
+        context_note = build_context_note(tx, safe_address, simulate_as_bundle=simulate)
         utility_label = safe_utility_label(target)
         label = utility_label or (additional_info or "")
         return explain_batch_transaction(
@@ -375,6 +379,7 @@ def _explain_safe_tx(
             # A utility label names the multisend contract, not the Safe, so the
             # report's Contract link must point at the target in that case.
             label_address=target if utility_label else safe_address,
+            safe_tx_hash=safe_tx_hash,
         )
 
     # Non-multisend DELEGATECALLs (rare): skip sim but still try to explain.
@@ -392,6 +397,7 @@ def _explain_safe_tx(
         skip_simulation=skip_sim,
         context_note=context_note,
         refine=True,
+        safe_tx_hash=safe_tx_hash,
     )
 
 
