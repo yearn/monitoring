@@ -12,7 +12,15 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from utils.llm.base import LLMError, LLMProvider, LLMUnavailableError, LLMUsage
-from utils.llm.cli_provider import ClaudeCLIProvider, CodexCLIProvider, _cli_environment, _run_cli
+from utils.llm.cli_provider import (
+    CODEX_UNKNOWN_REROUTE,
+    ClaudeCLIProvider,
+    CodexCLIProvider,
+    _cli_environment,
+    _codex_error_stderr,
+    _codex_model,
+    _run_cli,
+)
 from utils.llm.factory import get_llm_provider, reset_provider
 from utils.llm.fallback import FallbackProvider
 
@@ -30,6 +38,10 @@ def _events(*items: dict[str, Any]) -> str:
 
 
 CODEX_SUCCESS = _events({"type": "thread.started"}, {"type": "turn.completed"})
+CODEX_STARTUP_LOG = (
+    '2026-11-18T15:14:18Z INFO codex_otel.trace_safe: event.name="codex.conversation_starts" '
+    "provider_name=openai model=requested-alias slug=gpt-6.2-sol"
+)
 
 
 def _claude_result(model: str | None = None, **fields: Any) -> str:
@@ -91,6 +103,19 @@ class TestRunCLI(unittest.TestCase):
         self.assertNotIn("prompt-derived", str(ctx.exception))
         self.assertIn("no stderr", str(ctx.exception))
 
+    def test_nonzero_exit_applies_error_stderr_filter(self) -> None:
+        binary = self._script(f"echo 'ERROR: failed to authenticate' >&2\necho '{CODEX_STARTUP_LOG}' >&2\nexit 1")
+        with self.assertRaises(LLMUnavailableError) as ctx:
+            _run_cli("codex", [binary], "", self.dir, timeout=10, error_stderr=_codex_error_stderr)
+        self.assertIn("ERROR: failed to authenticate", str(ctx.exception))
+        self.assertNotIn("codex_otel", str(ctx.exception))
+
+    def test_nonzero_exit_without_filter_quotes_all_stderr(self) -> None:
+        binary = self._script(f"echo '{CODEX_STARTUP_LOG}' >&2\nexit 1")
+        with self.assertRaises(LLMUnavailableError) as ctx:
+            _run_cli("codex", [binary], "", self.dir, timeout=10)
+        self.assertIn("codex_otel", str(ctx.exception))
+
     def test_missing_binary_is_unavailable(self) -> None:
         with self.assertRaises(LLMUnavailableError):
             _run_cli("fake", [str(self.dir / "missing")], "", self.dir, timeout=10)
@@ -139,16 +164,20 @@ class TestRunCLI(unittest.TestCase):
             )
 
 
-def _codex_fake(last_message: str, seen: list[list[str]] | None = None) -> Any:
+def _codex_fake(
+    last_message: str, seen: list[list[str]] | None = None, *, stdout: str = CODEX_SUCCESS, stderr: str = ""
+) -> Any:
     """Fake ``_run_cli`` for codex: writes ``last_message`` for ``exec``."""
 
-    def fake_run(label: str, args: list[str], prompt: str, cwd: Path, timeout: int, env: Any = None) -> MagicMock:
+    def fake_run(
+        label: str, args: list[str], prompt: str, cwd: Path, timeout: int, env: Any = None, error_stderr: Any = None
+    ) -> MagicMock:
         if seen is not None:
             seen.append(args)
         if "--output-schema" in args and seen is not None:
             seen.append(["schema", Path(_arg_after(args, "--output-schema")).read_text()])
         Path(_arg_after(args, "--output-last-message")).write_text(last_message)
-        return _completed(args, stdout=CODEX_SUCCESS)
+        return _completed(args, stdout=stdout, stderr=stderr)
 
     return fake_run
 
@@ -164,7 +193,7 @@ class TestCodexCLIProvider(unittest.TestCase):
         result = provider.complete("Explain this tx", system_prompt="Be terse.")
 
         self.assertEqual(result, "Pauses the vault. LOW.")
-        _, args, stdin, cwd, timeout, env = mock_run.call_args.args
+        _, args, stdin, cwd, timeout, env, _ = mock_run.call_args.args
         self.assertEqual(args[:4], ["/bin/codex", "exec", "--sandbox", "read-only"])
         self.assertNotIn("--yolo", args)
         self.assertIn("--ignore-user-config", args)
@@ -218,13 +247,112 @@ class TestCodexCLIProvider(unittest.TestCase):
     @patch("utils.llm.cli_provider._run_cli")
     def test_complete_structured_passes_schema_file(self, mock_run: MagicMock) -> None:
         seen: list[list[str]] = []
-        mock_run.side_effect = _codex_fake('{"summary": "ok"}', seen=seen)
+        mock_run.side_effect = _codex_fake('{"summary": "ok"}', seen=seen, stderr=CODEX_STARTUP_LOG)
         provider = CodexCLIProvider(binary="codex")
 
         self.assertTrue(provider.supports_structured_output)
         self.assertEqual(provider.complete_structured("p", SCHEMA), {"summary": "ok"})
+        self.assertEqual(provider.model_name, "codex-cli:gpt-6.2-sol")
         self.assertIn(["schema", json.dumps(SCHEMA)], seen)
         self.assertNotIn("--model", mock_run.call_args.args[1])
+        self.assertIn("codex_otel.trace_safe=info", mock_run.call_args.args[5]["RUST_LOG"])
+        self.assertIs(mock_run.call_args.args[6], _codex_error_stderr)
+
+    @patch("utils.llm.cli_provider._run_cli")
+    def test_model_label_uses_reroute_destination(self, mock_run: MagicMock) -> None:
+        stdout = _events(
+            {"type": "thread.started"},
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "error",
+                    "message": "model rerouted: gpt-6.2-sol -> gpt-6.1-sol (HighRiskCyberActivity)",
+                },
+            },
+            {"type": "turn.completed"},
+        )
+        mock_run.side_effect = _codex_fake("ok", stdout=stdout, stderr=CODEX_STARTUP_LOG)
+        provider = CodexCLIProvider(binary="codex")
+
+        provider.complete("p")
+
+        self.assertEqual(provider.model_name, "codex-cli:gpt-6.1-sol")
+
+    @patch("utils.llm.cli_provider._run_cli")
+    def test_model_label_falls_back_when_current_call_has_no_model_diagnostic(self, mock_run: MagicMock) -> None:
+        for configured, fallback in (("gpt-x", "codex-cli:gpt-x"), ("", "codex-cli")):
+            with self.subTest(configured=configured):
+                provider = CodexCLIProvider(binary="codex", model=configured)
+                mock_run.side_effect = _codex_fake("ok", stderr=CODEX_STARTUP_LOG)
+                provider.complete("previous")
+                self.assertEqual(provider.model_name, "codex-cli:gpt-6.2-sol")
+
+                mock_run.side_effect = _codex_fake("ok", stderr="unrelated diagnostic slug=ignored")
+                with self.assertLogs("utils.llm.cli_provider", level="WARNING") as logs:
+                    provider.complete("current")
+                    provider.complete("again")
+                self.assertEqual(provider.model_name, fallback)
+                self.assertEqual(len([r for r in logs.output if "no model slug" in r]), 1)
+
+
+def _reroute_events(message: str) -> list[dict[str, Any]]:
+    """Codex events holding one reroute notice."""
+    return [{"type": "item.completed", "item": {"type": "error", "message": message}}]
+
+
+class TestCodexModel(unittest.TestCase):
+    """Tests for reading the answering model from Codex output."""
+
+    def test_reroute_message_variants(self) -> None:
+        for message in (
+            "model rerouted: gpt-6.2-sol -> gpt-6.1-sol (HighRiskCyberActivity)",
+            "model rerouted: gpt-6.2-sol -> gpt-6.1-sol (high risk)",
+            "Model rerouted: gpt-6.2-sol -> gpt-6.1-sol.",
+            "model rerouted: `gpt-6.2-sol` -> `gpt-6.1-sol`",
+            "model rerouted from gpt-6.2-sol to gpt-6.1-sol",
+            "model rerouted: gpt-6.2-sol → gpt-6.1-sol, retrying",
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(_codex_model(_reroute_events(message), CODEX_STARTUP_LOG), "gpt-6.1-sol")
+        plus = _reroute_events("model rerouted: gpt-6.2-sol -> gpt-6.1+sol (x)")
+        self.assertEqual(_codex_model(plus, CODEX_STARTUP_LOG), "gpt-6.1+sol")
+
+    def test_unparseable_reroute_does_not_credit_requested_model(self) -> None:
+        events = _reroute_events("model rerouted for safety reasons")
+        with self.assertLogs("utils.llm.cli_provider", level="WARNING"):
+            self.assertEqual(_codex_model(events, CODEX_STARTUP_LOG), CODEX_UNKNOWN_REROUTE)
+
+    def test_slug_is_read_regardless_of_field_order_or_quoting(self) -> None:
+        for line in (
+            'INFO codex_otel.trace_safe: model=x slug="gpt-6.2-sol" event.name="codex.conversation_starts"',
+            "INFO codex_otel.trace_safe{span=1}: event.name=codex.conversation_starts slug=gpt-6.2-sol",
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(_codex_model([], line), "gpt-6.2-sol")
+
+    def test_slug_falls_back_to_other_trace_events(self) -> None:
+        stderr = 'INFO codex_otel.trace_safe: event.name="codex.sse_event" slug=gpt-6.1-sol'
+        self.assertEqual(_codex_model([], stderr), "gpt-6.1-sol")
+        self.assertEqual(_codex_model([], "plain stderr slug=gpt-6.1-sol"), "")
+
+
+class TestCodexErrorStderr(unittest.TestCase):
+    """Tests for filtering Codex diagnostics out of error messages."""
+
+    def test_keeps_errors_and_drops_info_traces_with_continuations(self) -> None:
+        stderr = "\n".join(
+            (
+                CODEX_STARTUP_LOG,
+                "    continued trace field",
+                '2026-11-18T15:14:19Z ERROR codex_otel.trace_safe: event.name="codex.api_request" status=401',
+                "ERROR: failed to authenticate",
+            )
+        )
+        filtered = _codex_error_stderr(stderr)
+        self.assertNotIn("conversation_starts", filtered)
+        self.assertNotIn("continued trace field", filtered)
+        self.assertIn("status=401", filtered)
+        self.assertIn("ERROR: failed to authenticate", filtered)
 
     @patch("utils.llm.cli_provider._run_cli")
     def test_unavailable_propagates(self, mock_run: MagicMock) -> None:
