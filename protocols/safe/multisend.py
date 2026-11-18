@@ -86,12 +86,12 @@ def is_simulatable_multisend(tx: dict, inner_calls: list[dict[str, str]]) -> boo
     return bool(inner_calls) and all(int(call.get("operation", "0") or 0) == 0 for call in inner_calls)
 
 
-def build_context_note(tx: dict, safe_address: str, simulated: bool = False) -> str:
+def build_context_note(tx: dict, safe_address: str, *, simulate_as_bundle: bool = False) -> str:
     """Describe the outer-call semantics so the LLM doesn't have to guess.
 
     Returns a short note that explains DELEGATECALL semantics and identifies
     the multisend target when applicable. Empty string for plain CALLs.
-    ``simulated`` says whether the inner calls were simulated as a bundle.
+    ``simulate_as_bundle`` says whether the simulator can model the inner calls.
     """
     operation = int(tx.get("operation", 0) or 0)
     if operation != 1:
@@ -105,9 +105,9 @@ def build_context_note(tx: dict, safe_address: str, simulated: bool = False) -> 
         + ".",
         f"Inner calls execute in the Safe's own storage context: msg.sender = {safe_address}.",
         (
-            "Every inner transaction is a plain CALL from the Safe, so the batch was simulated as one "
-            "ordered bundle of those calls from the Safe — the same execution the multisend performs."
-            if simulated
+            "Every inner transaction is a plain CALL from the Safe, so the batch can be simulated as one "
+            "ordered bundle of calls from the Safe."
+            if simulate_as_bundle
             else "Tenderly simulation was skipped because our simulator only models plain CALL "
             "and would produce spurious revert info for this delegated flow."
         ),
