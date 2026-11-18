@@ -23,7 +23,7 @@ from utils.solidity_text import declares_contract
 
 logger = get_logger("utils.verified_contract")
 
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 3
 
 _NOT_VERIFIED_ABI = "Contract source code not verified"
 
@@ -39,6 +39,7 @@ class VerifiedContract:
     settings: dict = field(default_factory=dict)  # standard-json settings (remappings, optimizer, …)
     abi: list[dict] = field(default_factory=list)
     contract_file: str | None = None  # resolved compilation target, None if ambiguous
+    constructor_arguments: str | None = None  # Etherscan hex, None when unavailable
 
     @property
     def compilation_target(self) -> tuple[str, str] | None:
@@ -68,6 +69,7 @@ class VerifiedContract:
             "settings": self.settings,
             "abi": self.abi,
             "contract_file": self.contract_file,
+            "constructor_arguments": self.constructor_arguments,
         }
 
     @classmethod
@@ -80,6 +82,7 @@ class VerifiedContract:
             return None
         settings = data.get("settings")
         abi = data.get("abi")
+        constructor_arguments = data.get("constructor_arguments")
         return cls(
             contract_name=str(data.get("contract_name") or ""),
             compiler_version=str(data.get("compiler_version") or ""),
@@ -88,6 +91,7 @@ class VerifiedContract:
             settings=settings if isinstance(settings, dict) else {},
             abi=abi if isinstance(abi, list) else [],
             contract_file=data.get("contract_file") or None,
+            constructor_arguments=constructor_arguments if isinstance(constructor_arguments, str) else None,
         )
 
 
@@ -101,6 +105,7 @@ def parse_etherscan_entry(entry: dict) -> VerifiedContract | None:
         return None
 
     contract_name = entry.get("ContractName") or ""
+    constructor_arguments = entry.get("ConstructorArguments")
     language, sources, settings = _parse_source_bundle(raw_source, contract_name)
     return VerifiedContract(
         contract_name=contract_name,
@@ -110,6 +115,9 @@ def parse_etherscan_entry(entry: dict) -> VerifiedContract | None:
         settings=settings,
         abi=parse_abi(entry.get("ABI") or "") or [],
         contract_file=resolve_contract_file(contract_name, sources, settings),
+        constructor_arguments=constructor_arguments.strip().lower().removeprefix("0x")
+        if isinstance(constructor_arguments, str)
+        else None,
     )
 
 

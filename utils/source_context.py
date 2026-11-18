@@ -140,7 +140,9 @@ class SourceContext:
     function_body: str = ""  # the body's statements, when short enough to show in full
 
 
-def _fetch_etherscan_contract(chain_id: int, address: str) -> VerifiedContract | None:
+def _fetch_etherscan_contract(
+    chain_id: int, address: str, *, timeout: int | None = None, retries: int | None = None
+) -> VerifiedContract | None:
     """Internal: fetch and cache the structured verified-contract record.
 
     Single Etherscan call shared by `fetch_source` (for natspec), `fetch_verified_contract`
@@ -187,7 +189,7 @@ def _fetch_etherscan_contract(chain_id: int, address: str) -> VerifiedContract |
             "address": address,
             "apikey": api_key,
         }
-        data = fetch_json(ETHERSCAN_V2_API_URL, params=params)
+        data = fetch_json(ETHERSCAN_V2_API_URL, params=params, timeout=timeout, retries=retries)
         # A clean response is status "1" with a result array; anything else (None on a
         # request error, or status "0") is treated as transient and not persisted, so an
         # Etherscan blip can't poison the disk cache as a day-long "unverified".
@@ -197,8 +199,11 @@ def _fetch_etherscan_contract(chain_id: int, address: str) -> VerifiedContract |
         contract = parse_etherscan_entry(entry) if isinstance(entry, dict) else None
 
         if contract is None:
-            with _source_cache_lock:
-                _source_cache[cache_key] = None
+            # A latency-bounded lookup must not suppress later normal lookups
+            # if its shorter timeout or retry budget is exhausted.
+            if status_ok or (timeout is None and retries is None):
+                with _source_cache_lock:
+                    _source_cache[cache_key] = None
             if status_ok:
                 _source_disk_cache.set_negative(disk_key)
             return None
@@ -209,14 +214,25 @@ def _fetch_etherscan_contract(chain_id: int, address: str) -> VerifiedContract |
         return contract
 
 
-def fetch_verified_contract(chain_id: int, address: str) -> VerifiedContract | None:
+def fetch_verified_contract(
+    chain_id: int, address: str, *, timeout: int | None = None, retries: int | None = None
+) -> VerifiedContract | None:
     """Fetch the structured verified-contract record for ``address``, or None.
 
     This is what semantic consumers (the implementation diff) should use: it
     keeps per-file sources, compiler settings, the ABI and the resolved
     compilation target, so a claim can be attributed to the deployed contract.
+
+    Args:
+        chain_id: Chain of the deployed contract.
+        address: Address of the deployed contract.
+        timeout: Optional timeout in seconds per HTTP attempt.
+        retries: Optional HTTP retry count.
+
+    Returns:
+        Verified contract data when available.
     """
-    return _fetch_etherscan_contract(chain_id, address)
+    return _fetch_etherscan_contract(chain_id, address, timeout=timeout, retries=retries)
 
 
 def fetch_source(chain_id: int, address: str) -> tuple[str, str] | None:

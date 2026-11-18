@@ -92,8 +92,10 @@ class TestResolveContractFile(unittest.TestCase):
 
 class TestCacheRoundTrip(unittest.TestCase):
     def test_round_trip(self) -> None:
-        contract = parse_etherscan_entry(_entry("{" + STANDARD_JSON + "}"))
+        entry = {**_entry("{" + STANDARD_JSON + "}"), "ConstructorArguments": "0xABCD"}
+        contract = parse_etherscan_entry(entry)
         assert contract is not None
+        self.assertEqual(contract.constructor_arguments, "abcd")
         restored = VerifiedContract.from_cache_dict(json.loads(json.dumps(contract.to_cache_dict())))
         self.assertEqual(restored, contract)
 

@@ -1,7 +1,7 @@
 """Proxy upgrade detection utilities.
 
-Detects proxy upgrade transactions (EIP-1967) and generates diff links
-to compare old vs new implementation source code on Etherscan.
+Detects proxy upgrade transactions (EIP-1967) and generates links
+comparing the old and new implementation source code.
 """
 
 import os
@@ -16,6 +16,7 @@ from utils.calldata.decoder import decode_calldata
 from utils.calldata.wrappers import unwrap_calls
 from utils.chains import EXPLORER_URLS, Chain
 from utils.logger import get_logger
+from utils.upgrade_diff import UpgradeDiffLink
 
 if TYPE_CHECKING:
     from utils.web3_wrapper import Web3Client
@@ -165,12 +166,19 @@ def _find_upgrades(data_hex: str, target: str, via: str, depth: int) -> list[Pro
     return found
 
 
-def format_upgrade_lines(upgrade: ProxyUpgrade, target: str, chain_id: int) -> list[str]:
-    """Telegram alert lines for one upgrade: proxy, old → new implementation, diff link.
+def format_upgrade_lines(
+    upgrade: ProxyUpgrade, target: str, chain_id: int, *, diffs: list[UpgradeDiffLink] | None = None
+) -> list[str]:
+    """Build Telegram lines for an upgrade and collect its diff for optional publication.
 
-    ``target`` is the call's own target. The proxy is named explicitly when it
-    differs — a ProxyAdmin-routed upgrade, or one nested inside a wrapper — so
-    recipients know which contract is changing.
+    Args:
+        upgrade: Detected proxy upgrade.
+        target: Outer call target, used to identify a separately named proxy.
+        chain_id: Chain on which the proxy is deployed.
+        diffs: Optional collector for the alert's implementation comparisons.
+
+    Returns:
+        Upgrade lines with the explorer diff link when available.
     """
     lines: list[str] = []
     if upgrade.proxy_address.lower() != target.lower():
@@ -186,6 +194,8 @@ def format_upgrade_lines(upgrade: ProxyUpgrade, target: str, chain_id: int) -> l
     diff_url = build_diff_url(old_impl, new_impl, chain_id)
     if diff_url:
         lines.append(f"📊 [Diff]({diff_url})")
+        if diffs is not None:
+            diffs.append(UpgradeDiffLink(upgrade.proxy_address, old_impl, new_impl, diff_url))
     return lines
 
 

@@ -389,13 +389,19 @@ class TestFormatUpgradeLines(unittest.TestCase):
         impl.assert_called_once_with(ORACLE, 1, use_cache=False)
 
     @patch("utils.proxy.get_current_implementation", return_value=OLD_IMPL)
-    def test_direct_upgrade_keeps_the_timelock_alert_format(self, _impl) -> None:
-        lines = format_upgrade_lines(ProxyUpgrade(ORACLE, NEW_ORACLE_IMPL), ORACLE, 1)
+    def test_direct_upgrade_collects_diff_with_explorer_fallback(self, _impl) -> None:
+        """Record the proxy and comparison while rendering the explorer fallback."""
+        from utils.upgrade_diff import UpgradeDiffLink
+
+        diffs: list[UpgradeDiffLink] = []
+        lines = format_upgrade_lines(ProxyUpgrade(ORACLE, NEW_ORACLE_IMPL), ORACLE, 1, diffs=diffs)
+        explorer_url = f"https://etherscan.io/contractdiffchecker?a1={OLD_IMPL}&a2={NEW_ORACLE_IMPL}"
+        self.assertEqual(diffs, [UpgradeDiffLink(ORACLE, OLD_IMPL, NEW_ORACLE_IMPL, explorer_url)])
         self.assertEqual(
             lines,
             [
                 f"🔄 Upgrade: `{OLD_IMPL}` → `{NEW_ORACLE_IMPL}`",
-                f"📊 [Diff](https://etherscan.io/contractdiffchecker?a1={OLD_IMPL}&a2={NEW_ORACLE_IMPL})",
+                f"📊 [Diff]({explorer_url})",
             ],
         )
 

@@ -11,6 +11,10 @@ Monitors all timelock contract types (TimelockController, Aave, Compound, Lido, 
 
 The script runs every 30 minutes (the `half_hourly` profile) via the [monitoring runner](../../automation/jobs.yaml). Every monitored timelock delays operations by at least 24h (Infinifi's short timelock has been at 24h since 2026-08-16), so detection takes a small share of the reaction window.
 
+Proxy upgrade alerts use the same [source diff publication settings as Safe alerts](../safe/README.md).
+The explorer link is the default for queued operations. Exact implementation pairs approved
+in `WAVEY_PUBLIC_UPGRADE_DIFFS` can use a Wavey Gist.
+
 ## Continuous Subscriber Pilot
 
 `event_subscriber.py` is a continuously running worker that observes the same `TimelockEvent` rows as `timelock_alerts.py` with lower latency ([#438](https://github.com/yearn/monitoring/issues/438), the first step of [#437](https://github.com/yearn/monitoring/issues/437)). It is an observation pilot: **it sends no alerts and changes nothing about current delivery**. The scheduled `timelock-alerts` task remains the only sender to protocol groups. Optionally it posts diagnostic notices to the internal errors chat (see [Pilot notices](#pilot-notices)). It runs as the `monitoring-timelock-subscriber` systemd unit; operations are in the [runbook](../../deploy/runbook.md#timelock-event-subscriber-pilot).

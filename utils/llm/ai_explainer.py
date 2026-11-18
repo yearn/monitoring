@@ -41,7 +41,6 @@ from utils.logger import get_logger
 from utils.on_chain_state import StateRead, format_state_reads, read_before_state
 from utils.proxy import (
     ProxyUpgrade,
-    build_diff_url,
     dedupe_upgrades,
     find_proxy_upgrades,
     get_current_implementation,
@@ -1056,10 +1055,6 @@ def _proxy_upgrade_block(upgrade: ProxyUpgrade, chain_id: int) -> str:
 
     info = f"{header}\nCurrent implementation: {old_impl}\nNew implementation: {new_impl}"
     info += verification_note
-    diff_url = build_diff_url(old_impl, new_impl, chain_id)
-    if diff_url:
-        info += f"\nDiff: {diff_url}"
-
     try:
         impl_diff = diff_implementations(old_impl, new_impl, chain_id)
         if impl_diff:
@@ -2758,7 +2753,7 @@ def explain_batch_transaction(
         return None
 
 
-def format_explanation_line(explanation: Explanation) -> str:
+def format_explanation_line(explanation: Explanation, *, upgrade_diff_links: list[str] | None = None) -> str:
     """Format the AI explanation for inclusion in a Telegram alert message.
 
     Uses the short summary for the Telegram message. The full report — metadata,
@@ -2774,11 +2769,20 @@ def format_explanation_line(explanation: Explanation) -> str:
     again against a chain state that has since moved — so an unpublished report
     is spilled to ``CACHE_DIR`` and a later recovery becomes a re-upload rather
     than a reconstruction.
+
+    Args:
+        explanation: Summary and full report for the transaction.
+        upgrade_diff_links: Code-generated Markdown links for this alert's upgrades.
+
+    Returns:
+        Telegram summary with a link to the full report when available.
     """
     # Labelled unverified: the model reads attacker-influenced source and calldata.
     line = f"\n🤖 *AI Summary (unverified):*\n{escape_markdown(explanation.summary)}"
     payload = explanation.report or explanation.detail
     if payload:
+        if upgrade_diff_links:
+            payload += "\n\n## Proxy upgrade diffs\n\n" + "\n".join(upgrade_diff_links)
         title = explanation.title or DETAIL_REPORT_TITLE
         detail_url = upload_to_gist(payload, title=title)
         if detail_url:

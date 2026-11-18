@@ -36,6 +36,12 @@ from utils.llm.credits import check_llm_credits
 from utils.logger import get_logger
 from utils.proxy import ProxyUpgrade, dedupe_upgrades, find_proxy_upgrades, format_upgrade_lines
 from utils.telegram import escape_markdown, send_error_message, send_telegram_message
+from utils.upgrade_diff import (
+    UpgradeDiffLink,
+    apply_upgrade_diff_links,
+    format_upgrade_report_links,
+    resolve_upgrade_diff_links,
+)
 from utils.web3_wrapper import ChainManager
 
 load_dotenv()
@@ -413,12 +419,14 @@ def _find_safe_tx_upgrades(tx: dict, target: str, hex_data: str) -> list[ProxyUp
     return dedupe_upgrades(upgrades)
 
 
-def _upgrade_alert_lines(tx: dict, target: str, hex_data: str, chain_id: int) -> str:
-    """Upgrade lines for the Telegram alert (old → new impl, diff link), or ""."""
+def _upgrade_alert_lines(
+    tx: dict, target: str, hex_data: str, chain_id: int, diffs: list[UpgradeDiffLink]
+) -> list[str]:
+    """Collect the alert lines and diff links for each detected Safe upgrade."""
     lines: list[str] = []
     for upgrade in _find_safe_tx_upgrades(tx, target, hex_data):
-        lines.extend(format_upgrade_lines(upgrade, target, chain_id))
-    return "".join(f"\n{line}" for line in lines)
+        lines.extend(format_upgrade_lines(upgrade, target, chain_id, diffs=diffs))
+    return lines
 
 
 def check_for_pending_transactions(safe_address: str, network_name: str, protocol: str) -> None:
@@ -521,14 +529,18 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
             chain_id = safe_network_to_chain_id(network_name)
             # Proxy upgrades, including ones nested in a timelock call or a
             # multisend (best-effort: an RPC failure must not block the alert).
+            diffs: list[UpgradeDiffLink] = []
+            upgrade_lines: list[str] = []
             try:
-                message += _upgrade_alert_lines(tx, target_contract, hex_data, chain_id)
+                upgrade_lines = _upgrade_alert_lines(tx, target_contract, hex_data, chain_id, diffs)
             except Exception:
+                diffs.clear()
                 logger.warning("Upgrade detection failed for Safe tx nonce=%s", nonce, exc_info=True)
 
             # AI explanation (best-effort, non-blocking). Empty and short
             # payloads still reach the explainer — they are native transfers
             # or unknown selectors, not "nothing to explain".
+            explanation = None
             try:
                 explanation = _explain_safe_tx(
                     tx=tx,
@@ -539,10 +551,18 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
                     safe_address=safe_address,
                     additional_info=additional_info,
                 )
-                if explanation:
-                    message += format_explanation_line(explanation)
             except Exception:
                 logger.debug("AI explanation failed for Safe tx nonce=%s", nonce, exc_info=True)
+
+            urls = resolve_upgrade_diff_links(diffs, chain_id)
+            message += "".join(f"\n{line}" for line in apply_upgrade_diff_links(upgrade_lines, urls))
+            if explanation:
+                try:
+                    message += format_explanation_line(
+                        explanation, upgrade_diff_links=format_upgrade_report_links(diffs, urls, chain_id)
+                    )
+                except Exception:
+                    logger.debug("AI report formatting failed for Safe tx nonce=%s", nonce, exc_info=True)
 
             # Silent for routine Yearn multisig txs (expected proposer); loud
             # for unexpected proposers and for all non-Yearn protocol alerts.
