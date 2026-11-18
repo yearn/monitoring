@@ -62,7 +62,7 @@ protocols:
       - name: "Timelock"
         description: "Aave Governance V3 events via Envio timelock monitor with proposal links"
       - name: "Safe Multisigs"
-        description: "Protocol Guardian and Governance Guardian Safe queues"
+        description: "Protocol Guardian and Governance Guardian Safe queues on Ethereum mainnet"
 
   apyusd:
     display_name: "APYUSD"
@@ -316,7 +316,7 @@ protocols:
       - name: "PT to Asset Ratio"
         description: "Active vault market PT ratio <0.95"
       - name: "Safe Multisig"
-        description: "2/4 governance multisig queues on Mainnet and Arbitrum"
+        description: "Queued proxy upgrades from the 2/4 governance Safe on Ethereum mainnet"
 
   rtoken:
     display_name: "RToken (ETH+)"
@@ -336,7 +336,7 @@ protocols:
 
   safe:
     display_name: "Safe Multisigs"
-    description: "Cross-protocol Safe multisig transaction monitoring"
+    description: "Cross-protocol Safe multisig transaction monitoring with support for Ethereum mainnet, Base, and Katana"
     cadence: "Every 20 minutes"
     tasks:
       - protocols/safe/main.py
@@ -502,8 +502,6 @@ protocols:
         description: "Hardcoded NVIDIA H200s legacy loan past 2028-07-27"
       - name: "Large Mints"
         description: "totalSupply delta >5% via large_mints.py using a baseline no older than 3 hours"
-      - name: "Safe Multisigs"
-        description: "USDai and sUSDai Admin Safe queues"
 
   yearn:
     display_name: "Yearn"
