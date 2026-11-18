@@ -17,6 +17,7 @@ credit errors) raises ``LLMUnavailableError`` so the fallback chain moves on.
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -43,6 +44,13 @@ _NO_TOOLS_INSTRUCTIONS = (
 # Codex items that are model output or status, not tool use. ``todo_list`` is the
 # plan tool's checklist and touches nothing outside the model.
 _CODEX_BENIGN_ITEMS = ("agent_message", "reasoning", "todo_list", "error")
+_CODEX_TRACE_TARGET = "codex_otel.trace_safe"
+_CODEX_LOG_FILTER = f"error,opentelemetry_sdk=off,opentelemetry_otlp=off,{_CODEX_TRACE_TARGET}=info"
+_CODEX_STARTUP_MODEL = re.compile(
+    rf'\b{re.escape(_CODEX_TRACE_TARGET)}: event\.name="codex\.conversation_starts" [^\r\n]*'
+    r"\bslug=([\w./:@-]+)(?=\s|$)"
+)
+_CODEX_REROUTED_MODEL = re.compile(r"model rerouted: \S+ -> ([\w./:@-]+) \(\w+\)")
 
 
 def _cli_environment(provider: str) -> dict[str, str]:
@@ -82,6 +90,22 @@ def _codex_tool_events(events: list[dict[str, Any]]) -> list[str]:
         if kind not in _CODEX_BENIGN_ITEMS:
             tools.append(str(kind or "unknown"))
     return tools
+
+
+def _codex_model(events: list[dict[str, Any]], stderr: str) -> str:
+    """Read the last reported reroute or the resolved model from Codex startup diagnostics."""
+    for event in reversed(events):
+        item = event.get("item")
+        if event.get("type") != "item.completed" or not isinstance(item, dict) or item.get("type") != "error":
+            continue
+        message = item.get("message")
+        if not isinstance(message, str):
+            continue
+        reroute = _CODEX_REROUTED_MODEL.fullmatch(message)
+        if reroute:
+            return reroute[1]
+    startup = _CODEX_STARTUP_MODEL.search(stderr)
+    return startup[1] if startup else ""
 
 
 def _claude_tool_events(events: list[dict[str, Any]]) -> list[str]:
@@ -180,7 +204,10 @@ def _run_cli(
         result = subprocess.CompletedProcess(args, proc.returncode, out.read(), err.read())
     if result.returncode != 0:
         # Only stderr: stdout is the event stream, which carries prompt-derived text.
-        detail = _tail(result.stderr) or "no stderr"
+        stderr = result.stderr
+        if label == "codex":
+            stderr = "\n".join(line for line in stderr.splitlines() if f"{_CODEX_TRACE_TARGET}:" not in line)
+        detail = _tail(stderr) or "no stderr"
         raise LLMUnavailableError(f"{label}: exited with code {result.returncode}: {detail}")
     return result
 
@@ -204,11 +231,12 @@ class CodexCLIProvider(LLMProvider):
 
         Args:
             binary: Path to the ``codex`` executable.
-            model: Optional model override; empty uses the CLI's configured default.
+            model: Optional model override; empty uses the CLI's default.
             timeout: Seconds to wait for a single completion.
         """
         self._binary = binary
         self._model = model
+        self._reported_model = ""
         self._timeout = timeout
         logger.info("Initialized Codex CLI provider: binary=%s model=%s", binary, model or "<cli default>")
 
@@ -231,6 +259,7 @@ class CodexCLIProvider(LLMProvider):
         ``codex exec`` has no system-prompt flag, so static instructions are
         prepended to the prompt in a tagged block.
         """
+        self._reported_model = ""
         instructions = f"{_NO_TOOLS_INSTRUCTIONS}\n\n{system_prompt}" if system_prompt else _NO_TOOLS_INSTRUCTIONS
         prompt = f"<system_instructions>\n{instructions}\n</system_instructions>\n\n{prompt}"
         with tempfile.TemporaryDirectory(prefix="llm-codex-") as tmp:
@@ -289,7 +318,8 @@ class CodexCLIProvider(LLMProvider):
                 args += ["--output-schema", str(schema_path)]
             args.append("-")  # read the prompt from stdin
 
-            proc = _run_cli("codex", args, prompt, workdir, self._timeout, _cli_environment("codex"))
+            env = {**_cli_environment("codex"), "RUST_LOG": _CODEX_LOG_FILTER}
+            proc = _run_cli("codex", args, prompt, workdir, self._timeout, env)
             events = _jsonl_events("codex", proc.stdout)
             unexpected = _codex_tool_events(events)
             if unexpected:
@@ -299,12 +329,14 @@ class CodexCLIProvider(LLMProvider):
             text = output_path.read_text().strip() if output_path.exists() else ""
         if not text:
             raise LLMError("codex: empty response")
+        self._reported_model = _codex_model(events, proc.stderr)
         return text
 
     @property
     def model_name(self) -> str:
-        """Return a label identifying the CLI and model."""
-        return f"codex-cli:{self._model}" if self._model else "codex-cli"
+        """Return the reported model, falling back to the configured model or CLI label."""
+        model = self._reported_model or self._model
+        return f"codex-cli({model})" if model else "codex-cli"
 
 
 class ClaudeCLIProvider(LLMProvider):

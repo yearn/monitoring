@@ -605,7 +605,11 @@ Registers a new type-2 farm in FarmRegistry. …
      - [`0x79e1…971f`](https://etherscan.io/address/0x79e1…)
 ```
 
-The header's **Model** line lists the distinct models that produced a summary, revision, passing critique or detail, in first-use order. Failed and empty responses do not add a model to that line. Model identifiers are escaped as single-line Markdown text. Claude's CLI reports its resolved model in the event stream: the provider reads the last assistant message's `model`, or the initialization event's `model` when no assistant model is available. This resolves aliases such as `opus` without another CLI call. If neither event reports a model, the label uses `LLM_CLAUDE_MODEL` or `claude-cli`. Codex's `exec --json` stream does not expose the model (verified with CLI 0.163.0), so its label uses `LLM_CODEX_MODEL` or `codex-cli`. **Time** measures total LLM generation time, including retries and refinement, and excludes context gathering and gist upload. These fields are omitted for deterministic reports that do not use an LLM.
+The header's **Model** line lists the distinct models that produced a summary, revision, passing critique or detail, in first-use order. Failed and empty responses do not add a model to that line. Model identifiers are escaped as single-line Markdown text. Claude's CLI reports its resolved model in the event stream: the provider reads the last assistant message's `model`, or the initialization event's `model` when no assistant model is available. This resolves aliases such as `opus` without another CLI call. If neither event reports a model, the label uses `LLM_CLAUDE_MODEL` or `claude-cli`.
+
+Codex reads the resolved model from its startup diagnostic and uses the destination of any reroute reported in the JSON event stream. The report shows a label such as `codex-cli(gpt-6.2-sol)`. If the CLI supplies neither signal, the label uses `LLM_CODEX_MODEL` when set and `codex-cli` otherwise.
+
+**Time** measures total LLM generation time, including retries and refinement, and excludes context gathering and gist upload. These fields are omitted for deterministic reports that do not use an LLM.
 
 The report can end with a code-generated `## Reference` table after Call Flow. It lists only the addresses the rest of the report does not already link: the executor, alert contract, call targets, calldata arguments (nested calldata included) and addresses resolved by protocol adapters, minus any that appear in the body above it. The table is omitted when nothing is left.
 
