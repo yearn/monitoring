@@ -65,8 +65,8 @@ def test_parse_live_sample(payload: dict[str, Any]) -> None:
         (("data", "loans", "Forward Flows", "Settle", "principalUsd"), Decimal("Infinity"), "principalUsd"),
         (("data", "loans", "Forward Flows", "Settle", "reportDate"), "20261111", "YYYY-MM-DD"),
         (("data", "loans", "Forward Flows", "Settle", "reportDate"), "2026-11-31", "valid calendar date"),
-        (("data", "loans", "Forward Flows", "Settle", "reportDate"), "2026-11-24", "in the future"),
-        (("data", "balances", "Bank Cash", "Erebor Bank", "timestamp"), 1795443610, "timestamp"),
+        (("data", "loans", "Forward Flows", "Settle", "reportDate"), "2026-11-25", "in the future"),
+        (("data", "balances", "Bank Cash", "Erebor Bank", "timestamp"), 1795444501, "timestamp"),
         (("data", "balances", "Bank Cash", "Erebor Bank", "balanceUsd"), -1, "balanceUsd"),
         (("data", "totalPrincipalUsd"), 98615764, "sum of originator principal"),
     ],
@@ -214,3 +214,14 @@ def test_invalid_endpoint_is_not_requested(monkeypatch: pytest.MonkeyPatch) -> N
     with pytest.raises(verified.DefiLlamaVerifiedError, match="HTTPS"):
         verified.fetch_report(config)
     request.assert_not_called()
+
+
+def test_sources_slightly_ahead_of_the_run_are_accepted(payload: dict[str, Any]) -> None:
+    """A document dated one day ahead of UTC, or a balance sampled after the run, is not a feed failure."""
+    payload["data"]["loans"]["Warehouse Loans"]["LendSwift"]["reportDate"] = "2026-11-24"
+    payload["data"]["balances"]["Bank Cash"]["Erebor Bank"]["timestamp"] = 1795443610  # run + 301s, before NOW
+
+    report = verified.parse_report(payload, CONFIG, NOW)
+
+    assert report.loans["Warehouse Loans", "LendSwift"].report_date == date(2026, 11, 24)
+    assert verified.report_issues(report, CONFIG, NOW) == {}

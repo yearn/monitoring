@@ -110,9 +110,12 @@ source methodology and observed timestamps. Document ages count UTC calendar day
 
 A missing required source, stale timestamp, or provider `state.upToDate: false` sends a MEDIUM
 alert when the set of issues changes. A usable report clears the availability failure streak
-even if its data is stale. Redirects, non-JSON responses, HTTP failures, and invalid JSON or
-schema count as unavailable. Availability alerts stay at LOW and MEDIUM because they reflect
-feed health. The onchain and Envio checks run independently of the feed.
+even if its data is stale. Redirects, non-JSON responses, HTTP failures, invalid JSON or
+schema, and unexpected errors in the check itself count as unavailable. Availability alerts stay
+at LOW and MEDIUM because they reflect feed health. The feed check runs first, in its own failure
+boundary, so it still runs when RPC access fails, and its failures cannot skip the onchain and
+Envio checks. Document dates may be up to one calendar day ahead of the UTC verification run,
+since documents dated in a time zone east of UTC are not malformed.
 
 The Verified client sends the desktop Firefox user agent with `Accept: application/json`.
 Direct Python requests with these headers returned valid JSON. Plain Python requests and curl

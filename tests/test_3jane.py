@@ -897,3 +897,39 @@ def test_verified_issues_dedupe_and_rearm(monkeypatch: pytest.MonkeyPatch) -> No
     assert "Erebor Bank" in alerts[0].message
     assert "out of date" in alerts[0].message
     assert cache[module.CACHE_KEY_VERIFIED_FAILURE_STREAK] == "0"
+
+
+def test_main_checks_verified_even_when_onchain_reads_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An RPC failure must not skip the offchain DefiLlama Verified check."""
+    module = load_3jane_module()
+    stub_cache(monkeypatch, module)
+    client = MagicMock()
+    client.eth.block_number = 100
+    client.execute_batch.side_effect = RuntimeError("rpc down")
+    monkeypatch.setattr(module.ChainManager, "get_client", Mock(return_value=client))
+    fetch = Mock(side_effect=DefiLlamaVerifiedError("HTTP 403"))
+    monkeypatch.setattr(module, "fetch_report", fetch)
+    alerts: list[Alert] = []
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.main()
+
+    fetch.assert_called_once_with(module.VERIFIED_FEED)
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.LOW]
+    assert "Monitoring Error" in alerts[0].message
+
+
+def test_verified_unexpected_error_counts_as_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-feed exception escalates through the outage streak instead of being swallowed."""
+    module = load_3jane_module()
+    cache = stub_cache(monkeypatch, module)
+    alerts: list[Alert] = []
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+    monkeypatch.setattr(module, "fetch_report", Mock(side_effect=TypeError("unexpected field type")))
+
+    module.check_defillama_verified()
+    module.check_defillama_verified()
+
+    assert cache[module.CACHE_KEY_VERIFIED_FAILURE_STREAK] == "2"
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.LOW]
+    assert "TypeError" in alerts[0].message

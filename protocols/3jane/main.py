@@ -1081,13 +1081,23 @@ def check_defillama_verified() -> None:
                 )
             )
         set_cache_value(CACHE_KEY_VERIFIED_ISSUES, current)
-    except Exception:
+    except Exception as exc:
         logger.exception("DefiLlama Verified check failed")
+        # Count unexpected failures toward the outage streak so a persistent bug
+        # escalates like an outage instead of silently disabling the check.
+        try:
+            _record_verified_failure(f"unexpected {type(exc).__name__}: {exc}"[:300])
+        except Exception:
+            logger.exception("Failed to record DefiLlama Verified failure")
 
 
 def main() -> None:
     """Run all 3Jane monitoring checks."""
     logger.info("Starting 3Jane monitoring...")
+
+    # Runs before the onchain reads and inside its own failure boundary, so the
+    # offchain loan record is checked even when RPC access is degraded.
+    check_defillama_verified()
 
     client = ChainManager.get_client(Chain.MAINNET)
     usd3_vault = client.eth.contract(address=USD3_ADDRESS, abi=ABI_VAULT)
@@ -1213,7 +1223,6 @@ def main() -> None:
         check_debt_cap(debt_cap_raw, wausdc_assets_per_scale)
         check_nominal_backing_floor(nominal_floor, susd3_backing)
         check_protocol_paused(is_paused)
-        check_defillama_verified()
         check_borrower_default_watch(grace_period_seconds, delinquency_period_seconds)
 
         logger.info(

@@ -16,6 +16,9 @@ from utils.http_client import request_with_retry
 
 FIREFOX_USER_AGENT = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:160.0) Gecko/20100101 Firefox/160.0"
 MAX_CLOCK_SKEW = timedelta(minutes=5)
+# Document dates carry no time zone; an originator dating a report in local time
+# east of UTC can be a calendar day ahead of DefiLlama's UTC run timestamp.
+MAX_SOURCE_DATE_LEAD = timedelta(days=1)
 PRINCIPAL_TOTAL_TOLERANCE = Decimal("0.01")
 
 type SourceKey = tuple[str, str]
@@ -147,7 +150,7 @@ def parse_report(payload: Any, config: VerifiedFeedConfig, now: datetime) -> Ver
 
     data = _object(body.get("data"), "data")
     timestamp = _timestamp(data.get("timestampOnRun"), "data.timestampOnRun", now)
-    latest_source_date = (timestamp + MAX_CLOCK_SKEW).date()
+    latest_source_date = (timestamp + MAX_CLOCK_SKEW).date() + MAX_SOURCE_DATE_LEAD
     loans = {}
     for key, entry in _source_rows(data.get("loans"), "data.loans").items():
         path = f"data.loans.{'.'.join(key)}"
@@ -163,7 +166,9 @@ def parse_report(payload: Any, config: VerifiedFeedConfig, now: datetime) -> Ver
         path = f"data.balances.{'.'.join(key)}"
         balances[key] = VerifiedBalance(
             balance_usd=_amount(entry.get("balanceUsd"), f"{path}.balanceUsd"),
-            timestamp=_timestamp(entry.get("timestamp"), f"{path}.timestamp", min(now, timestamp)),
+            # Bounded by the local clock, not the run timestamp: a balance can be
+            # sampled after the run started.
+            timestamp=_timestamp(entry.get("timestamp"), f"{path}.timestamp", now),
         )
 
     total = sum((loan.principal_usd for loan in loans.values()), Decimal(0))
