@@ -16,6 +16,7 @@ Monitors:
 - Nominal sUSD3 backing floor — alerts on change and when floor > sUSD3 backing
 - Protocol-wide pause — alerts once when ProtocolConfig IS_PAUSED flips to true
 - Borrower default watch — Envio-backed delinquency/default milestones
+- DefiLlama Verified — report availability and originator/cash source freshness
 
 Threshold alerts (USD3 protection, withdraw liquidity) are deduped via cache:
 the alerted value is stored and no new alert is sent until the value worsens by
@@ -28,7 +29,7 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from web3 import Web3
@@ -44,6 +45,7 @@ from utils.cache import (
     write_last_value_with_timestamp_to_file,
 )
 from utils.chains import Chain
+from utils.defillama_verified import DefiLlamaVerifiedError, VerifiedFeedConfig, fetch_report, report_issues
 from utils.drawdown import peak_drawdown_dispatch_eligible
 from utils.formatting import format_duration, format_usd, format_with_suffix
 from utils.logger import get_logger
@@ -70,6 +72,22 @@ ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 # --- External data sources ---
 ENVIO_GRAPHQL_URL = os.getenv("ENVIO_GRAPHQL_URL")
 ENVIO_PAGE_SIZE = int(os.getenv("THREE_JANE_ENVIO_PAGE_SIZE", "1000"))
+
+# DefiLlama supplies dates without publication times for loan documents.
+# These are operational limits with grace, since the API omits source cadences.
+VERIFIED_FEED = VerifiedFeedConfig(
+    slug=PROTOCOL,
+    endpoint_url=os.getenv("THREE_JANE_DEFILLAMA_VERIFIED_URL"),
+    report_max_age=timedelta(hours=3),
+    loan_max_ages={
+        ("Warehouse Loans", "LendSwift"): timedelta(days=10),
+        ("Warehouse Loans", "GigFi"): timedelta(days=10),
+        ("Forward Flows", "Slope"): timedelta(days=10),
+        ("Forward Flows", "Settle"): timedelta(days=38),
+    },
+    balance_max_ages={("Bank Cash", "Erebor Bank"): timedelta(hours=3)},
+)
+VERIFIED_AVAILABILITY_ALERTS = {2: AlertSeverity.LOW, 6: AlertSeverity.MEDIUM}
 
 # USDC has 6 decimals, USD3 and sUSD3 inherit this
 DECIMALS = 6
@@ -101,6 +119,8 @@ CACHE_KEY_INSURANCE_FUND_SHARES = "3JANE_INSURANCE_FUND_SHARES"
 CACHE_KEY_BORROWER_DEFAULT_WATCH_PREFIX = "3JANE_BORROWER_DEFAULT_WATCH"
 CACHE_KEY_USD3_OC_ALERTED = "3JANE_USD3_OC_ALERTED"
 CACHE_KEY_WITHDRAW_LIMIT_ALERTED = "3JANE_WITHDRAW_LIMIT_ALERTED"
+CACHE_KEY_VERIFIED_FAILURE_STREAK = "3JANE_DEFILLAMA_VERIFIED_FAILURE_STREAK"
+CACHE_KEY_VERIFIED_ISSUES = "3JANE_DEFILLAMA_VERIFIED_ISSUES"
 
 # --- ProtocolConfig keys (keccak256 of the string label) ---
 CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR = Web3.keccak(text="SUSD3_NOMINAL_BACKING_FLOOR")
@@ -1008,6 +1028,63 @@ def check_protocol_paused(is_paused: bool) -> None:
     set_fresh_cache_value(CACHE_KEY_IS_PAUSED, float(is_paused))
 
 
+def _record_verified_failure(reason: str) -> None:
+    """Escalate a streak of runs without a usable DefiLlama report."""
+    streak = get_cache_int(CACHE_KEY_VERIFIED_FAILURE_STREAK) + 1
+    set_cache_value(CACHE_KEY_VERIFIED_FAILURE_STREAK, streak)
+    logger.warning("DefiLlama Verified unavailable for %d consecutive runs: %s", streak, reason)
+    severity = VERIFIED_AVAILABILITY_ALERTS.get(streak)
+    if severity is not None:
+        send_alert(
+            Alert(
+                severity,
+                "*3Jane DefiLlama Verified unavailable*\n"
+                f"{streak} consecutive runs without a usable report\n"
+                f"{escape_markdown(reason)}\n"
+                f"[DefiLlama Verified]({VERIFIED_FEED.dashboard_url})",
+                PROTOCOL,
+            )
+        )
+
+
+def check_defillama_verified() -> None:
+    """Check the offchain loan record in isolation from the core 3Jane checks."""
+    try:
+        try:
+            report = fetch_report(VERIFIED_FEED)
+        except DefiLlamaVerifiedError as exc:
+            _record_verified_failure(str(exc))
+            return
+
+        if get_cache_int(CACHE_KEY_VERIFIED_FAILURE_STREAK):
+            set_cache_value(CACHE_KEY_VERIFIED_FAILURE_STREAK, 0)
+
+        logger.info(
+            "DefiLlama Verified: $%s offchain principal across %d originators, verified %s",
+            f"{report.total_principal_usd:,.2f}",
+            len(report.loans),
+            report.timestamp.isoformat(),
+        )
+        issues = report_issues(report, VERIFIED_FEED, datetime.now(tz=timezone.utc))
+        current = json.dumps(sorted(issues)) if issues else ""
+        previous = get_last_value_for_key_from_file(CACHE_FILENAME, CACHE_KEY_VERIFIED_ISSUES) or ""
+        if current == previous:
+            return
+        if issues:
+            details = "\n".join(f"- {escape_markdown(detail)}" for detail in issues.values())
+            send_alert(
+                Alert(
+                    AlertSeverity.MEDIUM,
+                    f"*3Jane DefiLlama Verified source issues*\n{details}\n"
+                    f"[DefiLlama Verified]({VERIFIED_FEED.dashboard_url})",
+                    PROTOCOL,
+                )
+            )
+        set_cache_value(CACHE_KEY_VERIFIED_ISSUES, current)
+    except Exception:
+        logger.exception("DefiLlama Verified check failed")
+
+
 def main() -> None:
     """Run all 3Jane monitoring checks."""
     logger.info("Starting 3Jane monitoring...")
@@ -1136,6 +1213,7 @@ def main() -> None:
         check_debt_cap(debt_cap_raw, wausdc_assets_per_scale)
         check_nominal_backing_floor(nominal_floor, susd3_backing)
         check_protocol_paused(is_paused)
+        check_defillama_verified()
         check_borrower_default_watch(grace_period_seconds, delinquency_period_seconds)
 
         logger.info(

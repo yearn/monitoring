@@ -1,11 +1,16 @@
 import importlib.util
+import json
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
 from utils import paths, store
+from utils.alert import Alert
+from utils.defillama_verified import DefiLlamaVerifiedError, parse_report
 
 
 def load_3jane_module() -> ModuleType:
@@ -785,3 +790,110 @@ def test_read_vault_shutdown_uses_its_own_pinned_block_batch() -> None:
 
     assert module.read_vault_shutdown(FakeClient(), FakeVault(True), FakeVault(False), 123) == (True, False)
     assert seen_blocks == [123, 123]
+
+
+@pytest.mark.parametrize("failure", [DefiLlamaVerifiedError("HTTP 403"), RuntimeError("unexpected failure")])
+def test_main_preserves_onchain_and_envio_checks_on_verified_failure(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    """Run the core and Envio checks even if the Verified check fails."""
+    module = load_3jane_module()
+    stub_cache(monkeypatch, module)
+    client = MagicMock()
+    client.eth.block_number = 100
+    client.execute_batch.side_effect = [
+        [1, 1, 1, 1, 1, 1, 1, [0, 0, 1, 0], 1, False, 1, 1, 3600, 86400, 1],
+        [1, module.RATE_SCALE],
+    ]
+    monkeypatch.setattr(module.ChainManager, "get_client", Mock(return_value=client))
+    monkeypatch.setattr(module, "read_vault_shutdown", Mock(return_value=(False, False)))
+
+    core_checks = (
+        "check_pps",
+        "check_tvl",
+        "check_usd3_oc",
+        "check_insurance_fund",
+        "check_withdraw_limit",
+        "check_vault_shutdown",
+        "check_debt_cap",
+        "check_nominal_backing_floor",
+        "check_protocol_paused",
+    )
+    for name in core_checks:
+        monkeypatch.setattr(module, name, Mock())
+    borrower_check = Mock()
+    fetch = Mock(side_effect=failure)
+    monkeypatch.setattr(module, "check_borrower_default_watch", borrower_check)
+    monkeypatch.setattr(module, "fetch_report", fetch)
+    alerts = Mock()
+    monkeypatch.setattr(module, "send_alert", alerts)
+
+    module.main()
+
+    fetch.assert_called_once_with(module.VERIFIED_FEED)
+    borrower_check.assert_called_once_with(3600, 86400)
+    for name in core_checks:
+        getattr(module, name).assert_called_once()
+    alerts.assert_not_called()
+
+
+def test_verified_availability_escalates_and_rearms(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Persist and escalate consecutive failures, then re-arm on a valid response."""
+    module = load_3jane_module()
+    cache = stub_cache(monkeypatch, module)
+    alerts: list[Alert] = []
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+    path = Path(__file__).with_name("fixtures") / "defillama_verified_3jane.json"
+    now = datetime(2026, 11, 23, 14, 30, tzinfo=timezone.utc)
+    report = parse_report(json.loads(path.read_text()), module.VERIFIED_FEED, now)
+    clock = Mock(wraps=datetime)
+    clock.now.return_value = now
+    monkeypatch.setattr(module, "datetime", clock)
+    failure = DefiLlamaVerifiedError("HTTP 403 (Cloudflare challenge)")
+    fetch = Mock(side_effect=[failure] * 8 + [report] + [failure] * 2)
+    monkeypatch.setattr(module, "fetch_report", fetch)
+
+    for _ in range(8):
+        module.check_defillama_verified()
+    assert [(alert.severity.value, alert.protocol) for alert in alerts] == [
+        ("LOW", "3jane"),
+        ("MEDIUM", "3jane"),
+    ]
+    assert "2 consecutive runs" in alerts[0].message
+    assert "6 consecutive runs" in alerts[1].message
+    assert "Cloudflare challenge" in alerts[1].message
+
+    module.check_defillama_verified()
+    assert cache[module.CACHE_KEY_VERIFIED_FAILURE_STREAK] == "0"
+    module.check_defillama_verified()
+    module.check_defillama_verified()
+    assert [alert.severity.value for alert in alerts] == ["LOW", "MEDIUM", "LOW"]
+
+
+def test_verified_issues_dedupe_and_rearm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deduplicate repeated source issues and alert again after recovery."""
+    module = load_3jane_module()
+    cache = stub_cache(monkeypatch, module)
+    alerts: list[Alert] = []
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+    path = Path(__file__).with_name("fixtures") / "defillama_verified_3jane.json"
+    now = datetime(2026, 11, 23, 14, 30, tzinfo=timezone.utc)
+    report = parse_report(json.loads(path.read_text()), module.VERIFIED_FEED, now)
+    degraded = replace(report, up_to_date=False, balances={})
+    cache[module.CACHE_KEY_VERIFIED_FAILURE_STREAK] = "5"
+    clock = Mock(wraps=datetime)
+    clock.now.return_value = now
+    monkeypatch.setattr(module, "datetime", clock)
+    fetch = Mock(side_effect=[degraded, degraded, report, degraded])
+    monkeypatch.setattr(module, "fetch_report", fetch)
+
+    for _ in range(4):
+        module.check_defillama_verified()
+
+    assert [(alert.severity.value, alert.protocol) for alert in alerts] == [
+        ("MEDIUM", "3jane"),
+        ("MEDIUM", "3jane"),
+    ]
+    assert "Erebor Bank" in alerts[0].message
+    assert "out of date" in alerts[0].message
+    assert cache[module.CACHE_KEY_VERIFIED_FAILURE_STREAK] == "0"

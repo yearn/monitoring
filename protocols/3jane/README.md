@@ -41,6 +41,9 @@
 | Nominal floor breach | Floor > sUSD3 backing valued in USDC (alert-once) | MEDIUM |
 | Protocol paused | `IS_PAUSED` transitions to true (alert-once) | CRITICAL |
 | Borrower delinquent/default watch | New milestone: delinquent, ≤14d, ≤7d, ≤3d, ≤1d, default | MEDIUM |
+| DefiLlama Verified source issue | Record marked out of date, stale verification or source data, or required source missing | MEDIUM |
+| DefiLlama Verified unavailable | 2 consecutive runs without a usable JSON report | LOW |
+| DefiLlama Verified outage continues | 6 consecutive runs without a usable JSON report | MEDIUM |
 | Monitoring run failure | Uncaught exception in `main()` | LOW |
 
 ## Cache Freshness
@@ -82,9 +85,61 @@ The indexer should populate/update that entity from `SetCreditLine`, `Borrow`, `
 
 The current countdown and alert bucket are intentionally computed in this monitoring script, not in Envio, because they depend on wall-clock time and governance-controlled timing. This also prevents an indexer environment value from drifting away from the live contract configuration.
 
-## Proof of Solvency
+## DefiLlama Verified
 
-The Accountable Proof of Solvency feed (`https://accountable.3jane.xyz/dashboard`) was removed in November 2026: 3Jane retired it while migrating to DefiLlama's Proof of Solvency service, and the endpoint now redirects to an HTML placeholder. Reserve/liability coverage is not monitored until a replacement feed is wired in. The protocol-agnostic Accountable client in [`utils/accountable.py`](../../utils/accountable.py) is kept for other protocols' feeds.
+The monitor reads [DefiLlama's public JSON route](https://defillama.com/api/public/verified/3jane) for the
+[3Jane verification record](https://defillama.com/verified/3jane). It checks the protocol slug and
+recomputes total principal from the originator rows, with one cent of tolerance for floating-point
+rounding. The fixture in [tests/fixtures](../../tests/fixtures/defillama_verified_3jane.json)
+is a captured API response with explanatory prose omitted.
+
+This is a partial-scope disclosure. It contains offchain outstanding principal excluding interest,
+eligible collateral for warehouse loans, and an Erebor Bank cash balance. The API exposes no
+complete reserves and liabilities, borrower addresses or individual loan IDs, or cryptographic
+attestation. The 99% and 95% Accountable coverage bands cannot be applied to these figures, and
+MorphoCredit total borrow and Envio borrower rows cannot be reconciled to this disclosure.
+
+The monitor uses the following age limits. Cadences are operational estimates based on the
+source methodology and observed timestamps. Document ages count UTC calendar days.
+
+| Source | Cadence + grace | Maximum age |
+|--------|-----------------|-------------|
+| Verification run (`timestampOnRun`) and Erebor Bank balance | Hourly + 2 hours | 3 hours |
+| LendSwift, GigFi, and Slope documents | Weekly + 3 days | 10 days |
+| Settle documents | Monthly (up to 31 days) + 7 days | 38 days |
+
+A missing required source, stale timestamp, or provider `state.upToDate: false` sends a MEDIUM
+alert when the set of issues changes. A usable report clears the availability failure streak
+even if its data is stale. Redirects, non-JSON responses, HTTP failures, and invalid JSON or
+schema count as unavailable. Availability alerts stay at LOW and MEDIUM because they reflect
+feed health. The onchain and Envio checks run independently of the feed.
+
+The Verified client sends the desktop Firefox user agent with `Accept: application/json`.
+Direct Python requests with these headers returned valid JSON. Plain Python requests and curl
+received a Cloudflare challenge. The official SDK and published Free and Pro API specs omit
+this website route.
+
+To check access from the monitoring VPS without running alert checks, use Python:
+
+```bash
+python3 - <<'PROBE'
+from urllib.request import Request, urlopen
+
+request = Request(
+    "https://defillama.com/api/public/verified/3jane",
+    headers={
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:160.0) Gecko/20100101 Firefox/160.0",
+    },
+)
+with urlopen(request, timeout=15) as response:
+    print(response.status, response.headers.get("Content-Type"))
+PROBE
+```
+
+Expect HTTP 200 and an `application/json` content type. If the VPS still receives a challenge,
+set `THREE_JANE_DEFILLAMA_VERIFIED_URL` when DefiLlama provides an alternate trusted HTTPS
+endpoint serving the same JSON.
 
 ## Alert dispatch
 
@@ -113,7 +168,7 @@ Add a key or role to `_HASHED_LABELS` in that module when 3Jane introduces one; 
 ## Running
 
 ```bash
-uv run 3jane/main.py
+uv run protocols/3jane/main.py
 ```
 
 ## Frequency
