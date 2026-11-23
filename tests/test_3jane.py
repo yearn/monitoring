@@ -1,7 +1,7 @@
 import importlib.util
 import json
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import MagicMock, Mock
@@ -933,3 +933,43 @@ def test_verified_unexpected_error_counts_as_failure(monkeypatch: pytest.MonkeyP
     assert cache[module.CACHE_KEY_VERIFIED_FAILURE_STREAK] == "2"
     assert [alert.severity for alert in alerts] == [module.AlertSeverity.LOW]
     assert "TypeError" in alerts[0].message
+
+
+def test_verified_report_dates_history_tracks_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Store each originator's distinct reportDates, capped, so the real cadence can be measured."""
+    module = load_3jane_module()
+    cache = stub_cache(monkeypatch, module)
+    path = Path(__file__).with_name("fixtures") / "defillama_verified_3jane.json"
+    now = datetime(2026, 11, 23, 14, 30, tzinfo=timezone.utc)
+    report = parse_report(json.loads(path.read_text()), module.VERIFIED_FEED, now)
+    gigfi = ("Warehouse Loans", "GigFi")
+
+    module.record_verified_report_dates(report)
+    module.record_verified_report_dates(report)  # same dates: no new entries
+    history = json.loads(cache[module.CACHE_KEY_VERIFIED_REPORT_DATES])
+    assert history["GigFi (Warehouse Loans)"] == ["2026-11-13"]
+    assert history["Settle (Forward Flows)"] == ["2026-11-11"]
+    assert len(history) == 4
+
+    for offset in range(1, module.VERIFIED_DATE_HISTORY_LENGTH + 2):
+        loans = dict(report.loans)
+        loans[gigfi] = replace(loans[gigfi], report_date=loans[gigfi].report_date + timedelta(days=7 * offset))
+        module.record_verified_report_dates(replace(report, loans=loans))
+
+    days = json.loads(cache[module.CACHE_KEY_VERIFIED_REPORT_DATES])["GigFi (Warehouse Loans)"]
+    assert len(days) == module.VERIFIED_DATE_HISTORY_LENGTH
+    assert days[-1] == "2027-02-12"
+
+
+def test_verified_report_dates_history_ignores_corrupt_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A malformed stored history is replaced rather than failing the Verified check."""
+    module = load_3jane_module()
+    cache = stub_cache(monkeypatch, module)
+    cache[module.CACHE_KEY_VERIFIED_REPORT_DATES] = "{not json"
+    path = Path(__file__).with_name("fixtures") / "defillama_verified_3jane.json"
+    now = datetime(2026, 11, 23, 14, 30, tzinfo=timezone.utc)
+    report = parse_report(json.loads(path.read_text()), module.VERIFIED_FEED, now)
+
+    module.record_verified_report_dates(report)
+
+    assert json.loads(cache[module.CACHE_KEY_VERIFIED_REPORT_DATES])["Slope (Forward Flows)"] == ["2026-11-19"]

@@ -29,7 +29,7 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from web3 import Web3
@@ -45,7 +45,13 @@ from utils.cache import (
     write_last_value_with_timestamp_to_file,
 )
 from utils.chains import Chain
-from utils.defillama_verified import DefiLlamaVerifiedError, VerifiedFeedConfig, fetch_report, report_issues
+from utils.defillama_verified import (
+    DefiLlamaVerifiedError,
+    VerifiedFeedConfig,
+    VerifiedLoanReport,
+    fetch_report,
+    report_issues,
+)
 from utils.drawdown import peak_drawdown_dispatch_eligible
 from utils.formatting import format_duration, format_usd, format_with_suffix
 from utils.logger import get_logger
@@ -88,6 +94,9 @@ VERIFIED_FEED = VerifiedFeedConfig(
     balance_max_ages={("Bank Cash", "Erebor Bank"): timedelta(hours=3)},
 )
 VERIFIED_AVAILABILITY_ALERTS = {2: AlertSeverity.LOW, 6: AlertSeverity.MEDIUM}
+# Distinct reportDates kept per originator, so the real document cadence can be
+# measured before the loan_max_ages estimates above are tightened.
+VERIFIED_DATE_HISTORY_LENGTH = 12
 
 # USDC has 6 decimals, USD3 and sUSD3 inherit this
 DECIMALS = 6
@@ -121,6 +130,7 @@ CACHE_KEY_USD3_OC_ALERTED = "3JANE_USD3_OC_ALERTED"
 CACHE_KEY_WITHDRAW_LIMIT_ALERTED = "3JANE_WITHDRAW_LIMIT_ALERTED"
 CACHE_KEY_VERIFIED_FAILURE_STREAK = "3JANE_DEFILLAMA_VERIFIED_FAILURE_STREAK"
 CACHE_KEY_VERIFIED_ISSUES = "3JANE_DEFILLAMA_VERIFIED_ISSUES"
+CACHE_KEY_VERIFIED_REPORT_DATES = "3JANE_DEFILLAMA_VERIFIED_REPORT_DATES"
 
 # --- ProtocolConfig keys (keccak256 of the string label) ---
 CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR = Web3.keccak(text="SUSD3_NOMINAL_BACKING_FLOOR")
@@ -1047,6 +1057,60 @@ def _record_verified_failure(reason: str) -> None:
         )
 
 
+def _load_verified_report_dates() -> dict[str, list[str]]:
+    """Read the stored reportDate history, discarding anything malformed."""
+    raw = get_last_value_for_key_from_file(CACHE_FILENAME, CACHE_KEY_VERIFIED_REPORT_DATES)
+    try:
+        stored = json.loads(raw) if isinstance(raw, str) and raw else {}
+    except ValueError:
+        return {}
+    if not isinstance(stored, dict):
+        return {}
+    return {
+        label: [day for day in days if isinstance(day, str)]
+        for label, days in stored.items()
+        if isinstance(label, str) and isinstance(days, list)
+    }
+
+
+def record_verified_report_dates(report: VerifiedLoanReport) -> None:
+    """Keep a short history of each originator's document dates and log new ones.
+
+    DefiLlama publishes only the latest record, so this history is the only way
+    to measure how often each originator actually uploads documents. Every
+    originator in the report is tracked, not just the required ones.
+
+    Args:
+        report: Validated DefiLlama Verified loan record.
+    """
+    history = _load_verified_report_dates()
+    changed = False
+    for (category, name), loan in sorted(report.loans.items()):
+        label = f"{name} ({category})"
+        days = history.get(label, [])
+        new_day = loan.report_date.isoformat()
+        if days and days[-1] == new_day:
+            continue
+        if days:
+            try:
+                gap = (loan.report_date - date.fromisoformat(days[-1])).days
+            except ValueError:
+                gap = None
+            logger.info(
+                "DefiLlama Verified %s reportDate %s -> %s (%s days)",
+                label,
+                days[-1],
+                new_day,
+                gap if gap is not None else "?",
+            )
+        else:
+            logger.info("DefiLlama Verified %s first reportDate seen: %s", label, new_day)
+        history[label] = [*days, new_day][-VERIFIED_DATE_HISTORY_LENGTH:]
+        changed = True
+    if changed:
+        set_cache_value(CACHE_KEY_VERIFIED_REPORT_DATES, json.dumps(history, sort_keys=True))
+
+
 def check_defillama_verified() -> None:
     """Check the offchain loan record in isolation from the core 3Jane checks."""
     try:
@@ -1065,6 +1129,7 @@ def check_defillama_verified() -> None:
             len(report.loans),
             report.timestamp.isoformat(),
         )
+        record_verified_report_dates(report)
         issues = report_issues(report, VERIFIED_FEED, datetime.now(tz=timezone.utc))
         current = json.dumps(sorted(issues)) if issues else ""
         previous = get_last_value_for_key_from_file(CACHE_FILENAME, CACHE_KEY_VERIFIED_ISSUES) or ""

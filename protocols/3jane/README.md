@@ -101,6 +101,10 @@ MorphoCredit total borrow and Envio borrower rows cannot be reconciled to this d
 
 The monitor uses the following age limits. Cadences are operational estimates based on the
 source methodology and observed timestamps. Document ages count UTC calendar days.
+DefiLlama publishes only the latest record, so the monitor keeps the last 12 distinct
+`reportDate` values per originator in monitor state (`3JANE_DEFILLAMA_VERIFIED_REPORT_DATES`,
+a JSON object keyed by originator) and logs each new date with the gap since the previous one.
+Use that history to replace these estimates with the observed cadence.
 
 | Source | Cadence + grace | Maximum age |
 |--------|-----------------|-------------|
