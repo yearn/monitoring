@@ -689,18 +689,32 @@ def test_vault_shutdown_alerts_once_per_transition(monkeypatch: pytest.MonkeyPat
 
 
 def test_usd3_oc_recovery_out_of_critical_rearms_escalation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CRITICAL at 105.9%, back to 106.1%, then 105.8%: the fresh crossing alerts despite a sub-step drop."""
+    """CRITICAL at 105.9%, back to 106.6%, then 105.8%: the fresh crossing alerts despite a sub-step drop."""
     module = load_3jane_module()
     alerts: list = []
     cache = stub_cache(monkeypatch, module)
     monkeypatch.setattr(module, "send_alert", alerts.append)
 
-    for oc in (1.059, 1.061, 1.058):
+    for oc in (1.059, 1.066, 1.058):
         # deployed / (deployed - backing) == oc  =>  backing = deployed * (1 - 1 / oc)
         module.check_usd3_oc(100_000_000 * (1 - 1 / oc), 100_000_000)
 
     assert [alert.severity for alert in alerts] == [module.AlertSeverity.CRITICAL, module.AlertSeverity.CRITICAL]
     assert float(cache[module.CACHE_KEY_USD3_OC_ALERTED]) == pytest.approx(1.058)
+
+
+def test_usd3_oc_flapping_around_critical_does_not_realert(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OC oscillating within one step of 106% alerts CRITICAL once, not on every crossing."""
+    module = load_3jane_module()
+    alerts: list = []
+    cache = stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    for oc in (1.0599, 1.0605, 1.0597, 1.0640, 1.0595):
+        module.check_usd3_oc(100_000_000 * (1 - 1 / oc), 100_000_000)
+
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.CRITICAL]
+    assert float(cache[module.CACHE_KEY_USD3_OC_ALERTED]) == pytest.approx(1.0599)
 
 
 def test_withdraw_limit_drop_of_exactly_one_step_alerts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -714,6 +728,21 @@ def test_withdraw_limit_drop_of_exactly_one_step_alerts(monkeypatch: pytest.Monk
     module.check_withdraw_limit(0)
 
     assert len(alerts) == 2
+    assert "Available withdraw limit: $0.00" in alerts[1].message
+
+
+def test_withdraw_limit_draining_below_one_step_alerts_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Alerted at $500k then drained to $0 alerts on the drain, and dust around $0 stays quiet."""
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    for limit in (500_000, 0, 15_000, 0):
+        module.check_withdraw_limit(limit)
+
+    assert len(alerts) == 2
+    assert "Available withdraw limit: $500.00K" in alerts[0].message
     assert "Available withdraw limit: $0.00" in alerts[1].message
 
 

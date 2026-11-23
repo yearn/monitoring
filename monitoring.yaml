@@ -32,7 +32,7 @@ protocols:
       - name: "Insurance Fund Outflow"
         description: "waUSDC outflow >=$50k since prior run"
       - name: "Withdraw Liquidity"
-        description: "USD3 availableWithdrawLimit < $4M; re-alerts on a further $1M drop; re-armed after a monitoring gap >3 hours"
+        description: "USD3 availableWithdrawLimit < $4M; re-alerts on a further $1M drop or on falling below $10k; re-armed after a monitoring gap >3 hours"
       - name: "Vault Shutdown"
         description: "Alert-once when isShutdown() is true; re-armed after a monitoring gap >3 hours"
       - name: "Debt Cap"

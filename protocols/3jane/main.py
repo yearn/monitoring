@@ -118,6 +118,10 @@ WITHDRAW_LIMIT_THRESHOLD = 4_000_000  # USDC, alert when USD3 availableWithdrawL
 # step, interest accrual and dust movements re-alert on every sub-basis-point dip.
 USD3_OC_REALERT_STEP = 0.005  # 0.5 percentage points of OC
 WITHDRAW_LIMIT_REALERT_STEP = 1_000_000  # USDC
+# Below this the vault is effectively drained. Reaching it always alerts, so a
+# limit alerted under $1M cannot drain to $0 silently just because the
+# remaining drop is smaller than the step.
+WITHDRAW_LIMIT_DRAINED_THRESHOLD = 10_000  # USDC
 
 THREE_JANE_BORROWER_DEFAULT_WATCH_QUERY = """
 query GetThreeJaneBorrowerDefaultWatch($limit: Int!, $offset: Int!) {
@@ -222,19 +226,23 @@ def should_alert_value_drop(
     Repeat runs stay silent until the metric drops at least ``min_step`` below
     the last alerted value, so slow drift and dust movements cannot re-alert
     every run. Crossing ``escalate_below`` always alerts, so a severity
-    escalation is never swallowed by the step; recovering to or above
-    ``escalate_below`` while still breached moves the baseline up to the
-    current value, so the next crossing counts as fresh. Recovering to or above
-    the threshold clears the cache so the next breach alerts again. The caller
-    must record the value with mark_alerted_value() only after send_alert()
-    returns, so a failed Telegram send retries on the next run.
+    escalation is never swallowed by the step. Once alerted below
+    ``escalate_below``, the escalation re-arms only after the metric recovers to
+    at least ``escalate_below + min_step`` (hysteresis, so a value flapping
+    around the boundary cannot re-fire every run); re-arming moves the baseline
+    up to the current value. Recovering to or above the threshold clears the
+    cache so the next breach alerts again. The caller must record the value
+    with mark_alerted_value() only after send_alert() returns, so a failed
+    Telegram send retries on the next run.
 
     Args:
         cache_key: Cache key holding the last alerted value (-1 = none outstanding).
         value: Current metric value; lower is worse.
         threshold: Alert when the value drops below this.
-        min_step: Minimum further drop below the last alerted value that re-alerts.
-        escalate_below: Optional stricter threshold whose first crossing always alerts.
+        min_step: Minimum further drop below the last alerted value that re-alerts;
+            also the recovery margin above ``escalate_below`` needed to re-arm it.
+        escalate_below: Optional stricter level whose crossing always alerts, even
+            when the drop is smaller than ``min_step``.
 
     Returns:
         True when a new alert should be sent.
@@ -254,8 +262,9 @@ def should_alert_value_drop(
         worsened = value < cached
     should_alert = escalated or worsened
     if not should_alert:
-        # Recovered out of the escalation band: re-arm it by lifting the baseline.
-        recovered = escalate_below is not None and cached < escalate_below <= value
+        # Recovered clear of the escalation band (by at least one step): re-arm it
+        # by lifting the baseline. Smaller rebounds keep the old baseline.
+        recovered = escalate_below is not None and cached < escalate_below and value >= escalate_below + min_step
         set_fresh_cache_value(cache_key, value if recovered else cached)
     return should_alert
 
@@ -796,7 +805,8 @@ def check_withdraw_limit(withdraw_limit: float) -> None:
     withdrawals. When it falls below the threshold, withdrawals may queue or
     stall, signalling a liquidity squeeze on the senior tranche.
     Deduped via cache: re-alerts only when the limit drops at least
-    WITHDRAW_LIMIT_REALERT_STEP further.
+    WITHDRAW_LIMIT_REALERT_STEP further, or when it first falls below
+    WITHDRAW_LIMIT_DRAINED_THRESHOLD (effectively drained).
 
     Args:
         withdraw_limit: USD3 availableWithdrawLimit in USDC.
@@ -808,6 +818,7 @@ def check_withdraw_limit(withdraw_limit: float) -> None:
         withdraw_limit,
         WITHDRAW_LIMIT_THRESHOLD,
         min_step=WITHDRAW_LIMIT_REALERT_STEP,
+        escalate_below=WITHDRAW_LIMIT_DRAINED_THRESHOLD,
     ):
         message = (
             f"🚨 *3Jane USD3 Withdraw Liquidity Low*\n"
