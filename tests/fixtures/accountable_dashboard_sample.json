@@ -1,0 +1,42 @@
+{
+  "res": "ok",
+  "data": {
+    "collateralization": 1.000288,
+    "net": 21565.08,
+    "ts": "1785490814726",
+    "reserves": {
+      "verifiability": "100",
+      "interval": "live",
+      "total_reserves": {
+        "value": 75021555.53,
+        "name": "Total Reserves"
+      },
+      "total_supply": {
+        "value": 74999990.44,
+        "name": "Total Supply"
+      }
+    },
+    "dataSources": {
+      "LendSwift - Warehouse Senior Note": {
+        "type": "Document Report",
+        "frequency": "WEEKLY",
+        "lastUpdated": "1784851200000"
+      },
+      "USD3 Minted Liabilities": {
+        "type": "ERC4626",
+        "frequency": "15 MIN",
+        "lastUpdated": "1785490200523"
+      },
+      "Slope - Forward Flows": {
+        "type": "Document Report",
+        "frequency": "DAILY",
+        "lastUpdated": "1785283200000"
+      },
+      "USD3 On-Chain Reserves": {
+        "type": "ERC4626",
+        "frequency": "15 MIN",
+        "lastUpdated": "1785490201173"
+      }
+    }
+  }
+}

@@ -84,7 +84,7 @@ The current countdown and alert bucket are intentionally computed in this monito
 
 ## Proof of Solvency
 
-The Accountable Proof of Solvency feed (`https://accountable.3jane.xyz/dashboard`) was removed in November 2026: 3Jane retired it while migrating to DefiLlama's Proof of Solvency service, and the endpoint now redirects to an HTML placeholder. Reserve/liability coverage is not monitored until a replacement feed is wired in.
+The Accountable Proof of Solvency feed (`https://accountable.3jane.xyz/dashboard`) was removed in November 2026: 3Jane retired it while migrating to DefiLlama's Proof of Solvency service, and the endpoint now redirects to an HTML placeholder. Reserve/liability coverage is not monitored until a replacement feed is wired in. The protocol-agnostic Accountable client in [`utils/accountable.py`](../../utils/accountable.py) is kept for other protocols' feeds.
 
 ## Alert dispatch
 
