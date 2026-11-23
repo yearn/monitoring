@@ -177,20 +177,24 @@ def simulate_transaction(
         return None
 
     try:
-        return _parse_transaction(data.get("transaction", {}) or {}, raw_response=data)
+        result = _parse_transaction(data.get("transaction"), raw_response=data)
     except Exception:
         logger.exception("Failed to parse Tenderly simulation response")
         return None
+    if result is None:
+        logger.error("Tenderly simulation response had no recognized terminal transaction status")
+    return result
 
 
-def _parse_transaction(tx: dict[str, Any], raw_response: dict[str, Any]) -> SimulationResult:
-    """Parse one simulated ``transaction`` object (single or bundle response)."""
+def _parse_transaction(tx: object, raw_response: dict[str, Any]) -> SimulationResult | None:
+    """Parse a simulated transaction with a recognized terminal status."""
+    if not isinstance(tx, dict):
+        return None
+    status = tx.get("status")
+    if not isinstance(status, bool) and status not in ("success", "failed"):
+        return None
+    success = status is True or status == "success"
     tx_info = tx.get("transaction_info", {}) or {}
-    status = tx.get("status", False)
-    if isinstance(status, str):
-        success = status == "success"
-    else:
-        success = status is True
     # Single simulations report gas inside transaction_info; bundle results only on the transaction.
     gas_used = int(tx_info.get("gas_used") or tx.get("gas_used") or 0)
     error_message = "" if success else ((tx_info.get("stack_trace") or [{}])[0].get("error_reason") or "")
@@ -276,9 +280,12 @@ def simulate_bundle(
 
     try:
         raw_results = data.get("simulation_results", []) or []
-        results: list[SimulationResult | None] = [
-            _parse_transaction(item.get("transaction", {}) or {}, raw_response=item) for item in raw_results
-        ]
+        results: list[SimulationResult | None] = []
+        for item in raw_results[: len(calls)]:
+            result = _parse_transaction(item.get("transaction"), raw_response=item)
+            results.append(result)
+            if result is None or not result.success:
+                break
     except Exception:
         logger.exception("Failed to parse Tenderly bundle simulation response")
         return None
@@ -287,4 +294,8 @@ def simulate_bundle(
         # `error` object on a 200 response; log it so a fallback is diagnosable.
         logger.error("Tenderly bundle simulation returned no results: %s", str(data.get("error") or data)[:300])
         return None
-    return (results + [None] * len(calls))[: len(calls)]
+    last = results[-1]
+    if last is None or (last.success and len(results) < len(calls)):
+        logger.error("Tenderly bundle simulation returned incomplete transaction results")
+        return None
+    return results + [None] * (len(calls) - len(results))

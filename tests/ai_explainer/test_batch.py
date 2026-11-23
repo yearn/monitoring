@@ -367,7 +367,7 @@ class TestBatchSequentialSimulation(unittest.TestCase):
         self.assertNotIn("not authorized", prompt)
         self.assertIn(
             "**Batch simulation diagnostic:** reverted with `execution reverted: not authorized` when run in batch "
-            "order — not a predicted governance failure (omitted from the risk prompt)",
+            "order — not a predicted governance failure (access-control revert omitted from the risk prompt)",
             result.report,
         )
         self.assertIn("**Batch simulation:** not reached — call 2 reverted first in batch order", result.report)

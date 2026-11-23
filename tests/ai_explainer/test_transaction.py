@@ -108,15 +108,85 @@ class TestExplainTransaction(unittest.TestCase):
         self.assertIsNone(explain_transaction(target=self.TARGET, calldata="0x", chain_id=1, value=10**18))
 
 
-class TestFailedSimulationDropped(unittest.TestCase):
-    """Failed Tenderly simulations must not leak into the LLM prompt."""
+class TestSimulationEvidence(unittest.TestCase):
+    """The prompt and report describe what Tenderly observed."""
 
     @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
     @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
     @patch("utils.llm.ai_explainer.get_llm_provider")
     @patch("utils.llm.ai_explainer.simulate_transaction")
     @patch("utils.llm.ai_explainer.decode_calldata")
-    def test_failed_sim_omitted_from_single_prompt(
+    def test_single_simulation_outcomes(
+        self,
+        mock_decode: MagicMock,
+        mock_simulate: MagicMock,
+        mock_get_provider: MagicMock,
+        _mock_label: MagicMock,
+        _mock_source: MagicMock,
+    ) -> None:
+        safe = "0x9F6e831c8F8939DC0C830C6e492e7cEf4f9C2F5f"
+        target = "0xcBCFA3eb5E067173b262ACe62f9dD87f1D2Cc0Cf"
+        safe_tx_hash = "0x79e4fb0945ca96391dab25766e2839b51030db023e58ec7fdaf554839dbfc667"
+        mock_decode.return_value = DecodedCall(
+            function_name="finalizeRedemptionTimeoutUpdate", signature="finalizeRedemptionTimeoutUpdate()"
+        )
+        cases = [
+            (
+                SimulationResult(success=False, error_message="Change not initiated"),
+                "This call reverted in simulation with Change not initiated.",
+                "**Simulation diagnostic:** reverted with `Change not initiated`",
+                "Simulation reverted",
+            ),
+            (
+                SimulationResult(success=False),
+                "This call reverted in simulation.",
+                "no revert reason available",
+                "Simulation reverted",
+            ),
+            (None, "Simulation unavailable.", "**Simulation:** unavailable", "Simulation unavailable"),
+            (SimulationResult(success=True), "Simulation: SUCCESS", "**Simulation:** SUCCESS", ""),
+        ]
+        for sim, prompt_status, report_status, warning in cases:
+            with self.subTest(prompt_status=prompt_status):
+                mock_simulate.return_value = sim
+                provider = make_provider("TLDR: Finalizes the redemption timeout update. MEDIUM.\nDETAIL: Updates it.")
+                mock_get_provider.return_value = provider
+
+                with patch("utils.llm.ai_explainer.logger.warning") as warn:
+                    result = explain_transaction(
+                        target=target,
+                        calldata="0xdd6d0e68",
+                        chain_id=1,
+                        from_address=safe,
+                        safe_tx_hash=safe_tx_hash,
+                        refine=False,
+                    )
+
+                assert result is not None
+                prompt = provider.complete.call_args.args[0]
+                self.assertIn(prompt_status, prompt)
+                self.assertIn(report_status, result.report)
+                if warning:
+                    self.assertNotIn("Simulation: SUCCESS", prompt)
+                    self.assertNotIn("**Simulation:** SUCCESS", result.report)
+                    warn.assert_called_once()
+                    log = warn.call_args.args[0] % warn.call_args.args[1:]
+                    self.assertIn(
+                        f"{warning} chain_id=1 sender={safe} target={target} safe_tx_hash={safe_tx_hash}", log
+                    )
+                    self.assertNotIn("0xdd6d0e68", log)
+                else:
+                    warn.assert_not_called()
+                if sim is not None and sim.error_message == "Change not initiated":
+                    self.assertIn("prerequisite outside this transaction", prompt)
+                    self.assertIn("not a predicted governance failure", result.report)
+
+    @patch("utils.llm.ai_explainer.get_source_context", return_value=None)
+    @patch("utils.llm.ai_explainer.get_contract_label", return_value="")
+    @patch("utils.llm.ai_explainer.get_llm_provider")
+    @patch("utils.llm.ai_explainer.simulate_transaction")
+    @patch("utils.llm.ai_explainer.decode_calldata")
+    def test_single_access_revert_reason_omitted_from_prompt(
         self,
         mock_decode: MagicMock,
         mock_simulate: MagicMock,
@@ -131,10 +201,13 @@ class TestFailedSimulationDropped(unittest.TestCase):
         provider = make_provider("TLDR: pauses. LOW.")
         mock_get_provider.return_value = provider
 
-        explain_transaction(target="0xT", calldata="0x8456cb59", chain_id=1)
+        result = explain_transaction(target="0xT", calldata="0x8456cb59", chain_id=1)
         prompt = provider.complete.call_args[0][0]
 
+        assert result is not None
+        self.assertIn("access-control revert omitted from the risk prompt", result.report)
         self.assertNotIn("--- Simulation Results ---", prompt)
+        self.assertNotIn("reverted in simulation", prompt)
         self.assertNotIn("FAILED", prompt)
         self.assertNotIn("execution reverted", prompt)
 

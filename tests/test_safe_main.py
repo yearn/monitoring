@@ -413,7 +413,8 @@ class TestCheckForPendingTransactions(unittest.TestCase):
 
     def test_explain_safe_tx_forwards_empty_calldata(self):
         safe_main = self._import_safe_main()
-        tx = {**self._tx(2281), "data": "0x", "value": "1", "operation": 0}
+        safe_tx_hash = "0x" + "12" * 32
+        tx = {**self._tx(2281), "data": "0x", "value": "1", "operation": 0, "safeTxHash": safe_tx_hash}
 
         with patch.object(safe_main, "explain_transaction") as mock_explain:
             mock_explain.return_value = None
@@ -430,10 +431,12 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         mock_explain.assert_called_once()
         self.assertEqual(mock_explain.call_args.kwargs["calldata"], "0x")
         self.assertEqual(mock_explain.call_args.kwargs["value"], 1)
+        self.assertEqual(mock_explain.call_args.kwargs["safe_tx_hash"], safe_tx_hash)
 
     def _multisend_tx(self, inner_operations: list[int]) -> dict:
         return {
             **self._tx(2296),
+            "safeTxHash": "0x" + "34" * 32,
             "to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
             "operation": 1,
             "dataDecoded": {
@@ -466,10 +469,12 @@ class TestCheckForPendingTransactions(unittest.TestCase):
 
     def test_all_call_multisend_is_simulated_as_a_bundle(self):
         """MultiSend inner CALLs run from the Safe, so a bundle from the Safe is the real execution."""
-        kwargs = self._explain_multisend(self._multisend_tx([0, 0, 0]))
+        tx = self._multisend_tx([0, 0, 0])
+        kwargs = self._explain_multisend(tx)
         self.assertFalse(kwargs["skip_simulation"])
         self.assertEqual(kwargs["from_address"], "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52")
-        self.assertIn("simulated as one ordered bundle", kwargs["context_note"])
+        self.assertEqual(kwargs["safe_tx_hash"], tx["safeTxHash"])
+        self.assertIn("can be simulated as one ordered bundle", kwargs["context_note"])
 
     def test_multisend_with_inner_delegatecall_skips_simulation(self):
         kwargs = self._explain_multisend(self._multisend_tx([0, 1]))
