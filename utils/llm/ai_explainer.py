@@ -582,6 +582,8 @@ def _simulation_note(
     error = f"reverted with `{sim.error_message}`" if sim.error_message else "reverted"
     if _is_informative_revert(sim):
         handling = "reason included in the risk prompt"
+    elif _is_access_revert(sim):
+        handling = "access-control revert omitted from the risk prompt"
     else:
         handling = "reason omitted from the risk prompt" if sim.error_message else "no revert reason available"
     if sequential:
@@ -644,8 +646,18 @@ def _is_informative_revert(sim: SimulationResult | None) -> bool:
     """
     if sim is None or sim.success:
         return False
-    reason = sim.error_message.strip()
-    return reason.lower() not in _UNNAMED_REVERTS and not _ACCESS_REVERT_RE.search(reason)
+    return sim.error_message.strip().lower() not in _UNNAMED_REVERTS and not _is_access_revert(sim)
+
+
+def _is_access_revert(sim: SimulationResult | None) -> bool:
+    """Whether a failed simulation reverted on access control.
+
+    Tenderly may run the call from a sender that does not hold the executor's
+    role, so such a revert usually says nothing about the transaction itself.
+    """
+    if sim is None or sim.success:
+        return False
+    return bool(_ACCESS_REVERT_RE.search(sim.error_message))
 
 
 def _simulation_diagnostic(sim: SimulationResult | None, call: str) -> str:
@@ -678,6 +690,10 @@ def _single_simulation_diagnostic(
     logger.warning("Simulation reverted %s reason=%r", context, redact_secrets(sim.error_message))
     if diagnostic := _simulation_diagnostic(sim, "This call"):
         return f"{diagnostic}\n{SIMULATION_PREREQUISITE_NOTE}"
+    if _is_access_revert(sim):
+        # The simulator's sender lacks the executor's role; even a bare "it
+        # reverted" biases the model toward a failure that will not happen.
+        return ""
     return "This call reverted in simulation. Do not infer how the queued transaction will execute."
 
 

@@ -205,8 +205,9 @@ class TestSimulationEvidence(unittest.TestCase):
         prompt = provider.complete.call_args[0][0]
 
         assert result is not None
-        self.assertIn("reason omitted from the risk prompt", result.report)
-        self.assertIn("This call reverted in simulation.", prompt)
+        self.assertIn("access-control revert omitted from the risk prompt", result.report)
+        self.assertNotIn("--- Simulation Results ---", prompt)
+        self.assertNotIn("reverted in simulation", prompt)
         self.assertNotIn("FAILED", prompt)
         self.assertNotIn("execution reverted", prompt)
 
