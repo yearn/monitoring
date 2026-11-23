@@ -686,3 +686,73 @@ def test_vault_shutdown_alerts_once_per_transition(monkeypatch: pytest.MonkeyPat
 
     assert [("sUSD3" in alert.message) for alert in alerts] == [False, True]
     assert all(alert.severity == module.AlertSeverity.CRITICAL for alert in alerts)
+
+
+def test_usd3_oc_recovery_out_of_critical_rearms_escalation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CRITICAL at 105.9%, back to 106.1%, then 105.8%: the fresh crossing alerts despite a sub-step drop."""
+    module = load_3jane_module()
+    alerts: list = []
+    cache = stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    for oc in (1.059, 1.061, 1.058):
+        # deployed / (deployed - backing) == oc  =>  backing = deployed * (1 - 1 / oc)
+        module.check_usd3_oc(100_000_000 * (1 - 1 / oc), 100_000_000)
+
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.CRITICAL, module.AlertSeverity.CRITICAL]
+    assert float(cache[module.CACHE_KEY_USD3_OC_ALERTED]) == pytest.approx(1.058)
+
+
+def test_withdraw_limit_drop_of_exactly_one_step_alerts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Alerted at $1M then drained to $0 is exactly one step and must alert."""
+    module = load_3jane_module()
+    alerts: list = []
+    stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.check_withdraw_limit(1_000_000)
+    module.check_withdraw_limit(0)
+
+    assert len(alerts) == 2
+    assert "Available withdraw limit: $0.00" in alerts[1].message
+
+
+def test_read_vault_shutdown_uses_its_own_pinned_block_batch() -> None:
+    """Shutdown flags come from a dedicated batch at the core reads' block."""
+    module = load_3jane_module()
+    seen_blocks: list[int] = []
+
+    class FakeCall:
+        def __init__(self, result: bool) -> None:
+            self.result = result
+
+        def call(self, block_identifier: int) -> bool:
+            seen_blocks.append(block_identifier)
+            return self.result
+
+    class FakeVault:
+        def __init__(self, shutdown: bool) -> None:
+            self.functions = type("F", (), {"isShutdown": lambda _self: FakeCall(shutdown)})()
+
+    class FakeBatch:
+        def __init__(self) -> None:
+            self.items: list[bool] = []
+
+        def __enter__(self) -> "FakeBatch":
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def add(self, item: bool) -> None:
+            self.items.append(item)
+
+    class FakeClient:
+        def batch_requests(self) -> FakeBatch:
+            return FakeBatch()
+
+        def execute_batch(self, batch: FakeBatch) -> list[bool]:
+            return batch.items
+
+    assert module.read_vault_shutdown(FakeClient(), FakeVault(True), FakeVault(False), 123) == (True, False)
+    assert seen_blocks == [123, 123]

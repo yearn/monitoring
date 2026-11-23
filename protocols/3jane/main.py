@@ -219,11 +219,13 @@ def should_alert_value_drop(
 ) -> bool:
     """Decide whether a lower-is-worse threshold alert should be sent.
 
-    Repeat runs stay silent until the metric drops more than ``min_step`` below
+    Repeat runs stay silent until the metric drops at least ``min_step`` below
     the last alerted value, so slow drift and dust movements cannot re-alert
     every run. Crossing ``escalate_below`` always alerts, so a severity
-    escalation is never swallowed by the step. Recovering to or above the
-    threshold clears the cache so the next breach alerts again. The caller
+    escalation is never swallowed by the step; recovering to or above
+    ``escalate_below`` while still breached moves the baseline up to the
+    current value, so the next crossing counts as fresh. Recovering to or above
+    the threshold clears the cache so the next breach alerts again. The caller
     must record the value with mark_alerted_value() only after send_alert()
     returns, so a failed Telegram send retries on the next run.
 
@@ -245,9 +247,16 @@ def should_alert_value_drop(
     if cached < 0:
         return True
     escalated = escalate_below is not None and value < escalate_below <= cached
-    should_alert = escalated or value < cached - min_step
+    if min_step > 0:
+        # Inclusive so a drop of exactly ``min_step`` (e.g. $1M -> $0) still alerts.
+        worsened = value <= cached - min_step
+    else:
+        worsened = value < cached
+    should_alert = escalated or worsened
     if not should_alert:
-        set_fresh_cache_value(cache_key, cached)
+        # Recovered out of the escalation band: re-arm it by lifting the baseline.
+        recovered = escalate_below is not None and cached < escalate_below <= value
+        set_fresh_cache_value(cache_key, value if recovered else cached)
     return should_alert
 
 
@@ -811,6 +820,30 @@ def check_withdraw_limit(withdraw_limit: float) -> None:
         mark_alerted_value(CACHE_KEY_WITHDRAW_LIMIT_ALERTED, withdraw_limit)
 
 
+def read_vault_shutdown(client: Any, usd3_vault: Any, susd3_vault: Any, block_number: int) -> tuple[bool, bool]:
+    """Read both vaults' isShutdown() at the run's pinned block in one batch.
+
+    Kept out of the core batch: Web3 fails a whole batch when any call errors,
+    so a shutdown-read failure would otherwise skip every core check.
+
+    Args:
+        client: Web3Client instance.
+        usd3_vault: USD3 contract instance.
+        susd3_vault: sUSD3 contract instance.
+        block_number: Block the core reads were pinned to.
+
+    Returns:
+        USD3 and sUSD3 shutdown flags.
+    """
+    with client.batch_requests() as batch:
+        batch.add(usd3_vault.functions.isShutdown().call(block_identifier=block_number))
+        batch.add(susd3_vault.functions.isShutdown().call(block_identifier=block_number))
+        responses = client.execute_batch(batch)
+        if len(responses) != 2:
+            raise ValueError(f"Expected 2 shutdown responses, got {len(responses)}")
+    return bool(responses[0]), bool(responses[1])
+
+
 def check_vault_shutdown(usd3_shutdown: bool, susd3_shutdown: bool) -> None:
     """Check if either vault has been emergency shut down.
 
@@ -997,11 +1030,9 @@ def main() -> None:
             batch.add(protocol_config.functions.config(CFG_KEY_GRACE_PERIOD).call(block_identifier=block_number))
             batch.add(protocol_config.functions.config(CFG_KEY_DELINQUENCY_PERIOD).call(block_identifier=block_number))
             batch.add(protocol_config.functions.getDebtCap().call(block_identifier=block_number))
-            batch.add(usd3_vault.functions.isShutdown().call(block_identifier=block_number))
-            batch.add(susd3_vault.functions.isShutdown().call(block_identifier=block_number))
             responses = client.execute_batch(batch)
-            if len(responses) != 17:
-                raise ValueError(f"Expected 17 responses, got {len(responses)}")
+            if len(responses) != 15:
+                raise ValueError(f"Expected 15 responses, got {len(responses)}")
 
         usd3_total_assets = responses[0]
         usd3_total_supply = responses[1]
@@ -1018,8 +1049,6 @@ def main() -> None:
         grace_period_seconds = int(responses[12])
         delinquency_period_seconds = int(responses[13])
         debt_cap_raw = int(responses[14])
-        usd3_shutdown = bool(responses[15])
-        susd3_shutdown = bool(responses[16])
 
         if len(market_liquidity) != 4:
             raise ValueError(f"Expected 4 market liquidity values, got {len(market_liquidity)}")
@@ -1090,7 +1119,9 @@ def main() -> None:
             insurance_outflow_assets,
         )
         check_withdraw_limit(withdraw_limit)
-        check_vault_shutdown(usd3_shutdown, susd3_shutdown)
+        # Separate batch (same pinned block) so a failing shutdown read cannot
+        # take down the core reads above and skip PPS/OC/liquidity checks.
+        check_vault_shutdown(*read_vault_shutdown(client, usd3_vault, susd3_vault, block_number))
         check_debt_cap(debt_cap_raw, wausdc_assets_per_scale)
         check_nominal_backing_floor(nominal_floor, susd3_backing)
         check_protocol_paused(is_paused)
