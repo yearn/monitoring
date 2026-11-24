@@ -1,9 +1,10 @@
 """Behavior tests for on-chain MorphoMarketV1AdapterV2 timelock monitoring."""
 
 import unittest
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Iterator
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from web3 import Web3
@@ -185,7 +186,7 @@ class _FakeClient:
         return bind
 
     @contextmanager
-    def batch_requests(self) -> Iterator[_FakeBatch]:
+    def batch_requests(self) -> Generator[_FakeBatch]:
         self.in_batch = True
         try:
             yield _FakeBatch()

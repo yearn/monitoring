@@ -12,7 +12,7 @@ import os
 import sqlite3
 import time
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,7 +57,7 @@ class DispatchQueue:
         self.path = str(path or os.getenv("EMERGENCY_DISPATCH_DB") or cache_path("emergency_dispatch.sqlite3"))
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
+    def _connect(self) -> Generator[sqlite3.Connection]:
         with closing(sqlite3.connect(self.path, timeout=5, isolation_level=None)) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")

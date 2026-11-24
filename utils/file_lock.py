@@ -9,7 +9,7 @@ exits, so a crash never leaves a stale lock.
 
 import fcntl
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 
 from utils.paths import cache_path
@@ -20,7 +20,7 @@ class LockTimeout(Exception):
 
 
 @contextmanager
-def file_lock(name: str, timeout: float = 120.0, poll_interval: float = 0.1) -> Iterator[None]:
+def file_lock(name: str, timeout: float = 120.0, poll_interval: float = 0.1) -> Generator[None]:
     """Hold an exclusive lock on ``$CACHE_DIR/<name>.lock`` for the ``with`` block.
 
     Args:
