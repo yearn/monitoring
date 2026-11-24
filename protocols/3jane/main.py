@@ -129,6 +129,8 @@ CACHE_KEY_BORROWER_DEFAULT_WATCH_PREFIX = "3JANE_BORROWER_DEFAULT_WATCH"
 CACHE_KEY_USD3_OC_ALERTED = "3JANE_USD3_OC_ALERTED"
 CACHE_KEY_WITHDRAW_LIMIT_ALERTED = "3JANE_WITHDRAW_LIMIT_ALERTED"
 CACHE_KEY_VERIFIED_FAILURE_STREAK = "3JANE_DEFILLAMA_VERIFIED_FAILURE_STREAK"
+# Highest VERIFIED_AVAILABILITY_ALERTS level delivered during the current outage.
+CACHE_KEY_VERIFIED_ALERTED_STREAK = "3JANE_DEFILLAMA_VERIFIED_ALERTED_STREAK"
 CACHE_KEY_VERIFIED_ISSUES = "3JANE_DEFILLAMA_VERIFIED_ISSUES"
 CACHE_KEY_VERIFIED_REPORT_DATES = "3JANE_DEFILLAMA_VERIFIED_REPORT_DATES"
 
@@ -1039,15 +1041,26 @@ def check_protocol_paused(is_paused: bool) -> None:
 
 
 def _record_verified_failure(reason: str) -> None:
-    """Escalate a streak of runs without a usable DefiLlama report."""
+    """Count one run without a usable DefiLlama report and escalate the outage.
+
+    The streak is persisted before any alert is sent, so it advances exactly once
+    per run. An escalation is marked delivered only after send_alert() returns; a
+    failed send is logged and retried on the next failed run instead of being
+    lost because the streak has moved past its level.
+
+    Args:
+        reason: Why this run had no usable report.
+    """
     streak = get_cache_int(CACHE_KEY_VERIFIED_FAILURE_STREAK) + 1
     set_cache_value(CACHE_KEY_VERIFIED_FAILURE_STREAK, streak)
     logger.warning("DefiLlama Verified unavailable for %d consecutive runs: %s", streak, reason)
-    severity = VERIFIED_AVAILABILITY_ALERTS.get(streak)
-    if severity is not None:
+    level = max((level for level in VERIFIED_AVAILABILITY_ALERTS if level <= streak), default=0)
+    if level <= get_cache_int(CACHE_KEY_VERIFIED_ALERTED_STREAK):
+        return
+    try:
         send_alert(
             Alert(
-                severity,
+                VERIFIED_AVAILABILITY_ALERTS[level],
                 "*3Jane DefiLlama Verified unavailable*\n"
                 f"{streak} consecutive runs without a usable report\n"
                 f"{escape_markdown(reason)}\n"
@@ -1055,6 +1068,17 @@ def _record_verified_failure(reason: str) -> None:
                 PROTOCOL,
             )
         )
+    except Exception:
+        logger.exception("Failed to send DefiLlama Verified outage alert; retrying next run")
+        return
+    set_cache_value(CACHE_KEY_VERIFIED_ALERTED_STREAK, level)
+
+
+def _reset_verified_failures() -> None:
+    """Clear the outage streak and its delivered escalation after a usable report."""
+    for key in (CACHE_KEY_VERIFIED_FAILURE_STREAK, CACHE_KEY_VERIFIED_ALERTED_STREAK):
+        if get_cache_int(key):
+            set_cache_value(key, 0)
 
 
 def _load_verified_report_dates() -> dict[str, list[str]]:
@@ -1111,18 +1135,19 @@ def record_verified_report_dates(report: VerifiedLoanReport) -> None:
         set_cache_value(CACHE_KEY_VERIFIED_REPORT_DATES, json.dumps(history, sort_keys=True))
 
 
-def check_defillama_verified() -> None:
-    """Check the offchain loan record in isolation from the core 3Jane checks."""
+def _evaluate_verified_report() -> dict[str, str] | None:
+    """Fetch, validate and evaluate the loan record, counting one failure if that fails.
+
+    Any exception here, not just a feed error, counts toward the outage streak,
+    so a persistent bug escalates like an outage instead of silently disabling
+    the check. Alert delivery happens afterwards, so a Telegram failure is never
+    mistaken for a feed outage.
+
+    Returns:
+        The current source issues, or None when the run had no usable report.
+    """
     try:
-        try:
-            report = fetch_report(VERIFIED_FEED)
-        except DefiLlamaVerifiedError as exc:
-            _record_verified_failure(str(exc))
-            return
-
-        if get_cache_int(CACHE_KEY_VERIFIED_FAILURE_STREAK):
-            set_cache_value(CACHE_KEY_VERIFIED_FAILURE_STREAK, 0)
-
+        report = fetch_report(VERIFIED_FEED)
         logger.info(
             "DefiLlama Verified: $%s offchain principal across %d originators, verified %s",
             f"{report.total_principal_usd:,.2f}",
@@ -1131,6 +1156,24 @@ def check_defillama_verified() -> None:
         )
         record_verified_report_dates(report)
         issues = report_issues(report, VERIFIED_FEED, datetime.now(tz=timezone.utc))
+    except DefiLlamaVerifiedError as exc:
+        reason = str(exc)
+    except Exception as exc:
+        logger.exception("DefiLlama Verified check failed")
+        reason = f"unexpected {type(exc).__name__}: {exc}"[:300]
+    else:
+        _reset_verified_failures()
+        return issues
+    _record_verified_failure(reason)
+    return None
+
+
+def check_defillama_verified() -> None:
+    """Check the offchain loan record in isolation from the core 3Jane checks."""
+    try:
+        issues = _evaluate_verified_report()
+        if issues is None:
+            return
         current = json.dumps(sorted(issues)) if issues else ""
         previous = get_last_value_for_key_from_file(CACHE_FILENAME, CACHE_KEY_VERIFIED_ISSUES) or ""
         if current == previous:
@@ -1146,14 +1189,11 @@ def check_defillama_verified() -> None:
                 )
             )
         set_cache_value(CACHE_KEY_VERIFIED_ISSUES, current)
-    except Exception as exc:
-        logger.exception("DefiLlama Verified check failed")
-        # Count unexpected failures toward the outage streak so a persistent bug
-        # escalates like an outage instead of silently disabling the check.
-        try:
-            _record_verified_failure(f"unexpected {type(exc).__name__}: {exc}"[:300])
-        except Exception:
-            logger.exception("Failed to record DefiLlama Verified failure")
+    except Exception:
+        # Failure boundary: the onchain checks in main() must still run. Feed and
+        # evaluation failures were already counted; this only catches alert
+        # delivery and cache errors, which retry on the next run.
+        logger.exception("DefiLlama Verified alerting failed")
 
 
 def main() -> None:

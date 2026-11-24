@@ -11,6 +11,7 @@ import pytest
 from utils import paths, store
 from utils.alert import Alert
 from utils.defillama_verified import DefiLlamaVerifiedError, parse_report
+from utils.telegram import TelegramError
 
 
 def load_3jane_module() -> ModuleType:
@@ -933,6 +934,60 @@ def test_verified_unexpected_error_counts_as_failure(monkeypatch: pytest.MonkeyP
     assert cache[module.CACHE_KEY_VERIFIED_FAILURE_STREAK] == "2"
     assert [alert.severity for alert in alerts] == [module.AlertSeverity.LOW]
     assert "TypeError" in alerts[0].message
+
+
+def test_verified_outage_alert_send_failure_counts_poll_once_and_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Telegram failure on the sixth failed poll must not double-count it, and MEDIUM retries next poll."""
+    module = load_3jane_module()
+    cache = stub_cache(monkeypatch, module)
+    sent: list[Alert] = []
+    medium_attempts: list[int] = []
+
+    def flaky_send(alert: Alert) -> bool:
+        if alert.severity == module.AlertSeverity.MEDIUM and not medium_attempts:
+            medium_attempts.append(1)
+            raise TelegramError("telegram down")
+        sent.append(alert)
+        return True
+
+    monkeypatch.setattr(module, "send_alert", flaky_send)
+    monkeypatch.setattr(module, "fetch_report", Mock(side_effect=DefiLlamaVerifiedError("HTTP 403")))
+
+    for _ in range(6):
+        module.check_defillama_verified()
+    assert cache[module.CACHE_KEY_VERIFIED_FAILURE_STREAK] == "6"
+    assert [alert.severity.value for alert in sent] == ["LOW"]
+
+    module.check_defillama_verified()
+    module.check_defillama_verified()
+    assert cache[module.CACHE_KEY_VERIFIED_FAILURE_STREAK] == "8"
+    assert [alert.severity.value for alert in sent] == ["LOW", "MEDIUM"]
+    assert "7 consecutive runs" in sent[1].message
+
+
+def test_verified_issue_alert_send_failure_is_not_an_outage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed source-issue alert retries next run without counting toward the outage streak."""
+    module = load_3jane_module()
+    cache = stub_cache(monkeypatch, module)
+    path = Path(__file__).with_name("fixtures") / "defillama_verified_3jane.json"
+    now = datetime(2026, 11, 23, 14, 30, tzinfo=timezone.utc)
+    report = parse_report(json.loads(path.read_text()), module.VERIFIED_FEED, now)
+    degraded = replace(report, up_to_date=False)
+    clock = Mock(wraps=datetime)
+    clock.now.return_value = now
+    monkeypatch.setattr(module, "datetime", clock)
+    monkeypatch.setattr(module, "fetch_report", Mock(return_value=degraded))
+    send = Mock(side_effect=[TelegramError("telegram down"), True])
+    monkeypatch.setattr(module, "send_alert", send)
+
+    module.check_defillama_verified()
+    assert cache.get(module.CACHE_KEY_VERIFIED_FAILURE_STREAK, 0) in (0, "0")
+    assert cache.get(module.CACHE_KEY_VERIFIED_ISSUES, 0) in (0, "")
+
+    module.check_defillama_verified()
+    assert send.call_count == 2
+    assert "out of date" in send.call_args.args[0].message
+    assert cache[module.CACHE_KEY_VERIFIED_ISSUES]
 
 
 def test_verified_report_dates_history_tracks_changes(monkeypatch: pytest.MonkeyPatch) -> None:

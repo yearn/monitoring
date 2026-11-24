@@ -115,8 +115,11 @@ Use that history to replace these estimates with the observed cadence.
 A missing required source, stale timestamp, or provider `state.upToDate: false` sends a MEDIUM
 alert when the set of issues changes. A usable report clears the availability failure streak
 even if its data is stale. Redirects, non-JSON responses, HTTP failures, invalid JSON or
-schema, and unexpected errors in the check itself count as unavailable. Availability alerts stay
-at LOW and MEDIUM because they reflect feed health. The feed check runs first, in its own failure
+schema, and unexpected errors while fetching or evaluating the report count as unavailable. Each
+run counts once, and an availability alert is marked sent only after Telegram accepts it, so a
+failed send retries on the next failed run. A failed source-issue alert retries on the next run
+and does not count as a feed outage. Availability alerts stay at LOW and MEDIUM because they
+reflect feed health. The feed check runs first, in its own failure
 boundary, so it still runs when RPC access fails, and its failures cannot skip the onchain and
 Envio checks. Document dates may be up to one calendar day ahead of the UTC verification run,
 since documents dated in a time zone east of UTC are not malformed.
