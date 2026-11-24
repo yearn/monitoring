@@ -7,7 +7,7 @@ from eth_abi import encode
 from eth_utils import function_signature_to_4byte_selector
 from eth_utils import to_checksum_address as _cs
 
-from utils.calldata.wrappers import InnerCall, is_wrapper_call, unwrap_calls
+from utils.calldata.wrappers import InnerCall, is_wrapper_call, unwrap_calls, unwrap_executed_calls
 
 ORACLE = _cs("0xcd7f45566bc0e7303fb92a93969bb4d3f6e662bb")
 CUSD = _cs("0xcccc62962d17b8914c62d74ffb843d73b2a3cccc")
@@ -30,6 +30,15 @@ def execute_batch(targets: list[str], payloads: list[str]) -> str:
         "executeBatch(address[],uint256[],bytes[],bytes32,bytes32)",
         ["address[]", "uint256[]", "bytes[]", "bytes32", "bytes32"],
         [targets, [0] * len(targets), [bytes.fromhex(p[2:]) for p in payloads], ZERO32, ZERO32],
+    )
+
+
+def pendle_aggregate(calls: list[tuple[str, int, str]]) -> str:
+    """Pendle governance proxy ``aggregate((address,uint256,bytes)[])`` of ``(target, value, data_hex)`` calls."""
+    return encode_call(
+        "aggregate((address,uint256,bytes)[])",
+        ["(address,uint256,bytes)[]"],
+        [[(target, value, bytes.fromhex(data[2:])) for target, value, data in calls]],
     )
 
 
@@ -98,6 +107,21 @@ class TestUnwrapCalls(unittest.TestCase):
         self.assertEqual(
             unwrap_calls(data), [InnerCall(ORACLE, upgrade_to_and_call(NEW_ORACLE_IMPL), "scheduleProposals")]
         )
+
+    def test_pendle_aggregate_yields_each_call_in_order(self) -> None:
+        data = pendle_aggregate([(ORACLE, 0, upgrade_to_and_call(NEW_ORACLE_IMPL)), (CUSD, 1, "0x8456cb59")])
+        self.assertTrue(data.startswith("0x1acaa198"))
+        self.assertEqual(
+            unwrap_calls(data),
+            [
+                InnerCall(ORACLE, upgrade_to_and_call(NEW_ORACLE_IMPL), "aggregate call 1"),
+                InnerCall(CUSD, "0x8456cb59", "aggregate call 2"),
+            ],
+        )
+
+    def test_pendle_aggregate_calls_run_in_the_wrapping_tx(self) -> None:
+        data = pendle_aggregate([(ORACLE, 0, upgrade_to_and_call(NEW_ORACLE_IMPL))])
+        self.assertEqual(unwrap_executed_calls(data), unwrap_calls(data))
 
     def test_non_wrapper_and_empty_calldata(self) -> None:
         self.assertEqual(unwrap_calls(upgrade_to_and_call(NEW_ORACLE_IMPL)), [])

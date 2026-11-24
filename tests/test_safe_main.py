@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import requests
+from web3 import Web3
 
 
 @pytest.fixture(autouse=True)
@@ -16,6 +17,25 @@ def _isolate_safe_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
         if name.startswith("SAFE_API_KEY_"):
             monkeypatch.delenv(name)
     monkeypatch.setenv("SAFE_API_KEY", "test-key")
+
+
+def queue_tx(nonce: int, **fields) -> dict:
+    """A Safe Queue Service row: string numerics, lowercase addresses, ``created``."""
+    return {
+        "nonce": str(nonce),
+        "chainId": "1",
+        "to": "0x0000000000000000000000000000000000000abc",
+        "data": "0x",
+        "operation": 0,
+        "created": "2026-06-14T00:00:00Z",
+        "proposer": "0x0000000000000000000000000000000000000999",
+        "proposedVia": "OWNER",
+        "proposedBy": None,
+        "value": "0",
+        "txHash": None,
+        "failed": None,
+        **fields,
+    }
 
 
 class TestSafePendingTransactions(unittest.TestCase):
@@ -92,10 +112,10 @@ class TestSafePendingTransactions(unittest.TestCase):
         safe_address = "0xSafe"
 
         txs = [
-            {"nonce": 30, "isExecuted": True},
-            {"nonce": 31, "executionDate": "2026-06-14T21:00:00Z"},
-            {"nonce": 32, "transactionHash": "0x" + "ab" * 32},
-            {"nonce": 33, "isExecuted": False, "executionDate": None, "transactionHash": None},
+            {"nonce": "30", "txHash": "0x" + "ab" * 32, "failed": False},
+            {"nonce": "31", "txHash": None, "failed": True},
+            {"nonce": "32", "txHash": "0x" + "cd" * 32, "failed": None},
+            {"nonce": "33", "txHash": None, "failed": None},
         ]
 
         with (
@@ -107,15 +127,15 @@ class TestSafePendingTransactions(unittest.TestCase):
             pending = safe_main.get_pending_transactions(safe_address, "mainnet")
 
         mock_write.assert_called_once_with(safe_address, 29)
-        self.assertEqual(pending, [{"nonce": 33, "isExecuted": False, "executionDate": None, "transactionHash": None}])
+        self.assertEqual(pending, [{"nonce": "33", "txHash": None, "failed": None}])
 
     def test_current_nonce_unknown_fails_closed(self):
         safe_main = self._import_safe_main()
         safe_address = "0xSafe"
 
         txs = [
-            {"nonce": 3274, "isExecuted": False, "executionDate": None, "transactionHash": None},
-            {"nonce": 3280, "isExecuted": False, "executionDate": None, "transactionHash": None},
+            {"nonce": 3274, "txHash": None, "failed": None},
+            {"nonce": 3280, "txHash": None, "failed": None},
         ]
 
         with (
@@ -134,8 +154,8 @@ class TestSafePendingTransactions(unittest.TestCase):
         safe_address = "0xSafe"
 
         txs = [
-            {"nonce": 3280, "isExecuted": False, "executionDate": None, "transactionHash": None},
-            {"nonce": 3282, "isExecuted": False, "executionDate": None, "transactionHash": None},
+            {"nonce": 3280, "txHash": None, "failed": None},
+            {"nonce": 3282, "txHash": None, "failed": None},
         ]
 
         with (
@@ -147,9 +167,7 @@ class TestSafePendingTransactions(unittest.TestCase):
             pending = safe_main.get_pending_transactions(safe_address, "mainnet")
 
         mock_write.assert_called_once_with(safe_address, 3281)
-        self.assertEqual(
-            pending, [{"nonce": 3282, "isExecuted": False, "executionDate": None, "transactionHash": None}]
-        )
+        self.assertEqual(pending, [{"nonce": 3282, "txHash": None, "failed": None}])
 
 
 class TestCheckForPendingTransactions(unittest.TestCase):
@@ -176,14 +194,7 @@ class TestCheckForPendingTransactions(unittest.TestCase):
             return importlib.reload(safe_main)
 
     def _tx(self, nonce: int) -> dict:
-        return {
-            "nonce": str(nonce),
-            "to": "0x0000000000000000000000000000000000000abc",
-            "data": "0x",
-            "submissionDate": "2026-06-14T00:00:00Z",
-            "proposer": "0x0000000000000000000000000000000000000999",
-            "value": "0",
-        }
+        return queue_tx(nonce)
 
     def test_cache_write_uses_highest_nonce_not_lowest(self):
         """Two pending txs in DESCENDING order; cache must end at the highest.
@@ -299,7 +310,7 @@ class TestCheckForPendingTransactions(unittest.TestCase):
 
         mock_explain.assert_called_once()
         self.assertEqual(mock_explain.call_args.kwargs["hex_data"], "0x")
-        self.assertEqual(mock_explain.call_args.kwargs["target"], tx["to"])
+        self.assertEqual(mock_explain.call_args.kwargs["target"], Web3.to_checksum_address(tx["to"]))
 
     def test_short_calldata_reaches_explainer(self):
         safe_main = self._import_safe_main()
@@ -375,26 +386,13 @@ class TestCheckForPendingTransactions(unittest.TestCase):
 
     def test_multisend_upgrade_path_names_the_inner_call(self):
         from tests.test_calldata_wrappers import NEW_ORACLE_IMPL, ORACLE, upgrade_to_and_call
+        from tests.test_safe_multisend import MULTISEND_CALL_ONLY, pack_multisend
 
         safe_main = self._import_safe_main()
         transfer = "0xa9059cbb" + "00" * 64
-        tx = {
-            **self._tx(10),
-            "to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
-            "operation": 1,
-            "dataDecoded": {
-                "method": "multiSend",
-                "parameters": [
-                    {
-                        "valueDecoded": [
-                            {"to": ORACLE, "data": transfer, "value": "0"},
-                            {"to": ORACLE, "data": upgrade_to_and_call(NEW_ORACLE_IMPL), "value": "0"},
-                        ]
-                    }
-                ],
-            },
-        }
-        upgrades = safe_main._find_safe_tx_upgrades(tx, tx["to"], "0x8d80ff0a")
+        data = pack_multisend([(0, ORACLE, 0, transfer), (0, ORACLE, 0, upgrade_to_and_call(NEW_ORACLE_IMPL))])
+        tx = {**self._tx(10), "to": MULTISEND_CALL_ONLY.lower(), "operation": 1, "data": data}
+        upgrades = safe_main._find_safe_tx_upgrades(tx, MULTISEND_CALL_ONLY, data)
         self.assertEqual([(u.proxy_address, u.via) for u in upgrades], [(ORACLE, "multiSend call 2")])
 
     def test_upgrade_detection_failure_does_not_block_the_alert(self):
@@ -434,22 +432,14 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         self.assertEqual(mock_explain.call_args.kwargs["safe_tx_hash"], safe_tx_hash)
 
     def _multisend_tx(self, inner_operations: list[int]) -> dict:
+        from tests.test_safe_multisend import MULTISEND_CALL_ONLY, pack_multisend
+
         return {
             **self._tx(2296),
             "safeTxHash": "0x" + "34" * 32,
-            "to": "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
+            "to": MULTISEND_CALL_ONLY.lower(),
             "operation": 1,
-            "dataDecoded": {
-                "method": "multiSend",
-                "parameters": [
-                    {
-                        "valueDecoded": [
-                            {"operation": op, "to": f"0x{i + 1:040x}", "value": "0", "data": "0x8456cb59"}
-                            for i, op in enumerate(inner_operations)
-                        ]
-                    }
-                ],
-            },
+            "data": pack_multisend([(op, f"0x{i + 1:040x}", 0, "0x8456cb59") for i, op in enumerate(inner_operations)]),
         }
 
     def _explain_multisend(self, tx: dict):
@@ -458,7 +448,7 @@ class TestCheckForPendingTransactions(unittest.TestCase):
             safe_main._explain_safe_tx(
                 tx=tx,
                 target=tx["to"],
-                hex_data="0x8d80ff0a",
+                hex_data=tx["data"],
                 chain_id=1,
                 protocol="YEARN_MS",
                 safe_address="0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52",
@@ -541,11 +531,13 @@ class TestPendingFilterDiag(unittest.TestCase):
 
 
 def test_watched_safes_use_supported_networks() -> None:
-    """Require each watched Safe to have a queue link and a transaction service."""
-    from protocols.safe.addresses import ALL_SAFE_ADDRESSES, safe_address_network_prefix, safe_apis
+    """Require each watched Safe's network to have a chain id (for the Queue Service) and an app.safe.global prefix."""
+    from protocols.safe.addresses import ALL_SAFE_ADDRESSES, safe_address_network_prefix
+    from utils.chains import safe_network_to_chain_id
 
-    assert safe_apis.keys() == safe_address_network_prefix.keys()
-    assert {network for _, network, *_ in ALL_SAFE_ADDRESSES} <= safe_apis.keys()
+    for _, network, *_ in ALL_SAFE_ADDRESSES:
+        assert safe_network_to_chain_id(network), f"{network} has no chain id"
+        assert network in safe_address_network_prefix, f"{network} has no app.safe.global prefix"
 
 
 if __name__ == "__main__":
@@ -790,3 +782,201 @@ class TestLoadSafeApiKeys(unittest.TestCase):
 
             safe_main = importlib.reload(safe_main)
         self.assertEqual([safe_main._next_api_key() for _ in range(4)], ["k1", "k2", "k3", "k1"])
+
+
+class TestQueueServiceMigration(unittest.TestCase):
+    """Safe Queue Service request shape, response fields and failure handling."""
+
+    SAFE = "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52"
+    BOT = "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"
+    OWNER = "0x962228a90eac69238c7d1f216d80037e61ea9255"
+    _DIAG = TestCheckForPendingTransactions._DIAG
+
+    def _import_safe_main(self):
+        with patch.dict(os.environ, {"SAFE_API_KEY": "test-key"}):
+            import protocols.safe.main as safe_main
+
+            return importlib.reload(safe_main)
+
+    def _tx(self, nonce: int = 10, **fields) -> dict:
+        return queue_tx(nonce, **fields)
+
+    def _alert(self, safe_main, txs: list[dict], protocol: str = "YEARN_MS", expected: set[str] | None = None):
+        """Run the alert loop for ``txs`` and return the send_telegram_message mock."""
+        proposers = {("mainnet", self.SAFE.lower()): expected} if expected else {}
+        with (
+            patch.object(safe_main, "get_pending_transactions", return_value=txs),
+            patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", proposers),
+            patch.object(safe_main, "_pending_filter_diag", return_value=self._DIAG),
+            patch.object(safe_main, "_explain_safe_tx", return_value=None),
+            patch.object(safe_main, "send_telegram_message") as mock_send,
+            patch.object(safe_main, "write_last_executed_nonce_to_file"),
+        ):
+            safe_main.check_for_pending_transactions(self.SAFE, "mainnet", protocol)
+        return mock_send
+
+    # --- request -------------------------------------------------------------
+
+    def test_request_targets_queue_service_with_chain_id_and_nonce_order(self):
+        safe_main = self._import_safe_main()
+        ok = Mock(status_code=200)
+        ok.json.return_value = {"results": []}
+
+        with patch.object(safe_main.requests, "get", return_value=ok) as mock_get:
+            safe_main.get_safe_transactions(self.SAFE, "base-main", executed=False)
+
+        url = mock_get.call_args.args[0]
+        self.assertEqual(url, f"https://api.safe.global/queue/api/v1/safes/{self.SAFE}/multisig-transactions")
+        self.assertFalse(url.endswith("/"))
+        self.assertEqual(
+            mock_get.call_args.kwargs["params"],
+            {"chainId": 8453, "limit": 10, "nonceOrder": "desc", "executed": "false"},
+        )
+
+    def test_unknown_network_raises_before_any_request(self):
+        safe_main = self._import_safe_main()
+        with patch.object(safe_main.requests, "get") as mock_get, self.assertRaises(ValueError):
+            safe_main.get_safe_transactions(self.SAFE, "not-a-network")
+        mock_get.assert_not_called()
+
+    def test_validation_error_is_raised_not_swallowed(self):
+        safe_main = self._import_safe_main()
+        rejected = Mock(status_code=422, text='{"detail": "Invalid chainId"}')
+
+        with (
+            patch.object(safe_main.requests, "get", return_value=rejected),
+            self.assertRaises(safe_main.SafeApiRequestError) as ctx,
+        ):
+            safe_main.get_safe_transactions(self.SAFE, "mainnet")
+        self.assertIn("422", str(ctx.exception))
+        self.assertIn("Invalid chainId", str(ctx.exception))
+
+    def test_rejected_key_raises_auth_error(self):
+        safe_main = self._import_safe_main()
+        with (
+            patch.object(safe_main.requests, "get", return_value=Mock(status_code=401)),
+            self.assertRaises(safe_main.SafeApiAuthError),
+        ):
+            safe_main.get_safe_transactions(self.SAFE, "mainnet")
+
+    # --- proposer escalation ---------------------------------------------------
+
+    def _assert_quiet(self, mock_send) -> None:
+        message, _protocol, disable_notification = mock_send.call_args.args
+        self.assertNotIn("UNEXPECTED PROPOSER", message)
+        self.assertTrue(disable_notification)
+
+    def _assert_critical(self, mock_send) -> None:
+        message, _protocol, disable_notification = mock_send.call_args.args
+        self.assertIn("UNEXPECTED PROPOSER", message)
+        self.assertFalse(disable_notification)
+
+    def test_delegate_proposal_by_known_bot_is_quiet(self):
+        safe_main = self._import_safe_main()
+        tx = self._tx(proposer=self.OWNER, proposedVia="DELEGATE", proposedBy=self.BOT)
+        self._assert_quiet(self._alert(safe_main, [tx], expected={self.BOT}))
+
+    def test_nested_owner_signer_on_allowlist_does_not_make_tx_expected(self):
+        safe_main = self._import_safe_main()
+        tx = self._tx(proposer=self.OWNER, proposedVia="NESTED_OWNER", proposedBy=self.BOT)
+        self._assert_critical(self._alert(safe_main, [tx], expected={self.BOT}))
+
+    def test_unknown_proposal_with_null_proposer_is_critical(self):
+        safe_main = self._import_safe_main()
+        tx = self._tx(proposer=None, proposedVia="UNKNOWN", proposedBy=None)
+        self._assert_critical(self._alert(safe_main, [tx], expected={self.BOT}))
+
+    def test_unrecognized_proposed_via_does_not_trust_proposed_by(self):
+        safe_main = self._import_safe_main()
+        tx = self._tx(proposer=self.OWNER, proposedVia="SOMETHING_NEW", proposedBy=self.BOT)
+        self._assert_critical(self._alert(safe_main, [tx], expected={self.BOT}))
+
+    def test_owner_proposal_by_known_address_is_quiet(self):
+        safe_main = self._import_safe_main()
+        tx = self._tx(proposer=self.BOT, proposedVia="OWNER", proposedBy=None)
+        self._assert_quiet(self._alert(safe_main, [tx], expected={self.BOT}))
+
+    # --- response fields -------------------------------------------------------
+
+    def test_alert_shows_created_date_and_checksummed_target(self):
+        safe_main = self._import_safe_main()
+        message = self._alert(safe_main, [self._tx(created="2026-11-17T10:37:02Z")]).call_args.args[0]
+        self.assertIn("📅 Submission Date: 2026-11-17T10:37:02Z", message)
+        self.assertIn("0x0000000000000000000000000000000000000aBc", message)
+
+    def test_null_destination_is_the_zero_address(self):
+        safe_main = self._import_safe_main()
+        message = self._alert(safe_main, [self._tx(to=None)]).call_args.args[0]
+        self.assertIn(f"Target Contract Address: {safe_main.ZERO_ADDRESS}", message)
+
+    def test_euler_vault_matches_lowercase_target(self):
+        safe_main = self._import_safe_main()
+        vault = "0x797dd80692c3b2dadabce8e30c07fde5307d48a9"
+        mock_send = self._alert(safe_main, [self._tx(11, to=vault), self._tx(10)], protocol="EULER")
+        self.assertEqual(mock_send.call_count, 1)
+
+    def test_null_calldata_does_not_crash_any_protocol_path(self):
+        safe_main = self._import_safe_main()
+        vault = "0x797dd80692c3b2dadabce8e30c07fde5307d48a9"
+        cases = {
+            "PENDLE": (self._tx(data=None), 0),
+            "EULER": (self._tx(to=vault, data=None), 1),
+            "LIDO": (self._tx(data=None), 1),
+        }
+        for protocol, (tx, alerts) in cases.items():
+            with self.subTest(protocol):
+                self.assertEqual(self._alert(safe_main, [tx], protocol=protocol).call_count, alerts)
+
+    def test_pendle_alerts_on_privileged_call_only(self):
+        from tests.test_calldata_wrappers import NEW_ORACLE_IMPL, ORACLE, pendle_aggregate, upgrade_to_and_call
+
+        safe_main = self._import_safe_main()
+        upgrade = self._tx(11, data=pendle_aggregate([(ORACLE, 0, upgrade_to_and_call(NEW_ORACLE_IMPL))]))
+        routine = self._tx(10, data=pendle_aggregate([(ORACLE, 0, "0x8456cb59")]))
+        with (
+            patch("utils.proxy.get_current_implementation", return_value=None),
+            patch("utils.upgrade_diff.publish_upgrade_diff", return_value=None),
+        ):
+            mock_send = self._alert(safe_main, [upgrade, routine], protocol="PENDLE")
+        self.assertEqual(mock_send.call_count, 1)
+        self.assertIn("#️⃣ Nonce: 11", mock_send.call_args.args[0])
+
+    # --- per-safe isolation ------------------------------------------------------
+
+    def test_one_failing_safe_alerts_and_the_rest_still_run(self):
+        safe_main = self._import_safe_main()
+        safes = [["PENDLE", "mainnet", "0x1"], ["LIDO", "mainnet", "0x2"]]
+
+        with (
+            patch.object(safe_main, "check_llm_credits"),
+            patch.object(safe_main, "ALL_SAFE_ADDRESSES", safes),
+            patch.object(safe_main, "run_for_network", side_effect=[TypeError("boom"), None]) as mock_run,
+            patch.object(safe_main, "send_error_message") as mock_error,
+        ):
+            safe_main.main()
+
+        self.assertEqual(
+            [c.args for c in mock_run.call_args_list], [("mainnet", "0x1", "PENDLE"), ("mainnet", "0x2", "LIDO")]
+        )
+        mock_error.assert_called_once()
+        message, label = mock_error.call_args.args
+        self.assertEqual(label, "yearn")
+        self.assertEqual(mock_error.call_args.kwargs["alert_protocol"], "yearn-internal")
+        self.assertIn("0x1", message)
+        self.assertIn("TypeError: boom", message)
+
+    def test_rejected_key_stops_the_run(self):
+        safe_main = self._import_safe_main()
+        safes = [["LIDO", "mainnet", "0x1"], ["LIDO", "mainnet", "0x2"]]
+
+        with (
+            patch.object(safe_main, "check_llm_credits"),
+            patch.object(safe_main, "ALL_SAFE_ADDRESSES", safes),
+            patch.object(safe_main, "run_for_network", side_effect=safe_main.SafeApiAuthError("bad key")) as mock_run,
+            patch.object(safe_main, "send_error_message") as mock_error,
+            self.assertRaises(safe_main.SafeApiAuthError),
+        ):
+            safe_main.main()
+
+        mock_run.assert_called_once()
+        mock_error.assert_not_called()

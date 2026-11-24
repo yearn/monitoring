@@ -11,18 +11,17 @@ from web3 import Web3
 
 from protocols.safe.addresses import (
     ALL_SAFE_ADDRESSES,
-    PROXY_UPGRADE_SIGNATURES,
+    SAFE_QUEUE_API_URL,
     YEARN_EXPECTED_PROPOSERS,
     safe_address_network_prefix,
-    safe_apis,
 )
+from protocols.safe.filters import should_alert
 from protocols.safe.multisend import (
     build_context_note,
     extract_inner_calls,
     is_simulatable_multisend,
     safe_utility_label,
 )
-from protocols.safe.specific import handle_pendle
 from utils.cache import (
     cache_filename,
     get_last_executed_nonce_from_file,
@@ -49,7 +48,9 @@ load_dotenv()
 logger = get_logger("safe")
 
 SAFE_WEBSITE_URL = "https://app.safe.global/transactions/queue?safe="
-provider_url_mainnet = os.getenv("PROVIDER_URL_MAINNET")
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+# How much of an unexpected Safe API error body to put in the error alert.
+_ERROR_BODY_CHARS = 500
 
 # Values treated as "no key": unset env templates and serialized nulls.
 _PLACEHOLDER_KEYS = {"null", "none", "nil", "undefined", "false", "0", "changeme"}
@@ -118,6 +119,14 @@ class SafeApiQuotaExhausted(Exception):
         self.reset_seconds = reset_seconds
 
 
+class SafeApiAuthError(Exception):
+    """Raised when the Safe API rejects the API key; every safe in the run would fail the same way."""
+
+
+class SafeApiRequestError(Exception):
+    """Raised when the Safe API rejects a request it should accept (e.g. 422), so the safe is not monitored."""
+
+
 def _next_api_key() -> str | None:
     """Return the next API key that still has quota, or None when all are exhausted."""
     for _ in range(len(_api_keys)):
@@ -175,18 +184,34 @@ def _quota_reset_seconds(response: requests.Response) -> int | None:
 def get_safe_transactions(
     safe_address: str, network_name: str, executed: bool | None = None, limit: int = 10, max_retries: int = 3
 ) -> list[dict]:
-    """
-    Docs: https://docs.safe.global/core-api/transaction-service-reference/mainnet#List-a-Safe's-Multisig-Transactions
+    """List a Safe's multisig transactions from the Safe Queue Service, highest nonce first.
+
+    Docs: https://docs.safe.global/core-api/safe-queue-service-reference
+
+    Args:
+        safe_address: The Safe's address.
+        network_name: Safe network name from the watchlist (e.g. ``"mainnet"``).
+        executed: Filter on execution state; ``None`` returns both.
+        limit: Page size (the service accepts 1–100).
+        max_retries: Attempts for transport errors, rate limits and 5xx responses.
+
+    Returns:
+        The transactions, or ``[]`` when retries run out.
 
     Raises:
         SafeApiQuotaExhausted: When every API key has used up its quota; retrying
             would only burn requests until the window resets.
+        SafeApiAuthError: When the service rejects the API key.
+        SafeApiRequestError: When the service rejects the request (e.g. 422).
+        ValueError: When ``network_name`` has no known chain id.
     """
+    chain_id = safe_network_to_chain_id(network_name)
+    if not chain_id:
+        raise ValueError(f"No chain id for Safe network {network_name!r}")
+    endpoint = f"{SAFE_QUEUE_API_URL}/api/v1/safes/{safe_address}/multisig-transactions"
 
-    base_url = safe_apis[network_name] + "/api/v2"
-    endpoint = f"{base_url}/safes/{safe_address}/multisig-transactions/"
-
-    params = {"limit": limit, "ordering": "-nonce"}  # Order by nonce descending
+    # The service silently ignores unknown parameters, so a misspelled one fails quietly.
+    params: dict[str, str | int] = {"chainId": chain_id, "limit": limit, "nonceOrder": "desc"}
 
     if executed is not None:
         params["executed"] = str(executed).lower()
@@ -218,7 +243,7 @@ def get_safe_transactions(
         if response.status_code == 200:
             return response.json()["results"]
         elif response.status_code == 401:
-            raise ValueError("Invalid API key. Please check your SAFE_API_KEY.")
+            raise SafeApiAuthError("Invalid API key. Please check your SAFE_API_KEY.")
         elif response.status_code == 429:
             reset_seconds = _quota_reset_seconds(response)
             if reset_seconds is not None:
@@ -245,8 +270,12 @@ def get_safe_transactions(
             attempt += 1
             continue
         else:
-            logger.error("Error: %s\nResponse text: %s", response.status_code, response.text)
-            return []
+            # 422 is the Queue Service's validation/auth rejection. Returning [] here would
+            # silently stop alerts for this safe, so surface it instead.
+            raise SafeApiRequestError(
+                f"Safe API returned {response.status_code} for {safe_address} on {network_name}: "
+                f"{response.text[:_ERROR_BODY_CHARS]}"
+            )
 
     logger.error("Failed after %s retries for %s on %s", max_retries, safe_address, network_name)
     return []
@@ -270,13 +299,14 @@ def get_safe_current_nonce(safe_address: str, network_name: str) -> int | None:
 
 
 def _is_executed_safe_tx(tx: dict) -> bool:
-    """Return True for tx-service rows that are already executed.
+    """Return True for Queue Service rows that are already executed.
 
     The API request asks for ``executed=false``, but the monitor treats the
     response defensively: if an item carries any executed marker, it must never
-    reach the alert path.
+    reach the alert path. The Queue Service sets ``txHash`` once a tx executes,
+    and ``failed`` (``null`` until then) to its outcome.
     """
-    return tx.get("isExecuted") is True or bool(tx.get("executionDate")) or bool(tx.get("transactionHash"))
+    return bool(tx.get("txHash")) or tx.get("failed") is not None
 
 
 def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]:
@@ -287,7 +317,7 @@ def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]
     - Dead-slot: nonce < safe.currentNonce. These remain in the API as
       ``executed=false`` because a competing tx at the same nonce executed
       first, but they will never run themselves.
-    - Executed rows: any tx-service row with executed markers. These must never
+    - Executed rows: any Queue Service row with executed markers. These must never
       alert even if the API includes them in an ``executed=false`` response.
 
     The baseline is the higher of (a) the last nonce we already alerted on
@@ -435,6 +465,19 @@ def _upgrade_alert_lines(
     return lines
 
 
+def _proposer_and_delegate(tx: dict) -> tuple[str, str]:
+    """Return the lowercased (proposer, delegate) a Yearn multisig tx is matched on.
+
+    ``proposedBy`` counts as a delegate only when ``proposedVia`` is ``DELEGATE``.
+    For ``NESTED_OWNER`` it is an EOA acting through an owner Safe, which must
+    not make the tx look expected when that owner Safe (``proposer``) is not.
+    ``proposer`` is null when ``proposedVia`` is ``UNKNOWN``.
+    """
+    proposer = (tx.get("proposer") or "").lower()
+    delegate = (tx.get("proposedBy") or "").lower() if tx.get("proposedVia") == "DELEGATE" else ""
+    return proposer, delegate
+
+
 def check_for_pending_transactions(safe_address: str, network_name: str, protocol: str) -> None:
     pending_transactions = get_pending_transactions(safe_address, network_name)
     expected_proposers = YEARN_EXPECTED_PROPOSERS.get((network_name, safe_address.lower()), set())
@@ -454,11 +497,13 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
         highest_alerted_nonce = None
         for tx in pending_transactions:
             nonce = int(tx["nonce"])
+            # The Queue Service returns null for empty calldata and for a zero-address
+            # destination, and lowercases addresses.
+            hex_data = tx.get("data") or "0x"
+            target_contract = Web3.to_checksum_address(tx.get("to") or ZERO_ADDRESS)
 
-            target_contract = tx["to"]
-
-            if protocol == "EULER" and target_contract != "0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9":
-                # send message for txs that target only vaults that we use in our strategies
+            if not should_alert(protocol, tx, target_contract, hex_data):
+                logger.info("Skipping nonce %s on %s: outside the %s alert rule", nonce, safe_address, protocol)
                 continue
 
             # Yearn multisigs (expected_proposers is non-empty) always get an
@@ -468,8 +513,7 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
             # critical alert — it could mean a compromised proposer.
             is_yearn_multisig = bool(expected_proposers)
             unexpected_proposer = False
-            tx_proposer = (tx.get("proposer") or "").lower()
-            tx_delegate = (tx.get("proposedByDelegate") or "").lower()
+            tx_proposer, tx_delegate = _proposer_and_delegate(tx)
             if is_yearn_multisig:
                 matched = next((a for a in (tx_proposer, tx_delegate) if a and a in expected_proposers), None)
                 if matched:
@@ -482,11 +526,12 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
                 else:
                     unexpected_proposer = True
                     logger.warning(
-                        "Nonce %s on %s proposed by UNEXPECTED address (proposer=%s delegate=%s)",
+                        "Nonce %s on %s proposed by UNEXPECTED address (proposer=%s via=%s proposedBy=%s)",
                         nonce,
                         safe_address,
                         tx_proposer or "?",
-                        tx_delegate or "?",
+                        tx.get("proposedVia") or "?",
+                        tx.get("proposedBy") or "?",
                     )
 
             message = ""
@@ -495,7 +540,8 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
                     "⚠️🚨 *CRITICAL: UNEXPECTED PROPOSER* 🚨⚠️\n"
                     "This Yearn multisig tx was NOT proposed by a known Yearn bot/EOA!\n"
                     f"👤 Proposer: {tx_proposer or 'unknown'}\n"
-                    f"👤 Proposed by delegate: {tx_delegate or 'none'}\n\n"
+                    f"👤 Proposed via: {escape_markdown(str(tx.get('proposedVia') or 'unknown'))}"
+                    f" by {tx.get('proposedBy') or 'none'}\n\n"
                 )
             message += (
                 "🚨 QUEUED TX DETECTED 🚨\n"
@@ -504,7 +550,7 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
                 f"🔗 Safe URL: {get_safe_url(safe_address, network_name)}\n"
                 f"#️⃣ Nonce: {nonce}\n"
                 f"📜 Target Contract Address: {target_contract}\n"
-                f"📅 Submission Date: {tx['submissionDate']}"
+                f"📅 Submission Date: {tx.get('created') or 'unknown'}"
             )
             # Find the additional info for the current safe address
             additional_info = None
@@ -517,21 +563,6 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
             if additional_info:
                 message += f"\nℹ️ Additional Info: {escape_markdown(additional_info)}"
 
-            # pendle uses specific owner of the contracts where we need to decode the data
-            if protocol == "PENDLE":
-                hex_data = tx["data"]
-                # if hex data doesnt contain any of the proxy upgrade signatures, skip
-                if not any(signature in hex_data for signature in PROXY_UPGRADE_SIGNATURES):
-                    logger.info("Skipping tx with nonce %s as it does not contain any proxy upgrade signatures.", nonce)
-                    continue
-
-                try:
-                    if network_name == "mainnet":
-                        message += handle_pendle(provider_url_mainnet, hex_data)
-                except Exception as e:
-                    logger.error("Cannot decode Pendle aggregate calls: %s", e)
-
-            hex_data = tx.get("data") or "0x"
             chain_id = safe_network_to_chain_id(network_name)
             # Proxy upgrades, including ones nested in a timelock call or a
             # multisend (best-effort: an RPC failure must not block the alert).
@@ -577,7 +608,7 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
             if highest_alerted_nonce is None or nonce > highest_alerted_nonce:
                 highest_alerted_nonce = nonce
                 # Persist progress after each delivered alert, but never move
-                # the scalar nonce cache backwards. The Safe tx-service returns
+                # the scalar nonce cache backwards. The Safe Queue Service returns
                 # pending txs in DESCENDING nonce order, so a lower nonce must
                 # not overwrite a higher nonce already alerted in this batch.
                 write_last_executed_nonce_to_file(safe_address, highest_alerted_nonce)
@@ -632,6 +663,25 @@ def report_quota_exhausted(exc: SafeApiQuotaExhausted, now: float | None = None)
     write_last_value_to_file(cache_filename, CACHE_KEY_QUOTA_ALERTED_UNTIL, int(reset_at))
 
 
+def report_safe_failure(protocol: str, network_name: str, safe_address: str, exc: Exception) -> None:
+    """Alert that one safe could not be checked this run, and carry on with the others.
+
+    Args:
+        protocol: Protocol key from the watchlist.
+        network_name: Safe network name.
+        safe_address: The safe that failed.
+        exc: The exception raised while checking it.
+    """
+    logger.error("Safe check failed for %s %s on %s", protocol, safe_address, network_name, exc_info=exc)
+    send_error_message(
+        f"Safe monitor could not check {protocol} Safe {safe_address} on {network_name}; "
+        f"its queued txs are not being alerted on this run.\n{type(exc).__name__}: {exc}",
+        ERROR_LABEL,
+        source="safe_check_failed",
+        alert_protocol=ALERT_PROTOCOL,
+    )
+
+
 def main():
     last_api_call_time = 0
     request_counter = 0
@@ -647,6 +697,11 @@ def main():
             # Every remaining safe would hit the same exhausted keys; stop the run.
             report_quota_exhausted(exc)
             return
+        except SafeApiAuthError:
+            # A rejected key fails every safe the same way: let the run crash and alert once.
+            raise
+        except Exception as exc:  # noqa: BLE001 - one safe's failure must not skip the rest
+            report_safe_failure(safe[0], safe[1], safe[2], exc)
         request_counter += 1
 
 

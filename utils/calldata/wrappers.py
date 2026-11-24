@@ -17,6 +17,8 @@ Supported wrappers:
     - Yearn governance Executor: ``execute(bytes)``, whose script packs each call
       as a 32-byte header ``target (160 bits) | calldata size (96 bits)`` followed
       by the calldata
+    - Pendle governance proxy: ``aggregate((address,uint256,bytes)[])``, which
+      runs each ``(target, value, data)`` call in order
 """
 
 from collections.abc import Callable
@@ -58,6 +60,11 @@ def _compound(values: tuple) -> list[tuple[str, bytes]]:
     if signature:
         data = function_signature_to_4byte_selector(signature) + data
     return [(target, data)]
+
+
+def _aggregate(values: tuple) -> list[tuple[str, bytes]]:
+    """((target, value, data)[],) — Pendle governance proxy aggregate."""
+    return [(target, data) for target, _value, data in values[0]]
 
 
 def _maple(values: tuple) -> list[tuple[str, bytes]]:
@@ -127,13 +134,26 @@ _WRAPPER_SIGNATURES: dict[str, _Extractor] = {
     "executeTransaction(address,uint256,string,bytes,uint256)": _compound,
     "scheduleProposals(address[],bytes[])": _maple,
     PACKED_SCRIPT_SIGNATURE: _packed_script,
+    "aggregate((address,uint256,bytes)[])": _aggregate,
 }
 
 
 def _parse_types(signature: str) -> list[str]:
-    """Top-level parameter types of a signature with no tuple parameters."""
+    """Top-level parameter types of a signature; tuple types stay whole, e.g. ``(address,bytes)[]``."""
     inner = signature[signature.index("(") + 1 : -1]
-    return inner.split(",") if inner else []
+    types: list[str] = []
+    depth = 0
+    current = ""
+    for char in inner:
+        if char == "," and depth == 0:
+            types.append(current)
+            current = ""
+            continue
+        depth += {"(": 1, ")": -1}.get(char, 0)
+        current += char
+    if current:
+        types.append(current)
+    return types
 
 
 _WRAPPERS: dict[str, tuple[str, list[str], _Extractor]] = {
@@ -143,7 +163,7 @@ _WRAPPERS: dict[str, tuple[str, list[str], _Extractor]] = {
 
 # Wrappers whose inner calls run inside the wrapping transaction. The others
 # only queue their inner calls for a later transaction.
-_EXECUTING_WRAPPERS = frozenset({"execute", "executeBatch", "executeTransaction"})
+_EXECUTING_WRAPPERS = frozenset({"execute", "executeBatch", "executeTransaction", "aggregate"})
 
 
 def is_wrapper_call(data_hex: str) -> bool:
