@@ -466,7 +466,7 @@ def _validate_usd_supply(supply_entry: dict[str, Any]) -> None:
     """Establish that raw supply is the USD liability denominator.
 
     Accountable documents ``total_supply.fx`` as 1 for USD-pegged feeds, but the
-    live 3Jane response currently omits the field. When present, require it to be
+    recorded sample response omits the field. When present, require it to be
     exactly 1.
 
     When absent, the invariant is already enforced by the net cross-check in
@@ -512,7 +512,7 @@ def parse_report(payload: Any, config: AccountableFeedConfig, now_ms: int) -> Ac
     # The docs define collateralization and net against liabilities, which equal
     # raw total_supply only for a USD-pegged feed. Validate the explicit fx when
     # available; the net cross-check below enforces the same invariant when it
-    # is absent, as it is on the live 3Jane response.
+    # is absent, as it is on the recorded sample response.
     _validate_usd_supply(supply_entry)
 
     collateralization = total_reserves / total_supply

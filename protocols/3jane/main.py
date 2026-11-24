@@ -11,17 +11,17 @@ Monitors:
 - USD3 protection — alerts when senior-tranche OC / equivalent junior buffer drops below thresholds
 - Insurance fund — alerts on waUSDC outflows of at least $50k
 - Withdraw liquidity — alerts when USD3 availableWithdrawLimit falls below $4M
-
-Threshold alerts (USD3 protection, withdraw liquidity) are deduped via
-cache: the alerted value is stored and no new alert is sent until the value
-drops below it; recovering above the threshold re-arms the alert.
 - Vault shutdown status — alerts once if either vault enters emergency shutdown
 - Debt cap changes — alerts when ProtocolConfig debt cap is modified
 - Nominal sUSD3 backing floor — alerts on change and when floor > sUSD3 backing
 - Protocol-wide pause — alerts once when ProtocolConfig IS_PAUSED flips to true
-- Accountable Proof of Solvency — collateral ratio thresholds plus feed freshness
-  and availability. HIGH and CRITICAL use the same ``3jane`` protocol key as the
-  onchain checks, so they dispatch the same way.
+- Borrower default watch — Envio-backed delinquency/default milestones
+- DefiLlama Verified — report availability and originator/cash source freshness
+
+Threshold alerts (USD3 protection, withdraw liquidity) are deduped via cache:
+the alerted value is stored and no new alert is sent until the value worsens by
+at least a minimum step (or USD3 OC escalates to CRITICAL); recovering above the
+threshold re-arms the alert.
 """
 
 import json
@@ -29,14 +29,12 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from decimal import Decimal
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from web3 import Web3
 
 from utils.abi import load_abi
-from utils.accountable import AccountableFeedConfig, AccountableReport, AccountableStatus, fetch_report
 from utils.alert import Alert, AlertSeverity, send_alert
 from utils.cache import (
     HOURLY_CACHE_STALE_AFTER_SECONDS,
@@ -47,8 +45,15 @@ from utils.cache import (
     write_last_value_with_timestamp_to_file,
 )
 from utils.chains import Chain
+from utils.defillama_verified import (
+    DefiLlamaVerifiedError,
+    VerifiedFeedConfig,
+    VerifiedLoanReport,
+    fetch_report,
+    report_issues,
+)
 from utils.drawdown import peak_drawdown_dispatch_eligible
-from utils.formatting import format_age, format_duration, format_usd, format_with_suffix
+from utils.formatting import format_duration, format_usd, format_with_suffix
 from utils.logger import get_logger
 from utils.telegram import escape_markdown
 from utils.web3_wrapper import ChainManager
@@ -74,11 +79,29 @@ ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 ENVIO_GRAPHQL_URL = os.getenv("ENVIO_GRAPHQL_URL")
 ENVIO_PAGE_SIZE = int(os.getenv("THREE_JANE_ENVIO_PAGE_SIZE", "1000"))
 
+# DefiLlama supplies dates without publication times for loan documents.
+# These are operational limits with grace, since the API omits source cadences.
+VERIFIED_FEED = VerifiedFeedConfig(
+    slug=PROTOCOL,
+    endpoint_url=os.getenv("THREE_JANE_DEFILLAMA_VERIFIED_URL"),
+    report_max_age=timedelta(hours=3),
+    loan_max_ages={
+        ("Warehouse Loans", "LendSwift"): timedelta(days=10),
+        ("Warehouse Loans", "GigFi"): timedelta(days=10),
+        ("Forward Flows", "Slope"): timedelta(days=10),
+        ("Forward Flows", "Settle"): timedelta(days=38),
+    },
+    balance_max_ages={("Bank Cash", "Erebor Bank"): timedelta(hours=3)},
+)
+VERIFIED_AVAILABILITY_ALERTS = {2: AlertSeverity.LOW, 6: AlertSeverity.MEDIUM}
+# Distinct reportDates kept per originator, so the real document cadence can be
+# measured before the loan_max_ages estimates above are tightened.
+VERIFIED_DATE_HISTORY_LENGTH = 12
+
 # USDC has 6 decimals, USD3 and sUSD3 inherit this
 DECIMALS = 6
 ONE_SHARE = 10**DECIMALS
 RATE_SCALE = 10**18
-SECONDS_PER_MINUTE = 60
 SECONDS_PER_DAY = 86_400
 
 # --- Cache Keys ---
@@ -105,11 +128,11 @@ CACHE_KEY_INSURANCE_FUND_SHARES = "3JANE_INSURANCE_FUND_SHARES"
 CACHE_KEY_BORROWER_DEFAULT_WATCH_PREFIX = "3JANE_BORROWER_DEFAULT_WATCH"
 CACHE_KEY_USD3_OC_ALERTED = "3JANE_USD3_OC_ALERTED"
 CACHE_KEY_WITHDRAW_LIMIT_ALERTED = "3JANE_WITHDRAW_LIMIT_ALERTED"
-CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED = "3JANE_ACCOUNTABLE_HIGH_ALERTED"
-CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED = "3JANE_ACCOUNTABLE_CRITICAL_ALERTED"
-CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK = "3JANE_ACCOUNTABLE_FAILURE_STREAK"
-CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED = "3JANE_ACCOUNTABLE_HEALTH_ALERTED"
-CACHE_KEY_ACCOUNTABLE_STALE_ALERTED = "3JANE_ACCOUNTABLE_STALE_ALERTED"
+CACHE_KEY_VERIFIED_FAILURE_STREAK = "3JANE_DEFILLAMA_VERIFIED_FAILURE_STREAK"
+# Highest VERIFIED_AVAILABILITY_ALERTS level delivered during the current outage.
+CACHE_KEY_VERIFIED_ALERTED_STREAK = "3JANE_DEFILLAMA_VERIFIED_ALERTED_STREAK"
+CACHE_KEY_VERIFIED_ISSUES = "3JANE_DEFILLAMA_VERIFIED_ISSUES"
+CACHE_KEY_VERIFIED_REPORT_DATES = "3JANE_DEFILLAMA_VERIFIED_REPORT_DATES"
 
 # --- ProtocolConfig keys (keccak256 of the string label) ---
 CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR = Web3.keccak(text="SUSD3_NOMINAL_BACKING_FLOOR")
@@ -123,33 +146,14 @@ USD3_OC_HIGH_THRESHOLD = 1.11  # Alert when USD3 OC drops below the 111% target
 USD3_OC_CRITICAL_THRESHOLD = 1.06  # Alert when USD3 OC drops below 106%
 INSURANCE_FUND_OUTFLOW_THRESHOLD = 50_000  # USDC
 WITHDRAW_LIMIT_THRESHOLD = 4_000_000  # USDC, alert when USD3 availableWithdrawLimit falls below
-
-# --- Accountable Proof of Solvency ---
-ACCOUNTABLE_FEED = AccountableFeedConfig(
-    dfid="100000026",
-    protocol=PROTOCOL,
-    dashboard_url=os.getenv("THREE_JANE_ACCOUNTABLE_URL", "https://accountable.3jane.xyz/dashboard"),
-    message_url=os.getenv("THREE_JANE_ACCOUNTABLE_MESSAGE_URL", "https://accountable.3jane.xyz/"),
-    dashboard_type="three-jane",
-    required_sources=(
-        "LendSwift - Warehouse Senior Note",
-        "USD3 Minted Liabilities",
-        "Slope - Forward Flows",
-        "USD3 On-Chain Reserves",
-    ),
-    # Correct only the known DAILY/weekly disagreement; honor future cadence changes.
-    source_frequency_corrections=(("Slope - Forward Flows", "DAILY", "WEEKLY"),),
-    # Permit one missed 15-minute refresh (aggregate report and on-chain sources),
-    # or a midnight-dated weekly report uploaded by midday UTC the day after it is due.
-    grace_by_cadence_seconds=(
-        (15 * SECONDS_PER_MINUTE, 30 * SECONDS_PER_MINUTE),
-        (7 * SECONDS_PER_DAY, SECONDS_PER_DAY * 3 // 2),
-    ),
-)
-# TODO: Recalibrate both thresholds after Accountable includes 3Jane's idle
-# funds in the reported reserve totals. These values are temporary test bands.
-ACCOUNTABLE_CRITICAL_RATIO = Decimal("0.95")
-ACCOUNTABLE_HIGH_RATIO = Decimal("0.99")
+# Minimum worsening before a still-breached threshold alert re-fires. Without a
+# step, interest accrual and dust movements re-alert on every sub-basis-point dip.
+USD3_OC_REALERT_STEP = 0.005  # 0.5 percentage points of OC
+WITHDRAW_LIMIT_REALERT_STEP = 1_000_000  # USDC
+# Below this the vault is effectively drained. Reaching it always alerts, so a
+# limit alerted under $1M cannot drain to $0 silently just because the
+# remaining drop is smaller than the step.
+WITHDRAW_LIMIT_DRAINED_THRESHOLD = 10_000  # USDC
 
 THREE_JANE_BORROWER_DEFAULT_WATCH_QUERY = """
 query GetThreeJaneBorrowerDefaultWatch($limit: Int!, $offset: Int!) {
@@ -242,19 +246,37 @@ def _get_alerted_value(cache_key: str) -> float:
         return -1.0
 
 
-def should_alert_value_drop(cache_key: str, value: float, threshold: float) -> bool:
+def should_alert_value_drop(
+    cache_key: str,
+    value: float,
+    threshold: float,
+    min_step: float = 0.0,
+    escalate_below: float | None = None,
+) -> bool:
     """Decide whether a lower-is-worse threshold alert should be sent.
 
-    Deduped like the debt cap check: repeat runs stay silent until the metric
-    drops below the last alerted value (worsens). Recovering to or above the
-    threshold clears the cache so the next breach alerts again. The caller
-    must record the value with mark_alerted_value() only after send_alert()
-    returns, so a failed Telegram send retries on the next run.
+    Repeat runs stay silent until the metric drops at least ``min_step`` below
+    the last alerted value, so slow drift and dust movements cannot re-alert
+    every run. Crossing ``escalate_below`` always alerts, so a severity
+    escalation is never swallowed by the step. Once alerted below
+    ``escalate_below``, the escalation re-arms only after the metric recovers to
+    at least ``escalate_below + min_step`` (hysteresis, so a value flapping
+    around the boundary cannot re-fire every run); re-arming resets the baseline
+    to ``escalate_below`` rather than the current value, so a later dip that
+    stays above the escalation level cannot re-alert at the lower severity while
+    the metric is still better than when it was last alerted. Recovering to or
+    above the threshold clears the cache so the next breach alerts again. The
+    caller must record the value with mark_alerted_value() only after
+    send_alert() returns, so a failed Telegram send retries on the next run.
 
     Args:
         cache_key: Cache key holding the last alerted value (-1 = none outstanding).
         value: Current metric value; lower is worse.
         threshold: Alert when the value drops below this.
+        min_step: Minimum further drop below the last alerted value that re-alerts;
+            also the recovery margin above ``escalate_below`` needed to re-arm it.
+        escalate_below: Optional stricter level whose crossing always alerts, even
+            when the drop is smaller than ``min_step``.
 
     Returns:
         True when a new alert should be sent.
@@ -264,8 +286,21 @@ def should_alert_value_drop(cache_key: str, value: float, threshold: float) -> b
         return False
 
     cached = _get_alerted_value(cache_key)
-    should_alert = not 0 <= cached <= value
+    if cached < 0:
+        return True
+    escalated = escalate_below is not None and value < escalate_below <= cached
+    if min_step > 0:
+        # Inclusive so a drop of exactly ``min_step`` (e.g. $1M -> $0) still alerts.
+        worsened = value <= cached - min_step
+    else:
+        worsened = value < cached
+    should_alert = escalated or worsened
     if not should_alert:
+        # Recovered clear of the escalation band (by at least one step): re-arm it
+        # by resetting the baseline to the escalation level. Smaller rebounds keep
+        # the old baseline.
+        if escalate_below is not None and cached < escalate_below and value >= escalate_below + min_step:
+            cached = escalate_below
         set_fresh_cache_value(cache_key, cached)
     return should_alert
 
@@ -671,7 +706,11 @@ def check_tvl(usd3_tvl: float, susd3_tvl: float) -> None:
 
     # --- sUSD3 TVL ---
     previous_susd3_tvl = get_fresh_cache_value(CACHE_KEY_SUSD3_TVL)
-    logger.info("sUSD3 TVL: %s (previous: %s)", format_usd(susd3_tvl), format_usd(previous_susd3_tvl))
+    logger.info(
+        "sUSD3 TVL: %s USD3 (previous: %s USD3)",
+        format_with_suffix(susd3_tvl),
+        format_with_suffix(previous_susd3_tvl),
+    )
 
     if previous_susd3_tvl > 0:
         change_pct = abs(susd3_tvl - previous_susd3_tvl) / previous_susd3_tvl
@@ -680,7 +719,7 @@ def check_tvl(usd3_tvl: float, susd3_tvl: float) -> None:
             message = (
                 f"🚨 *3Jane sUSD3 TVL Change*\n"
                 f"💰 TVL {direction} by {change_pct:.2%}\n"
-                f"📊 {format_usd(previous_susd3_tvl)} → {format_usd(susd3_tvl)}\n"
+                f"📊 {format_with_suffix(previous_susd3_tvl)} → {format_with_suffix(susd3_tvl)} USD3\n"
                 f"⚠️ Junior tranche buffer size changed significantly\n"
                 f"🔗 [sUSD3](https://etherscan.io/address/{SUSD3_ADDRESS})"
             )
@@ -696,7 +735,8 @@ def check_usd3_oc(susd3_backing: float, deployed_credit: float) -> None:
     absorbs first losses: deployed / (deployed - sUSD3). Alert thresholds use
     the direct OC ratio, so 111% means OC is below 1.11x. The junior-buffer
     percentage is included in the same alert so the two equivalent views cannot
-    disagree. Deduped via cache: re-alerts only when OC drops further.
+    disagree. Deduped via cache: re-alerts only when OC drops at least
+    USD3_OC_REALERT_STEP further, or on the first crossing into CRITICAL.
 
     Args:
         susd3_backing: USD3 held by sUSD3, valued in USDC.
@@ -729,7 +769,13 @@ def check_usd3_oc(susd3_backing: float, deployed_credit: float) -> None:
         format_usd(senior_at_risk),
     )
 
-    if not should_alert_value_drop(CACHE_KEY_USD3_OC_ALERTED, oc_ratio, USD3_OC_HIGH_THRESHOLD):
+    if not should_alert_value_drop(
+        CACHE_KEY_USD3_OC_ALERTED,
+        oc_ratio,
+        USD3_OC_HIGH_THRESHOLD,
+        min_step=USD3_OC_REALERT_STEP,
+        escalate_below=USD3_OC_CRITICAL_THRESHOLD,
+    ):
         return
 
     if oc_ratio < USD3_OC_CRITICAL_THRESHOLD:
@@ -794,14 +840,22 @@ def check_withdraw_limit(withdraw_limit: float) -> None:
     availableWithdrawLimit is the USDC the USD3 vault can immediately honor for
     withdrawals. When it falls below the threshold, withdrawals may queue or
     stall, signalling a liquidity squeeze on the senior tranche.
-    Deduped via cache: re-alerts only when the limit drops further.
+    Deduped via cache: re-alerts only when the limit drops at least
+    WITHDRAW_LIMIT_REALERT_STEP further, or when it first falls below
+    WITHDRAW_LIMIT_DRAINED_THRESHOLD (effectively drained).
 
     Args:
         withdraw_limit: USD3 availableWithdrawLimit in USDC.
     """
     logger.info("USD3 available withdraw limit: %s", format_usd(withdraw_limit))
 
-    if should_alert_value_drop(CACHE_KEY_WITHDRAW_LIMIT_ALERTED, withdraw_limit, WITHDRAW_LIMIT_THRESHOLD):
+    if should_alert_value_drop(
+        CACHE_KEY_WITHDRAW_LIMIT_ALERTED,
+        withdraw_limit,
+        WITHDRAW_LIMIT_THRESHOLD,
+        min_step=WITHDRAW_LIMIT_REALERT_STEP,
+        escalate_below=WITHDRAW_LIMIT_DRAINED_THRESHOLD,
+    ):
         message = (
             f"🚨 *3Jane USD3 Withdraw Liquidity Low*\n"
             f"📉 Available withdraw limit: {format_usd(withdraw_limit)} "
@@ -813,27 +867,40 @@ def check_withdraw_limit(withdraw_limit: float) -> None:
         mark_alerted_value(CACHE_KEY_WITHDRAW_LIMIT_ALERTED, withdraw_limit)
 
 
-def check_vault_shutdown(client, usd3_vault, susd3_vault) -> None:
+def read_vault_shutdown(client: Any, usd3_vault: Any, susd3_vault: Any, block_number: int) -> tuple[bool, bool]:
+    """Read both vaults' isShutdown() at the run's pinned block in one batch.
+
+    Kept out of the core batch: Web3 fails a whole batch when any call errors,
+    so a shutdown-read failure would otherwise skip every core check.
+
+    Args:
+        client: Web3Client instance.
+        usd3_vault: USD3 contract instance.
+        susd3_vault: sUSD3 contract instance.
+        block_number: Block the core reads were pinned to.
+
+    Returns:
+        USD3 and sUSD3 shutdown flags.
+    """
+    with client.batch_requests() as batch:
+        batch.add(usd3_vault.functions.isShutdown().call(block_identifier=block_number))
+        batch.add(susd3_vault.functions.isShutdown().call(block_identifier=block_number))
+        responses = client.execute_batch(batch)
+        if len(responses) != 2:
+            raise ValueError(f"Expected 2 shutdown responses, got {len(responses)}")
+    return bool(responses[0]), bool(responses[1])
+
+
+def check_vault_shutdown(usd3_shutdown: bool, susd3_shutdown: bool) -> None:
     """Check if either vault has been emergency shut down.
 
     Uses alert-once pattern: only sends alert when shutdown state transitions
     from False to True.
 
     Args:
-        client: Web3Client instance.
-        usd3_vault: USD3 contract instance.
-        susd3_vault: sUSD3 contract instance.
+        usd3_shutdown: USD3 isShutdown() read at the run's pinned block.
+        susd3_shutdown: sUSD3 isShutdown() read at the run's pinned block.
     """
-    with client.batch_requests() as batch:
-        batch.add(usd3_vault.functions.isShutdown())
-        batch.add(susd3_vault.functions.isShutdown())
-        responses = client.execute_batch(batch)
-        if len(responses) != 2:
-            raise ValueError(f"Expected 2 responses, got {len(responses)}")
-
-    usd3_shutdown = responses[0]
-    susd3_shutdown = responses[1]
-
     logger.info("Vault shutdown — USD3: %s, sUSD3: %s", usd3_shutdown, susd3_shutdown)
 
     # Alert once on USD3 shutdown
@@ -977,176 +1044,160 @@ def check_protocol_paused(is_paused: bool) -> None:
     set_fresh_cache_value(CACHE_KEY_IS_PAUSED, float(is_paused))
 
 
-def _accountable_alert(severity: AlertSeverity, message: str) -> None:
-    """Send an Accountable alert using the feed's owning protocol key."""
-    send_alert(Alert(severity, message, ACCOUNTABLE_FEED.protocol))
+def _record_verified_failure(reason: str) -> None:
+    """Count one run without a usable DefiLlama report and escalate the outage.
 
-
-def _clear_accountable_ratio_alerts() -> None:
-    """Re-arm HIGH/CRITICAL ratio alerts after recovery above the warning threshold."""
-    if get_cache_int(CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED):
-        set_cache_value(CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED, 0)
-    if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED):
-        set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED, 0)
-
-
-def _format_accountable_report(report: AccountableReport) -> str:
-    """Render the shared report body used by every Accountable alert."""
-    return (
-        f"📊 Collateral ratio: {report.collateralization:.4%}\n"
-        f"💰 Reserves: {format_usd(float(report.total_reserves))} | "
-        f"Liabilities: {format_usd(float(report.total_supply))}\n"
-        f"🧮 Net: {format_usd(float(report.net))} | Verifiability: {report.verifiability}%\n"
-        f"🕒 Report: {report.report_timestamp:%Y-%m-%d %H:%M:%S UTC} "
-        f"({format_age(report.report_age_seconds)} old)"
-    )
-
-
-def _alert_accountable_high(report: AccountableReport) -> None:
-    """Alert once while ratio is below the HIGH threshold."""
-    if get_cache_int(CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED):
-        return
-    message = (
-        f"🚨 *3Jane Proof of Solvency Low*\n"
-        f"{_format_accountable_report(report)}\n"
-        f"⚠️ Collateral ratio below the {ACCOUNTABLE_HIGH_RATIO:.0%} warning threshold\n"
-        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.message_url})"
-    )
-    _accountable_alert(AlertSeverity.HIGH, message)
-    set_cache_value(CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED, 1)
-
-
-def _alert_accountable_critical(report: AccountableReport) -> None:
-    """Alert once while ratio is below the critical threshold."""
-    if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED):
-        return
-    message = (
-        f"🚨 *3Jane Proof of Solvency CRITICAL*\n"
-        f"{_format_accountable_report(report)}\n"
-        f"⚠️ Collateral ratio below the {ACCOUNTABLE_CRITICAL_RATIO:.0%} critical threshold\n"
-        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.message_url})"
-    )
-    _accountable_alert(AlertSeverity.CRITICAL, message)
-    set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED, 1)
-    # Avoid a follow-up HIGH once CRITICAL clears but ratio is still under the HIGH threshold.
-    set_cache_value(CACHE_KEY_ACCOUNTABLE_HIGH_ALERTED, 1)
-
-
-def check_accountable_collateral(report: AccountableReport) -> None:
-    """Alert when Accountable collateral ratio breaches thresholds.
-
-    HIGH when ratio < 99%; CRITICAL on the first reading below 95%. Each
-    severity alerts once until the ratio recovers above its threshold.
+    The streak is persisted before any alert is sent, so it advances exactly once
+    per run. An escalation is marked delivered only after send_alert() returns; a
+    failed send is logged and retried on the next failed run instead of being
+    lost because the streak has moved past its level.
 
     Args:
-        report: Validated Proof of Solvency report.
+        reason: Why this run had no usable report.
     """
-    ratio = report.collateralization
-    logger.info("Accountable collateral ratio: %.6f%%", ratio * 100)
-
-    if ratio < ACCOUNTABLE_CRITICAL_RATIO:
-        _alert_accountable_critical(report)
+    streak = get_cache_int(CACHE_KEY_VERIFIED_FAILURE_STREAK) + 1
+    set_cache_value(CACHE_KEY_VERIFIED_FAILURE_STREAK, streak)
+    logger.warning("DefiLlama Verified unavailable for %d consecutive runs: %s", streak, reason)
+    level = max((level for level in VERIFIED_AVAILABILITY_ALERTS if level <= streak), default=0)
+    if level <= get_cache_int(CACHE_KEY_VERIFIED_ALERTED_STREAK):
         return
-
-    if ratio < ACCOUNTABLE_HIGH_RATIO:
-        if get_cache_int(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED):
-            set_cache_value(CACHE_KEY_ACCOUNTABLE_CRITICAL_ALERTED, 0)
-        _alert_accountable_high(report)
+    try:
+        send_alert(
+            Alert(
+                VERIFIED_AVAILABILITY_ALERTS[level],
+                "*3Jane DefiLlama Verified unavailable*\n"
+                f"{streak} consecutive runs without a usable report\n"
+                f"{escape_markdown(reason)}\n"
+                f"[DefiLlama Verified]({VERIFIED_FEED.dashboard_url})",
+                PROTOCOL,
+            )
+        )
+    except Exception:
+        logger.exception("Failed to send DefiLlama Verified outage alert; retrying next run")
         return
+    set_cache_value(CACHE_KEY_VERIFIED_ALERTED_STREAK, level)
 
-    _clear_accountable_ratio_alerts()
+
+def _reset_verified_failures() -> None:
+    """Clear the outage streak and its delivered escalation after a usable report."""
+    for key in (CACHE_KEY_VERIFIED_FAILURE_STREAK, CACHE_KEY_VERIFIED_ALERTED_STREAK):
+        if get_cache_int(key):
+            set_cache_value(key, 0)
 
 
-def check_accountable_staleness(report: AccountableReport, reason: str) -> None:
-    """Alert once when the Accountable feed or one of its sources goes stale.
+def _load_verified_report_dates() -> dict[str, list[str]]:
+    """Read the stored reportDate history, discarding anything malformed."""
+    raw = get_last_value_for_key_from_file(CACHE_FILENAME, CACHE_KEY_VERIFIED_REPORT_DATES)
+    try:
+        stored = json.loads(raw) if isinstance(raw, str) and raw else {}
+    except ValueError:
+        return {}
+    if not isinstance(stored, dict):
+        return {}
+    return {
+        label: [day for day in days if isinstance(day, str)]
+        for label, days in stored.items()
+        if isinstance(label, str) and isinstance(days, list)
+    }
 
-    A fresh aggregate timestamp does not prove every input is fresh, and the
-    reserves side leans heavily on manually uploaded document reports. Deduped
-    until the feed recovers.
+
+def record_verified_report_dates(report: VerifiedLoanReport) -> None:
+    """Keep a short history of each originator's document dates and log new ones.
+
+    DefiLlama publishes only the latest record, so this history is the only way
+    to measure how often each originator actually uploads documents. Every
+    originator in the report is tracked, not just the required ones.
 
     Args:
-        report: Report the staleness was detected on.
-        reason: Human-readable description of what is stale.
+        report: Validated DefiLlama Verified loan record.
     """
-    logger.warning("Accountable feed %s is stale: %s", ACCOUNTABLE_FEED.dfid, reason)
-
-    if get_cache_int(CACHE_KEY_ACCOUNTABLE_STALE_ALERTED):
-        return
-
-    message = (
-        f"⚠️ *3Jane Proof of Solvency Stale*\n"
-        f"{_format_accountable_report(report)}\n"
-        f"🕳️ {escape_markdown(reason)}\n"
-        f"⚠️ Collateral ratio may not reflect current positions\n"
-        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.message_url})"
-    )
-    _accountable_alert(AlertSeverity.MEDIUM, message)
-    set_cache_value(CACHE_KEY_ACCOUNTABLE_STALE_ALERTED, 1)
-
-
-def check_accountable_availability(reason: str) -> None:
-    """Track feed failures: HIGH on the first miss, CRITICAL on the second.
-
-    ``fetch_report`` has already exhausted bounded retries before reporting a
-    request failure. A success clears the streak. Further misses after
-    CRITICAL stay quiet until recovery.
-
-    Args:
-        reason: Why the feed was unusable this run.
-    """
-    streak = get_cache_int(CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK) + 1
-    set_cache_value(CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK, streak)
-    logger.warning("Accountable feed unusable (%d consecutive): %s", streak, reason)
-
-    if streak == 1:
-        severity = AlertSeverity.HIGH
-    elif streak == 2:
-        severity = AlertSeverity.CRITICAL
-    else:
-        return
-
-    message = (
-        f"⚠️ *3Jane Proof of Solvency Unavailable*\n"
-        f"📡 Retrieval failed after all retry attempts ({streak} consecutive run"
-        f"{'s' if streak > 1 else ''})\n"
-        f"❌ {escape_markdown(reason)}\n"
-        f"⚠️ Collateral ratio is not being monitored\n"
-        f"🔗 [Accountable dashboard]({ACCOUNTABLE_FEED.message_url})"
-    )
-    _accountable_alert(severity, message)
-    set_cache_value(CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED, 1)
+    history = _load_verified_report_dates()
+    changed = False
+    for (category, name), loan in sorted(report.loans.items()):
+        label = f"{name} ({category})"
+        days = history.get(label, [])
+        new_day = loan.report_date.isoformat()
+        if days and days[-1] == new_day:
+            continue
+        if days:
+            try:
+                gap = (loan.report_date - date.fromisoformat(days[-1])).days
+            except ValueError:
+                gap = None
+            logger.info(
+                "DefiLlama Verified %s reportDate %s -> %s (%s days)",
+                label,
+                days[-1],
+                new_day,
+                gap if gap is not None else "?",
+            )
+        else:
+            logger.info("DefiLlama Verified %s first reportDate seen: %s", label, new_day)
+        history[label] = [*days, new_day][-VERIFIED_DATE_HISTORY_LENGTH:]
+        changed = True
+    if changed:
+        set_cache_value(CACHE_KEY_VERIFIED_REPORT_DATES, json.dumps(history, sort_keys=True))
 
 
-def check_accountable_solvency() -> None:
-    """Fetch and evaluate the Accountable Proof of Solvency feed.
+def _evaluate_verified_report() -> dict[str, str] | None:
+    """Fetch, validate and evaluate the loan record, counting one failure if that fails.
 
-    Runs in its own failure boundary: any error here is logged and swallowed so
-    the onchain 3Jane checks always complete.
+    Any exception here, not just a feed error, counts toward the outage streak,
+    so a persistent bug escalates like an outage instead of silently disabling
+    the check. Alert delivery happens afterwards, so a Telegram failure is never
+    mistaken for a feed outage.
+
+    Returns:
+        The current source issues, or None when the run had no usable report.
     """
     try:
-        result = fetch_report(ACCOUNTABLE_FEED)
+        report = fetch_report(VERIFIED_FEED)
+        logger.info(
+            "DefiLlama Verified: $%s offchain principal across %d originators, verified %s",
+            f"{report.total_principal_usd:,.2f}",
+            len(report.loans),
+            report.timestamp.isoformat(),
+        )
+        record_verified_report_dates(report)
+        issues = report_issues(report, VERIFIED_FEED, datetime.now(tz=timezone.utc))
+    except DefiLlamaVerifiedError as exc:
+        reason = str(exc)
+    except Exception as exc:
+        logger.exception("DefiLlama Verified check failed")
+        reason = f"unexpected {type(exc).__name__}: {exc}"[:300]
+    else:
+        _reset_verified_failures()
+        return issues
+    _record_verified_failure(reason)
+    return None
 
-        if result.status is AccountableStatus.UNAVAILABLE or result.report is None:
-            check_accountable_availability(result.reason or "unknown error")
+
+def check_defillama_verified() -> None:
+    """Check the offchain loan record in isolation from the core 3Jane checks."""
+    try:
+        issues = _evaluate_verified_report()
+        if issues is None:
             return
-
-        # Reachable and parseable: clear any outstanding availability alert.
-        if get_cache_int(CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK):
-            set_cache_value(CACHE_KEY_ACCOUNTABLE_FAILURE_STREAK, 0)
-        if get_cache_int(CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED):
-            set_cache_value(CACHE_KEY_ACCOUNTABLE_HEALTH_ALERTED, 0)
-
-        report = result.report
-        if result.status is AccountableStatus.STALE:
-            check_accountable_staleness(report, result.reason)
-        elif get_cache_int(CACHE_KEY_ACCOUNTABLE_STALE_ALERTED):
-            set_cache_value(CACHE_KEY_ACCOUNTABLE_STALE_ALERTED, 0)
-
-        # The ratio is still evaluated on a stale report: a low-ratio
-        # reading matters even when the inputs behind it have aged.
-        check_accountable_collateral(report)
-    except Exception as e:
-        logger.error("Error during Accountable Proof of Solvency check: %s", e)
+        current = json.dumps(sorted(issues)) if issues else ""
+        previous = get_last_value_for_key_from_file(CACHE_FILENAME, CACHE_KEY_VERIFIED_ISSUES) or ""
+        if current == previous:
+            return
+        if issues:
+            details = "\n".join(f"- {escape_markdown(detail)}" for detail in issues.values())
+            send_alert(
+                Alert(
+                    AlertSeverity.MEDIUM,
+                    f"*3Jane DefiLlama Verified source issues*\n{details}\n"
+                    f"[DefiLlama Verified]({VERIFIED_FEED.dashboard_url})",
+                    PROTOCOL,
+                )
+            )
+        set_cache_value(CACHE_KEY_VERIFIED_ISSUES, current)
+    except Exception:
+        # Failure boundary: the onchain checks in main() must still run. Feed and
+        # evaluation failures were already counted; this only catches alert
+        # delivery and cache errors, which retry on the next run.
+        logger.exception("DefiLlama Verified alerting failed")
 
 
 def main() -> None:
@@ -1154,8 +1205,8 @@ def main() -> None:
     logger.info("Starting 3Jane monitoring...")
 
     # Runs before the onchain reads and inside its own failure boundary, so the
-    # solvency feed is checked even when RPC access is degraded.
-    check_accountable_solvency()
+    # offchain loan record is checked even when RPC access is degraded.
+    check_defillama_verified()
 
     client = ChainManager.get_client(Chain.MAINNET)
     usd3_vault = client.eth.contract(address=USD3_ADDRESS, abi=ABI_VAULT)
@@ -1249,8 +1300,8 @@ def main() -> None:
         )
         logger.info(
             "sUSD3 — TVL: %s USD3, Supply: %s, PPS: %.8f",
-            format_usd(susd3_tvl),
-            format_usd(susd3_supply),
+            format_with_suffix(susd3_tvl),
+            format_with_suffix(susd3_supply),
             susd3_pps,
         )
         logger.info(
@@ -1275,18 +1326,20 @@ def main() -> None:
             insurance_outflow_assets,
         )
         check_withdraw_limit(withdraw_limit)
-        check_vault_shutdown(client, usd3_vault, susd3_vault)
+        # Separate batch (same pinned block) so a failing shutdown read cannot
+        # take down the core reads above and skip PPS/OC/liquidity checks.
+        check_vault_shutdown(*read_vault_shutdown(client, usd3_vault, susd3_vault, block_number))
         check_debt_cap(debt_cap_raw, wausdc_assets_per_scale)
         check_nominal_backing_floor(nominal_floor, susd3_backing)
         check_protocol_paused(is_paused)
         check_borrower_default_watch(grace_period_seconds, delinquency_period_seconds)
 
         logger.info(
-            "Monitoring complete — USD3 PPS: %.8f, TVL: %s | sUSD3 PPS: %.8f, TVL: %s",
+            "Monitoring complete — USD3 PPS: %.8f, TVL: %s | sUSD3 PPS: %.8f, TVL: %s USD3",
             usd3_pps,
             format_usd(usd3_tvl),
             susd3_pps,
-            format_usd(susd3_tvl),
+            format_with_suffix(susd3_tvl),
         )
     except Exception as e:
         logger.error("Error during 3Jane monitoring: %s", e)

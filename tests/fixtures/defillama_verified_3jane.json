@@ -1,0 +1,43 @@
+{
+  "projectId": "3jane",
+  "projectName": "3Jane Credit Loans",
+  "state": {
+    "upToDate": true
+  },
+  "data": {
+    "loans": {
+      "Warehouse Loans": {
+        "LendSwift": {
+          "principalUsd": 6564597.25,
+          "collateralUsd": 8997455.51,
+          "reportDate": "2026-11-20"
+        },
+        "GigFi": {
+          "principalUsd": 100000,
+          "collateralUsd": 638337.58,
+          "reportDate": "2026-11-13"
+        }
+      },
+      "Forward Flows": {
+        "Settle": {
+          "principalUsd": 40409976.09,
+          "reportDate": "2026-11-11"
+        },
+        "Slope": {
+          "principalUsd": 51541190.4,
+          "reportDate": "2026-11-19"
+        }
+      }
+    },
+    "balances": {
+      "Bank Cash": {
+        "Erebor Bank": {
+          "balanceUsd": 12602750.86,
+          "timestamp": 1795442445
+        }
+      }
+    },
+    "totalPrincipalUsd": 98615763.74000001,
+    "timestampOnRun": 1795443309
+  }
+}

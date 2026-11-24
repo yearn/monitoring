@@ -21,16 +21,18 @@ from utils.accountable import (
     parse_report,
 )
 
-FIXTURE_PATH = Path(__file__).parent / "fixtures" / "accountable_3jane_dashboard.json"
+# Real dashboard response (recorded from a since-retired feed) used as a schema sample;
+# its source names are fixture data, not tied to any configured monitor.
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "accountable_dashboard_sample.json"
 # Fixture was recorded at ts=1785490814726; this is a few minutes later.
 FIXTURE_NOW_MS = 1785491000000
 
 CONFIG = AccountableFeedConfig(
     dfid="100000026",
-    protocol="3jane",
-    dashboard_url="https://accountable.3jane.xyz/dashboard",
-    message_url="https://accountable.3jane.xyz/",
-    dashboard_type="three-jane",
+    protocol="example",
+    dashboard_url="https://accountable.example.com/dashboard",
+    message_url="https://accountable.example.com/",
+    dashboard_type="example",
     required_sources=(
         "LendSwift - Warehouse Senior Note",
         "USD3 Minted Liabilities",
@@ -465,7 +467,7 @@ def test_fetch_report_rejects_non_https_url(monkeypatch: pytest.MonkeyPatch) -> 
         raise AssertionError("request must not be attempted")
 
     monkeypatch.setattr(accountable, "request_with_retry", unexpected)
-    config = replace(CONFIG, dashboard_url="http://accountable.3jane.xyz/dashboard")
+    config = replace(CONFIG, dashboard_url="http://accountable.example.com/dashboard")
 
     result = fetch_report(config, FIXTURE_NOW_MS)
 
