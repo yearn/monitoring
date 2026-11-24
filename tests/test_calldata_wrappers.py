@@ -7,7 +7,7 @@ from eth_abi import encode
 from eth_utils import function_signature_to_4byte_selector
 from eth_utils import to_checksum_address as _cs
 
-from utils.calldata.wrappers import InnerCall, is_wrapper_call, unwrap_calls, unwrap_executed_calls
+from utils.calldata.wrappers import InnerCall, is_wrapper_call, try_unwrap_calls, unwrap_calls, unwrap_executed_calls
 
 ORACLE = _cs("0xcd7f45566bc0e7303fb92a93969bb4d3f6e662bb")
 CUSD = _cs("0xcccc62962d17b8914c62d74ffb843d73b2a3cccc")
@@ -131,6 +131,13 @@ class TestUnwrapCalls(unittest.TestCase):
     def test_pendle_aggregate_calls_run_in_the_wrapping_tx(self) -> None:
         data = pendle_aggregate([(ORACLE, 0, upgrade_to_and_call(NEW_ORACLE_IMPL))])
         self.assertEqual(unwrap_executed_calls(data), unwrap_calls(data))
+
+    def test_try_unwrap_separates_empty_batch_from_decode_failure(self) -> None:
+        empty = pendle_aggregate([])
+        self.assertEqual(try_unwrap_calls(empty), [])
+        self.assertIsNone(try_unwrap_calls(empty[:20]))
+        self.assertEqual(unwrap_calls(empty[:20]), [])
+        self.assertEqual(try_unwrap_calls(upgrade_to_and_call(NEW_ORACLE_IMPL)), [])
 
     def test_non_wrapper_and_empty_calldata(self) -> None:
         self.assertEqual(unwrap_calls(upgrade_to_and_call(NEW_ORACLE_IMPL)), [])

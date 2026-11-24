@@ -101,6 +101,12 @@ class TestPendleRule(unittest.TestCase):
         self.assertFalse(pendle_alerts(call_tx(None)))
         self.assertFalse(pendle_alerts(call_tx("0x")))
 
+    def test_empty_aggregate_batches_are_skipped(self) -> None:
+        # A well-formed empty batch executes nothing; only a decode failure fails open.
+        for name in ("aggregate", "aggregateWithScopedAccess"):
+            with self.subTest(name):
+                self.assertFalse(pendle_alerts(call_tx(pendle_aggregate([], name=name))))
+
     def test_malformed_aggregate_alerts(self) -> None:
         data = pendle_aggregate([(ORACLE, 0, PAUSE)])[:90]
         self.assertTrue(pendle_alerts(call_tx(data)))

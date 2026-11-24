@@ -14,7 +14,7 @@ an unknown contract) alerts instead of being skipped.
 from collections.abc import Callable
 
 from protocols.safe.multisend import decode_multisend, is_multisend_call
-from utils.calldata.wrappers import is_wrapper_call, unwrap_calls
+from utils.calldata.wrappers import is_wrapper_call, try_unwrap_calls
 from utils.logger import get_logger
 from utils.proxy import MAX_WRAPPER_DEPTH
 
@@ -56,10 +56,11 @@ def _call_is_privileged(data_hex: str, depth: int) -> bool:
     if depth >= MAX_WRAPPER_DEPTH:
         logger.warning("Wrapper nested deeper than %s levels; treating as privileged", MAX_WRAPPER_DEPTH)
         return True
-    inner_calls = unwrap_calls(data_hex)
-    if not inner_calls:
+    inner_calls = try_unwrap_calls(data_hex)
+    if inner_calls is None:
         logger.warning("Wrapper calldata %s… does not decode; treating as privileged", data_hex[:10])
         return True
+    # A well-formed empty batch (e.g. Pendle aggregate([])) executes nothing.
     return any(_call_is_privileged(inner.data, depth + 1) for inner in inner_calls)
 
 

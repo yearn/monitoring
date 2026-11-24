@@ -175,11 +175,16 @@ def is_wrapper_call(data_hex: str) -> bool:
     return bool(data_hex) and data_hex[:10].lower() in _WRAPPERS
 
 
-def unwrap_calls(data_hex: str) -> list[InnerCall]:
-    """Inner calls of a supported wrapper, in order; [] for anything else.
+def try_unwrap_calls(data_hex: str) -> list[InnerCall] | None:
+    """Inner calls of a supported wrapper, telling a decode failure apart from an empty batch.
 
-    Malformed wrapper calldata also yields [] — this feeds best-effort
-    enrichment, and a decode failure must not break the alert.
+    Args:
+        data_hex: 0x-prefixed calldata.
+
+    Returns:
+        The inner calls in order (``[]`` for a well-formed empty batch, or for
+        calldata that is not a supported wrapper), or ``None`` when the wrapper
+        calldata does not decode.
     """
     if not is_wrapper_call(data_hex):
         return []
@@ -190,7 +195,18 @@ def unwrap_calls(data_hex: str) -> list[InnerCall]:
         return _inner_calls(name, extractor(values))
     except Exception as e:  # noqa: BLE001 - adversarial/malformed payloads
         logger.debug("could not unwrap %s calldata: %s", name, e)
-        return []
+        return None
+
+
+def unwrap_calls(data_hex: str) -> list[InnerCall]:
+    """Inner calls of a supported wrapper, in order; [] for anything else.
+
+    Malformed wrapper calldata also yields [] — this feeds best-effort
+    enrichment, and a decode failure must not break the alert. Use
+    :func:`try_unwrap_calls` when a decode failure must be told apart from an
+    empty batch.
+    """
+    return try_unwrap_calls(data_hex) or []
 
 
 def unwrap_call_values(signature: str, values: tuple) -> list[InnerCall]:
