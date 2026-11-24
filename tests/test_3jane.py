@@ -709,6 +709,23 @@ def test_usd3_oc_recovery_out_of_critical_rearms_escalation(monkeypatch: pytest.
     assert float(cache[module.CACHE_KEY_USD3_OC_ALERTED]) == pytest.approx(1.058)
 
 
+def test_usd3_oc_recovery_does_not_send_extra_high(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CRITICAL at 105.9%, back to 110.9%, then 110.3%: no HIGH while OC beats the alerted level."""
+    module = load_3jane_module()
+    alerts: list = []
+    cache = stub_cache(monkeypatch, module)
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    for oc in (1.059, 1.109, 1.103, 1.061):
+        module.check_usd3_oc(100_000_000 * (1 - 1 / oc), 100_000_000)
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.CRITICAL]
+
+    # The recovery still re-armed CRITICAL.
+    module.check_usd3_oc(100_000_000 * (1 - 1 / 1.0595), 100_000_000)
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.CRITICAL, module.AlertSeverity.CRITICAL]
+    assert float(cache[module.CACHE_KEY_USD3_OC_ALERTED]) == pytest.approx(1.0595)
+
+
 def test_usd3_oc_flapping_around_critical_does_not_realert(monkeypatch: pytest.MonkeyPatch) -> None:
     """OC oscillating within one step of 106% alerts CRITICAL once, not on every crossing."""
     module = load_3jane_module()
