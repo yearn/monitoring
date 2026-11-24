@@ -16,6 +16,7 @@ Monitors:
 - Nominal sUSD3 backing floor — alerts on change and when floor > sUSD3 backing
 - Protocol-wide pause — alerts once when ProtocolConfig IS_PAUSED flips to true
 - Borrower default watch — Envio-backed delinquency/default milestones
+- DefiLlama Verified — report availability and originator/cash source freshness
 
 Threshold alerts (USD3 protection, withdraw liquidity) are deduped via cache:
 the alerted value is stored and no new alert is sent until the value worsens by
@@ -28,7 +29,7 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from web3 import Web3
@@ -44,6 +45,13 @@ from utils.cache import (
     write_last_value_with_timestamp_to_file,
 )
 from utils.chains import Chain
+from utils.defillama_verified import (
+    DefiLlamaVerifiedError,
+    VerifiedFeedConfig,
+    VerifiedLoanReport,
+    fetch_report,
+    report_issues,
+)
 from utils.drawdown import peak_drawdown_dispatch_eligible
 from utils.formatting import format_duration, format_usd, format_with_suffix
 from utils.logger import get_logger
@@ -70,6 +78,25 @@ ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 # --- External data sources ---
 ENVIO_GRAPHQL_URL = os.getenv("ENVIO_GRAPHQL_URL")
 ENVIO_PAGE_SIZE = int(os.getenv("THREE_JANE_ENVIO_PAGE_SIZE", "1000"))
+
+# DefiLlama supplies dates without publication times for loan documents.
+# These are operational limits with grace, since the API omits source cadences.
+VERIFIED_FEED = VerifiedFeedConfig(
+    slug=PROTOCOL,
+    endpoint_url=os.getenv("THREE_JANE_DEFILLAMA_VERIFIED_URL"),
+    report_max_age=timedelta(hours=3),
+    loan_max_ages={
+        ("Warehouse Loans", "LendSwift"): timedelta(days=10),
+        ("Warehouse Loans", "GigFi"): timedelta(days=10),
+        ("Forward Flows", "Slope"): timedelta(days=10),
+        ("Forward Flows", "Settle"): timedelta(days=38),
+    },
+    balance_max_ages={("Bank Cash", "Erebor Bank"): timedelta(hours=3)},
+)
+VERIFIED_AVAILABILITY_ALERTS = {2: AlertSeverity.LOW, 6: AlertSeverity.MEDIUM}
+# Distinct reportDates kept per originator, so the real document cadence can be
+# measured before the loan_max_ages estimates above are tightened.
+VERIFIED_DATE_HISTORY_LENGTH = 12
 
 # USDC has 6 decimals, USD3 and sUSD3 inherit this
 DECIMALS = 6
@@ -101,6 +128,11 @@ CACHE_KEY_INSURANCE_FUND_SHARES = "3JANE_INSURANCE_FUND_SHARES"
 CACHE_KEY_BORROWER_DEFAULT_WATCH_PREFIX = "3JANE_BORROWER_DEFAULT_WATCH"
 CACHE_KEY_USD3_OC_ALERTED = "3JANE_USD3_OC_ALERTED"
 CACHE_KEY_WITHDRAW_LIMIT_ALERTED = "3JANE_WITHDRAW_LIMIT_ALERTED"
+CACHE_KEY_VERIFIED_FAILURE_STREAK = "3JANE_DEFILLAMA_VERIFIED_FAILURE_STREAK"
+# Highest VERIFIED_AVAILABILITY_ALERTS level delivered during the current outage.
+CACHE_KEY_VERIFIED_ALERTED_STREAK = "3JANE_DEFILLAMA_VERIFIED_ALERTED_STREAK"
+CACHE_KEY_VERIFIED_ISSUES = "3JANE_DEFILLAMA_VERIFIED_ISSUES"
+CACHE_KEY_VERIFIED_REPORT_DATES = "3JANE_DEFILLAMA_VERIFIED_REPORT_DATES"
 
 # --- ProtocolConfig keys (keccak256 of the string label) ---
 CFG_KEY_SUSD3_NOMINAL_BACKING_FLOOR = Web3.keccak(text="SUSD3_NOMINAL_BACKING_FLOOR")
@@ -1012,9 +1044,169 @@ def check_protocol_paused(is_paused: bool) -> None:
     set_fresh_cache_value(CACHE_KEY_IS_PAUSED, float(is_paused))
 
 
+def _record_verified_failure(reason: str) -> None:
+    """Count one run without a usable DefiLlama report and escalate the outage.
+
+    The streak is persisted before any alert is sent, so it advances exactly once
+    per run. An escalation is marked delivered only after send_alert() returns; a
+    failed send is logged and retried on the next failed run instead of being
+    lost because the streak has moved past its level.
+
+    Args:
+        reason: Why this run had no usable report.
+    """
+    streak = get_cache_int(CACHE_KEY_VERIFIED_FAILURE_STREAK) + 1
+    set_cache_value(CACHE_KEY_VERIFIED_FAILURE_STREAK, streak)
+    logger.warning("DefiLlama Verified unavailable for %d consecutive runs: %s", streak, reason)
+    level = max((level for level in VERIFIED_AVAILABILITY_ALERTS if level <= streak), default=0)
+    if level <= get_cache_int(CACHE_KEY_VERIFIED_ALERTED_STREAK):
+        return
+    try:
+        send_alert(
+            Alert(
+                VERIFIED_AVAILABILITY_ALERTS[level],
+                "*3Jane DefiLlama Verified unavailable*\n"
+                f"{streak} consecutive runs without a usable report\n"
+                f"{escape_markdown(reason)}\n"
+                f"[DefiLlama Verified]({VERIFIED_FEED.dashboard_url})",
+                PROTOCOL,
+            )
+        )
+    except Exception:
+        logger.exception("Failed to send DefiLlama Verified outage alert; retrying next run")
+        return
+    set_cache_value(CACHE_KEY_VERIFIED_ALERTED_STREAK, level)
+
+
+def _reset_verified_failures() -> None:
+    """Clear the outage streak and its delivered escalation after a usable report."""
+    for key in (CACHE_KEY_VERIFIED_FAILURE_STREAK, CACHE_KEY_VERIFIED_ALERTED_STREAK):
+        if get_cache_int(key):
+            set_cache_value(key, 0)
+
+
+def _load_verified_report_dates() -> dict[str, list[str]]:
+    """Read the stored reportDate history, discarding anything malformed."""
+    raw = get_last_value_for_key_from_file(CACHE_FILENAME, CACHE_KEY_VERIFIED_REPORT_DATES)
+    try:
+        stored = json.loads(raw) if isinstance(raw, str) and raw else {}
+    except ValueError:
+        return {}
+    if not isinstance(stored, dict):
+        return {}
+    return {
+        label: [day for day in days if isinstance(day, str)]
+        for label, days in stored.items()
+        if isinstance(label, str) and isinstance(days, list)
+    }
+
+
+def record_verified_report_dates(report: VerifiedLoanReport) -> None:
+    """Keep a short history of each originator's document dates and log new ones.
+
+    DefiLlama publishes only the latest record, so this history is the only way
+    to measure how often each originator actually uploads documents. Every
+    originator in the report is tracked, not just the required ones.
+
+    Args:
+        report: Validated DefiLlama Verified loan record.
+    """
+    history = _load_verified_report_dates()
+    changed = False
+    for (category, name), loan in sorted(report.loans.items()):
+        label = f"{name} ({category})"
+        days = history.get(label, [])
+        new_day = loan.report_date.isoformat()
+        if days and days[-1] == new_day:
+            continue
+        if days:
+            try:
+                gap = (loan.report_date - date.fromisoformat(days[-1])).days
+            except ValueError:
+                gap = None
+            logger.info(
+                "DefiLlama Verified %s reportDate %s -> %s (%s days)",
+                label,
+                days[-1],
+                new_day,
+                gap if gap is not None else "?",
+            )
+        else:
+            logger.info("DefiLlama Verified %s first reportDate seen: %s", label, new_day)
+        history[label] = [*days, new_day][-VERIFIED_DATE_HISTORY_LENGTH:]
+        changed = True
+    if changed:
+        set_cache_value(CACHE_KEY_VERIFIED_REPORT_DATES, json.dumps(history, sort_keys=True))
+
+
+def _evaluate_verified_report() -> dict[str, str] | None:
+    """Fetch, validate and evaluate the loan record, counting one failure if that fails.
+
+    Any exception here, not just a feed error, counts toward the outage streak,
+    so a persistent bug escalates like an outage instead of silently disabling
+    the check. Alert delivery happens afterwards, so a Telegram failure is never
+    mistaken for a feed outage.
+
+    Returns:
+        The current source issues, or None when the run had no usable report.
+    """
+    try:
+        report = fetch_report(VERIFIED_FEED)
+        logger.info(
+            "DefiLlama Verified: $%s offchain principal across %d originators, verified %s",
+            f"{report.total_principal_usd:,.2f}",
+            len(report.loans),
+            report.timestamp.isoformat(),
+        )
+        record_verified_report_dates(report)
+        issues = report_issues(report, VERIFIED_FEED, datetime.now(tz=timezone.utc))
+    except DefiLlamaVerifiedError as exc:
+        reason = str(exc)
+    except Exception as exc:
+        logger.exception("DefiLlama Verified check failed")
+        reason = f"unexpected {type(exc).__name__}: {exc}"[:300]
+    else:
+        _reset_verified_failures()
+        return issues
+    _record_verified_failure(reason)
+    return None
+
+
+def check_defillama_verified() -> None:
+    """Check the offchain loan record in isolation from the core 3Jane checks."""
+    try:
+        issues = _evaluate_verified_report()
+        if issues is None:
+            return
+        current = json.dumps(sorted(issues)) if issues else ""
+        previous = get_last_value_for_key_from_file(CACHE_FILENAME, CACHE_KEY_VERIFIED_ISSUES) or ""
+        if current == previous:
+            return
+        if issues:
+            details = "\n".join(f"- {escape_markdown(detail)}" for detail in issues.values())
+            send_alert(
+                Alert(
+                    AlertSeverity.MEDIUM,
+                    f"*3Jane DefiLlama Verified source issues*\n{details}\n"
+                    f"[DefiLlama Verified]({VERIFIED_FEED.dashboard_url})",
+                    PROTOCOL,
+                )
+            )
+        set_cache_value(CACHE_KEY_VERIFIED_ISSUES, current)
+    except Exception:
+        # Failure boundary: the onchain checks in main() must still run. Feed and
+        # evaluation failures were already counted; this only catches alert
+        # delivery and cache errors, which retry on the next run.
+        logger.exception("DefiLlama Verified alerting failed")
+
+
 def main() -> None:
     """Run all 3Jane monitoring checks."""
     logger.info("Starting 3Jane monitoring...")
+
+    # Runs before the onchain reads and inside its own failure boundary, so the
+    # offchain loan record is checked even when RPC access is degraded.
+    check_defillama_verified()
 
     client = ChainManager.get_client(Chain.MAINNET)
     usd3_vault = client.eth.contract(address=USD3_ADDRESS, abi=ABI_VAULT)

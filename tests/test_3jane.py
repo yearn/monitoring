@@ -1,11 +1,17 @@
 import importlib.util
+import json
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
 from utils import paths, store
+from utils.alert import Alert
+from utils.defillama_verified import DefiLlamaVerifiedError, parse_report
+from utils.telegram import TelegramError
 
 
 def load_3jane_module() -> ModuleType:
@@ -802,3 +808,240 @@ def test_read_vault_shutdown_uses_its_own_pinned_block_batch() -> None:
 
     assert module.read_vault_shutdown(FakeClient(), FakeVault(True), FakeVault(False), 123) == (True, False)
     assert seen_blocks == [123, 123]
+
+
+@pytest.mark.parametrize("failure", [DefiLlamaVerifiedError("HTTP 403"), RuntimeError("unexpected failure")])
+def test_main_preserves_onchain_and_envio_checks_on_verified_failure(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    """Run the core and Envio checks even if the Verified check fails."""
+    module = load_3jane_module()
+    stub_cache(monkeypatch, module)
+    client = MagicMock()
+    client.eth.block_number = 100
+    client.execute_batch.side_effect = [
+        [1, 1, 1, 1, 1, 1, 1, [0, 0, 1, 0], 1, False, 1, 1, 3600, 86400, 1],
+        [1, module.RATE_SCALE],
+    ]
+    monkeypatch.setattr(module.ChainManager, "get_client", Mock(return_value=client))
+    monkeypatch.setattr(module, "read_vault_shutdown", Mock(return_value=(False, False)))
+
+    core_checks = (
+        "check_pps",
+        "check_tvl",
+        "check_usd3_oc",
+        "check_insurance_fund",
+        "check_withdraw_limit",
+        "check_vault_shutdown",
+        "check_debt_cap",
+        "check_nominal_backing_floor",
+        "check_protocol_paused",
+    )
+    for name in core_checks:
+        monkeypatch.setattr(module, name, Mock())
+    borrower_check = Mock()
+    fetch = Mock(side_effect=failure)
+    monkeypatch.setattr(module, "check_borrower_default_watch", borrower_check)
+    monkeypatch.setattr(module, "fetch_report", fetch)
+    alerts = Mock()
+    monkeypatch.setattr(module, "send_alert", alerts)
+
+    module.main()
+
+    fetch.assert_called_once_with(module.VERIFIED_FEED)
+    borrower_check.assert_called_once_with(3600, 86400)
+    for name in core_checks:
+        getattr(module, name).assert_called_once()
+    alerts.assert_not_called()
+
+
+def test_verified_availability_escalates_and_rearms(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Persist and escalate consecutive failures, then re-arm on a valid response."""
+    module = load_3jane_module()
+    cache = stub_cache(monkeypatch, module)
+    alerts: list[Alert] = []
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+    path = Path(__file__).with_name("fixtures") / "defillama_verified_3jane.json"
+    now = datetime(2026, 11, 23, 14, 30, tzinfo=timezone.utc)
+    report = parse_report(json.loads(path.read_text()), module.VERIFIED_FEED, now)
+    clock = Mock(wraps=datetime)
+    clock.now.return_value = now
+    monkeypatch.setattr(module, "datetime", clock)
+    failure = DefiLlamaVerifiedError("HTTP 403 (Cloudflare challenge)")
+    fetch = Mock(side_effect=[failure] * 8 + [report] + [failure] * 2)
+    monkeypatch.setattr(module, "fetch_report", fetch)
+
+    for _ in range(8):
+        module.check_defillama_verified()
+    assert [(alert.severity.value, alert.protocol) for alert in alerts] == [
+        ("LOW", "3jane"),
+        ("MEDIUM", "3jane"),
+    ]
+    assert "2 consecutive runs" in alerts[0].message
+    assert "6 consecutive runs" in alerts[1].message
+    assert "Cloudflare challenge" in alerts[1].message
+
+    module.check_defillama_verified()
+    assert cache[module.CACHE_KEY_VERIFIED_FAILURE_STREAK] == "0"
+    module.check_defillama_verified()
+    module.check_defillama_verified()
+    assert [alert.severity.value for alert in alerts] == ["LOW", "MEDIUM", "LOW"]
+
+
+def test_verified_issues_dedupe_and_rearm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deduplicate repeated source issues and alert again after recovery."""
+    module = load_3jane_module()
+    cache = stub_cache(monkeypatch, module)
+    alerts: list[Alert] = []
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+    path = Path(__file__).with_name("fixtures") / "defillama_verified_3jane.json"
+    now = datetime(2026, 11, 23, 14, 30, tzinfo=timezone.utc)
+    report = parse_report(json.loads(path.read_text()), module.VERIFIED_FEED, now)
+    degraded = replace(report, up_to_date=False, balances={})
+    cache[module.CACHE_KEY_VERIFIED_FAILURE_STREAK] = "5"
+    clock = Mock(wraps=datetime)
+    clock.now.return_value = now
+    monkeypatch.setattr(module, "datetime", clock)
+    fetch = Mock(side_effect=[degraded, degraded, report, degraded])
+    monkeypatch.setattr(module, "fetch_report", fetch)
+
+    for _ in range(4):
+        module.check_defillama_verified()
+
+    assert [(alert.severity.value, alert.protocol) for alert in alerts] == [
+        ("MEDIUM", "3jane"),
+        ("MEDIUM", "3jane"),
+    ]
+    assert "Erebor Bank" in alerts[0].message
+    assert "out of date" in alerts[0].message
+    assert cache[module.CACHE_KEY_VERIFIED_FAILURE_STREAK] == "0"
+
+
+def test_main_checks_verified_even_when_onchain_reads_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An RPC failure must not skip the offchain DefiLlama Verified check."""
+    module = load_3jane_module()
+    stub_cache(monkeypatch, module)
+    client = MagicMock()
+    client.eth.block_number = 100
+    client.execute_batch.side_effect = RuntimeError("rpc down")
+    monkeypatch.setattr(module.ChainManager, "get_client", Mock(return_value=client))
+    fetch = Mock(side_effect=DefiLlamaVerifiedError("HTTP 403"))
+    monkeypatch.setattr(module, "fetch_report", fetch)
+    alerts: list[Alert] = []
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+
+    module.main()
+
+    fetch.assert_called_once_with(module.VERIFIED_FEED)
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.LOW]
+    assert "Monitoring Error" in alerts[0].message
+
+
+def test_verified_unexpected_error_counts_as_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-feed exception escalates through the outage streak instead of being swallowed."""
+    module = load_3jane_module()
+    cache = stub_cache(monkeypatch, module)
+    alerts: list[Alert] = []
+    monkeypatch.setattr(module, "send_alert", alerts.append)
+    monkeypatch.setattr(module, "fetch_report", Mock(side_effect=TypeError("unexpected field type")))
+
+    module.check_defillama_verified()
+    module.check_defillama_verified()
+
+    assert cache[module.CACHE_KEY_VERIFIED_FAILURE_STREAK] == "2"
+    assert [alert.severity for alert in alerts] == [module.AlertSeverity.LOW]
+    assert "TypeError" in alerts[0].message
+
+
+def test_verified_outage_alert_send_failure_counts_poll_once_and_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Telegram failure on the sixth failed poll must not double-count it, and MEDIUM retries next poll."""
+    module = load_3jane_module()
+    cache = stub_cache(monkeypatch, module)
+    sent: list[Alert] = []
+    medium_attempts: list[int] = []
+
+    def flaky_send(alert: Alert) -> bool:
+        if alert.severity == module.AlertSeverity.MEDIUM and not medium_attempts:
+            medium_attempts.append(1)
+            raise TelegramError("telegram down")
+        sent.append(alert)
+        return True
+
+    monkeypatch.setattr(module, "send_alert", flaky_send)
+    monkeypatch.setattr(module, "fetch_report", Mock(side_effect=DefiLlamaVerifiedError("HTTP 403")))
+
+    for _ in range(6):
+        module.check_defillama_verified()
+    assert cache[module.CACHE_KEY_VERIFIED_FAILURE_STREAK] == "6"
+    assert [alert.severity.value for alert in sent] == ["LOW"]
+
+    module.check_defillama_verified()
+    module.check_defillama_verified()
+    assert cache[module.CACHE_KEY_VERIFIED_FAILURE_STREAK] == "8"
+    assert [alert.severity.value for alert in sent] == ["LOW", "MEDIUM"]
+    assert "7 consecutive runs" in sent[1].message
+
+
+def test_verified_issue_alert_send_failure_is_not_an_outage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed source-issue alert retries next run without counting toward the outage streak."""
+    module = load_3jane_module()
+    cache = stub_cache(monkeypatch, module)
+    path = Path(__file__).with_name("fixtures") / "defillama_verified_3jane.json"
+    now = datetime(2026, 11, 23, 14, 30, tzinfo=timezone.utc)
+    report = parse_report(json.loads(path.read_text()), module.VERIFIED_FEED, now)
+    degraded = replace(report, up_to_date=False)
+    clock = Mock(wraps=datetime)
+    clock.now.return_value = now
+    monkeypatch.setattr(module, "datetime", clock)
+    monkeypatch.setattr(module, "fetch_report", Mock(return_value=degraded))
+    send = Mock(side_effect=[TelegramError("telegram down"), True])
+    monkeypatch.setattr(module, "send_alert", send)
+
+    module.check_defillama_verified()
+    assert cache.get(module.CACHE_KEY_VERIFIED_FAILURE_STREAK, 0) in (0, "0")
+    assert cache.get(module.CACHE_KEY_VERIFIED_ISSUES, 0) in (0, "")
+
+    module.check_defillama_verified()
+    assert send.call_count == 2
+    assert "out of date" in send.call_args.args[0].message
+    assert cache[module.CACHE_KEY_VERIFIED_ISSUES]
+
+
+def test_verified_report_dates_history_tracks_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Store each originator's distinct reportDates, capped, so the real cadence can be measured."""
+    module = load_3jane_module()
+    cache = stub_cache(monkeypatch, module)
+    path = Path(__file__).with_name("fixtures") / "defillama_verified_3jane.json"
+    now = datetime(2026, 11, 23, 14, 30, tzinfo=timezone.utc)
+    report = parse_report(json.loads(path.read_text()), module.VERIFIED_FEED, now)
+    gigfi = ("Warehouse Loans", "GigFi")
+
+    module.record_verified_report_dates(report)
+    module.record_verified_report_dates(report)  # same dates: no new entries
+    history = json.loads(cache[module.CACHE_KEY_VERIFIED_REPORT_DATES])
+    assert history["GigFi (Warehouse Loans)"] == ["2026-11-13"]
+    assert history["Settle (Forward Flows)"] == ["2026-11-11"]
+    assert len(history) == 4
+
+    for offset in range(1, module.VERIFIED_DATE_HISTORY_LENGTH + 2):
+        loans = dict(report.loans)
+        loans[gigfi] = replace(loans[gigfi], report_date=loans[gigfi].report_date + timedelta(days=7 * offset))
+        module.record_verified_report_dates(replace(report, loans=loans))
+
+    days = json.loads(cache[module.CACHE_KEY_VERIFIED_REPORT_DATES])["GigFi (Warehouse Loans)"]
+    assert len(days) == module.VERIFIED_DATE_HISTORY_LENGTH
+    assert days[-1] == "2027-02-12"
+
+
+def test_verified_report_dates_history_ignores_corrupt_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A malformed stored history is replaced rather than failing the Verified check."""
+    module = load_3jane_module()
+    cache = stub_cache(monkeypatch, module)
+    cache[module.CACHE_KEY_VERIFIED_REPORT_DATES] = "{not json"
+    path = Path(__file__).with_name("fixtures") / "defillama_verified_3jane.json"
+    now = datetime(2026, 11, 23, 14, 30, tzinfo=timezone.utc)
+    report = parse_report(json.loads(path.read_text()), module.VERIFIED_FEED, now)
+
+    module.record_verified_report_dates(report)
+
+    assert json.loads(cache[module.CACHE_KEY_VERIFIED_REPORT_DATES])["Slope (Forward Flows)"] == ["2026-11-19"]
