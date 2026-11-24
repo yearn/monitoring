@@ -54,6 +54,11 @@ JOURNAL_MAX_USE="${JOURNAL_MAX_USE:-500M}"
 # both together and re-verify the checksum from the release page.
 SUPERCRONIC_VERSION="${SUPERCRONIC_VERSION:-v0.2.34}"
 SUPERCRONIC_SHA256="${SUPERCRONIC_SHA256:-a51b340a83c5bd035742f0d7191555f9663876405e494dbf824537d64f3e39c6}"
+# Pinned uv release archive, checksum-verified (no `curl | sh` of a moving
+# installer). linux/amd64 only. Bump together with `required-version` in
+# pyproject.toml and the CI pin; take the hash from the release's .sha256 file.
+UV_VERSION="${UV_VERSION:-0.13.9}"
+UV_SHA256="${UV_SHA256:-a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5}"
 
 log()  { printf '\033[1;34m[install]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[install]\033[0m %s\n' "$*"; }
@@ -96,11 +101,19 @@ apt-get install -y -qq \
   ca-certificates curl git jq sqlite3 util-linux
 
 # ─── uv (manages Python + venvs) ──────────────────────────────────────
-if ! command -v uv >/dev/null; then
-  log "installing uv (Astral) → /usr/local/bin/uv…"
-  curl -fsSL https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh
+# Also re-run on version drift, so re-running this script upgrades an old uv.
+if [[ "$(uv --version 2>/dev/null | awk '{print $2}')" != "$UV_VERSION" ]]; then
+  log "installing uv ${UV_VERSION} (Astral) → /usr/local/bin/uv…"
+  uv_tmp="$(mktemp -d)"
+  uv_archive="uv-x86_64-unknown-linux-gnu.tar.gz"
+  curl -fsSL -o "${uv_tmp}/${uv_archive}" \
+    "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${uv_archive}"
+  echo "${UV_SHA256}  ${uv_tmp}/${uv_archive}" | sha256sum -c -
+  tar -xzf "${uv_tmp}/${uv_archive}" -C "$uv_tmp"
+  install -m 0755 "${uv_tmp}/uv-x86_64-unknown-linux-gnu/uv" "${uv_tmp}/uv-x86_64-unknown-linux-gnu/uvx" /usr/local/bin/
+  rm -rf "$uv_tmp"
 else
-  log "uv already installed; skipping."
+  log "uv ${UV_VERSION} already installed; skipping."
 fi
 need uv
 

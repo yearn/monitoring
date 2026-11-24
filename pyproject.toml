@@ -77,22 +77,34 @@ dev = [
     "types-pyyaml==6.0.12.20260906",
     "types-requests==2.33.0.20260906",
     "types-setuptools==84.0.0.20260812",
+    "zizmor==1.32.0",
 ]
 
 [tool.uv]
+# Hashed `build-constraint-dependencies` below need uv >= 0.13; older uv fails to
+# parse this file. Keep in sync with UV_VERSION in deploy/install.sh and CI.
+required-version = ">=0.13.9"
 # Supply-chain hardening: never resolve packages that were uploaded
 # less than 7 days ago. Mirrors the `min-release-age=7` rule used in
 # yearn/risk-score's pnpm setup. Accepts a friendly duration ("1 week")
 # or ISO 8601 (e.g. "P7D"). Applies to `uv pip install`, `uv lock`,
 # `uv sync`, etc. Also settable via `UV_EXCLUDE_NEWER=1 week`.
 exclude-newer = "1 week"
-# The emSign CA compromise needs certifi's 2026.10.19 security release before the
-# normal seven-day cooldown; the pinned version and PyPI provenance were checked.
-# TODO: remove after 2026-10-27T02:25Z (2026.10.19 upload + 7 days), then `uv lock`.
-exclude-newer-package = { certifi = "2026-10-21T00:00:00Z" }
+# Never build dependencies from sdists: a build runs arbitrary backend code and
+# build backends aren't covered by uv.lock hashes. Every dependency must ship a
+# wheel. The project itself has no wheel, so it is the one package built locally.
+no-build = true
+no-binary-package = ["monitoring-scripts-py"]
+# Hash-pin the build backend used for the editable install of this project.
+# When bumping, update the version in [build-system] too.
+build-constraint-dependencies = [
+    { requirement = "setuptools==84.2.1", hashes = [
+        "sha256:ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2",
+    ] },
+]
 
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+requires = ["setuptools==84.2.1"]
 build-backend = "setuptools.build_meta"
 
 # Protocol monitors live under `protocols/`; shared code under `utils/` and `automation/`.
