@@ -63,6 +63,18 @@ class TestPendleRule(unittest.TestCase):
         data = pendle_aggregate([(ORACLE, 0, PAUSE), (ORACLE, 0, upgrade_to_and_call(NEW_ORACLE_IMPL))])
         self.assertTrue(pendle_alerts(call_tx(data)))
 
+    def test_upgrade_inside_aggregate_with_scoped_access_alerts(self) -> None:
+        # The deployed PendleGovernanceProxy also executes batches through aggregateWithScopedAccess.
+        data = pendle_aggregate(
+            [(ORACLE, 0, PAUSE), (ORACLE, 0, upgrade_to_and_call(NEW_ORACLE_IMPL))], name="aggregateWithScopedAccess"
+        )
+        self.assertTrue(pendle_alerts(call_tx(data)))
+
+    def test_routine_aggregate_with_scoped_access_is_skipped(self) -> None:
+        self.assertFalse(
+            pendle_alerts(call_tx(pendle_aggregate([(ORACLE, 0, PAUSE)], name="aggregateWithScopedAccess")))
+        )
+
     def test_upgrade_inside_multisend_alerts(self) -> None:
         tx = multisend_tx([(0, ORACLE, 0, PAUSE), (0, PROXY_ADMIN, 0, proxy_admin_upgrade_and_call())])
         self.assertTrue(pendle_alerts(tx))

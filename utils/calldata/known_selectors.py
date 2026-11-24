@@ -30,6 +30,7 @@ KNOWN_SELECTORS: dict[str, str] = {
     "0x1f931c1c": "diamondCut((address,uint8,bytes4[])[],address,bytes)",  # EIP-2535
     # Pendle governance proxy
     "0x1acaa198": "aggregate((address,uint256,bytes)[])",
+    "0xc45ce972": "aggregateWithScopedAccess((address,uint256,bytes)[])",
     # Ownable
     "0xf2fde38b": "transferOwnership(address)",
     # Pausable

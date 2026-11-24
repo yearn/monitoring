@@ -20,14 +20,17 @@ from utils.logger import get_logger
 
 logger = get_logger("safe.multisend")
 
-# Canonical Safe utility contract addresses are identical across all chains
-# Safe is deployed on. Source: https://github.com/safe-global/safe-deployments
+# Official Safe utility deployments. Each address is the same on every chain it is deployed to; v1.3.0
+# has both a "canonical" and an "EIP-155" deployment, and a chain may use either.
+# Source: https://github.com/safe-global/safe-deployments (src/assets/v*/multi_send*.json)
 _SAFE_UTILS: dict[str, str] = {
-    "0x40a2accbd92bca938b02010e17a5b8929b49130d": "Safe MultiSendCallOnly",
+    "0x40a2accbd92bca938b02010e17a5b8929b49130d": "Safe MultiSendCallOnly",  # v1.3.0 canonical
+    "0xa1dabef33b3b82c7814b6d82a79e50f4ac44102b": "Safe MultiSendCallOnly v1.3.0 (EIP-155)",
     "0x9641d764fc13c8b624c04430c7356c1c7c8102e2": "Safe MultiSendCallOnly v1.4.1",
-    "0x38869bf66a61cf6bdb996a6ae40d5853fd43b526": "Safe MultiSend (legacy, permits nested DELEGATECALL)",
-    "0x998739bfdaadde7c933b942a68053933098f9eda": "Safe MultiSend v1.3.0",
-    "0xa238cbeb142c10ef7ad8442c6d1f9e89e07e7761": "Safe MultiSend v1.4.1",
+    "0x8d29be29923b68abfdd21e541b9374737b49cdad": "Safe MultiSend v1.1.1 (permits nested DELEGATECALL)",
+    "0xa238cbeb142c10ef7ad8442c6d1f9e89e07e7761": "Safe MultiSend v1.3.0 (permits nested DELEGATECALL)",
+    "0x998739bfdaadde7c933b942a68053933098f9eda": "Safe MultiSend v1.3.0 EIP-155 (permits nested DELEGATECALL)",
+    "0x38869bf66a61cf6bdb996a6ae40d5853fd43b526": "Safe MultiSend v1.4.1 (permits nested DELEGATECALL)",
     "0xd53cd0ab83d845ac265be939c57f53ad838012c9": "Safe SignMessageLib",
 }
 

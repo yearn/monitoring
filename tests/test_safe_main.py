@@ -891,6 +891,13 @@ class TestQueueServiceMigration(unittest.TestCase):
         tx = self._tx(proposer=self.OWNER, proposedVia="SOMETHING_NEW", proposedBy=self.BOT)
         self._assert_critical(self._alert(safe_main, [tx], expected={self.BOT}))
 
+    def test_unrecognized_route_does_not_trust_an_allowlisted_proposer(self):
+        safe_main = self._import_safe_main()
+        for route in ("SOMETHING_NEW", "UNKNOWN", None):
+            with self.subTest(route=route):
+                tx = self._tx(proposer=self.BOT, proposedVia=route, proposedBy=self.BOT)
+                self._assert_critical(self._alert(safe_main, [tx], expected={self.BOT}))
+
     def test_owner_proposal_by_known_address_is_quiet(self):
         safe_main = self._import_safe_main()
         tx = self._tx(proposer=self.BOT, proposedVia="OWNER", proposedBy=None)
@@ -964,6 +971,23 @@ class TestQueueServiceMigration(unittest.TestCase):
         self.assertEqual(mock_error.call_args.kwargs["alert_protocol"], "yearn-internal")
         self.assertIn("0x1", message)
         self.assertIn("TypeError: boom", message)
+
+    def test_failed_error_alert_does_not_skip_the_remaining_safes(self):
+        from utils.telegram import TelegramError
+
+        safe_main = self._import_safe_main()
+        safes = [["PENDLE", "mainnet", "0x1"], ["LIDO", "mainnet", "0x2"]]
+
+        with (
+            patch.object(safe_main, "check_llm_credits"),
+            patch.object(safe_main, "ALL_SAFE_ADDRESSES", safes),
+            patch.object(safe_main, "run_for_network", side_effect=[TypeError("boom"), None]) as mock_run,
+            patch.object(safe_main, "send_error_message", side_effect=TelegramError("chat not found")) as mock_error,
+        ):
+            safe_main.main()
+
+        self.assertEqual(mock_run.call_count, 2)
+        mock_error.assert_called_once()
 
     def test_rejected_key_stops_the_run(self):
         safe_main = self._import_safe_main()

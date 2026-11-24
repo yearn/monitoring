@@ -33,10 +33,10 @@ def execute_batch(targets: list[str], payloads: list[str]) -> str:
     )
 
 
-def pendle_aggregate(calls: list[tuple[str, int, str]]) -> str:
-    """Pendle governance proxy ``aggregate((address,uint256,bytes)[])`` of ``(target, value, data_hex)`` calls."""
+def pendle_aggregate(calls: list[tuple[str, int, str]], name: str = "aggregate") -> str:
+    """Pendle governance proxy ``aggregate`` (or ``aggregateWithScopedAccess``) of ``(target, value, data_hex)`` calls."""
     return encode_call(
-        "aggregate((address,uint256,bytes)[])",
+        f"{name}((address,uint256,bytes)[])",
         ["(address,uint256,bytes)[]"],
         [[(target, value, bytes.fromhex(data[2:])) for target, value, data in calls]],
     )
@@ -118,6 +118,15 @@ class TestUnwrapCalls(unittest.TestCase):
                 InnerCall(CUSD, "0x8456cb59", "aggregate call 2"),
             ],
         )
+
+    def test_pendle_aggregate_with_scoped_access_yields_each_call(self) -> None:
+        data = pendle_aggregate([(ORACLE, 0, upgrade_to_and_call(NEW_ORACLE_IMPL))], name="aggregateWithScopedAccess")
+        self.assertTrue(data.startswith("0xc45ce972"))
+        self.assertEqual(
+            unwrap_calls(data),
+            [InnerCall(ORACLE, upgrade_to_and_call(NEW_ORACLE_IMPL), "aggregateWithScopedAccess")],
+        )
+        self.assertEqual(unwrap_executed_calls(data), unwrap_calls(data))
 
     def test_pendle_aggregate_calls_run_in_the_wrapping_tx(self) -> None:
         data = pendle_aggregate([(ORACLE, 0, upgrade_to_and_call(NEW_ORACLE_IMPL))])

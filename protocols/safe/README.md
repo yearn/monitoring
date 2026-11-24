@@ -11,14 +11,16 @@ batches itself, and only for a DELEGATECALL into a known Safe multisend utility.
 
 Yearn Safe alerts are escalated when the proposer is outside the configured list of known
 proposers. A known address counts when it is the `proposer`, or the delegate in `proposedBy`
-when `proposedVia` is `DELEGATE`. A nested-owner signer in `proposedBy` does not count.
+when `proposedVia` is `DELEGATE`. A nested-owner signer in `proposedBy` does not count, and an
+`UNKNOWN`, missing or unrecognized `proposedVia` trusts neither address.
 
 [Per-protocol rules](filters.py) narrow some Safes:
 
 - **Euler** alerts only on txs to the vault our strategies use.
 - **Pendle** alerts only on privileged calls: proxy upgrades (direct or through a ProxyAdmin),
   `changeProxyAdmin`, `transferOwnership` and `diamondCut`. Calls are read from decoded calldata,
-  including multisend batches, Pendle `aggregate` calls and timelock wrappers. Calldata the rule
+  including multisend batches, Pendle `aggregate` / `aggregateWithScopedAccess` calls and timelock
+  wrappers. Calldata the rule
   cannot fully inspect alerts rather than being skipped.
 
 If one Safe cannot be checked (for example the API rejects the request), the monitor sends an

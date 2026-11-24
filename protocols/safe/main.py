@@ -49,6 +49,8 @@ logger = get_logger("safe")
 
 SAFE_WEBSITE_URL = "https://app.safe.global/transactions/queue?safe="
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+# Queue Service ``proposedVia`` values whose ``proposer`` / ``proposedBy`` semantics we rely on.
+_KNOWN_PROPOSAL_ROUTES = frozenset({"OWNER", "DELEGATE", "NESTED_OWNER"})
 # How much of an unexpected Safe API error body to put in the error alert.
 _ERROR_BODY_CHARS = 500
 
@@ -471,10 +473,16 @@ def _proposer_and_delegate(tx: dict) -> tuple[str, str]:
     ``proposedBy`` counts as a delegate only when ``proposedVia`` is ``DELEGATE``.
     For ``NESTED_OWNER`` it is an EOA acting through an owner Safe, which must
     not make the tx look expected when that owner Safe (``proposer``) is not.
-    ``proposer`` is null when ``proposedVia`` is ``UNKNOWN``.
+
+    Any other route (``UNKNOWN``, a missing value, or one the service adds later)
+    has unknown semantics, so neither address is trusted and a Yearn multisig tx
+    escalates as an unexpected proposer.
     """
+    route = tx.get("proposedVia")
+    if route not in _KNOWN_PROPOSAL_ROUTES:
+        return "", ""
     proposer = (tx.get("proposer") or "").lower()
-    delegate = (tx.get("proposedBy") or "").lower() if tx.get("proposedVia") == "DELEGATE" else ""
+    delegate = (tx.get("proposedBy") or "").lower() if route == "DELEGATE" else ""
     return proposer, delegate
 
 
@@ -673,13 +681,16 @@ def report_safe_failure(protocol: str, network_name: str, safe_address: str, exc
         exc: The exception raised while checking it.
     """
     logger.error("Safe check failed for %s %s on %s", protocol, safe_address, network_name, exc_info=exc)
-    send_error_message(
-        f"Safe monitor could not check {protocol} Safe {safe_address} on {network_name}; "
-        f"its queued txs are not being alerted on this run.\n{type(exc).__name__}: {exc}",
-        ERROR_LABEL,
-        source="safe_check_failed",
-        alert_protocol=ALERT_PROTOCOL,
-    )
+    try:
+        send_error_message(
+            f"Safe monitor could not check {protocol} Safe {safe_address} on {network_name}; "
+            f"its queued txs are not being alerted on this run.\n{type(exc).__name__}: {exc}",
+            ERROR_LABEL,
+            source="safe_check_failed",
+            alert_protocol=ALERT_PROTOCOL,
+        )
+    except Exception:  # noqa: BLE001 - a failed notification must not skip the remaining safes
+        logger.exception("Could not send the Safe check failure alert for %s on %s", safe_address, network_name)
 
 
 def main():

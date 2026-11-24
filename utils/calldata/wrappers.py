@@ -17,8 +17,9 @@ Supported wrappers:
     - Yearn governance Executor: ``execute(bytes)``, whose script packs each call
       as a 32-byte header ``target (160 bits) | calldata size (96 bits)`` followed
       by the calldata
-    - Pendle governance proxy: ``aggregate((address,uint256,bytes)[])``, which
-      runs each ``(target, value, data)`` call in order
+    - Pendle governance proxy: ``aggregate((address,uint256,bytes)[])`` and
+      ``aggregateWithScopedAccess((address,uint256,bytes)[])``, which run each
+      ``(target, value, data)`` call in order
 """
 
 from collections.abc import Callable
@@ -63,7 +64,7 @@ def _compound(values: tuple) -> list[tuple[str, bytes]]:
 
 
 def _aggregate(values: tuple) -> list[tuple[str, bytes]]:
-    """((target, value, data)[],) — Pendle governance proxy aggregate."""
+    """((target, value, data)[],) — Pendle governance proxy aggregate / aggregateWithScopedAccess."""
     return [(target, data) for target, _value, data in values[0]]
 
 
@@ -135,6 +136,7 @@ _WRAPPER_SIGNATURES: dict[str, _Extractor] = {
     "scheduleProposals(address[],bytes[])": _maple,
     PACKED_SCRIPT_SIGNATURE: _packed_script,
     "aggregate((address,uint256,bytes)[])": _aggregate,
+    "aggregateWithScopedAccess((address,uint256,bytes)[])": _aggregate,
 }
 
 
@@ -163,7 +165,9 @@ _WRAPPERS: dict[str, tuple[str, list[str], _Extractor]] = {
 
 # Wrappers whose inner calls run inside the wrapping transaction. The others
 # only queue their inner calls for a later transaction.
-_EXECUTING_WRAPPERS = frozenset({"execute", "executeBatch", "executeTransaction", "aggregate"})
+_EXECUTING_WRAPPERS = frozenset(
+    {"execute", "executeBatch", "executeTransaction", "aggregate", "aggregateWithScopedAccess"}
+)
 
 
 def is_wrapper_call(data_hex: str) -> bool:

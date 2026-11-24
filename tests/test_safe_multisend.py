@@ -120,6 +120,24 @@ class TestExtractInnerCalls(unittest.TestCase):
         calls = extract_inner_calls(multisend_tx(YCHAD_2308_DATA))
         self.assertEqual([c["target"] for c in calls], ["0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"])
 
+    def test_official_multisend_deployments_are_decoded(self) -> None:
+        # v1.3.0 canonical + EIP-155, v1.4.1, and the MultiSend variants (safe-global/safe-deployments).
+        for to in (
+            MULTISEND_CALL_ONLY,
+            "0xA1dabEF33b3B82c7814B6D82A79e50F4AC44102B",
+            "0x9641d764fc13c8B624c04430C7356C1C7C8102e2",
+            "0x8D29bE29923b68abfDD21e541b9374737B49cdAD",
+            "0xA238CBeb142c10Ef7Ad8442C6D1f9E89e07e7761",
+            "0x998739BFdAAdde7C933B942a68053933098f9EDa",
+            "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
+        ):
+            with self.subTest(to=to):
+                self.assertEqual(len(extract_inner_calls(multisend_tx(YCHAD_2308_DATA, to=to))), 1)
+
+    def test_sign_message_lib_is_not_a_multisend(self) -> None:
+        tx = multisend_tx(YCHAD_2308_DATA, to="0xd53cd0ab83d845ac265be939c57f53ad838012c9")
+        self.assertEqual(extract_inner_calls(tx), [])
+
     def test_multisend_selector_on_unknown_destination_stays_single_call(self) -> None:
         tx = multisend_tx(YCHAD_2308_DATA, to="0x000000000000000000000000000000000000dead")
         self.assertFalse(is_multisend_call(tx))
