@@ -205,11 +205,8 @@ def get_safe_transactions(
             would only burn requests until the window resets.
         SafeApiAuthError: When the service rejects the API key.
         SafeApiRequestError: When the service rejects the request (e.g. 422).
-        ValueError: When ``network_name`` has no known chain id.
     """
     chain_id = safe_network_to_chain_id(network_name)
-    if not chain_id:
-        raise ValueError(f"No chain id for Safe network {network_name!r}")
     endpoint = f"{SAFE_QUEUE_API_URL}/api/v1/safes/{safe_address}/multisig-transactions"
 
     # The service silently ignores unknown parameters, so a misspelled one fails quietly.

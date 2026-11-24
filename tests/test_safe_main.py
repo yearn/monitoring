@@ -833,12 +833,6 @@ class TestQueueServiceMigration(unittest.TestCase):
             {"chainId": 8453, "limit": 10, "nonceOrder": "desc", "executed": "false"},
         )
 
-    def test_unknown_network_raises_before_any_request(self):
-        safe_main = self._import_safe_main()
-        with patch.object(safe_main.requests, "get") as mock_get, self.assertRaises(ValueError):
-            safe_main.get_safe_transactions(self.SAFE, "not-a-network")
-        mock_get.assert_not_called()
-
     def test_validation_error_is_raised_not_swallowed(self):
         safe_main = self._import_safe_main()
         rejected = Mock(status_code=422, text='{"detail": "Invalid chainId"}')
@@ -881,16 +875,6 @@ class TestQueueServiceMigration(unittest.TestCase):
         tx = self._tx(proposer=self.OWNER, proposedVia="NESTED_OWNER", proposedBy=self.BOT)
         self._assert_critical(self._alert(safe_main, [tx], expected={self.BOT}))
 
-    def test_unknown_proposal_with_null_proposer_is_critical(self):
-        safe_main = self._import_safe_main()
-        tx = self._tx(proposer=None, proposedVia="UNKNOWN", proposedBy=None)
-        self._assert_critical(self._alert(safe_main, [tx], expected={self.BOT}))
-
-    def test_unrecognized_proposed_via_does_not_trust_proposed_by(self):
-        safe_main = self._import_safe_main()
-        tx = self._tx(proposer=self.OWNER, proposedVia="SOMETHING_NEW", proposedBy=self.BOT)
-        self._assert_critical(self._alert(safe_main, [tx], expected={self.BOT}))
-
     def test_unrecognized_route_does_not_trust_an_allowlisted_proposer(self):
         safe_main = self._import_safe_main()
         for route in ("SOMETHING_NEW", "UNKNOWN", None):
@@ -915,12 +899,6 @@ class TestQueueServiceMigration(unittest.TestCase):
         safe_main = self._import_safe_main()
         message = self._alert(safe_main, [self._tx(to=None)]).call_args.args[0]
         self.assertIn(f"Target Contract Address: {safe_main.ZERO_ADDRESS}", message)
-
-    def test_euler_vault_matches_lowercase_target(self):
-        safe_main = self._import_safe_main()
-        vault = "0x797dd80692c3b2dadabce8e30c07fde5307d48a9"
-        mock_send = self._alert(safe_main, [self._tx(11, to=vault), self._tx(10)], protocol="EULER")
-        self.assertEqual(mock_send.call_count, 1)
 
     def test_null_calldata_does_not_crash_any_protocol_path(self):
         safe_main = self._import_safe_main()

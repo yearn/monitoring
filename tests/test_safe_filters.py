@@ -4,7 +4,7 @@ import unittest
 
 from eth_abi import encode
 
-from protocols.safe.filters import has_privileged_call, should_alert
+from protocols.safe.filters import should_alert
 from tests.test_calldata_wrappers import (
     NEW_ORACLE_IMPL,
     ORACLE,
@@ -16,135 +16,101 @@ from tests.test_calldata_wrappers import (
 from tests.test_safe_multisend import MULTISEND_CALL_ONLY, pack_multisend
 
 GOVERNANCE = "0x" + "11" * 20  # stand-in for the governance contract the Safe calls
-PROXY_ADMIN = "0x" + "22" * 20  # stand-in ProxyAdmin
 PAUSE = "0x8456cb59"
+UPGRADE = upgrade_to_and_call(NEW_ORACLE_IMPL)
+EULER_VAULT = "0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9"
 
 
-def proxy_admin_upgrade_and_call() -> str:
-    return encode_call(
-        "upgradeAndCall(address,address,bytes)", ["address", "address", "bytes"], [ORACLE, NEW_ORACLE_IMPL, b""]
-    )
-
-
-def transfer_ownership() -> str:
-    return encode_call("transferOwnership(address)", ["address"], [NEW_ORACLE_IMPL])
-
-
-def call_tx(data: str | None, to: str = GOVERNANCE) -> dict:
-    return {"to": to.lower(), "operation": 0, "data": data}
+def call_tx(data: str | None, to: str = GOVERNANCE, operation: int = 0) -> dict:
+    return {"to": to.lower(), "operation": operation, "data": data}
 
 
 def multisend_tx(calls: list[tuple[int, str, int, str]]) -> dict:
-    return {"to": MULTISEND_CALL_ONLY.lower(), "operation": 1, "data": pack_multisend(calls)}
+    return call_tx(pack_multisend(calls), to=MULTISEND_CALL_ONLY, operation=1)
 
 
-def pendle_alerts(tx: dict) -> bool:
-    return should_alert("PENDLE", tx, tx["to"], tx["data"] or "0x")
+def alerts(protocol: str, tx: dict) -> bool:
+    return should_alert(protocol, tx, tx["to"], tx["data"] or "0x")
+
+
+def _privileged_calls() -> dict[str, str]:
+    """One call per privileged selector the Pendle rule must catch."""
+    address_pair = ["address", "address"]
+    return {
+        "upgradeToAndCall": UPGRADE,
+        # Missed by the old substring filter: the calldata never holds the proxy's own upgrade selector.
+        "ProxyAdmin upgradeAndCall": encode_call(
+            "upgradeAndCall(address,address,bytes)", [*address_pair, "bytes"], [ORACLE, NEW_ORACLE_IMPL, b""]
+        ),
+        "ProxyAdmin upgrade": encode_call("upgrade(address,address)", address_pair, [ORACLE, NEW_ORACLE_IMPL]),
+        "changeProxyAdmin": encode_call("changeProxyAdmin(address,address)", address_pair, [ORACLE, ORACLE]),
+        "transferOwnership": encode_call("transferOwnership(address)", ["address"], [NEW_ORACLE_IMPL]),
+    }
 
 
 class TestPendleRule(unittest.TestCase):
-    def test_direct_upgrade_to_and_call_alerts(self) -> None:
-        self.assertTrue(pendle_alerts(call_tx(upgrade_to_and_call(NEW_ORACLE_IMPL), to=ORACLE)))
+    def test_privileged_calls_alert_at_every_level(self) -> None:
+        wrapped = {
+            "direct": lambda data: call_tx(data, to=ORACLE),
+            "aggregate": lambda data: call_tx(pendle_aggregate([(ORACLE, 0, PAUSE), (ORACLE, 0, data)])),
+            "aggregateWithScopedAccess": lambda data: call_tx(
+                pendle_aggregate([(ORACLE, 0, data)], name="aggregateWithScopedAccess")
+            ),
+            "multisend": lambda data: multisend_tx([(0, ORACLE, 0, PAUSE), (0, ORACLE, 0, data)]),
+            "timelock in aggregate": lambda data: call_tx(
+                pendle_aggregate([(ORACLE, 0, execute_batch([ORACLE], [data]))])
+            ),
+        }
+        for call_name, data in _privileged_calls().items():
+            for level, make_tx in wrapped.items():
+                with self.subTest(call=call_name, level=level):
+                    self.assertTrue(alerts("PENDLE", make_tx(data)))
 
-    def test_proxy_admin_upgrade_and_call_alerts(self) -> None:
-        # Missed by the old substring filter: the calldata never holds the proxy's own upgrade selector.
-        self.assertTrue(pendle_alerts(call_tx(proxy_admin_upgrade_and_call(), to=PROXY_ADMIN)))
-
-    def test_proxy_admin_upgrade_and_change_admin_alert(self) -> None:
-        upgrade = encode_call("upgrade(address,address)", ["address", "address"], [ORACLE, NEW_ORACLE_IMPL])
-        change_admin = encode_call("changeProxyAdmin(address,address)", ["address", "address"], [ORACLE, ORACLE])
-        self.assertTrue(pendle_alerts(call_tx(upgrade, to=PROXY_ADMIN)))
-        self.assertTrue(pendle_alerts(call_tx(change_admin, to=PROXY_ADMIN)))
-
-    def test_transfer_ownership_alerts(self) -> None:
-        self.assertTrue(pendle_alerts(call_tx(transfer_ownership(), to=ORACLE)))
-
-    def test_upgrade_inside_aggregate_alerts(self) -> None:
-        data = pendle_aggregate([(ORACLE, 0, PAUSE), (ORACLE, 0, upgrade_to_and_call(NEW_ORACLE_IMPL))])
-        self.assertTrue(pendle_alerts(call_tx(data)))
-
-    def test_upgrade_inside_aggregate_with_scoped_access_alerts(self) -> None:
-        # The deployed PendleGovernanceProxy also executes batches through aggregateWithScopedAccess.
-        data = pendle_aggregate(
-            [(ORACLE, 0, PAUSE), (ORACLE, 0, upgrade_to_and_call(NEW_ORACLE_IMPL))], name="aggregateWithScopedAccess"
-        )
-        self.assertTrue(pendle_alerts(call_tx(data)))
-
-    def test_routine_aggregate_with_scoped_access_is_skipped(self) -> None:
-        self.assertFalse(
-            pendle_alerts(call_tx(pendle_aggregate([(ORACLE, 0, PAUSE)], name="aggregateWithScopedAccess")))
-        )
-
-    def test_upgrade_inside_multisend_alerts(self) -> None:
-        tx = multisend_tx([(0, ORACLE, 0, PAUSE), (0, PROXY_ADMIN, 0, proxy_admin_upgrade_and_call())])
-        self.assertTrue(pendle_alerts(tx))
-
-    def test_upgrade_inside_timelock_inside_aggregate_alerts(self) -> None:
-        timelock_call = execute_batch([ORACLE], [upgrade_to_and_call(NEW_ORACLE_IMPL)])
-        data = pendle_aggregate([(ORACLE, 0, timelock_call)])
-        self.assertTrue(pendle_alerts(call_tx(data)))
-
-    def test_routine_aggregate_is_skipped(self) -> None:
-        data = pendle_aggregate([(ORACLE, 0, PAUSE), (ORACLE, 0, "0x3f4ba83a")])
-        self.assertFalse(pendle_alerts(call_tx(data)))
-
-    def test_routine_multisend_is_skipped(self) -> None:
-        self.assertFalse(pendle_alerts(multisend_tx([(0, ORACLE, 0, PAUSE)])))
-
-    def test_selector_bytes_inside_an_argument_are_skipped(self) -> None:
-        # The old filter matched "4f1ef286" anywhere in the hex; only decoded selectors count now.
-        data = "0xa9059cbb" + encode(["bytes32", "uint256"], [bytes.fromhex("4f1ef286" * 8), 1]).hex()
-        self.assertIn("4f1ef286", data[10:])
-        self.assertFalse(pendle_alerts(call_tx(data)))
-
-    def test_null_and_empty_calldata_are_skipped(self) -> None:
-        self.assertFalse(pendle_alerts(call_tx(None)))
-        self.assertFalse(pendle_alerts(call_tx("0x")))
-
-    def test_empty_aggregate_batches_are_skipped(self) -> None:
-        # A well-formed empty batch executes nothing; only a decode failure fails open.
-        for name in ("aggregate", "aggregateWithScopedAccess"):
-            with self.subTest(name):
-                self.assertFalse(pendle_alerts(call_tx(pendle_aggregate([], name=name))))
-
-    def test_malformed_aggregate_alerts(self) -> None:
-        data = pendle_aggregate([(ORACLE, 0, PAUSE)])[:90]
-        self.assertTrue(pendle_alerts(call_tx(data)))
-
-    def test_malformed_multisend_alerts(self) -> None:
-        tx = multisend_tx([(0, ORACLE, 0, PAUSE)])
-        tx["data"] = tx["data"][:100]
-        self.assertTrue(pendle_alerts(tx))
-
-    def test_inner_delegatecall_in_multisend_alerts(self) -> None:
-        self.assertTrue(pendle_alerts(multisend_tx([(1, ORACLE, 0, PAUSE)])))
-
-    def test_delegatecall_into_unknown_contract_alerts(self) -> None:
-        tx = {"to": ORACLE.lower(), "operation": 1, "data": PAUSE}
-        self.assertTrue(has_privileged_call(tx, PAUSE))
-
-    def test_wrappers_nested_past_the_depth_limit_alert(self) -> None:
+    def test_uninspectable_calldata_fails_open(self) -> None:
+        malformed_multisend = multisend_tx([(0, ORACLE, 0, PAUSE)])
+        malformed_multisend["data"] = malformed_multisend["data"][:100]
         innermost = pendle_aggregate([(ORACLE, 0, PAUSE)])
-        data = pendle_aggregate([(ORACLE, 0, pendle_aggregate([(ORACLE, 0, innermost)]))])
-        self.assertTrue(pendle_alerts(call_tx(data)))
+        cases = {
+            "malformed aggregate": call_tx(pendle_aggregate([(ORACLE, 0, PAUSE)])[:90]),
+            "malformed multisend": malformed_multisend,
+            "inner DELEGATECALL in multisend": multisend_tx([(1, ORACLE, 0, PAUSE)]),
+            "DELEGATECALL into unknown contract": call_tx(PAUSE, to=ORACLE, operation=1),
+            "wrappers past the depth limit": call_tx(
+                pendle_aggregate([(ORACLE, 0, pendle_aggregate([(ORACLE, 0, innermost)]))])
+            ),
+        }
+        for name, tx in cases.items():
+            with self.subTest(name):
+                self.assertTrue(alerts("PENDLE", tx))
+
+    def test_routine_txs_are_skipped(self) -> None:
+        # The old filter matched "4f1ef286" anywhere in the hex; only decoded selectors count now.
+        selector_in_argument = "0xa9059cbb" + encode(["bytes32", "uint256"], [bytes.fromhex("4f1ef286" * 8), 1]).hex()
+        cases = {
+            "null calldata": call_tx(None),
+            "empty calldata": call_tx("0x"),
+            "routine aggregate": call_tx(pendle_aggregate([(ORACLE, 0, PAUSE), (ORACLE, 0, "0x3f4ba83a")])),
+            "routine aggregateWithScopedAccess": call_tx(
+                pendle_aggregate([(ORACLE, 0, PAUSE)], name="aggregateWithScopedAccess")
+            ),
+            "empty aggregate": call_tx(pendle_aggregate([])),
+            "empty aggregateWithScopedAccess": call_tx(pendle_aggregate([], name="aggregateWithScopedAccess")),
+            "routine multisend": multisend_tx([(0, ORACLE, 0, PAUSE)]),
+            "selector bytes inside an argument": call_tx(selector_in_argument),
+        }
+        for name, tx in cases.items():
+            with self.subTest(name):
+                self.assertFalse(alerts("PENDLE", tx))
 
 
-class TestEulerRule(unittest.TestCase):
-    VAULT = "0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9"
+class TestOtherRules(unittest.TestCase):
+    def test_euler_alerts_only_on_its_vault_in_any_case(self) -> None:
+        self.assertTrue(alerts("EULER", call_tx("0x", to=EULER_VAULT)))
+        self.assertTrue(alerts("EULER", call_tx("0x", to=EULER_VAULT.lower())))
+        self.assertFalse(alerts("EULER", call_tx("0x", to="0x0000000000000000000000000000000000000bad")))
 
-    def test_vault_target_matches_in_any_case(self) -> None:
-        for target in (self.VAULT, self.VAULT.lower()):
-            with self.subTest(target=target):
-                self.assertTrue(should_alert("EULER", call_tx("0x", to=target), target, "0x"))
-
-    def test_other_target_is_skipped(self) -> None:
-        other = "0x0000000000000000000000000000000000000bad"
-        self.assertFalse(should_alert("EULER", call_tx("0x", to=other), other, "0x"))
-
-
-class TestDefaultRule(unittest.TestCase):
     def test_protocols_without_a_rule_alert_on_everything(self) -> None:
-        self.assertTrue(should_alert("LIDO", call_tx(None, to=ORACLE), ORACLE, "0x"))
+        self.assertTrue(alerts("LIDO", call_tx(None, to=ORACLE)))
 
 
 if __name__ == "__main__":

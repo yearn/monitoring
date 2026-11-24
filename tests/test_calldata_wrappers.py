@@ -118,6 +118,7 @@ class TestUnwrapCalls(unittest.TestCase):
                 InnerCall(CUSD, "0x8456cb59", "aggregate call 2"),
             ],
         )
+        self.assertEqual(unwrap_executed_calls(data), unwrap_calls(data))
 
     def test_pendle_aggregate_with_scoped_access_yields_each_call(self) -> None:
         data = pendle_aggregate([(ORACLE, 0, upgrade_to_and_call(NEW_ORACLE_IMPL))], name="aggregateWithScopedAccess")
@@ -126,10 +127,6 @@ class TestUnwrapCalls(unittest.TestCase):
             unwrap_calls(data),
             [InnerCall(ORACLE, upgrade_to_and_call(NEW_ORACLE_IMPL), "aggregateWithScopedAccess")],
         )
-        self.assertEqual(unwrap_executed_calls(data), unwrap_calls(data))
-
-    def test_pendle_aggregate_calls_run_in_the_wrapping_tx(self) -> None:
-        data = pendle_aggregate([(ORACLE, 0, upgrade_to_and_call(NEW_ORACLE_IMPL))])
         self.assertEqual(unwrap_executed_calls(data), unwrap_calls(data))
 
     def test_try_unwrap_separates_empty_batch_from_decode_failure(self) -> None:

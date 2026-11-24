@@ -11,8 +11,6 @@ appear inside any argument. It fails open: calldata it cannot fully inspect
 an unknown contract) alerts instead of being skipped.
 """
 
-from collections.abc import Callable
-
 from protocols.safe.multisend import decode_multisend, is_multisend_call
 from utils.calldata.wrappers import is_wrapper_call, try_unwrap_calls
 from utils.logger import get_logger
@@ -33,9 +31,6 @@ PRIVILEGED_SELECTORS: dict[str, str] = {
     "0xf2fde38b": "transferOwnership(address)",
     "0x1f931c1c": "diamondCut((address,uint8,bytes4[])[],address,bytes)",  # EIP-2535
 }
-
-# (tx, target, hex_data) -> whether to alert
-SafeTxFilter = Callable[[dict, str, str], bool]
 
 
 def _call_is_privileged(data_hex: str, depth: int) -> bool:
@@ -88,20 +83,6 @@ def has_privileged_call(tx: dict, hex_data: str) -> bool:
     return _call_is_privileged(hex_data, 0)
 
 
-def _euler_filter(_tx: dict, target: str, _hex_data: str) -> bool:
-    return target.lower() in EULER_WATCHED_TARGETS
-
-
-def _pendle_filter(tx: dict, _target: str, hex_data: str) -> bool:
-    return has_privileged_call(tx, hex_data)
-
-
-PROTOCOL_FILTERS: dict[str, SafeTxFilter] = {
-    "EULER": _euler_filter,
-    "PENDLE": _pendle_filter,
-}
-
-
 def should_alert(protocol: str, tx: dict, target: str, hex_data: str) -> bool:
     """Whether a queued tx on a ``protocol`` Safe is worth an alert.
 
@@ -114,5 +95,8 @@ def should_alert(protocol: str, tx: dict, target: str, hex_data: str) -> bool:
     Returns:
         True when the protocol has no rule, or its rule accepts the tx.
     """
-    rule = PROTOCOL_FILTERS.get(protocol)
-    return rule is None or rule(tx, target, hex_data)
+    if protocol == "EULER":
+        return target.lower() in EULER_WATCHED_TARGETS
+    if protocol == "PENDLE":
+        return has_privileged_call(tx, hex_data)
+    return True

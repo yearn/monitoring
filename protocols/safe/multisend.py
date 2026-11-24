@@ -144,11 +144,11 @@ def is_simulatable_multisend(tx: dict, inner_calls: list[dict[str, str]]) -> boo
     one ordered bundle from the Safe reproduces the real execution. Any inner
     DELEGATECALL, or an unknown delegate target, is not modeled.
     """
-    if int(tx.get("operation", 0) or 0) != 1:
-        return False
-    if (tx.get("to") or "").lower() not in _MULTISEND_UTILS:
-        return False
-    return bool(inner_calls) and all(int(call.get("operation", "0") or 0) == 0 for call in inner_calls)
+    return (
+        is_multisend_call(tx)
+        and bool(inner_calls)
+        and all(int(call.get("operation", "0") or 0) == 0 for call in inner_calls)
+    )
 
 
 def build_context_note(tx: dict, safe_address: str, *, simulate_as_bundle: bool = False) -> str:

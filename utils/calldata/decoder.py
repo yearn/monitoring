@@ -15,7 +15,7 @@ from eth_utils import to_checksum_address
 
 from utils.cache import cache_path
 from utils.calldata.known_selectors import KNOWN_SELECTORS
-from utils.calldata.wrappers import PACKED_SCRIPT_SIGNATURE, split_packed_script
+from utils.calldata.wrappers import PACKED_SCRIPT_SIGNATURE, split_packed_script, split_top_level_types
 from utils.http_client import fetch_json
 from utils.logger import get_logger
 
@@ -195,32 +195,6 @@ def _parse_param_types(signature: str) -> list[str]:
 
     inner = signature[start + 1 : end].strip()
     return split_top_level_types(inner) if inner else []
-
-
-def split_top_level_types(types: str) -> list[str]:
-    """Split a comma-separated type list on top-level commas only.
-
-    Commas inside ``(...)`` tuples or ``[...]`` array sizes are preserved so a
-    type like ``(address,uint256)[]`` stays intact. Public so consumers that
-    walk decoded values (e.g. the gist report renderer) can decompose a tuple
-    type into its component types.
-    """
-    parts: list[str] = []
-    depth = 0
-    current: list[str] = []
-    for ch in types:
-        if ch in "([":
-            depth += 1
-        elif ch in ")]":
-            depth -= 1
-        if ch == "," and depth == 0:
-            parts.append("".join(current).strip())
-            current = []
-        else:
-            current.append(ch)
-    if current:
-        parts.append("".join(current).strip())
-    return parts
 
 
 def _no_backticks(text: str) -> str:

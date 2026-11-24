@@ -8,7 +8,6 @@ from protocols.safe.multisend import (
     build_context_note,
     decode_multisend,
     extract_inner_calls,
-    is_multisend_call,
     is_simulatable_multisend,
     safe_utility_label,
 )
@@ -116,10 +115,6 @@ class TestDecodeMultisend(unittest.TestCase):
 
 
 class TestExtractInnerCalls(unittest.TestCase):
-    def test_delegatecall_into_multisend_is_decoded(self) -> None:
-        calls = extract_inner_calls(multisend_tx(YCHAD_2308_DATA))
-        self.assertEqual([c["target"] for c in calls], ["0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"])
-
     def test_official_multisend_deployments_are_decoded(self) -> None:
         # v1.3.0 canonical + EIP-155, v1.4.1, and the MultiSend variants (safe-global/safe-deployments).
         for to in (
@@ -132,53 +127,52 @@ class TestExtractInnerCalls(unittest.TestCase):
             "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
         ):
             with self.subTest(to=to):
-                self.assertEqual(len(extract_inner_calls(multisend_tx(YCHAD_2308_DATA, to=to))), 1)
+                calls = extract_inner_calls(multisend_tx(YCHAD_2308_DATA, to=to))
+                self.assertEqual([c["target"] for c in calls], ["0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"])
 
-    def test_sign_message_lib_is_not_a_multisend(self) -> None:
-        tx = multisend_tx(YCHAD_2308_DATA, to="0xd53cd0ab83d845ac265be939c57f53ad838012c9")
-        self.assertEqual(extract_inner_calls(tx), [])
-
-    def test_multisend_selector_on_unknown_destination_stays_single_call(self) -> None:
-        tx = multisend_tx(YCHAD_2308_DATA, to="0x000000000000000000000000000000000000dead")
-        self.assertFalse(is_multisend_call(tx))
-        self.assertEqual(extract_inner_calls(tx), [])
-
-    def test_plain_call_into_multisend_stays_single_call(self) -> None:
-        tx = multisend_tx(YCHAD_2308_DATA, operation=0)
-        self.assertFalse(is_multisend_call(tx))
-        self.assertEqual(extract_inner_calls(tx), [])
-
-    def test_other_selector_on_multisend_stays_single_call(self) -> None:
-        self.assertEqual(extract_inner_calls(multisend_tx("0xa9059cbb" + "00" * 64)), [])
-
-    def test_null_data_returns_empty(self) -> None:
-        self.assertEqual(extract_inner_calls(multisend_tx(None)), [])
-
-    def test_malformed_payload_returns_empty(self) -> None:
-        self.assertEqual(extract_inner_calls(multisend_tx(YCHAD_2308_DATA[:200])), [])
+    def test_anything_else_stays_a_single_call(self) -> None:
+        cases = {
+            "multiSend selector on unknown destination": multisend_tx(
+                YCHAD_2308_DATA, to="0x000000000000000000000000000000000000dead"
+            ),
+            "SignMessageLib destination": multisend_tx(
+                YCHAD_2308_DATA, to="0xd53cd0ab83d845ac265be939c57f53ad838012c9"
+            ),
+            "plain CALL into multisend": multisend_tx(YCHAD_2308_DATA, operation=0),
+            "other selector": multisend_tx("0xa9059cbb" + "00" * 64),
+            "null data": multisend_tx(None),
+            "malformed payload": multisend_tx(YCHAD_2308_DATA[:200]),
+        }
+        for name, tx in cases.items():
+            with self.subTest(name):
+                self.assertEqual(extract_inner_calls(tx), [])
 
 
 class TestIsSimulatableMultisend(unittest.TestCase):
     """Only a delegatecall into a multisend utility whose inner txs are all CALLs is modeled."""
 
     CALLS = [{"target": "0xA", "data": "0x", "value": "0", "operation": "0"}]
+    TX = multisend_tx(YCHAD_2308_DATA)
 
     def test_all_calls_via_multisend(self) -> None:
-        self.assertTrue(is_simulatable_multisend({"to": MULTISEND_CALL_ONLY, "operation": 1}, self.CALLS))
+        self.assertTrue(is_simulatable_multisend(self.TX, self.CALLS))
 
-    def test_inner_delegatecall_is_not(self) -> None:
-        calls = [*self.CALLS, {"target": "0xB", "data": "0x", "value": "0", "operation": "1"}]
-        self.assertFalse(is_simulatable_multisend({"to": MULTISEND_CALL_ONLY, "operation": 1}, calls))
-
-    def test_unknown_delegate_target_is_not(self) -> None:
-        self.assertFalse(is_simulatable_multisend({"to": "0xCustomDelegated", "operation": 1}, self.CALLS))
-
-    def test_sign_message_lib_is_not(self) -> None:
-        tx = {"to": "0xd53cd0ab83d845ac265be939c57f53ad838012c9", "operation": 1}
-        self.assertFalse(is_simulatable_multisend(tx, self.CALLS))
-
-    def test_empty_batch_is_not(self) -> None:
-        self.assertFalse(is_simulatable_multisend({"to": MULTISEND_CALL_ONLY, "operation": 1}, []))
+    def test_not_simulatable(self) -> None:
+        cases = {
+            "inner DELEGATECALL": (
+                self.TX,
+                [*self.CALLS, {"target": "0xB", "data": "0x", "value": "0", "operation": "1"}],
+            ),
+            "unknown delegate target": (multisend_tx(YCHAD_2308_DATA, to="0x" + "ab" * 20), self.CALLS),
+            "SignMessageLib": (
+                multisend_tx(YCHAD_2308_DATA, to="0xd53cd0ab83d845ac265be939c57f53ad838012c9"),
+                self.CALLS,
+            ),
+            "empty batch": (self.TX, []),
+        }
+        for name, (tx, calls) in cases.items():
+            with self.subTest(name):
+                self.assertFalse(is_simulatable_multisend(tx, calls))
 
 
 class TestBuildContextNote(unittest.TestCase):

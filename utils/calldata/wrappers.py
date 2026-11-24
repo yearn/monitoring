@@ -140,22 +140,36 @@ _WRAPPER_SIGNATURES: dict[str, _Extractor] = {
 }
 
 
+def split_top_level_types(types: str) -> list[str]:
+    """Split a comma-separated type list on top-level commas only.
+
+    Commas inside ``(...)`` tuples or ``[...]`` array sizes are preserved so a
+    type like ``(address,uint256)[]`` stays intact. Public so consumers that
+    walk decoded values (e.g. the gist report renderer) can decompose a tuple
+    type into its component types.
+    """
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in types:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        parts.append("".join(current).strip())
+    return parts
+
+
 def _parse_types(signature: str) -> list[str]:
     """Top-level parameter types of a signature; tuple types stay whole, e.g. ``(address,bytes)[]``."""
     inner = signature[signature.index("(") + 1 : -1]
-    types: list[str] = []
-    depth = 0
-    current = ""
-    for char in inner:
-        if char == "," and depth == 0:
-            types.append(current)
-            current = ""
-            continue
-        depth += {"(": 1, ")": -1}.get(char, 0)
-        current += char
-    if current:
-        types.append(current)
-    return types
+    return split_top_level_types(inner) if inner else []
 
 
 _WRAPPERS: dict[str, tuple[str, list[str], _Extractor]] = {
