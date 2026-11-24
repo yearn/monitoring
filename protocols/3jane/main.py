@@ -229,11 +229,13 @@ def should_alert_value_drop(
     escalation is never swallowed by the step. Once alerted below
     ``escalate_below``, the escalation re-arms only after the metric recovers to
     at least ``escalate_below + min_step`` (hysteresis, so a value flapping
-    around the boundary cannot re-fire every run); re-arming moves the baseline
-    up to the current value. Recovering to or above the threshold clears the
-    cache so the next breach alerts again. The caller must record the value
-    with mark_alerted_value() only after send_alert() returns, so a failed
-    Telegram send retries on the next run.
+    around the boundary cannot re-fire every run); re-arming resets the baseline
+    to ``escalate_below`` rather than the current value, so a later dip that
+    stays above the escalation level cannot re-alert at the lower severity while
+    the metric is still better than when it was last alerted. Recovering to or
+    above the threshold clears the cache so the next breach alerts again. The
+    caller must record the value with mark_alerted_value() only after
+    send_alert() returns, so a failed Telegram send retries on the next run.
 
     Args:
         cache_key: Cache key holding the last alerted value (-1 = none outstanding).
@@ -263,9 +265,11 @@ def should_alert_value_drop(
     should_alert = escalated or worsened
     if not should_alert:
         # Recovered clear of the escalation band (by at least one step): re-arm it
-        # by lifting the baseline. Smaller rebounds keep the old baseline.
-        recovered = escalate_below is not None and cached < escalate_below and value >= escalate_below + min_step
-        set_fresh_cache_value(cache_key, value if recovered else cached)
+        # by resetting the baseline to the escalation level. Smaller rebounds keep
+        # the old baseline.
+        if escalate_below is not None and cached < escalate_below and value >= escalate_below + min_step:
+            cached = escalate_below
+        set_fresh_cache_value(cache_key, cached)
     return should_alert
 
 
