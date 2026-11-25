@@ -79,6 +79,8 @@ If the function isn't found in the target's source (e.g., the target is an `ERC1
 
 Sourcify lookups need no credentials. Set `ETHERSCAN_TOKEN` to enable the fallback. If neither provider supplies source, the explainer omits the source context.
 
+Source excerpts identify the provider and its reported match quality. For a non-exact Sourcify excerpt, the explainer prefers Etherscan source for the same address when Etherscan does not identify it as a similar match. If the excerpt still comes from a non-exact match, the prompt treats comments and NatSpec as unconfirmed. Creation-only matches count as verified source and carry an explicit runtime coverage note.
+
 #### Disk-Backed Source And Label Cache
 
 Verified source/ABI lookups and Swiss Knife labels are cached under `CACHE_DIR` via `utils/disk_cache.py`:

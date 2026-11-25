@@ -5,7 +5,17 @@ from unittest.mock import Mock
 import pytest
 from requests import Timeout
 
-from utils.source_context import fetch_abi_entries, fetch_verified_contract, get_verification_status, reset_cache
+from utils.source_context import (
+    _disk_key,
+    _source_disk_cache,
+    fetch_abi_entries,
+    fetch_verified_contract,
+    format_source_context,
+    get_source_context,
+    get_verification_status,
+    reset_cache,
+)
+from utils.verified_contract import VerifiedContract
 
 ADDRESS = "0xCa2081136Dad8d2277A2387Ce68995958C35Ed98"
 LIBRARY = "0x" + "ab" * 20
@@ -18,15 +28,17 @@ def clear_source_memory() -> None:
     reset_cache()
 
 
-def _sourcify_response(*, creation_match: str | None = "match") -> Mock:
+def _sourcify_response(
+    *, creation_match: str | None = "match", runtime_match: str | None = "exact_match", source: str = SOURCE
+) -> Mock:
     """Return a Sourcify response with source and deployment artifacts."""
     return Mock(
         **{
             "json.return_value": {
-                "match": "exact_match",
-                "runtimeMatch": "exact_match",
+                "match": runtime_match or creation_match,
+                "runtimeMatch": runtime_match,
                 "creationMatch": creation_match,
-                "sources": {"src/Vault.sol": {"content": SOURCE}},
+                "sources": {"src/Vault.sol": {"content": source}},
                 "abi": [{"type": "constructor", "inputs": [{"type": "address"}]}],
                 "compilation": {
                     "language": "Solidity",
@@ -153,3 +165,71 @@ def test_fallback_uses_remaining_alert_deadline(monkeypatch: pytest.MonkeyPatch)
     assert fetch_verified_contract(1, ADDRESS, timeout=5, retries=0, deadline=16) is not None
     assert etherscan.call_args.kwargs["timeout"] == 2
     assert etherscan.call_args.kwargs["retries"] == 0
+
+
+def test_creation_only_match_is_verified_and_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retain creation-only source across runs with explicit match provenance."""
+    source = "contract Vault {\n    function update() external {\n        uint256 value = 1;\n    }\n}"
+    sourcify = Mock(return_value=_sourcify_response(runtime_match=None, source=source))
+    monkeypatch.setattr("utils.sourcify_contract.request_with_retry", sourcify)
+    assert get_verification_status(1, ADDRESS) is True
+    reset_cache()
+
+    record = fetch_verified_contract(1, ADDRESS, require_constructor_arguments=True)
+    assert record is not None
+    assert record.match_quality == "creation_only_match"
+    assert record.constructor_arguments == "12ab"
+    context = get_source_context(1, ADDRESS, "update")
+    assert context is not None
+    assert "Only creation bytecode matched" in format_source_context(context)
+    assert "what actually executes" not in format_source_context(context)
+    sourcify.assert_called_once()
+
+
+@pytest.mark.parametrize("similar_match", ["", LIBRARY])
+def test_explainer_prefers_address_specific_source_for_partial_match(
+    monkeypatch: pytest.MonkeyPatch, similar_match: str
+) -> None:
+    """Use stronger source for excerpts and label a remaining partial match."""
+    source_template = "contract Vault {\n    /// @notice SOURCE_WORDING\n    function update() external {}\n}"
+    sourcify_source = source_template.replace("SOURCE_WORDING", "Sourcify wording")
+    etherscan_source = source_template.replace("SOURCE_WORDING", "Etherscan wording")
+    sourcify = Mock(return_value=_sourcify_response(runtime_match="match", source=sourcify_source))
+    etherscan = _etherscan_response(etherscan_source)
+    etherscan.return_value["result"][0]["SimilarMatch"] = similar_match
+    monkeypatch.setenv("ETHERSCAN_TOKEN", "test-key")
+    monkeypatch.setattr("utils.sourcify_contract.request_with_retry", sourcify)
+    monkeypatch.setattr("utils.source_context.fetch_json", etherscan)
+
+    for _ in range(2):
+        context = get_source_context(1, ADDRESS, "update")
+        assert context is not None
+        rendered = format_source_context(context)
+        if similar_match:
+            assert "Source: Sourcify (match)" in rendered
+            assert "Do not quote or rely on them." in rendered
+            assert "Etherscan wording" not in rendered
+        else:
+            assert "Source: Etherscan" in rendered
+            assert "Etherscan wording" in rendered
+            assert "Sourcify wording" not in rendered
+        reset_cache()
+
+    sourcify.assert_called_once()
+    etherscan.assert_called_once()
+
+
+@pytest.mark.parametrize("case", ["legacy_negative", "invalid_record", "missing_constructor", "confirmed_miss"])
+def test_disk_hits_count_only_usable_entries(monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+    """Stale, malformed, and incomplete entries count as misses."""
+    values = {
+        "legacy_negative": None,
+        "invalid_record": {"schema": 2, "sources": {}},
+        "missing_constructor": VerifiedContract("Vault", "v0.8.34", "Solidity", {"Vault.sol": SOURCE}).to_cache_dict(),
+        "confirmed_miss": False,
+    }
+    _source_disk_cache.set_negative(_disk_key(1, ADDRESS), values[case])
+    stats = Mock()
+    monkeypatch.setattr("utils.source_context._record_cache_event", stats)
+    fetch_verified_contract(1, ADDRESS, require_constructor_arguments=True)
+    stats.assert_called_once_with("disk", case == "confirmed_miss", (1, ADDRESS.lower()))

@@ -86,7 +86,7 @@ class VerifiedContract:
         if not isinstance(data, dict) or data.get("schema") != CACHE_SCHEMA_VERSION:
             return None
         sources = data.get("sources")
-        if not isinstance(sources, dict):
+        if not isinstance(sources, dict) or not sources or not all(isinstance(text, str) for text in sources.values()):
             return None
         settings = data.get("settings")
         abi = data.get("abi")
@@ -96,7 +96,7 @@ class VerifiedContract:
             contract_name=str(data.get("contract_name") or ""),
             compiler_version=str(data.get("compiler_version") or ""),
             language=str(data.get("language") or "Solidity"),
-            sources={str(k): str(v) for k, v in sources.items()},
+            sources=sources,
             settings=settings if isinstance(settings, dict) else {},
             abi=abi if isinstance(abi, list) else [],
             contract_file=data.get("contract_file") or None,
@@ -108,6 +108,20 @@ class VerifiedContract:
 
 # False is a provider-confirmed miss. None means that the lookup could not establish verification.
 type ContractLookup = VerifiedContract | Literal[False] | None
+
+
+def source_provenance_lines(provider: str, match_quality: str | None) -> list[str]:
+    """Describe what the source match establishes for the explainer."""
+    lines: list[str] = []
+    if provider:
+        quality = f" ({match_quality.replace('_', ' ')})" if match_quality else ""
+        lines.append(f"Source: {provider}{quality}")
+    creation_only = bool(match_quality and match_quality.startswith("creation_only_"))
+    if match_quality in ("match", "similar_match") or creation_only:
+        lines.append("Comments and NatSpec are unconfirmed for this deployment. Do not quote or rely on them.")
+    if creation_only:
+        lines.append("Only creation bytecode matched. Treat runtime behavior from this source as unconfirmed.")
+    return lines
 
 
 def parse_etherscan_entry(entry: dict) -> VerifiedContract | None:

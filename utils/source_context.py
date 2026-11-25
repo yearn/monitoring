@@ -9,17 +9,23 @@ import os
 import re
 import textwrap
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import monotonic
 
 from eth_utils.abi import collapse_if_tuple
 
 from utils.calldata.decoder import split_top_level_types
-from utils.disk_cache import MISS, DiskCache
+from utils.disk_cache import DiskCache
 from utils.http_client import fetch_json
 from utils.logger import get_logger
 from utils.sourcify_contract import fetch_sourcify_contract
-from utils.verified_contract import CACHE_SCHEMA_VERSION, ContractLookup, VerifiedContract, parse_etherscan_entry
+from utils.verified_contract import (
+    CACHE_SCHEMA_VERSION,
+    ContractLookup,
+    VerifiedContract,
+    parse_etherscan_entry,
+    source_provenance_lines,
+)
 
 logger = get_logger("utils.source_context")
 
@@ -141,6 +147,8 @@ class SourceContext:
     function_snippet: str  # natspec + function signature line
     state_var_snippets: list[str]  # natspec + declaration for each mutated state var
     function_body: str = ""  # the body's statements, when short enough to show in full
+    provider: str = ""
+    match_quality: str | None = None
 
 
 def _is_usable(record: ContractLookup, require_constructor_arguments: bool) -> bool:
@@ -248,9 +256,17 @@ def _lookup_contract(
     retries: int | None = None,
     deadline: float | None = None,
     require_constructor_arguments: bool = False,
+    provider: str | None = None,
 ) -> ContractLookup:
-    """Share source and verification results across readers and cron runs."""
-    cache_key = (chain_id, address.lower())
+    """Share source and verification results across readers and cron runs.
+
+    Provider-specific lookups use their own cache entries so a comparison or
+    source excerpt can use a different bundle without replacing the shared record.
+    """
+    address_key = address.lower()
+    if provider:
+        address_key = f"{address_key}-{provider.lower()}"
+    cache_key = (chain_id, address_key)
     unbounded = timeout is None and retries is None and deadline is None
     hit, cached = _memory_lookup(cache_key, require_constructor_arguments, unbounded)
     if hit:
@@ -261,26 +277,42 @@ def _lookup_contract(
         if hit:
             return cached
 
-        disk_key = _disk_key(chain_id, address)
+        disk_key = _disk_key(*cache_key)
         disk_val = _source_disk_cache.get(disk_key)
-        _record_cache_event("disk", disk_val is not MISS, cache_key)
         # Legacy nulls only represent Etherscan misses. Recheck them with both providers.
         disk_record = False if disk_val is False else VerifiedContract.from_cache_dict(disk_val)
-        if _is_usable(disk_record, require_constructor_arguments):
+        disk_hit = _is_usable(disk_record, require_constructor_arguments)
+        _record_cache_event("disk", disk_hit, cache_key)
+        if disk_hit:
             with _source_cache_lock:
                 _source_cache[cache_key] = disk_record
             return disk_record
 
         previous = cached if cached is not None else disk_record
-        result = _lookup_providers(
-            chain_id,
-            address,
-            previous,
-            timeout=timeout,
-            retries=retries,
-            deadline=deadline,
-            require_constructor_arguments=require_constructor_arguments,
-        )
+        if provider and deadline is not None:
+            remaining = deadline - monotonic()
+            if remaining < 1:
+                return previous
+            timeout = remaining if timeout is None else min(timeout, remaining)
+        if provider == "Sourcify":
+            result = fetch_sourcify_contract(chain_id, address, timeout=timeout)
+        elif provider == "Etherscan":
+            result = _fetch_etherscan_contract(
+                chain_id,
+                address,
+                timeout=5.0 if timeout is None else timeout,
+                retries=0 if retries is None else retries,
+            )
+        else:
+            result = _lookup_providers(
+                chain_id,
+                address,
+                previous,
+                timeout=timeout,
+                retries=retries,
+                deadline=deadline,
+                require_constructor_arguments=require_constructor_arguments,
+            )
         if result is None:
             if unbounded:
                 with _source_cache_lock:
@@ -290,7 +322,10 @@ def _lookup_contract(
                 _source_cache[cache_key] = result
                 _unknown_lookups.discard(cache_key)
             if isinstance(result, VerifiedContract) and result is not previous:
-                _source_disk_cache.set_positive(disk_key, result.to_cache_dict())
+                if provider == "Etherscan" and result.match_quality == "similar_match":
+                    _source_disk_cache.set_negative(disk_key, result.to_cache_dict())
+                else:
+                    _source_disk_cache.set_positive(disk_key, result.to_cache_dict())
             elif result is False:
                 _source_disk_cache.set_negative(disk_key, False)
         return result
@@ -334,9 +369,15 @@ def fetch_verified_contract(
 
 
 def fetch_contract_from_provider(
-    chain_id: int, address: str, provider: str, *, timeout: float, retries: int = 0
+    chain_id: int,
+    address: str,
+    provider: str,
+    *,
+    timeout: float | None = None,
+    retries: int | None = None,
+    deadline: float | None = None,
 ) -> VerifiedContract | None:
-    """Fetch one provider's verified record directly, bypassing the shared cache.
+    """Fetch one provider's verified record using a provider-specific cache.
 
     The shared cache keeps one preferred record per address. A caller comparing two
     contracts uses this to read both from the same provider, because providers lay
@@ -348,16 +389,14 @@ def fetch_contract_from_provider(
         provider: ``"Sourcify"`` or ``"Etherscan"``.
         timeout: Timeout in seconds per HTTP attempt.
         retries: HTTP retry count.
+        deadline: Monotonic deadline for starting and bounding the request.
 
     Returns:
         That provider's verified record, or None when it has none or the request fails.
     """
-    if provider == "Sourcify":
-        result = fetch_sourcify_contract(chain_id, address, timeout=timeout)
-    elif provider == "Etherscan":
-        result = _fetch_etherscan_contract(chain_id, address, timeout=timeout, retries=retries)
-    else:
+    if provider not in ("Sourcify", "Etherscan"):
         return None
+    result = _lookup_contract(chain_id, address, timeout=timeout, retries=retries, deadline=deadline, provider=provider)
     return result if isinstance(result, VerifiedContract) else None
 
 
@@ -929,11 +968,9 @@ def get_source_context(
     EIP-1967 proxy slot (if any) and retry against the implementation source.
     Best-effort: returns None on any failure (unverified, missing key, no match).
     """
-    fetched = fetch_source(chain_id, address)
-    if fetched:
-        ctx = _build_context(fetched[0], fetched[1], function_name, signature)
-        if ctx:
-            return ctx
+    ctx = _source_context_for_address(chain_id, address, function_name, signature)
+    if ctx:
+        return ctx
 
     # Function not in proxy source — try the implementation if this is a proxy.
     from utils.proxy import get_current_implementation
@@ -942,10 +979,29 @@ def get_source_context(
     if not impl or impl.lower() == address.lower():
         return None
 
-    fetched_impl = fetch_source(chain_id, impl)
-    if not fetched_impl:
+    return _source_context_for_address(chain_id, impl, function_name, signature)
+
+
+def _source_context_for_address(
+    chain_id: int, address: str, function_name: str, signature: str | None
+) -> SourceContext | None:
+    """Prefer address-specific Etherscan source over a non-exact Sourcify excerpt."""
+    record = fetch_verified_contract(chain_id, address)
+    if record is None:
         return None
-    return _build_context(fetched_impl[0], fetched_impl[1], function_name, signature)
+    ctx = _build_context(record.contract_name, record.concatenated_source(), function_name, signature)
+    if ctx is None:
+        return None
+    if record.provider == "Sourcify" and record.match_quality != "exact_match":
+        candidate = fetch_contract_from_provider(chain_id, address, "Etherscan")
+        # Etherscan identifies similar matches but does not report an exact flag in getsourcecode.
+        if candidate is not None and candidate.match_quality != "similar_match":
+            preferred = _build_context(
+                candidate.contract_name, candidate.concatenated_source(), function_name, signature
+            )
+            if preferred is not None:
+                record, ctx = candidate, preferred
+    return replace(ctx, provider=record.provider, match_quality=record.match_quality)
 
 
 def get_contract_label(chain_id: int, address: str) -> str:
@@ -964,11 +1020,17 @@ def format_source_context(ctx: SourceContext) -> str:
     lines: list[str] = []
     if ctx.contract_name:
         lines.append(f"Contract: {ctx.contract_name}")
+    creation_only = bool(ctx.match_quality and ctx.match_quality.startswith("creation_only_"))
+    lines.extend(source_provenance_lines(ctx.provider, ctx.match_quality))
     lines.append("")
     lines.append(ctx.function_snippet)
     if ctx.function_body:
         lines.append("")
-        lines.append("Function body (verified source — what actually executes; it overrides the natspec):")
+        lines.append(
+            "Function body (creation-matched source):"
+            if creation_only
+            else "Function body (verified source — what actually executes; it overrides the natspec):"
+        )
         lines.append(textwrap.indent(ctx.function_body, "    "))
     if ctx.state_var_snippets:
         lines.append("")

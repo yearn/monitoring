@@ -264,7 +264,7 @@ def _same_provider_pair(
         timeout = _request_timeout(deadline)
         if timeout is None:
             break
-        aligned = fetch_contract_from_provider(chain_id, address, provider, timeout=timeout)
+        aligned = fetch_contract_from_provider(chain_id, address, provider, timeout=timeout, deadline=deadline)
         if aligned and aligned.sources:
             return (old_record, aligned) if keep_old else (aligned, new_record)
     logger.info("Source diff for chain=%s old=%s new=%s mixes source providers", chain_id, old_impl, new_impl)

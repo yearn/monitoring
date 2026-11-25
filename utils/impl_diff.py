@@ -59,7 +59,7 @@ from utils.source_diff import (
 )
 from utils.sourcify_layout import fetch_storage_layout
 from utils.storage_layout import LayoutComparison, StorageCompatibility, compare_storage_layouts
-from utils.verified_contract import VerifiedContract
+from utils.verified_contract import VerifiedContract, source_provenance_lines
 
 logger = get_logger("utils.impl_diff")
 
@@ -132,6 +132,8 @@ class ImplTarget:
     address: str
     contract_name: str
     contract_file: str | None
+    provider: str = ""
+    match_quality: str | None = None
 
     def __str__(self) -> str:
         if self.contract_name and self.contract_file:
@@ -270,7 +272,13 @@ def reset_provenance_registry() -> None:
 
 
 def _target(address: str, contract: VerifiedContract) -> ImplTarget:
-    return ImplTarget(address=address, contract_name=contract.contract_name, contract_file=contract.contract_file)
+    return ImplTarget(
+        address=address,
+        contract_name=contract.contract_name,
+        contract_file=contract.contract_file,
+        provider=contract.provider,
+        match_quality=contract.match_quality,
+    )
 
 
 def _compare_storage(
@@ -670,10 +678,10 @@ def _fmt_library(lib: LibraryChange) -> list[str]:
 
 def format_impl_diff(diff: ImplDiff) -> str:
     """Render an :class:`ImplDiff` into a prompt-ready text block."""
-    lines: list[str] = [
-        f"Old: {diff.old.address} — {diff.old}",
-        f"New: {diff.new.address} — {diff.new}",
-    ]
+    lines: list[str] = []
+    for side, target in (("Old", diff.old), ("New", diff.new)):
+        lines.append(f"{side}: {target.address} — {target}")
+        lines.extend(f"  {line}" for line in source_provenance_lines(target.provider, target.match_quality))
     if diff.old.contract_name and diff.new.contract_name and diff.old.contract_name != diff.new.contract_name:
         lines.append(f"Contract name changed: {diff.old.contract_name} → {diff.new.contract_name}")
 

@@ -50,12 +50,19 @@ def fetch_sourcify_contract(chain_id: int, address: str, *, timeout: float | Non
 
 
 def _parse_contract(payload: dict) -> VerifiedContract | None:
-    """Map a runtime-verified Sourcify bundle onto the shared contract record."""
-    match = payload.get("runtimeMatch")
+    """Map a runtime or creation match onto the shared contract record."""
+    runtime_match = payload.get("runtimeMatch")
+    creation_match = payload.get("creationMatch")
+    if runtime_match in _MATCHES:
+        match = runtime_match
+    elif creation_match in _MATCHES:
+        match = f"creation_only_{creation_match}"
+    else:
+        return None
     raw_sources = payload.get("sources")
     compilation = payload.get("compilation")
     abi = payload.get("abi")
-    if match not in _MATCHES or not isinstance(raw_sources, dict) or not isinstance(compilation, dict):
+    if not isinstance(raw_sources, dict) or not isinstance(compilation, dict):
         return None
     if not isinstance(abi, list) or not all(isinstance(entry, dict) for entry in abi):
         return None
