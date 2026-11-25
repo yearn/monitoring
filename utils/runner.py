@@ -11,7 +11,7 @@ Usage:
 
 import signal
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from types import FrameType
 from typing import Callable
@@ -30,7 +30,7 @@ def _terminate_on_sigterm(signum: int, _frame: FrameType | None) -> None:
 
 
 @contextmanager
-def _sigterm_cleanup() -> Iterator[None]:
+def _sigterm_cleanup() -> Generator[None]:
     """Make SIGTERM (sent by the automation runner on task timeout) clean up instead of dying outright."""
     if threading.current_thread() is not threading.main_thread():
         # Signal handlers can only be installed from the main thread.

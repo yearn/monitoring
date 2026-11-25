@@ -3,6 +3,7 @@
 import asyncio
 import json
 import time
+from collections.abc import Generator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -112,7 +113,7 @@ def _client(head: int = 1_000) -> MagicMock:
     client.eth.block_number = head
 
     @contextmanager
-    def batch_requests() -> Iterator[_Batch]:
+    def batch_requests() -> Generator[_Batch]:
         yield _Batch()
 
     client.batch_requests.side_effect = batch_requests
@@ -121,7 +122,7 @@ def _client(head: int = 1_000) -> MagicMock:
 
 
 @contextmanager
-def _v1_cache(values: dict[tuple[str, str], int] | None = None) -> Iterator[MagicMock]:
+def _v1_cache(values: dict[tuple[str, str], int] | None = None) -> Generator[MagicMock]:
     """Patch the V1 cache (reads from ``values``, writes recorded) and market metadata."""
     values = values or {}
     write = MagicMock()
@@ -252,7 +253,7 @@ def _v2_client(executable_at: dict[bytes, int]) -> MagicMock:
 
 
 @contextmanager
-def _v2_cache(values: dict[str, str] | None = None) -> Iterator[MagicMock]:
+def _v2_cache(values: dict[str, str] | None = None) -> Generator[MagicMock]:
     values = values or {}
     write = MagicMock()
     with (
@@ -682,9 +683,9 @@ class CommittingEvaluator(FakeEvaluator):
 
 
 @contextmanager
-def _recording_lock(log: list[str]) -> Iterator[MagicMock]:
+def _recording_lock(log: list[str]) -> Generator[MagicMock]:
     @contextmanager
-    def lock(address: str) -> Iterator[None]:
+    def lock(address: str) -> Generator[None]:
         log.append(f"lock {address}")
         yield
         log.append("unlock")
@@ -744,7 +745,7 @@ def test_daily_v2_job_takes_the_same_vault_lock() -> None:
     entered: list[str] = []
 
     @contextmanager
-    def lock(address: str) -> Iterator[None]:
+    def lock(address: str) -> Generator[None]:
         entered.append(address)
         yield
 
