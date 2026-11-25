@@ -18,7 +18,7 @@ Telegram, no alert store.
 import hashlib
 import json
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Generator, Iterable
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -225,7 +225,7 @@ class EventInbox:
         return event.get(field) if field else None
 
     @contextmanager
-    def _connect(self, write: bool = False) -> Iterator[sqlite3.Connection]:
+    def _connect(self, write: bool = False) -> Generator[sqlite3.Connection]:
         """Open a connection; one transaction spans the ``with`` block.
 
         Args:

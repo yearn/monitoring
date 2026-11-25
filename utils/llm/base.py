@@ -1,7 +1,7 @@
 """Abstract base class for LLM providers."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -20,7 +20,7 @@ class LLMUnavailableError(LLMError):
 
 
 @contextmanager
-def wrap_llm_errors(label: str) -> Iterator[None]:
+def wrap_llm_errors(label: str) -> Generator[None]:
     """Translate any non-``LLMError`` raised inside the block into an ``LLMError``.
 
     Existing ``LLMError``s (and their messages) pass through untouched; anything

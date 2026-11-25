@@ -1,0 +1,15 @@
+# Keeps the SHA-pinned GitHub Actions in .github/workflows up to date.
+# Python deps are exact-pinned in pyproject.toml and bumped by hand (with the
+# 1-week `exclude-newer` cooldown in [tool.uv]), so no `uv` ecosystem here.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Same cooldown as uv's `exclude-newer`: skip releases younger than 7 days.
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]

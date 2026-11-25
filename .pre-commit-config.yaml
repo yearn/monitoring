@@ -1,20 +1,33 @@
 # Pre-commit hooks. Compatible with both `pre-commit` and `prek` (https://github.com/j178/prek).
 # Install the git hook with:  prek install   (or)   pre-commit install
 # Run against all files with:  prek run --all-files
+#
+# All hooks are local and run through `uv run --locked`, so every tool comes from
+# the hash-pinned uv.lock instead of a mutable hook-repo tag.
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    # Keep in sync with the ruff version pinned in pyproject.toml [dev].
-    rev: v0.16.8
+  - repo: local
     hooks:
       # Lint (with autofix), then format — mirrors the CI checks.
       - id: ruff-check
-        args: [--fix]
+        name: Lint with ruff
+        entry: uv run --locked --extra dev ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
       - id: ruff-format
-  - repo: local
-    hooks:
+        name: Format with ruff
+        entry: uv run --locked --extra dev ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
       - id: ty
         name: Check types with ty
         entry: uv run --locked --extra dev ty check
         language: system
         types: [python]
         pass_filenames: false
+      - id: zizmor
+        name: Audit GitHub Actions with zizmor
+        entry: uv run --locked --extra dev zizmor --offline
+        language: system
+        files: ^\.github/(workflows/.*\.ya?ml|dependabot\.ya?ml)$

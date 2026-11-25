@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+# Every `uv sync` / `uv run` must match uv.lock exactly (hash-pinned deps and tools).
+env:
+  UV_LOCKED: "1"
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -22,6 +26,9 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
+          # Keep in sync with `required-version` in pyproject.toml and deploy/install.sh.
+          version: "0.13.9"
+          checksum: "a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5" # x86_64-unknown-linux-gnu
           enable-cache: true
 
       - name: Set up Python
@@ -43,6 +50,9 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
+          # Keep in sync with `required-version` in pyproject.toml and deploy/install.sh.
+          version: "0.13.9"
+          checksum: "a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5" # x86_64-unknown-linux-gnu
           enable-cache: true
 
       - name: Set up Python
@@ -60,6 +70,9 @@ jobs:
       - name: Check types with ty
         run: uv run ty check
 
+      - name: Audit GitHub Actions with zizmor
+        run: uv run zizmor --offline .github/
+
   audit:
     runs-on: ubuntu-latest
     steps:
@@ -70,6 +83,9 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
+          # Keep in sync with `required-version` in pyproject.toml and deploy/install.sh.
+          version: "0.13.9"
+          checksum: "a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5" # x86_64-unknown-linux-gnu
           enable-cache: true
 
       - name: Set up Python

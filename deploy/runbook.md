@@ -129,6 +129,13 @@ cd /srv/monitoring
 uv sync --frozen --extra ai   # --extra ai: openai client for the AI explainer
 ```
 
+**uv version.** `pyproject.toml` sets `required-version` for uv. An older uv
+on the box makes that pre-run `uv sync` fail (the code updates but the
+dependencies don't). To upgrade, re-run `sudo bash deploy/install.sh`. It
+installs the pinned, checksum-verified `UV_VERSION` whenever the installed uv
+differs. Bump `UV_VERSION`/`UV_SHA256` there, the CI `setup-uv` pin and
+`required-version` together.
+
 ---
 
 ## Rotate a secret (Telegram token, RPC URL, API key)

@@ -21,7 +21,7 @@ ingestion:
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -143,7 +143,7 @@ class LiveStore:
             conn.executescript(_SCHEMA)
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
+    def _connect(self) -> Generator[sqlite3.Connection]:
         """Open a short-lived connection; one transaction spans the ``with`` block."""
         with closing(sqlite3.connect(self.path, timeout=10)) as conn:
             conn.row_factory = sqlite3.Row
