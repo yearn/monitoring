@@ -5,7 +5,7 @@ import io
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import monotonic
 
 from utils.chains import EXPLORER_URLS
@@ -266,6 +266,9 @@ def _same_provider_pair(
             break
         aligned = fetch_contract_from_provider(chain_id, address, provider, timeout=timeout, deadline=deadline)
         if aligned and aligned.sources:
+            original = new_record if keep_old else old_record
+            if original.constructor_arguments is not None:
+                aligned = replace(aligned, constructor_arguments=original.constructor_arguments)
             return (old_record, aligned) if keep_old else (aligned, new_record)
     logger.info("Source diff for chain=%s old=%s new=%s mixes source providers", chain_id, old_impl, new_impl)
     return old_record, new_record

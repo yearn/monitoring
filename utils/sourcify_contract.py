@@ -49,15 +49,21 @@ def fetch_sourcify_contract(chain_id: int, address: str, *, timeout: float | Non
     return _parse_contract(payload)
 
 
-def _parse_contract(payload: dict) -> VerifiedContract | None:
-    """Map a runtime or creation match onto the shared contract record."""
+def sourcify_match_quality(payload: dict) -> str | None:
+    """Classify the runtime match, or the creation match when runtime did not match."""
     runtime_match = payload.get("runtimeMatch")
     creation_match = payload.get("creationMatch")
     if runtime_match in _MATCHES:
-        match = runtime_match
-    elif creation_match in _MATCHES:
-        match = f"creation_only_{creation_match}"
-    else:
+        return runtime_match
+    if creation_match in _MATCHES:
+        return f"creation_only_{creation_match}"
+    return None
+
+
+def _parse_contract(payload: dict) -> VerifiedContract | None:
+    """Map a runtime or creation match onto the shared contract record."""
+    match = sourcify_match_quality(payload)
+    if match is None:
         return None
     raw_sources = payload.get("sources")
     compilation = payload.get("compilation")

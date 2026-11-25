@@ -89,19 +89,22 @@ class VerifiedContract:
         if not isinstance(sources, dict) or not sources or not all(isinstance(text, str) for text in sources.values()):
             return None
         settings = data.get("settings")
-        abi = data.get("abi")
+        abi = data["abi"] if isinstance(data.get("abi"), list) else []
         constructor_arguments = data.get("constructor_arguments")
         match_quality = data.get("match_quality")
+        provider = data.get("provider") or "Etherscan"
+        if provider == "Etherscan":
+            constructor_arguments = _etherscan_constructor_arguments(constructor_arguments, abi, match_quality)
         return cls(
             contract_name=str(data.get("contract_name") or ""),
             compiler_version=str(data.get("compiler_version") or ""),
             language=str(data.get("language") or "Solidity"),
             sources=sources,
             settings=settings if isinstance(settings, dict) else {},
-            abi=abi if isinstance(abi, list) else [],
+            abi=abi,
             contract_file=data.get("contract_file") or None,
             constructor_arguments=constructor_arguments if isinstance(constructor_arguments, str) else None,
-            provider=data.get("provider") or "Etherscan",
+            provider=provider,
             match_quality=match_quality if isinstance(match_quality, str) else None,
         )
 
@@ -110,13 +113,18 @@ class VerifiedContract:
 type ContractLookup = VerifiedContract | Literal[False] | None
 
 
+def is_creation_only_match(match_quality: str | None) -> bool:
+    """Return whether the provider matched creation bytecode alone."""
+    return bool(match_quality and match_quality.startswith("creation_only_"))
+
+
 def source_provenance_lines(provider: str, match_quality: str | None) -> list[str]:
     """Describe what the source match establishes for the explainer."""
     lines: list[str] = []
     if provider:
         quality = f" ({match_quality.replace('_', ' ')})" if match_quality else ""
         lines.append(f"Source: {provider}{quality}")
-    creation_only = bool(match_quality and match_quality.startswith("creation_only_"))
+    creation_only = is_creation_only_match(match_quality)
     if match_quality in ("match", "similar_match") or creation_only:
         lines.append("Comments and NatSpec are unconfirmed for this deployment. Do not quote or rely on them.")
     if creation_only:
@@ -134,7 +142,8 @@ def parse_etherscan_entry(entry: dict) -> VerifiedContract | None:
         return None
 
     contract_name = entry.get("ContractName") or ""
-    constructor_arguments = entry.get("ConstructorArguments")
+    abi = parse_abi(entry.get("ABI") or "") or []
+    match_quality = "similar_match" if entry.get("SimilarMatch") else None
     language, sources, settings = _parse_source_bundle(raw_source, contract_name)
     return VerifiedContract(
         contract_name=contract_name,
@@ -142,13 +151,23 @@ def parse_etherscan_entry(entry: dict) -> VerifiedContract | None:
         language=language,
         sources=sources,
         settings=settings,
-        abi=parse_abi(entry.get("ABI") or "") or [],
+        abi=abi,
         contract_file=resolve_contract_file(contract_name, sources, settings),
-        constructor_arguments=constructor_arguments.strip().lower().removeprefix("0x")
-        if isinstance(constructor_arguments, str)
-        else None,
-        match_quality="similar_match" if entry.get("SimilarMatch") else None,
+        constructor_arguments=_etherscan_constructor_arguments(entry.get("ConstructorArguments"), abi, match_quality),
+        match_quality=match_quality,
     )
+
+
+def _etherscan_constructor_arguments(value: object, abi: list[dict], match_quality: str | None) -> str | None:
+    """Keep only arguments attributable to this deployment, including in legacy cache entries."""
+    if match_quality == "similar_match" or not isinstance(value, str):
+        return None
+    arguments = value.strip().lower().removeprefix("0x")
+    if not arguments and any(
+        isinstance(entry, dict) and entry.get("type") == "constructor" and entry.get("inputs") for entry in abi
+    ):
+        return None
+    return arguments
 
 
 def parse_abi(abi_json: str) -> list[dict] | None:

@@ -14,7 +14,7 @@ from utils.upgrade_diff import (
     publish_upgrade_diff,
     resolve_upgrade_diff_links,
 )
-from utils.verified_contract import VerifiedContract
+from utils.verified_contract import VerifiedContract, parse_etherscan_entry
 
 OLD_IMPL = "0x" + "a" * 40
 NEW_IMPL = "0x" + "b" * 40
@@ -171,6 +171,32 @@ def test_mixed_providers_are_compared_from_one_provider(aligned_side: str | None
     assert f"--- a/{path}\n+++ b/{path}" in body
     assert "/dev/null" not in body
     assert "compiler:" not in body
+
+
+@pytest.mark.parametrize("new_arguments", ["1234", "abcd"])
+def test_same_provider_diff_preserves_verified_constructor_arguments(new_arguments: str) -> None:
+    """Align source files without replacing verified deployment arguments."""
+    old_source = "contract Vault {}"
+    old = replace(
+        _verified({"src/Vault.sol": old_source}),
+        provider="Sourcify",
+        constructor_arguments="1234",
+    )
+    new = replace(_verified({"Vault.sol": "contract Vault { uint256 x; }"}), constructor_arguments=new_arguments)
+    aligned_old = parse_etherscan_entry(
+        {"SourceCode": old_source, "ContractName": "Vault", "ConstructorArguments": "", "SimilarMatch": NEW_IMPL}
+    )
+    with (
+        patch("utils.upgrade_diff.fetch_verified_contract", side_effect=[old, new]),
+        patch("utils.upgrade_diff.fetch_contract_from_provider", side_effect=[None, aligned_old]),
+        patch("utils.upgrade_diff.upload_to_gist", return_value=GIST_URL) as upload,
+    ):
+        assert publish_upgrade_diff(OLD_IMPL, NEW_IMPL, 1) == GIST_URL
+
+    body = upload.call_args.args[0]
+    assert "--- a/Vault.sol\n+++ b/Vault.sol" in body
+    assert "constructor arguments unavailable" not in body
+    assert ("constructor arguments: differ" in body) == (new_arguments != "1234")
 
 
 def test_moved_files_keep_paths_and_unusual_line_breaks() -> None:

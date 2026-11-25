@@ -23,6 +23,7 @@ from utils.verified_contract import (
     CACHE_SCHEMA_VERSION,
     ContractLookup,
     VerifiedContract,
+    is_creation_only_match,
     parse_etherscan_entry,
     source_provenance_lines,
 )
@@ -57,10 +58,9 @@ _source_cache_misses = 0
 _source_cache_lock = threading.RLock()
 _source_key_locks: dict[tuple[int, str], threading.Lock] = {}
 
-# On-disk layer keyed by "chain_id-address". Verified source is immutable per address, so
-# positive entries never expire; "unverified" misses get the short negative TTL so a
-# contract verified later is picked up. Source can be large (~500KB) — bound the namespace
-# by total bytes as well as entry count. All tunable via env.
+# On-disk layer keyed by "chain_id-address". Fully verified source can be reused
+# indefinitely. Misses and creation-only records expire so later verification is picked up.
+# Source can be large (~500KB), so cap the cache by bytes and entry count.
 # The namespace carries the record's schema version: because positive entries never
 # expire, a shape change would otherwise keep serving records written by an older version.
 _source_disk_cache = DiskCache(
@@ -322,7 +322,9 @@ def _lookup_contract(
                 _source_cache[cache_key] = result
                 _unknown_lookups.discard(cache_key)
             if isinstance(result, VerifiedContract) and result is not previous:
-                if provider == "Etherscan" and result.match_quality == "similar_match":
+                if is_creation_only_match(result.match_quality) or (
+                    provider == "Etherscan" and result.match_quality == "similar_match"
+                ):
                     _source_disk_cache.set_negative(disk_key, result.to_cache_dict())
                 else:
                     _source_disk_cache.set_positive(disk_key, result.to_cache_dict())
@@ -1020,7 +1022,7 @@ def format_source_context(ctx: SourceContext) -> str:
     lines: list[str] = []
     if ctx.contract_name:
         lines.append(f"Contract: {ctx.contract_name}")
-    creation_only = bool(ctx.match_quality and ctx.match_quality.startswith("creation_only_"))
+    creation_only = is_creation_only_match(ctx.match_quality)
     lines.extend(source_provenance_lines(ctx.provider, ctx.match_quality))
     lines.append("")
     lines.append(ctx.function_snippet)

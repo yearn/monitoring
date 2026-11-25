@@ -186,6 +186,20 @@ def test_creation_only_match_is_verified_and_cached(monkeypatch: pytest.MonkeyPa
     sourcify.assert_called_once()
 
 
+def test_expired_creation_only_source_can_gain_runtime_verification(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retry a creation-only source lookup after the cache entry expires."""
+    sourcify = Mock(side_effect=[_sourcify_response(runtime_match=None), _sourcify_response()])
+    monkeypatch.setattr("utils.sourcify_contract.request_with_retry", sourcify)
+    monkeypatch.setattr(_source_disk_cache, "negative_ttl", -1)
+    first = fetch_verified_contract(1, ADDRESS)
+    reset_cache()
+    updated = fetch_verified_contract(1, ADDRESS)
+
+    assert first is not None and first.match_quality == "creation_only_match"
+    assert updated is not None and updated.match_quality == "exact_match"
+    assert sourcify.call_count == 2
+
+
 @pytest.mark.parametrize("similar_match", ["", LIBRARY])
 def test_explainer_prefers_address_specific_source_for_partial_match(
     monkeypatch: pytest.MonkeyPatch, similar_match: str
