@@ -15,6 +15,16 @@ from protocols.safe.addresses import (
     YEARN_EXPECTED_PROPOSERS,
     safe_address_network_prefix,
 )
+from protocols.safe.executed import (
+    NonceCheck,
+    NonceCheckState,
+    SafeKey,
+    TxId,
+    load_nonce_check_state,
+    plan_nonce_check,
+    read_onchain_nonces,
+    save_nonce_check_state,
+)
 from protocols.safe.filters import should_alert
 from protocols.safe.multisend import (
     ZERO_ADDRESS,
@@ -52,6 +62,7 @@ load_dotenv()
 logger = get_logger("safe")
 
 SAFE_WEBSITE_URL = "https://app.safe.global/transactions/queue?safe="
+SAFE_HISTORY_URL = "https://app.safe.global/transactions/history?safe="
 # Queue Service ``proposedVia`` values whose ``proposer`` / ``proposedBy`` semantics we rely on.
 _KNOWN_PROPOSAL_ROUTES = frozenset({"OWNER", "DELEGATE", "NESTED_OWNER"})
 # How much of an unexpected Safe API error body to put in the error alert.
@@ -119,11 +130,8 @@ _SAFE_TX_HASH_RE = re.compile(r"0x[0-9a-fA-F]{64}")
 # Per (network, safe) cache entry listing the queued txs already alerted on (or skipped by the
 # protocol's alert rule), as comma-separated ``nonce@safeTxHash`` items.
 CACHE_KEY_HANDLED_TXS_PREFIX = "safe_handled_txs"
-
-# A watched Safe: ``(network_name, safe_address)``.
-SafeKey = tuple[str, str]
-# A queued tx's dedup id: ``(nonce, lowercased safeTxHash)``.
-TxId = tuple[int, str]
+# The batch endpoint's cap on hashes per request.
+SAFE_TX_HASH_BATCH_SIZE = 100
 
 
 class SafeApiQuotaExhausted(Exception):
@@ -200,11 +208,14 @@ def _quota_reset_seconds(response: requests.Response) -> int | None:
         return 0
 
 
-def _queue_request(params: list[tuple[str, str | int]], context: str, max_retries: int) -> dict | None:
-    """Send one Queue Service ``/queue`` request, retrying transient failures.
+def _queue_request(
+    path: str, params: list[tuple[str, str | int]], context: str, max_retries: int
+) -> dict | list | None:
+    """Send one Queue Service GET request, retrying transient failures.
 
     Args:
-        params: Query parameters; ``safes`` repeats once per Safe.
+        path: Endpoint path under ``/api/v1``.
+        params: Query parameters; a repeated parameter appears once per value.
         context: What the request covers, for log and error messages.
         max_retries: Attempts for transport errors, rate limits and 5xx responses.
 
@@ -216,7 +227,7 @@ def _queue_request(params: list[tuple[str, str | int]], context: str, max_retrie
         SafeApiAuthError: When the service rejects the API key.
         SafeApiRequestError: When the service rejects the request (e.g. 422 for a Safe it cannot resolve).
     """
-    endpoint = f"{SAFE_QUEUE_API_URL}/api/v1/multisig-transactions/queue"
+    endpoint = f"{SAFE_QUEUE_API_URL}/api/v1/{path}"
     attempt = 0
     while attempt < max_retries:
         api_key = _next_api_key()
@@ -315,8 +326,8 @@ def fetch_queued_transactions(
     params += [("nonceOrder", "asc"), ("limit", SAFE_QUEUE_PAGE_SIZE)]
     for page in range(max_pages):
         page_params = params + ([("offset", page * SAFE_QUEUE_PAGE_SIZE)] if page else [])
-        body = _queue_request(page_params, context, max_retries)
-        if body is None:
+        body = _queue_request("multisig-transactions/queue", page_params, context, max_retries)
+        if not isinstance(body, dict):
             raise SafeApiUnavailable(f"Safe API retries exhausted for {context} at page {page + 1}")
         for tx in body.get("results", []):
             safe = by_param.get(f"{str(tx.get('safe', '')).lower()}:{tx.get('chainId')}")
@@ -339,6 +350,33 @@ def fetch_queued_transactions(
 def _safe_param(network_name: str, safe_address: str) -> str:
     """Return a Safe's ``address:chainId`` value for the Queue Service ``safes`` parameter."""
     return f"{safe_address.lower()}:{safe_network_to_chain_id(network_name)}"
+
+
+def fetch_executed_safe_tx_hashes(safe_tx_hashes: list[str], max_retries: int = 3) -> set[str]:
+    """Return which of ``safe_tx_hashes`` the Queue Service reports as executed.
+
+    One request per ``SAFE_TX_HASH_BATCH_SIZE`` hashes, across every Safe: a
+    ``safeTxHash`` commits to its chain and Safe, so the hashes never collide.
+
+    Args:
+        safe_tx_hashes: Lowercased ``safeTxHash`` values to look up.
+        max_retries: Attempts per request for transport errors, rate limits and 5xx responses.
+
+    Raises:
+        SafeApiQuotaExhausted: When every API key has used up its quota.
+        SafeApiAuthError: When the service rejects the API key.
+        SafeApiRequestError: When the service rejects the request.
+        SafeApiUnavailable: When retries run out.
+    """
+    executed: set[str] = set()
+    for start in range(0, len(safe_tx_hashes), SAFE_TX_HASH_BATCH_SIZE):
+        chunk = safe_tx_hashes[start : start + SAFE_TX_HASH_BATCH_SIZE]
+        context = f"{len(chunk)} executed-tx lookup(s)"
+        body = _queue_request("multisig-transactions/batch", [("safeTxHash", h) for h in chunk], context, max_retries)
+        if not isinstance(body, list):
+            raise SafeApiUnavailable(f"Safe API retries exhausted for {context}")
+        executed.update(str(tx["safeTxHash"]).lower() for tx in body if tx.get("txHash"))
+    return executed
 
 
 def _safe_tx_hash(tx: dict) -> str:
@@ -403,9 +441,10 @@ def get_pending_transactions(
     tx queued later at a lower pending nonce, or a replacement proposed at an
     already-alerted nonce, still alerts.
 
-    Handled entries no longer in the queue (executed, replaced or deleted) are pruned,
-    but only from a ``complete`` listing: a tx missing from a truncated one may still be
-    queued. A tx that disappears and comes back alerts again, which is the safe direction.
+    A handled entry is pruned once it is out of the queue (executed, replaced or deleted)
+    and its nonce is settled by the executed-nonce check, which needs the entry to tell
+    an alerted execution from an unalerted one. Pruning only happens on a ``complete``
+    listing: a tx missing from a truncated one may still be queued.
 
     Args:
         safe_address: The Safe's address.
@@ -414,7 +453,11 @@ def get_pending_transactions(
         complete: Whether ``queued_txs`` is the Safe's whole queue.
     """
     stored = load_handled_txs(safe_address, network_name)
-    handled = stored & {_tx_id(tx) for tx in queued_txs} if complete else stored
+    handled = stored
+    nonce_check = load_nonce_check_state((network_name, safe_address))
+    if complete and nonce_check is not None:
+        queued_ids = {_tx_id(tx) for tx in queued_txs}
+        handled = {tx_id for tx_id in stored if tx_id in queued_ids or not nonce_check.is_settled(tx_id[0])}
     if handled != stored:
         save_handled_txs(safe_address, network_name, handled)
 
@@ -686,6 +729,76 @@ def check_for_pending_transactions(
         logger.info("No new queued transactions for %s on %s", safe_address, network_name)
 
 
+def _alert_unalerted_executions(check: NonceCheck, nonces: list[int]) -> bool:
+    """Send one loud alert listing a Safe's nonces that executed without a queued-tx alert.
+
+    Returns:
+        Whether Telegram accepted it. ``False`` keeps the nonces for the next run.
+    """
+    network_name, safe_address = check.safe
+    if not telegram_credentials_configured(check.protocol):
+        logger.warning(
+            "No Telegram destination for %s; leaving unalerted executions %s on %s for the next run",
+            check.protocol,
+            nonces,
+            safe_address,
+        )
+        return False
+    nonce_list = ", ".join(str(n) for n in nonces)
+    message = (
+        "🚨 SAFE TX EXECUTED WITHOUT A QUEUED ALERT 🚨\n"
+        f"🅿️ Protocol: {escape_markdown(check.protocol)}\n"
+        f"🔐 Safe Address: {safe_address}\n"
+        f"🔗 Safe history: {SAFE_HISTORY_URL}{safe_address_network_prefix[network_name]}:{safe_address}\n"
+        f"#️⃣ Nonce: {nonce_list}\n"
+        "No queued-tx alert covered what executed at this nonce. It was executed without being "
+        "posted to the Safe service, replaced an alerted tx at the same nonce, or was proposed and "
+        "executed between two polls. Check what executed."
+    )
+    logger.warning("Safe %s on %s executed nonces %s without a queued alert", safe_address, network_name, nonce_list)
+    return send_telegram_message(message, check.protocol, False)
+
+
+def check_executed_nonces(safes: list[list[str]]) -> None:
+    """Alert on nonces each Safe executed without a queued-tx alert covering the executed tx.
+
+    Runs after the queue alerts, so a tx alerted this run counts as alerted. A Safe's
+    first successful nonce read only records the nonce.
+
+    Args:
+        safes: Watchlist entries (``[protocol, network_name, safe_address, ...]``).
+
+    Raises:
+        SafeApiQuotaExhausted, SafeApiAuthError, SafeApiRequestError, SafeApiUnavailable:
+            From the executed-hash lookup. Every Safe then keeps its progress for the next run.
+    """
+    protocols = {(safe[1], safe[2]): safe[0] for safe in safes}
+    onchain = read_onchain_nonces(list(protocols))
+    checks: list[NonceCheck] = []
+    for safe, protocol in protocols.items():
+        current_nonce = onchain.get(safe)
+        if current_nonce is None:
+            continue
+        state = load_nonce_check_state(safe)
+        if state is None:
+            save_nonce_check_state(safe, NonceCheckState(current_nonce))
+            continue
+        if current_nonce < state.next_nonce:
+            logger.error("Onchain nonce %s of %s on %s went backwards", current_nonce, safe[1], safe[0])
+            continue
+        handled = load_handled_txs(safe[1], safe[0])
+        checks.append(plan_nonce_check(safe, protocol, state, current_nonce, handled))
+
+    lookups = sorted({h for check in checks for hashes in check.alerted_hashes.values() for h in hashes if h})
+    executed = fetch_executed_safe_tx_hashes(lookups) if lookups else set()
+
+    for check in checks:
+        unalerted, awaiting = check.resolve(executed)
+        if unalerted and not _alert_unalerted_executions(check, unalerted):
+            continue  # Keep the stored progress so the next run alerts again.
+        save_nonce_check_state(check.safe, NonceCheckState(check.current_nonce, awaiting))
+
+
 def check_api_limit(last_api_call_time: float, request_counter: int) -> tuple[float, int]:
     current_time = time.time()
     if current_time - last_api_call_time > 1:
@@ -751,6 +864,21 @@ def report_safe_failure(protocol: str, network_name: str, safe_address: str, exc
         logger.exception("Could not send the Safe check failure alert for %s on %s", safe_address, network_name)
 
 
+def report_executed_check_failure(exc: Exception) -> None:
+    """Alert that the executed-nonce check failed this run; its progress is kept for the next run."""
+    logger.error("Safe executed-nonce check failed", exc_info=exc)
+    try:
+        send_error_message(
+            "Safe monitor could not check which executed Safe txs were alerted on this run; "
+            f"it retries next run.\n{type(exc).__name__}: {exc}",
+            ERROR_LABEL,
+            source="safe_check_failed",
+            alert_protocol=ALERT_PROTOCOL,
+        )
+    except Exception:  # noqa: BLE001 - a failed notification must not crash the run
+        logger.exception("Could not send the Safe executed-nonce check failure alert")
+
+
 def main():
     load_known_exhausted_keys()
     check_llm_credits(ERROR_LABEL, alert_protocol=ALERT_PROTOCOL)
@@ -790,6 +918,15 @@ def main():
             raise
         except Exception as exc:  # noqa: BLE001 - one safe's failure must not skip the rest
             report_safe_failure(protocol, network_name, safe_address, exc)
+
+    try:
+        check_executed_nonces(ALL_SAFE_ADDRESSES)
+    except SafeApiQuotaExhausted as exc:
+        report_quota_exhausted(exc)
+    except SafeApiAuthError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - progress is kept, so the next run rechecks
+        report_executed_check_failure(exc)
 
 
 if __name__ == "__main__":

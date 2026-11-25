@@ -345,6 +345,8 @@ protocols:
         description: "Proxy upgrades in queued txs, including multisend, Safe v1.5 self-calls and timelock calls, with a Wavey Gist verified source diff"
       - name: "Unexpected Proposers"
         description: "Yearn multisig txs proposed by addresses outside known bot/EOA set"
+      - name: "Executed Without Alert"
+        description: "Safe txs that executed onchain without a queued-tx alert: signed offchain and executed directly, executed in place of an alerted tx, or proposed and executed between polls"
 
   silo:
     display_name: "Silo"

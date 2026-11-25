@@ -137,8 +137,9 @@ profiles:
     # Safe API budget: 50,000 requests per 30-day window per developer account.
     # Keys on the same account share that allowance; extra keys do not add quota.
     # One batched /queue request per run covers every Safe: 72 runs per day use
-    # about 2,160 requests per 30-day window before retries. A rejected batch falls
-    # back to one request per Safe for that run.
+    # about 2,160 requests per 30-day window before retries. Runs after an alerted
+    # tx executed add one hash lookup. A rejected batch falls back to one request
+    # per Safe for that run.
     # No env override: nonces land in the default nonces.txt under $CACHE_DIR.
     tasks:
       - { name: "safe",    script: protocols/safe/main.py }

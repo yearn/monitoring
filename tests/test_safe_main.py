@@ -121,17 +121,38 @@ class TestSafePendingTransactions(unittest.TestCase):
         self._alerted(queue_tx(101, safeTxHash=None))
         self.assertEqual(self._pending([queue_tx(101, safeTxHash=None), queue_tx(102, safeTxHash="")]), [102])
 
-    def test_handled_txs_no_longer_queued_are_pruned(self):
-        """Executed, replaced or deleted txs leave the queue, so their entries are dropped."""
+    def _settle_below(self, next_nonce: int, awaiting: frozenset[int] = frozenset()) -> None:
+        state = self.safe_main.NonceCheckState(next_nonce, awaiting)
+        self.safe_main.save_nonce_check_state(("mainnet", self.SAFE), state)
+
+    def test_settled_txs_no_longer_queued_are_pruned(self):
+        """Executed, replaced or deleted txs leave the queue; once their nonce is checked they are dropped."""
         self._alerted(queue_tx(100), queue_tx(101), queue_tx(102, safeTxHash=safe_tx_hash(102, variant=1)))
+        self._settle_below(102)
 
         self.assertEqual(self._pending([queue_tx(102, safeTxHash=safe_tx_hash(102, variant=1)), queue_tx(103)]), [103])
 
         self.assertEqual(self.safe_main.load_handled_txs(self.SAFE, "mainnet"), {(102, safe_tx_hash(102, variant=1))})
 
+    def test_unsettled_txs_are_kept_for_the_executed_nonce_check(self):
+        """The check needs the alerted hashes to tell an alerted execution from a replacement."""
+        alerted = {(n, safe_tx_hash(n)) for n in (100, 101, 102)}
+        self._alerted(*(queue_tx(n) for n in (100, 101, 102)))
+
+        self._pending([])  # no check progress yet: keep everything
+        self.assertEqual(self.safe_main.load_handled_txs(self.SAFE, "mainnet"), alerted)
+
+        self._settle_below(102, awaiting=frozenset({100}))
+        self._pending([])
+        self.assertEqual(
+            self.safe_main.load_handled_txs(self.SAFE, "mainnet"),
+            {(100, safe_tx_hash(100)), (102, safe_tx_hash(102))},
+        )
+
     def test_truncated_listing_does_not_prune(self):
         """A tx missing from a truncated listing may still be queued; pruning it would re-alert it."""
         self._alerted(queue_tx(100), queue_tx(101))
+        self._settle_below(102)
 
         self.assertEqual(self._pending([queue_tx(100)], complete=False), [])
 
@@ -887,9 +908,11 @@ class TestQueueServiceMigration(unittest.TestCase):
             patch.object(safe_main, "fetch_queued_transactions", side_effect=fetch) as mock_fetch,
             patch.object(safe_main, "check_for_pending_transactions", side_effect=check) as mock_check,
             patch.object(safe_main, "send_error_message", side_effect=error) as mock_error,
+            patch.object(safe_main, "check_executed_nonces") as mock_executed,
             patch.object(safe_main.time, "sleep"),
         ):
             safe_main.main()
+        mock_executed.assert_called_once_with(self.SAFES)
         return mock_fetch, mock_check, mock_error
 
     def test_one_batched_request_feeds_every_safe(self):
@@ -922,15 +945,34 @@ class TestQueueServiceMigration(unittest.TestCase):
         mock_error.assert_called_once()
         self.assertIn("0x1", mock_error.call_args.args[0])
 
-    def test_unavailable_service_crashes_the_run_for_one_alert(self):
+    def test_service_wide_failures_crash_the_run_for_one_alert(self):
         safe_main = import_safe_main()
-        with self.assertRaises(safe_main.SafeApiUnavailable):
-            self._main(safe_main, safe_main.SafeApiUnavailable("retries exhausted"))
+        for exc in (safe_main.SafeApiUnavailable("retries exhausted"), safe_main.SafeApiAuthError("bad key")):
+            with (
+                self.subTest(type(exc).__name__),
+                patch.object(safe_main, "check_llm_credits"),
+                patch.object(safe_main, "fetch_queued_transactions", side_effect=exc),
+                patch.object(safe_main, "check_executed_nonces") as mock_executed,
+                self.assertRaises(type(exc)),
+            ):
+                safe_main.main()
+            mock_executed.assert_not_called()
 
-    def test_rejected_key_crashes_the_run(self):
+    def test_executed_check_failure_alerts_internally(self):
         safe_main = import_safe_main()
-        with self.assertRaises(safe_main.SafeApiAuthError):
-            self._main(safe_main, safe_main.SafeApiAuthError("bad key"))
+        queues = {("mainnet", "0x1"): [], ("mainnet", "0x2"): []}
+        with (
+            patch.object(safe_main, "check_llm_credits"),
+            patch.object(safe_main, "ALL_SAFE_ADDRESSES", self.SAFES),
+            patch.object(safe_main, "fetch_queued_transactions", return_value=(queues, True)),
+            patch.object(safe_main, "check_for_pending_transactions"),
+            patch.object(safe_main, "check_executed_nonces", side_effect=safe_main.SafeApiUnavailable("down")),
+            patch.object(safe_main, "send_error_message") as mock_error,
+        ):
+            safe_main.main()
+        mock_error.assert_called_once()
+        self.assertIn("executed Safe txs", mock_error.call_args.args[0])
+        self.assertEqual(mock_error.call_args.kwargs["alert_protocol"], "yearn-internal")
 
     def test_one_failing_safe_alerts_and_the_rest_still_run(self):
         safe_main = import_safe_main()
