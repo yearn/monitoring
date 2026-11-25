@@ -17,12 +17,13 @@ One Queue Service request lists every watched Safe
 first). The endpoint returns only txs that can still execute: not executed, nonce at or above the
 Safe's current nonce. Dead slots, where a competing tx at the same nonce already executed, never
 come back. A further page is fetched only while the response has a `next` link, up to 5 pages.
+If the shared listing exceeds that budget, the monitor switches to individual Safe listings.
+Each Safe then has its own five-page budget and keeps its highest 500 proposals if it exceeds it.
 
 When retries run out (an outage), the run fails and the crash alert goes to the internal errors
 channel on every run until the service is back. When the service rejects the request (for example
 a Safe it cannot resolve), the monitor queries each Safe on its own, so only the bad one goes
-unchecked and gets an internal error alert. That costs one request per Safe until the watchlist is
-fixed.
+unchecked and gets an internal error alert. Each individual listing usually costs one request.
 
 ### 2. Alert each queued tx once
 
@@ -57,8 +58,10 @@ nonce executed since the last run:
 This check costs no Safe API request when no handled tx executed since the last run. It costs one
 request when at least one did. A Safe's first nonce read only records the nonce. If the RPC read
 fails, the Safe keeps its progress and the missed nonces are checked on the next successful read.
-If that alert is not delivered, or the hash lookup fails, the progress is kept and the next run
-checks again.
+Executed alerts compress consecutive nonces into ranges and split large lists into separate
+messages. Each message's nonces are settled after Telegram accepts it. A failed delivery leaves
+those nonces for the next run while the other Safes continue. If the hash lookup fails, the next
+run checks again.
 
 Handled entries are kept until their tx has left the queue and step 3 has settled their nonce.
 

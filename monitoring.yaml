@@ -346,7 +346,7 @@ protocols:
       - name: "Unexpected Proposers"
         description: "Yearn multisig txs proposed by addresses outside known bot/EOA set"
       - name: "Executed Without Alert"
-        description: "Safe txs that executed onchain without a queued-tx alert: signed offchain and executed directly, executed in place of an alerted tx, or proposed and executed between polls"
+        description: "Reports the nonces of Safe txs executed without a queued alert, including direct executions, replacements, and txs proposed and executed between polls."
 
   silo:
     display_name: "Silo"

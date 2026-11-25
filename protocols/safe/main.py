@@ -3,6 +3,7 @@ import itertools
 import os
 import re
 import time
+from collections.abc import Iterator
 from dataclasses import replace
 
 import requests
@@ -46,6 +47,7 @@ from utils.llm.credits import check_llm_credits
 from utils.logger import get_logger
 from utils.proxy import ProxyUpgrade, dedupe_upgrades, find_proxy_upgrades, format_upgrade_lines
 from utils.telegram import (
+    MAX_MESSAGE_LENGTH,
     escape_markdown,
     send_error_message,
     send_telegram_message,
@@ -110,6 +112,8 @@ _api_key_cycle = itertools.cycle(_api_keys)
 # Keys whose account quota is used up this run. A 429 with ``x-ratelimit-remaining: 0``
 # means retrying only burns requests. Extra keys on the same account share one quota.
 _exhausted_api_keys: dict[str, int] = {}  # key -> seconds until its quota resets
+_api_window_start = 0.0
+_api_requests_in_window = 0
 
 CACHE_KEY_QUOTA_ALERTED_UNTIL = "SAFE_API_QUOTA_ALERTED_UNTIL"
 # Per-key "exhausted until" unix time, so later runs skip a dead key instead of spending a
@@ -124,7 +128,7 @@ ALERT_PROTOCOL = "yearn-internal"
 
 # The Queue Service's maximum page size. One page covers every watched Safe's queue together.
 SAFE_QUEUE_PAGE_SIZE = 100
-# Hard cap on pages per run, so a runaway queue cannot drain the shared request quota.
+# Hard cap on pages per listing. An oversized shared listing falls back to per-Safe listings.
 SAFE_QUEUE_MAX_PAGES = 5
 _SAFE_TX_HASH_RE = re.compile(r"0x[0-9a-fA-F]{64}")
 # Per (network, safe) cache entry listing the queued txs already alerted on (or skipped by the
@@ -132,6 +136,8 @@ _SAFE_TX_HASH_RE = re.compile(r"0x[0-9a-fA-F]{64}")
 CACHE_KEY_HANDLED_TXS_PREFIX = "safe_handled_txs"
 # The batch endpoint's cap on hashes per request.
 SAFE_TX_HASH_BATCH_SIZE = 100
+# Reserve room for the alert text and the optional Telegram test-channel prefix.
+_MAX_NONCE_LIST_LENGTH = MAX_MESSAGE_LENGTH // 2
 
 
 class SafeApiQuotaExhausted(Exception):
@@ -227,6 +233,8 @@ def _queue_request(
         SafeApiAuthError: When the service rejects the API key.
         SafeApiRequestError: When the service rejects the request (e.g. 422 for a Safe it cannot resolve).
     """
+    global _api_window_start, _api_requests_in_window
+
     endpoint = f"{SAFE_QUEUE_API_URL}/api/v1/{path}"
     attempt = 0
     while attempt < max_retries:
@@ -235,6 +243,8 @@ def _queue_request(
             raise SafeApiQuotaExhausted(min(_exhausted_api_keys.values()))
         headers = {"Authorization": f"Bearer {api_key}"}
 
+        _api_window_start, _api_requests_in_window = check_api_limit(_api_window_start, _api_requests_in_window)
+        _api_requests_in_window += 1
         try:
             response = requests.get(endpoint, params=params, headers=headers, timeout=20)
         except requests.exceptions.RequestException as e:
@@ -308,9 +318,10 @@ def fetch_queued_transactions(
         max_pages: Upper bound on pages fetched.
 
     Returns:
-        Each requested Safe's queued txs (lowest nonce first), and whether the listing is
-        complete. It is incomplete only when ``max_pages`` was hit; callers must not treat
-        a tx missing from an incomplete listing as gone.
+        Each requested Safe's queued txs and whether the listing is complete. Shared
+        listings start at the lowest nonce. A single-Safe listing starts at the highest
+        nonce so its page cap retains the highest proposals. An incomplete listing
+        hit the page cap or reported more rows than the cap can cover.
 
     Raises:
         SafeApiQuotaExhausted: When every API key has used up its quota.
@@ -322,8 +333,10 @@ def fetch_queued_transactions(
     by_param = {_safe_param(network, address): (network, address) for network, address in safes}
     context = f"{len(safes)} Safe(s)" if len(safes) > 1 else f"{safes[0][1]} on {safes[0][0]}"
     seen: set[tuple[SafeKey, TxId]] = set()
+    shared = len(safes) > 1
+    nonce_order = "asc" if shared else "desc"
     params: list[tuple[str, str | int]] = [("safes", param) for param in by_param]
-    params += [("nonceOrder", "asc"), ("limit", SAFE_QUEUE_PAGE_SIZE)]
+    params += [("nonceOrder", nonce_order), ("limit", SAFE_QUEUE_PAGE_SIZE)]
     for page in range(max_pages):
         page_params = params + ([("offset", page * SAFE_QUEUE_PAGE_SIZE)] if page else [])
         body = _queue_request("multisig-transactions/queue", page_params, context, max_retries)
@@ -343,7 +356,10 @@ def fetch_queued_transactions(
                 queues[safe].append(tx)
         if not body.get("next"):
             return queues, True
-    logger.warning("Stopped after %s pages of queued txs for %s; higher nonces were not fetched", max_pages, context)
+        count = body.get("count")
+        if shared and isinstance(count, int) and count > max_pages * SAFE_QUEUE_PAGE_SIZE:
+            break
+    logger.warning("Queued txs for %s exceed the %s-page listing cap", context, max_pages)
     return queues, False
 
 
@@ -729,8 +745,26 @@ def check_for_pending_transactions(
         logger.info("No new queued transactions for %s on %s", safe_address, network_name)
 
 
-def _alert_unalerted_executions(check: NonceCheck, nonces: list[int]) -> bool:
-    """Send one loud alert listing a Safe's nonces that executed without a queued-tx alert.
+def _nonce_alert_batches(nonces: list[int]) -> Iterator[tuple[list[int], str]]:
+    """Group sorted nonces into ranges and fit those ranges into individual alert messages."""
+    batch: list[int] = []
+    labels: list[str] = []
+    length = 0
+    for _, group in itertools.groupby(enumerate(nonces), key=lambda item: item[1] - item[0]):
+        run = [nonce for _, nonce in group]
+        label = str(run[0]) if len(run) == 1 else f"{run[0]}–{run[-1]}"
+        if labels and length + 2 + len(label) > _MAX_NONCE_LIST_LENGTH:
+            yield batch, ", ".join(labels)
+            batch, labels, length = [], [], 0
+        length += (2 if labels else 0) + len(label)
+        labels.append(label)
+        batch.extend(run)
+    if labels:
+        yield batch, ", ".join(labels)
+
+
+def _alert_unalerted_executions(check: NonceCheck, nonce_list: str) -> bool:
+    """Send one loud alert for the listed nonces that executed without a queued-tx alert.
 
     Returns:
         Whether Telegram accepted it. ``False`` keeps the nonces for the next run.
@@ -740,11 +774,10 @@ def _alert_unalerted_executions(check: NonceCheck, nonces: list[int]) -> bool:
         logger.warning(
             "No Telegram destination for %s; leaving unalerted executions %s on %s for the next run",
             check.protocol,
-            nonces,
+            nonce_list,
             safe_address,
         )
         return False
-    nonce_list = ", ".join(str(n) for n in nonces)
     message = (
         "🚨 SAFE TX EXECUTED WITHOUT A QUEUED ALERT 🚨\n"
         f"🅿️ Protocol: {escape_markdown(check.protocol)}\n"
@@ -794,20 +827,31 @@ def check_executed_nonces(safes: list[list[str]]) -> None:
 
     for check in checks:
         unalerted, awaiting = check.resolve(executed)
-        if unalerted and not _alert_unalerted_executions(check, unalerted):
-            continue  # Keep the stored progress so the next run alerts again.
-        save_nonce_check_state(check.safe, NonceCheckState(check.current_nonce, awaiting))
+        try:
+            if not unalerted:
+                save_nonce_check_state(check.safe, NonceCheckState(check.current_nonce, awaiting))
+                continue
+
+            outstanding = set(unalerted) | awaiting
+            for batch, nonce_list in _nonce_alert_batches(unalerted):
+                if not _alert_unalerted_executions(check, nonce_list):
+                    break
+                outstanding.difference_update(batch)
+                save_nonce_check_state(check.safe, NonceCheckState(check.current_nonce, frozenset(outstanding)))
+        except Exception as exc:  # noqa: BLE001 - one Safe's delivery or save must not block the others
+            report_executed_check_failure(exc, safe=check.safe)
 
 
 def check_api_limit(last_api_call_time: float, request_counter: int) -> tuple[float, int]:
-    current_time = time.time()
+    """Allow at most four Queue Service requests per second before the next window."""
+    current_time = time.monotonic()
     if current_time - last_api_call_time > 1:
         last_api_call_time = current_time
         request_counter = 0
     elif request_counter >= 4:
         time.sleep(1)
         request_counter = 0
-        last_api_call_time = time.time()
+        last_api_call_time = time.monotonic()
 
     return last_api_call_time, request_counter
 
@@ -864,12 +908,13 @@ def report_safe_failure(protocol: str, network_name: str, safe_address: str, exc
         logger.exception("Could not send the Safe check failure alert for %s on %s", safe_address, network_name)
 
 
-def report_executed_check_failure(exc: Exception) -> None:
+def report_executed_check_failure(exc: Exception, safe: SafeKey | None = None) -> None:
     """Alert that the executed-nonce check failed this run; its progress is kept for the next run."""
-    logger.error("Safe executed-nonce check failed", exc_info=exc)
+    scope = f" for {safe[1]} on {safe[0]}" if safe else ""
+    logger.error("Safe executed-nonce check failed%s", scope, exc_info=exc)
     try:
         send_error_message(
-            "Safe monitor could not check which executed Safe txs were alerted on this run; "
+            f"Safe monitor could not check which executed Safe txs were alerted{scope} on this run; "
             f"it retries next run.\n{type(exc).__name__}: {exc}",
             ERROR_LABEL,
             source="safe_check_failed",
@@ -895,15 +940,15 @@ def main():
         logger.error("Batched Safe queue request rejected (%s); querying each Safe separately", exc)
         queues, complete = None, False
 
-    last_api_call_time = 0.0
-    request_counter = 0
+    if queues is not None and not complete and len(ALL_SAFE_ADDRESSES) > 1:
+        logger.warning("Batched Safe queue exceeded its page budget; querying each Safe separately")
+        queues = None
+
     for safe in ALL_SAFE_ADDRESSES:
         protocol, network_name, safe_address = safe[0], safe[1], safe[2]
         logger.info("Running for %s on %s", protocol, network_name)
         try:
             if queues is None:
-                last_api_call_time, request_counter = check_api_limit(last_api_call_time, request_counter)
-                request_counter += 1
                 safe_queues, safe_complete = fetch_queued_transactions([(network_name, safe_address)], max_retries=1)
                 queued_txs = safe_queues[(network_name, safe_address)]
             else:

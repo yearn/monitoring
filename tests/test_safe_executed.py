@@ -138,7 +138,7 @@ class TestCheckExecutedNonces(unittest.TestCase):
         mock_lookup.assert_not_called()  # no alerted tx to confirm: no Safe API request
         message, protocol, disable_notification = mock_send.call_args.args
         self.assertIn("EXECUTED WITHOUT A QUEUED ALERT", message)
-        self.assertIn("#️⃣ Nonce: 40, 41", message)
+        self.assertIn("#️⃣ Nonce: 40–41", message)
         self.assertIn(f"https://app.safe.global/transactions/history?safe=eth:{SAFE}", message)
         self.assertEqual(protocol, "YEARN_MS")
         self.assertFalse(disable_notification)
@@ -180,6 +180,63 @@ class TestCheckExecutedNonces(unittest.TestCase):
         _, mock_send = self._run({KEY: 41})
         self.assertIn("#️⃣ Nonce: 40", mock_send.call_args.args[0])
         self.assertEqual(self._state(), self.safe_main.NonceCheckState(41))
+
+    def test_failed_delivery_does_not_block_the_next_safe(self):
+        from utils.telegram import TelegramError
+
+        safe_main = self.safe_main
+        other = ("mainnet", "0x" + "12" * 20)
+        safes = [*SAFES, ["LIDO", *other]]
+        for key in (KEY, other):
+            safe_main.save_nonce_check_state(key, safe_main.NonceCheckState(40))
+
+        with (
+            patch.object(safe_main, "read_onchain_nonces", return_value={KEY: 41, other: 41}),
+            patch.object(
+                safe_main, "send_telegram_message", side_effect=[TelegramError("topic not found"), True]
+            ) as send,
+            patch.object(safe_main, "send_error_message") as send_error,
+        ):
+            safe_main.check_executed_nonces(safes)
+
+        self.assertEqual([call.args[1] for call in send.call_args_list], ["YEARN_MS", "LIDO"])
+        self.assertEqual(self._state(), safe_main.NonceCheckState(40))
+        self.assertEqual(safe_main.load_nonce_check_state(other), safe_main.NonceCheckState(41))
+        self.assertIn(SAFE, send_error.call_args.args[0])
+
+    def test_consecutive_backlog_fits_in_one_message(self):
+        self._run({KEY: 1000})
+        _, send = self._run({KEY: 2000})
+
+        send.assert_called_once()
+        self.assertIn("#️⃣ Nonce: 1000–1999", send.call_args.args[0])
+        self.assertEqual(self._state(), self.safe_main.NonceCheckState(2000))
+
+    def test_successful_chunk_stays_settled_after_later_delivery_is_skipped(self):
+        safe_main = self.safe_main
+        self._run({KEY: 40})
+        confirmed = {safe_tx_hash(nonce) for nonce in (41, 43)}
+        for nonce in (41, 43):
+            safe_main.mark_tx_handled(SAFE, "mainnet", queue_tx(nonce))
+
+        with (
+            patch.object(safe_main, "_MAX_NONCE_LIST_LENGTH", 6),
+            patch.object(safe_main, "read_onchain_nonces", return_value={KEY: 46}),
+            patch.object(safe_main, "fetch_executed_safe_tx_hashes", return_value=confirmed),
+            patch.object(safe_main, "send_telegram_message", side_effect=[True, False]) as send,
+        ):
+            safe_main.check_executed_nonces(SAFES)
+
+        self.assertEqual(send.call_count, 2)
+        self.assertIn("#️⃣ Nonce: 40, 42", send.call_args_list[0].args[0])
+        self.assertIn("#️⃣ Nonce: 44–45", send.call_args_list[1].args[0])
+        self.assertEqual(self._state(), safe_main.NonceCheckState(46, frozenset({44, 45})))
+
+        lookup, retry = self._run({KEY: 46})
+        lookup.assert_not_called()
+        retry.assert_called_once()
+        self.assertIn("#️⃣ Nonce: 44–45", retry.call_args.args[0])
+        self.assertEqual(self._state(), safe_main.NonceCheckState(46))
 
     def test_missing_destination_defers_without_sending(self):
         self._run({KEY: 40})

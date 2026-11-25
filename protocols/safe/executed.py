@@ -42,8 +42,8 @@ class NonceCheckState:
 
     Attributes:
         next_nonce: Every nonce below it is checked, except those in ``awaiting``.
-        awaiting: Executed nonces whose alerted tx the Queue Service has not reported as
-            executed yet. They alert if still unconfirmed on the next run.
+        awaiting: Executed nonces still awaiting hash confirmation or alert delivery.
+            They alert if still unconfirmed on the next run.
     """
 
     next_nonce: int
@@ -62,7 +62,7 @@ class NonceCheck:
         safe: The Safe being checked.
         protocol: Protocol key that picks the alert channel.
         current_nonce: The Safe's onchain nonce read this run.
-        previously_awaiting: Nonces that were already unconfirmed on the last run.
+        previously_awaiting: Nonces still awaiting hash confirmation or alert delivery from the last run.
         unalerted: Executed nonces with no alerted or rule-skipped tx.
         alerted_hashes: Executed nonces mapped to the alerted ``safeTxHash`` values at them.
     """

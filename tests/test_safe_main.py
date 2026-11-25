@@ -240,6 +240,18 @@ class TestSafeQueueFetch(unittest.TestCase):
         self.assertFalse(complete)
         self.assertEqual(len(queues[("mainnet", SAFE)]), 2)
 
+    def test_single_safe_cap_keeps_highest_nonces(self):
+        pages = [
+            queue_response([queue_tx(nonce) for nonce in range(start, start - 100, -1)], next_url="https://next")
+            for start in range(500, 0, -100)
+        ]
+        queues, complete, mock_get = self._fetch(pages, [("mainnet", SAFE)])
+
+        self.assertFalse(complete)
+        self.assertEqual(mock_get.call_count, 5)
+        self.assertEqual({dict(call.kwargs["params"])["nonceOrder"] for call in mock_get.call_args_list}, {"desc"})
+        self.assertEqual([int(tx["nonce"]) for tx in queues[("mainnet", SAFE)]], list(range(500, 0, -1)))
+
     def test_connection_error_is_retried(self):
         queues, _, mock_get = self._fetch([requests.exceptions.ConnectionError("reset"), queue_response([queue_tx(5)])])
         self.assertEqual(mock_get.call_count, 2)
@@ -944,6 +956,41 @@ class TestQueueServiceMigration(unittest.TestCase):
         self.assertEqual([c.args for c in mock_check.call_args_list], [("0x2", "mainnet", "LIDO", [], True)])
         mock_error.assert_called_once()
         self.assertIn("0x1", mock_error.call_args.args[0])
+
+    def test_oversized_shared_listing_does_not_hide_another_safes_queue(self):
+        safe_main = import_safe_main()
+        safes = [[protocol, "mainnet", f"0x{index:040x}"] for index, protocol in enumerate(("LIDO", "CAP", "AAVE"), 1)]
+        rows = {
+            safes[0][2]: [queue_tx(nonce, safe=safes[0][2]) for nonce in range(250)],
+            safes[1][2]: [queue_tx(nonce, safe=safes[1][2]) for nonce in range(250, 500)],
+            safes[2][2]: [queue_tx(500, safe=safes[2][2])],
+        }
+
+        def respond(_url: str, *, params: list[tuple[str, str | int]], **_kwargs: object) -> Mock:
+            options = dict(params)
+            selected = [tx for key, value in params if key == "safes" for tx in rows[str(value).split(":")[0]]]
+            selected.sort(key=lambda tx: int(tx["nonce"]), reverse=options["nonceOrder"] == "desc")
+            offset = int(options.get("offset", 0))
+            end = offset + int(options["limit"])
+            response = queue_response(selected[offset:end], next_url="https://next" if end < len(selected) else None)
+            response.json.return_value["count"] = len(selected)
+            return response
+
+        with (
+            patch.object(safe_main, "ALL_SAFE_ADDRESSES", safes),
+            patch.object(safe_main, "check_llm_credits"),
+            patch.object(safe_main.requests, "get", side_effect=respond) as get,
+            patch.object(safe_main.time, "monotonic", return_value=10),
+            patch.object(safe_main.time, "sleep") as sleep,
+            patch.object(safe_main, "check_for_pending_transactions") as check,
+            patch.object(safe_main, "check_executed_nonces"),
+        ):
+            safe_main.main()
+
+        self.assertEqual(get.call_count, 8)  # One shared page, then 3 + 3 + 1 individual pages.
+        sleep.assert_called_once_with(1)
+        self.assertEqual([len(call.args[3]) for call in check.call_args_list], [250, 250, 1])
+        check.assert_any_call(safes[2][2], "mainnet", "AAVE", rows[safes[2][2]], True)
 
     def test_service_wide_failures_crash_the_run_for_one_alert(self):
         safe_main = import_safe_main()
