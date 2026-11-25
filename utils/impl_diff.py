@@ -41,7 +41,7 @@ this process. A section that fails its own check is dropped rather than shown.
 
 import difflib
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from utils.abi_surface import AbiSurfaceDiff, abi_functions, diff_abi_surface
 from utils.logger import get_logger
@@ -59,7 +59,7 @@ from utils.source_diff import (
 )
 from utils.sourcify_layout import fetch_storage_layout
 from utils.storage_layout import LayoutComparison, StorageCompatibility, compare_storage_layouts
-from utils.verified_contract import VerifiedContract
+from utils.verified_contract import VerifiedContract, is_creation_only_match, source_provenance_lines
 
 logger = get_logger("utils.impl_diff")
 
@@ -132,6 +132,8 @@ class ImplTarget:
     address: str
     contract_name: str
     contract_file: str | None
+    provider: str = ""
+    match_quality: str | None = None
 
     def __str__(self) -> str:
         if self.contract_name and self.contract_file:
@@ -270,7 +272,13 @@ def reset_provenance_registry() -> None:
 
 
 def _target(address: str, contract: VerifiedContract) -> ImplTarget:
-    return ImplTarget(address=address, contract_name=contract.contract_name, contract_file=contract.contract_file)
+    return ImplTarget(
+        address=address,
+        contract_name=contract.contract_name,
+        contract_file=contract.contract_file,
+        provider=contract.provider,
+        match_quality=contract.match_quality,
+    )
 
 
 def _compare_storage(
@@ -282,19 +290,29 @@ def _compare_storage(
 ) -> tuple[LayoutComparison, NamespaceComparison, StorageCompatibility]:
     """Compare positional and non-positional storage, and combine the verdict.
 
-    Precedence: any proven conflict, in either part, is INCOMPATIBLE; otherwise
-    anything the check could not see — an unresolved type, a namespace it
-    couldn't prove, a raw ``sstore``, a ``delegatecall`` — is UNKNOWN; only
-    full coverage is COMPATIBLE. The positional result is returned as-is so it
-    stays visible on its own even when the combined verdict is UNKNOWN.
+    Creation-only source or layout evidence makes the combined verdict UNKNOWN.
+    With runtime evidence, a proven conflict is INCOMPATIBLE, gaps are UNKNOWN,
+    and full coverage is COMPATIBLE. Compiler layout results remain visible.
     """
+    old_layout = fetch_storage_layout(chain_id, old_addr)
+    new_layout = fetch_storage_layout(chain_id, new_addr)
     positional = compare_storage_layouts(
-        fetch_storage_layout(chain_id, old_addr),
-        fetch_storage_layout(chain_id, new_addr),
+        old_layout,
+        new_layout,
         _value_types(old),
         _value_types(new),
     )
     non_positional = compare_non_positional(old, new)
+    creation_only = [
+        side
+        for side, contract, layout in (("old", old, old_layout), ("new", new, new_layout))
+        if is_creation_only_match(contract.match_quality) or (layout is not None and layout.creation_only)
+    ]
+    if creation_only:
+        sides = " and ".join(creation_only)
+        gap = f"runtime bytecode unverified on the {sides} side of the comparison (creation-only match)"
+        positional = replace(positional, gaps=[*positional.gaps, gap])
+        return positional, non_positional, StorageCompatibility.UNKNOWN
     if positional.conflicts or non_positional.conflicts:
         verdict = StorageCompatibility.INCOMPATIBLE
     elif positional.status is not StorageCompatibility.COMPATIBLE or not non_positional.is_validated:
@@ -670,10 +688,10 @@ def _fmt_library(lib: LibraryChange) -> list[str]:
 
 def format_impl_diff(diff: ImplDiff) -> str:
     """Render an :class:`ImplDiff` into a prompt-ready text block."""
-    lines: list[str] = [
-        f"Old: {diff.old.address} — {diff.old}",
-        f"New: {diff.new.address} — {diff.new}",
-    ]
+    lines: list[str] = []
+    for side, target in (("Old", diff.old), ("New", diff.new)):
+        lines.append(f"{side}: {target.address} — {target}")
+        lines.extend(f"  {line}" for line in source_provenance_lines(target.provider, target.match_quality))
     if diff.old.contract_name and diff.new.contract_name and diff.old.contract_name != diff.new.contract_name:
         lines.append(f"Contract name changed: {diff.old.contract_name} → {diff.new.contract_name}")
 

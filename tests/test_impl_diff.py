@@ -6,6 +6,7 @@ mixed with imported interfaces and bases, commented-out code, body-only changes.
 
 import json
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from utils.impl_diff import (
@@ -368,6 +369,30 @@ class TestStorageVerdicts(ImplDiffTestCase):
         assert diff is not None
         self.assertEqual(diff.storage_status, StorageCompatibility.COMPATIBLE)
         self.assertEqual([e.label for e in diff.storage.added], ["buffer", "__gap"])
+
+    def test_creation_only_evidence_leaves_storage_verdict_unknown(self) -> None:
+        """Creation-only matches show compiler findings as provisional evidence."""
+        old = _contract(self.old_entry)
+        new = _contract(self.new_entry)
+        assert old is not None and new is not None
+        conflicting_layout = _layout([(0, 0, "buffer", "t_address"), (1, 0, "cap", "t_uint256")])
+        checks = (
+            (replace(new, provider="Sourcify", match_quality="creation_only_match"), NEW_LAYOUT),
+            (new, replace(conflicting_layout, creation_only=True)),
+        )
+        for contract, layout in checks:
+            with (
+                self.subTest(creation_only_layout=layout.creation_only),
+                patch("utils.impl_diff.fetch_verified_contract", side_effect=[old, contract]),
+                patch("utils.impl_diff.fetch_storage_layout", side_effect=[OLD_LAYOUT, layout]),
+            ):
+                diff = diff_implementations("0xOld", "0xNew", 1)
+                assert diff is not None
+                self.assertEqual(diff.storage_status, StorageCompatibility.UNKNOWN)
+                positional = "INCOMPATIBLE" if layout.creation_only else "COMPATIBLE"
+                rendered = format_impl_diff(diff)
+                self.assertIn(f"Positional layout (compiler): {positional}", rendered)
+                self.assertIn("runtime bytecode unverified on the new side", rendered)
 
     def test_missing_one_side_is_unknown(self) -> None:
         self.new_layout = None

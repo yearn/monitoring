@@ -30,7 +30,46 @@ class TestFetchStorageLayout(unittest.TestCase):
             layout = fetch_storage_layout(1, "0xABC")
         assert layout is not None
         self.assertEqual(layout.match, "match")
+        self.assertFalse(layout.creation_only)
         self.assertEqual(len(layout.storage), 1)
+
+    def test_creation_only_layout_keeps_match_scope_when_cached(self) -> None:
+        """Retain provisional compiler layout results and their creation-only provenance."""
+        layout_payload = {**LAYOUT_PAYLOAD, "runtimeMatch": None}
+        with patch("utils.sourcify_layout.fetch_json", return_value=layout_payload) as mock_fetch:
+            fetch_storage_layout(1, "0xABC")
+            layout = fetch_storage_layout(1, "0xabc")
+        assert layout is not None
+        self.assertTrue(layout.creation_only)
+        mock_fetch.assert_called_once()
+
+    def test_expired_creation_only_layout_can_gain_runtime_verification(self) -> None:
+        """Recheck creation-only layouts after the short cache lifetime."""
+        payload = {**LAYOUT_PAYLOAD, "runtimeMatch": None}
+        with (
+            patch.object(_layout_cache, "negative_ttl", -1),
+            patch("utils.sourcify_layout.fetch_json", side_effect=[payload, LAYOUT_PAYLOAD]) as mock_fetch,
+        ):
+            first = fetch_storage_layout(1, "0xabc")
+            second = fetch_storage_layout(1, "0xabc")
+        assert first is not None and second is not None
+        self.assertTrue(first.creation_only)
+        self.assertFalse(second.creation_only)
+        self.assertEqual(mock_fetch.call_count, 2)
+
+    def test_legacy_creation_only_layout_gets_an_expiry(self) -> None:
+        """A creation-only layout cached before expiry support can be refreshed."""
+        _layout_cache.set_positive("1-0xabc", {**LAYOUT_PAYLOAD, "runtimeMatch": None})
+        with (
+            patch.object(_layout_cache, "negative_ttl", -1),
+            patch("utils.sourcify_layout.fetch_json", return_value=LAYOUT_PAYLOAD) as mock_fetch,
+        ):
+            first = fetch_storage_layout(1, "0xabc")
+            second = fetch_storage_layout(1, "0xabc")
+        assert first is not None and second is not None
+        self.assertTrue(first.creation_only)
+        self.assertFalse(second.creation_only)
+        mock_fetch.assert_called_once()
 
     def test_unverified_match_is_none(self) -> None:
         """`match: null` arrives with HTTP 200 — status alone proves nothing."""

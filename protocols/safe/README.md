@@ -95,7 +95,11 @@ A tx a rule skipped still counts as handled for step 3. The executed-without-ale
 these rules: a tx that never reached the queue has no calldata to check, so it always alerts.
 
 The **Diff** link opens a Wavey Gist, published with `WAVEY_GIST_API_KEY`, with the verified
-source diff of both implementations. Any compiler, linked-library or constructor-argument changes
-are listed below it. Proxies upgraded to the same implementation pair share one gist. An alert
-waits up to 60 seconds for its gists. A comparison that is not ready by then, or whose source is
-unavailable, keeps the explorer link.
+source diff of both implementations. Uncached source lookups try Sourcify first, then Etherscan
+if needed. When the two implementations come from different providers, one is refetched from
+the other's provider, because the providers lay out file paths and compiler versions differently.
+If that fails, the gist says the providers differ. The gist names the source provider for each
+implementation and lists compiler, linked-library or constructor-argument changes. Refetching
+source preserves any constructor arguments already verified for the deployment. Proxies upgraded
+to the same implementation pair share one gist. An alert waits up to 60 seconds for its gists. A comparison that is not
+ready by then, or whose source is unavailable, keeps the explorer link.

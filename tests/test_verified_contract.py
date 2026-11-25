@@ -99,6 +99,41 @@ class TestCacheRoundTrip(unittest.TestCase):
         restored = VerifiedContract.from_cache_dict(json.loads(json.dumps(contract.to_cache_dict())))
         self.assertEqual(restored, contract)
 
+    def test_similar_match_constructor_arguments_are_unavailable(self) -> None:
+        """Etherscan does not verify constructor arguments for Similar Match."""
+        entry = {
+            **_entry("contract Vault {}"),
+            "ConstructorArguments": "",
+            "SimilarMatch": "0x" + "a" * 40,
+        }
+        contract = parse_etherscan_entry(entry)
+        assert contract is not None
+        self.assertIsNone(contract.constructor_arguments)
+        restored = VerifiedContract.from_cache_dict({**contract.to_cache_dict(), "constructor_arguments": "dead"})
+        self.assertEqual(restored, contract)
+
+    def test_blank_legacy_constructor_arguments_with_inputs_are_unknown(self) -> None:
+        """A blank field cannot represent encoded values for a constructor with inputs."""
+        entry = {
+            **_entry("contract Vault { constructor(uint256) {} }"),
+            "ABI": json.dumps([{"type": "constructor", "inputs": [{"type": "uint256"}]}]),
+            "ConstructorArguments": "",
+        }
+        contract = parse_etherscan_entry(entry)
+        assert contract is not None
+        self.assertIsNone(contract.constructor_arguments)
+        cached = {**contract.to_cache_dict(), "constructor_arguments": ""}
+        cached.pop("provider")
+        cached.pop("match_quality")
+        self.assertEqual(VerifiedContract.from_cache_dict(cached), contract)
+
+    def test_deployment_without_constructor_arguments_keeps_empty_value(self) -> None:
+        """A verified no-argument deployment records a known empty value."""
+        contract = parse_etherscan_entry({**_entry("contract Vault {}"), "ConstructorArguments": ""})
+        assert contract is not None
+        self.assertEqual(contract.constructor_arguments, "")
+        self.assertEqual(VerifiedContract.from_cache_dict(contract.to_cache_dict()), contract)
+
     def test_older_schema_is_rejected(self) -> None:
         """A flattened record from the previous cache version must not be reused."""
         self.assertIsNone(VerifiedContract.from_cache_dict(["Vault", "contract Vault {}", ABI_JSON]))

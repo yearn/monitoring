@@ -949,7 +949,7 @@ def _collect_safety_checks(
     for target in check_targets:
         if verified_by_target.get(target) is False:
             notes.append(
-                f"{target} is UNVERIFIED on Etherscan — source is not published; the call cannot be inspected."
+                f"{target} is UNVERIFIED in Sourcify and Etherscan — no verified source is available for inspection."
             )
 
     payable_seen: set[tuple[str, str]] = set()
@@ -1054,7 +1054,7 @@ def _format_role_name_notes(roles_by_target: dict[str, dict[str, str]]) -> list[
 
 
 def _new_impl_verification_note(new_impl: str, chain_id: int) -> str:
-    """One-line note on whether the new implementation is verified on Etherscan.
+    """One-line note on whether the new implementation has verified source.
 
     Upgrading a proxy to UNVERIFIED bytecode is a major red flag — the new code
     can't be inspected and the structural impl-diff can't run. Surfacing a hard
@@ -1063,9 +1063,9 @@ def _new_impl_verification_note(new_impl: str, chain_id: int) -> str:
     """
     status = get_verification_status(chain_id, new_impl)
     if status is False:
-        return "\nNew implementation is UNVERIFIED on Etherscan — its bytecode cannot be inspected (high risk)."
+        return "\nNew implementation is UNVERIFIED in Sourcify and Etherscan (high risk)."
     if status is True:
-        return "\nNew implementation is verified on Etherscan."
+        return "\nVerified source is available for the new implementation."
     return ""
 
 

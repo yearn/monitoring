@@ -1,4 +1,4 @@
-"""Structured record of an Etherscan-verified contract.
+"""Structured record of a verified contract.
 
 Etherscan returns a *bundle*: the deployed contract plus every base, library and
 interface it imports, as a standard-json ``sources`` map. Flattening that bundle
@@ -19,6 +19,7 @@ added without a bump when a missing value reads as "unknown" (``None``), as
 
 import json
 from dataclasses import dataclass, field
+from typing import Literal
 
 from utils.logger import get_logger
 from utils.solidity_text import declares_contract
@@ -32,7 +33,7 @@ _NOT_VERIFIED_ABI = "Contract source code not verified"
 
 @dataclass(frozen=True)
 class VerifiedContract:
-    """One verified contract as Etherscan reports it, with provenance preserved."""
+    """One verified contract with source and deployment provenance."""
 
     contract_name: str
     compiler_version: str
@@ -41,8 +42,10 @@ class VerifiedContract:
     settings: dict = field(default_factory=dict)  # standard-json settings (remappings, optimizer, …)
     abi: list[dict] = field(default_factory=list)
     contract_file: str | None = None  # resolved compilation target, None if ambiguous
-    # Etherscan hex. None when unavailable, including records cached before the field existed.
+    # Hex without a prefix. None when unavailable.
     constructor_arguments: str | None = None
+    provider: str = "Etherscan"
+    match_quality: str | None = None
 
     @property
     def compilation_target(self) -> tuple[str, str] | None:
@@ -73,6 +76,8 @@ class VerifiedContract:
             "abi": self.abi,
             "contract_file": self.contract_file,
             "constructor_arguments": self.constructor_arguments,
+            "provider": self.provider,
+            "match_quality": self.match_quality,
         }
 
     @classmethod
@@ -81,21 +86,50 @@ class VerifiedContract:
         if not isinstance(data, dict) or data.get("schema") != CACHE_SCHEMA_VERSION:
             return None
         sources = data.get("sources")
-        if not isinstance(sources, dict):
+        if not isinstance(sources, dict) or not sources or not all(isinstance(text, str) for text in sources.values()):
             return None
         settings = data.get("settings")
-        abi = data.get("abi")
+        abi = data["abi"] if isinstance(data.get("abi"), list) else []
         constructor_arguments = data.get("constructor_arguments")
+        match_quality = data.get("match_quality")
+        provider = data.get("provider") or "Etherscan"
+        if provider == "Etherscan":
+            constructor_arguments = _etherscan_constructor_arguments(constructor_arguments, abi, match_quality)
         return cls(
             contract_name=str(data.get("contract_name") or ""),
             compiler_version=str(data.get("compiler_version") or ""),
             language=str(data.get("language") or "Solidity"),
-            sources={str(k): str(v) for k, v in sources.items()},
+            sources=sources,
             settings=settings if isinstance(settings, dict) else {},
-            abi=abi if isinstance(abi, list) else [],
+            abi=abi,
             contract_file=data.get("contract_file") or None,
             constructor_arguments=constructor_arguments if isinstance(constructor_arguments, str) else None,
+            provider=provider,
+            match_quality=match_quality if isinstance(match_quality, str) else None,
         )
+
+
+# False is a provider-confirmed miss. None means that the lookup could not establish verification.
+type ContractLookup = VerifiedContract | Literal[False] | None
+
+
+def is_creation_only_match(match_quality: str | None) -> bool:
+    """Return whether the provider matched creation bytecode alone."""
+    return bool(match_quality and match_quality.startswith("creation_only_"))
+
+
+def source_provenance_lines(provider: str, match_quality: str | None) -> list[str]:
+    """Describe what the source match establishes for the explainer."""
+    lines: list[str] = []
+    if provider:
+        quality = f" ({match_quality.replace('_', ' ')})" if match_quality else ""
+        lines.append(f"Source: {provider}{quality}")
+    creation_only = is_creation_only_match(match_quality)
+    if match_quality in ("match", "similar_match") or creation_only:
+        lines.append("Comments and NatSpec are unconfirmed for this deployment. Do not quote or rely on them.")
+    if creation_only:
+        lines.append("Only creation bytecode matched. Treat runtime behavior from this source as unconfirmed.")
+    return lines
 
 
 def parse_etherscan_entry(entry: dict) -> VerifiedContract | None:
@@ -108,7 +142,8 @@ def parse_etherscan_entry(entry: dict) -> VerifiedContract | None:
         return None
 
     contract_name = entry.get("ContractName") or ""
-    constructor_arguments = entry.get("ConstructorArguments")
+    abi = parse_abi(entry.get("ABI") or "") or []
+    match_quality = "similar_match" if entry.get("SimilarMatch") else None
     language, sources, settings = _parse_source_bundle(raw_source, contract_name)
     return VerifiedContract(
         contract_name=contract_name,
@@ -116,12 +151,23 @@ def parse_etherscan_entry(entry: dict) -> VerifiedContract | None:
         language=language,
         sources=sources,
         settings=settings,
-        abi=parse_abi(entry.get("ABI") or "") or [],
+        abi=abi,
         contract_file=resolve_contract_file(contract_name, sources, settings),
-        constructor_arguments=constructor_arguments.strip().lower().removeprefix("0x")
-        if isinstance(constructor_arguments, str)
-        else None,
+        constructor_arguments=_etherscan_constructor_arguments(entry.get("ConstructorArguments"), abi, match_quality),
+        match_quality=match_quality,
     )
+
+
+def _etherscan_constructor_arguments(value: object, abi: list[dict], match_quality: str | None) -> str | None:
+    """Keep only arguments attributable to this deployment, including in legacy cache entries."""
+    if match_quality == "similar_match" or not isinstance(value, str):
+        return None
+    arguments = value.strip().lower().removeprefix("0x")
+    if not arguments and any(
+        isinstance(entry, dict) and entry.get("type") == "constructor" and entry.get("inputs") for entry in abi
+    ):
+        return None
+    return arguments
 
 
 def parse_abi(abi_json: str) -> list[dict] | None:

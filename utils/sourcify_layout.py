@@ -22,14 +22,15 @@ from dataclasses import dataclass
 from utils.disk_cache import MISS, DiskCache
 from utils.http_client import fetch_json
 from utils.logger import get_logger
+from utils.sourcify_contract import SOURCIFY_V2_API_URL, sourcify_match_quality
+from utils.verified_contract import is_creation_only_match
 
 logger = get_logger("utils.sourcify_layout")
 
-SOURCIFY_V2_API_URL = "https://sourcify.dev/server/v2/contract"
+_CREATION_ONLY_EXPIRY = "_creation_only_expiry"
 
-# Layouts for a verified address are immutable, so positive entries never expire.
-# Misses get the short negative TTL: Sourcify coverage grows over time, and a
-# contract unknown today is often verified a day later.
+# Runtime-matched layouts are immutable. Misses and creation-only layouts
+# expire so later runtime verification can be picked up.
 _layout_cache = DiskCache(
     namespace="sourcify-layout-v1",
     max_entries=int(os.getenv("SOURCIFY_LAYOUT_CACHE_MAX_ENTRIES", "5000")),
@@ -45,6 +46,7 @@ class StorageLayout:
     match: str  # Sourcify's match quality, e.g. "match" / "exact_match"
     storage: list[dict]  # entries with slot / offset / label / type
     types: dict[str, dict]  # type id -> type description
+    creation_only: bool = False
 
     @property
     def is_usable(self) -> bool:
@@ -62,7 +64,11 @@ def fetch_storage_layout(chain_id: int, address: str) -> StorageLayout | None:
     key = f"{chain_id}-{address.lower()}"
     cached = _layout_cache.get(key)
     if cached is not MISS:
-        return _from_payload(address, cached) if cached else None
+        layout = _from_payload(address, cached) if cached else None
+        if layout is not None and layout.creation_only and not cached.get(_CREATION_ONLY_EXPIRY):
+            # Older successful lookups stored creation-only layouts indefinitely.
+            _layout_cache.set_negative(key, {**cached, _CREATION_ONLY_EXPIRY: True})
+        return layout
 
     url = f"{SOURCIFY_V2_API_URL}/{chain_id}/{address}"
     payload = fetch_json(url, params={"fields": "storageLayout"})
@@ -76,7 +82,10 @@ def fetch_storage_layout(chain_id: int, address: str) -> StorageLayout | None:
         _layout_cache.set_negative(key)
         return None
 
-    _layout_cache.set_positive(key, payload)
+    if layout.creation_only:
+        _layout_cache.set_negative(key, {**payload, _CREATION_ONLY_EXPIRY: True})
+    else:
+        _layout_cache.set_positive(key, payload)
     return layout
 
 
@@ -103,5 +112,6 @@ def _from_payload(address: str, payload: object) -> StorageLayout | None:
         match=match,
         storage=[e for e in storage if isinstance(e, dict)],
         types={str(k): v for k, v in types.items() if isinstance(v, dict)},
+        creation_only=is_creation_only_match(sourcify_match_quality(payload)),
     )
     return layout if layout.is_usable else None

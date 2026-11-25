@@ -1,25 +1,32 @@
-"""Fetch verified contract source from Etherscan and extract relevant natspec and short bodies.
+"""Fetch verified contract source and extract relevant natspec and short bodies.
 
 Used by the AI transaction explainer to ground LLM summaries in the actual
 contract semantics (function natspec, state-variable docs) rather than
 guessing from function names alone.
-
-Etherscan v2 uses a single multichain API key.
 """
 
 import os
 import re
 import textwrap
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from time import monotonic
 
 from eth_utils.abi import collapse_if_tuple
 
 from utils.calldata.decoder import split_top_level_types
-from utils.disk_cache import MISS, DiskCache
+from utils.disk_cache import DiskCache
 from utils.http_client import fetch_json
 from utils.logger import get_logger
-from utils.verified_contract import CACHE_SCHEMA_VERSION, VerifiedContract, parse_etherscan_entry
+from utils.sourcify_contract import fetch_sourcify_contract
+from utils.verified_contract import (
+    CACHE_SCHEMA_VERSION,
+    ContractLookup,
+    VerifiedContract,
+    is_creation_only_match,
+    parse_etherscan_entry,
+    source_provenance_lines,
+)
 
 logger = get_logger("utils.source_context")
 
@@ -37,21 +44,23 @@ MAX_SNIPPET_CHARS = 4000
 MAX_BODY_LINES = 30
 MAX_BODY_CHARS = 2000
 
-# Per-process cache: (chain_id, address_lower) -> VerifiedContract or None for miss.
-# Backed by an on-disk cache (below) so the same verified source is not re-fetched from
-# Etherscan on every cron run; the in-memory dict still serves repeat lookups within a
-# single process for free. The record keeps Etherscan's per-file sources and settings
-# rather than a flattened blob, so consumers can scope claims to the deployed contract.
-_source_cache: dict[tuple[int, str], VerifiedContract | None] = {}
+# Per-process cache: (chain_id, address_lower) -> verified record or confirmed miss.
+# Both providers share the persistent cache, so source, ABI and verification
+# consumers can reuse the same response across processes.
+_source_cache: dict[tuple[int, str], ContractLookup] = {}
+# Keys whose unbounded lookup could not establish a result (no Etherscan key, a provider
+# error). Readers without a timeout, retry or deadline budget reuse that outcome for the
+# rest of the process instead of repeating both provider requests for every consumer.
+# Budgeted lookups (the upgrade diff) ignore it and always try again.
+_unknown_lookups: set[tuple[int, str]] = set()
 _source_cache_hits = 0
 _source_cache_misses = 0
 _source_cache_lock = threading.RLock()
 _source_key_locks: dict[tuple[int, str], threading.Lock] = {}
 
-# On-disk layer keyed by "chain_id-address". Verified source is immutable per address, so
-# positive entries never expire; "unverified" misses get the short negative TTL so a
-# contract verified later is picked up. Source can be large (~500KB) — bound the namespace
-# by total bytes as well as entry count. All tunable via env.
+# On-disk layer keyed by "chain_id-address". Fully verified source can be reused
+# indefinitely. Misses and creation-only records expire so later verification is picked up.
+# Source can be large (~500KB), so cap the cache by bytes and entry count.
 # The namespace carries the record's schema version: because positive entries never
 # expire, a shape change would otherwise keep serving records written by an older version.
 _source_disk_cache = DiskCache(
@@ -138,91 +147,190 @@ class SourceContext:
     function_snippet: str  # natspec + function signature line
     state_var_snippets: list[str]  # natspec + declaration for each mutated state var
     function_body: str = ""  # the body's statements, when short enough to show in full
+    provider: str = ""
+    match_quality: str | None = None
 
 
-def _is_usable(record: VerifiedContract | None, require_constructor_arguments: bool) -> bool:
-    """Whether a cached record (or cached negative) can answer this lookup."""
-    return not (require_constructor_arguments and record is not None and record.constructor_arguments is None)
+def _is_usable(record: ContractLookup, require_constructor_arguments: bool) -> bool:
+    """Check whether a cached result can answer this lookup."""
+    return record is False or (
+        isinstance(record, VerifiedContract)
+        and (not require_constructor_arguments or record.constructor_arguments is not None)
+    )
 
 
 def _fetch_etherscan_contract(
+    chain_id: int, address: str, *, timeout: float | None, retries: int | None
+) -> ContractLookup:
+    """Fetch Etherscan's source record without treating an API error as unverified."""
+    api_key = os.getenv("ETHERSCAN_TOKEN")
+    if not api_key:
+        return None
+    params = {
+        "chainid": str(chain_id),
+        "module": "contract",
+        "action": "getsourcecode",
+        "address": address,
+        "apikey": api_key,
+    }
+    data = fetch_json(ETHERSCAN_V2_API_URL, params=params, timeout=timeout, retries=retries)
+    results = data.get("result") if isinstance(data, dict) and data.get("status") == "1" else None
+    if not isinstance(results, list) or not results or not isinstance(results[0], dict):
+        return None
+    entry = results[0]
+    if entry.get("SourceCode") == "":
+        return False
+    return parse_etherscan_entry(entry) if isinstance(entry.get("SourceCode"), str) else None
+
+
+def _lookup_providers(
+    chain_id: int,
+    address: str,
+    cached: ContractLookup,
+    *,
+    timeout: float | None,
+    retries: int | None,
+    deadline: float | None,
+    require_constructor_arguments: bool,
+) -> ContractLookup:
+    """Use Sourcify first and give Etherscan the remaining request budget."""
+    remaining = deadline - monotonic() if deadline is not None else None
+    if remaining is not None and remaining < 1:
+        return cached
+    request_timeout = timeout
+    if remaining is not None:
+        request_timeout = remaining if timeout is None else min(timeout, remaining)
+    sourcify = (
+        cached
+        if isinstance(cached, VerifiedContract) and cached.provider == "Sourcify"
+        else fetch_sourcify_contract(chain_id, address, timeout=request_timeout)
+    )
+    if isinstance(sourcify, VerifiedContract) and _is_usable(sourcify, require_constructor_arguments):
+        return sourcify
+
+    remaining = deadline - monotonic() if deadline is not None else None
+    etherscan = None
+    if remaining is None or remaining >= 1:
+        fallback_timeout = timeout
+        if remaining is not None:
+            fallback_timeout = remaining if timeout is None else min(timeout, remaining)
+        etherscan = _fetch_etherscan_contract(chain_id, address, timeout=fallback_timeout, retries=retries)
+    if isinstance(etherscan, VerifiedContract) and _is_usable(etherscan, require_constructor_arguments):
+        return etherscan
+    for result in (sourcify, cached, etherscan):
+        if isinstance(result, VerifiedContract):
+            return result
+    # A transient or malformed reply from either provider leaves the status unknown.
+    return False if sourcify is False and etherscan is False else None
+
+
+def _memory_lookup(
+    cache_key: tuple[int, str], require_constructor_arguments: bool, unbounded: bool
+) -> tuple[bool, ContractLookup]:
+    """Answer a lookup from this process's memory.
+
+    Args:
+        cache_key: Chain ID and lowercase address.
+        require_constructor_arguments: Whether the caller needs constructor arguments.
+        unbounded: Whether the caller has no timeout, retry or deadline budget.
+
+    Returns:
+        Whether memory answered, and the cached result (the stale record on a miss).
+    """
+    with _source_cache_lock:
+        cached = _source_cache.get(cache_key)
+        if _is_usable(cached, require_constructor_arguments):
+            _record_cache_event("memory", True, cache_key)
+            return True, cached
+        if unbounded and cached is None and cache_key in _unknown_lookups:
+            _record_cache_event("memory", True, cache_key)
+            return True, None
+        return False, cached
+
+
+def _lookup_contract(
     chain_id: int,
     address: str,
     *,
     timeout: float | None = None,
     retries: int | None = None,
+    deadline: float | None = None,
     require_constructor_arguments: bool = False,
-) -> VerifiedContract | None:
-    """Internal: fetch and cache the structured verified-contract record.
+    provider: str | None = None,
+) -> ContractLookup:
+    """Share source and verification results across readers and cron runs.
 
-    Single Etherscan call shared by `fetch_source` (for natspec), `fetch_verified_contract`
-    (for the impl diff) and `fetch_function_input_names` (for parameter labels).
+    Provider-specific lookups use their own cache entries so a comparison or
+    source excerpt can use a different bundle without replacing the shared record.
     """
-    api_key = os.getenv("ETHERSCAN_TOKEN")
-    if not api_key:
-        return None
-
-    cache_key = (chain_id, address.lower())
-    with _source_cache_lock:
-        if cache_key in _source_cache and _is_usable(_source_cache[cache_key], require_constructor_arguments):
-            _record_cache_event("memory", True, cache_key)
-            return _source_cache[cache_key]
+    address_key = address.lower()
+    if provider:
+        address_key = f"{address_key}-{provider.lower()}"
+    cache_key = (chain_id, address_key)
+    unbounded = timeout is None and retries is None and deadline is None
+    hit, cached = _memory_lookup(cache_key, require_constructor_arguments, unbounded)
+    if hit:
+        return cached
 
     with _lock_for_key(cache_key):
-        with _source_cache_lock:
-            if cache_key in _source_cache and _is_usable(_source_cache[cache_key], require_constructor_arguments):
-                _record_cache_event("memory", True, cache_key)
-                return _source_cache[cache_key]
+        hit, cached = _memory_lookup(cache_key, require_constructor_arguments, unbounded)
+        if hit:
+            return cached
 
-        disk_key = _disk_key(chain_id, address)
+        disk_key = _disk_key(*cache_key)
         disk_val = _source_disk_cache.get(disk_key)
-        if disk_val is not MISS:
-            _record_cache_event("disk", True, cache_key)
-            if disk_val is None:
-                # Cached negative: a prior run saw this contract unverified.
-                with _source_cache_lock:
-                    _source_cache[cache_key] = None
-                return None
-            record = VerifiedContract.from_cache_dict(disk_val)
-            if record is not None and _is_usable(record, require_constructor_arguments):
-                with _source_cache_lock:
-                    _source_cache[cache_key] = record
-                return record
-            # Unexpected shape (or an older schema), or a record cached before
-            # constructor arguments were stored — fall through to a live fetch.
+        # Legacy nulls only represent Etherscan misses. Recheck them with both providers.
+        disk_record = False if disk_val is False else VerifiedContract.from_cache_dict(disk_val)
+        disk_hit = _is_usable(disk_record, require_constructor_arguments)
+        _record_cache_event("disk", disk_hit, cache_key)
+        if disk_hit:
+            with _source_cache_lock:
+                _source_cache[cache_key] = disk_record
+            return disk_record
+
+        previous = cached if cached is not None else disk_record
+        if provider and deadline is not None:
+            remaining = deadline - monotonic()
+            if remaining < 1:
+                return previous
+            timeout = remaining if timeout is None else min(timeout, remaining)
+        if provider == "Sourcify":
+            result = fetch_sourcify_contract(chain_id, address, timeout=timeout)
+        elif provider == "Etherscan":
+            result = _fetch_etherscan_contract(
+                chain_id,
+                address,
+                timeout=5.0 if timeout is None else timeout,
+                retries=0 if retries is None else retries,
+            )
         else:
-            _record_cache_event("disk", False, cache_key)
-
-        params = {
-            "chainid": str(chain_id),
-            "module": "contract",
-            "action": "getsourcecode",
-            "address": address,
-            "apikey": api_key,
-        }
-        data = fetch_json(ETHERSCAN_V2_API_URL, params=params, timeout=timeout, retries=retries)
-        # A clean response is status "1" with a result array; anything else (None on a
-        # request error, or status "0") is treated as transient and not persisted, so an
-        # Etherscan blip can't poison the disk cache as a day-long "unverified".
-        status_ok = data is not None and data.get("status") == "1"
-        results = (data or {}).get("result") or [] if status_ok else []
-        entry = results[0] if results else {}
-        contract = parse_etherscan_entry(entry) if isinstance(entry, dict) else None
-
-        if contract is None:
-            # A latency-bounded lookup must not suppress later normal lookups
-            # if its shorter timeout or retry budget is exhausted.
-            if status_ok or (timeout is None and retries is None):
+            result = _lookup_providers(
+                chain_id,
+                address,
+                previous,
+                timeout=timeout,
+                retries=retries,
+                deadline=deadline,
+                require_constructor_arguments=require_constructor_arguments,
+            )
+        if result is None:
+            if unbounded:
                 with _source_cache_lock:
-                    _source_cache[cache_key] = None
-            if status_ok:
-                _source_disk_cache.set_negative(disk_key)
-            return None
-
-        with _source_cache_lock:
-            _source_cache[cache_key] = contract
-        _source_disk_cache.set_positive(disk_key, contract.to_cache_dict())
-        return contract
+                    _unknown_lookups.add(cache_key)
+        else:
+            with _source_cache_lock:
+                _source_cache[cache_key] = result
+                _unknown_lookups.discard(cache_key)
+            if isinstance(result, VerifiedContract) and result is not previous:
+                if is_creation_only_match(result.match_quality) or (
+                    provider == "Etherscan" and result.match_quality == "similar_match"
+                ):
+                    _source_disk_cache.set_negative(disk_key, result.to_cache_dict())
+                else:
+                    _source_disk_cache.set_positive(disk_key, result.to_cache_dict())
+            elif result is False:
+                _source_disk_cache.set_negative(disk_key, False)
+        return result
 
 
 def fetch_verified_contract(
@@ -232,6 +340,7 @@ def fetch_verified_contract(
     timeout: float | None = None,
     retries: int | None = None,
     require_constructor_arguments: bool = False,
+    deadline: float | None = None,
 ) -> VerifiedContract | None:
     """Fetch the structured verified-contract record for ``address``, or None.
 
@@ -244,19 +353,53 @@ def fetch_verified_contract(
         address: Address of the deployed contract.
         timeout: Optional timeout in seconds per HTTP attempt.
         retries: Optional HTTP retry count.
-        require_constructor_arguments: Refetch a cached record that predates stored
-            constructor arguments instead of returning it without them.
+        require_constructor_arguments: Try to fill missing constructor arguments before returning the source.
+        deadline: Monotonic deadline shared by both provider lookups.
 
     Returns:
         Verified contract data when available.
     """
-    return _fetch_etherscan_contract(
+    result = _lookup_contract(
         chain_id,
         address,
         timeout=timeout,
         retries=retries,
+        deadline=deadline,
         require_constructor_arguments=require_constructor_arguments,
     )
+    return result if isinstance(result, VerifiedContract) else None
+
+
+def fetch_contract_from_provider(
+    chain_id: int,
+    address: str,
+    provider: str,
+    *,
+    timeout: float | None = None,
+    retries: int | None = None,
+    deadline: float | None = None,
+) -> VerifiedContract | None:
+    """Fetch one provider's verified record using a provider-specific cache.
+
+    The shared cache keeps one preferred record per address. A caller comparing two
+    contracts uses this to read both from the same provider, because providers lay
+    out file paths and compiler versions differently.
+
+    Args:
+        chain_id: Chain of the deployed contract.
+        address: Address of the deployed contract.
+        provider: ``"Sourcify"`` or ``"Etherscan"``.
+        timeout: Timeout in seconds per HTTP attempt.
+        retries: HTTP retry count.
+        deadline: Monotonic deadline for starting and bounding the request.
+
+    Returns:
+        That provider's verified record, or None when it has none or the request fails.
+    """
+    if provider not in ("Sourcify", "Etherscan"):
+        return None
+    result = _lookup_contract(chain_id, address, timeout=timeout, retries=retries, deadline=deadline, provider=provider)
+    return result if isinstance(result, VerifiedContract) else None
 
 
 def fetch_source(chain_id: int, address: str) -> tuple[str, str] | None:
@@ -271,7 +414,7 @@ def fetch_source(chain_id: int, address: str) -> tuple[str, str] | None:
     request fails. Caches by (chain_id, address) so repeated calls during the
     same run hit the API only once.
     """
-    record = _fetch_etherscan_contract(chain_id, address)
+    record = fetch_verified_contract(chain_id, address)
     return None if record is None else (record.contract_name, record.concatenated_source())
 
 
@@ -282,7 +425,7 @@ def fetch_abi_entries(chain_id: int, address: str) -> list[dict] | None:
     so callers that only need to inspect the ABI (e.g. finding a contract's
     token getters) pay no extra HTTP when source context was already fetched.
     """
-    record = _fetch_etherscan_contract(chain_id, address)
+    record = fetch_verified_contract(chain_id, address)
     return None if record is None or not record.abi else record.abi
 
 
@@ -306,7 +449,7 @@ def fetch_function_input_names(
             ABI entry per arity, and the names of one overload must never be
             applied to another's parameters.
     """
-    record = _fetch_etherscan_contract(chain_id, address)
+    record = fetch_verified_contract(chain_id, address)
     if record is None:
         return None
 
@@ -323,47 +466,16 @@ def fetch_function_input_names(
     impl = get_current_implementation(address, chain_id)
     if not impl or impl.lower() == address.lower():
         return None
-    impl_record = _fetch_etherscan_contract(chain_id, impl)
+    impl_record = fetch_verified_contract(chain_id, impl)
     if impl_record is None:
         return None
     return _function_input_names_from_abi(impl_record.abi, function_name, signature)
 
 
 def get_verification_status(chain_id: int, address: str) -> bool | None:
-    """Tri-state Etherscan verification check for ``address``.
-
-    Returns ``True`` if the contract has verified source, ``False`` if Etherscan
-    explicitly reports it unverified, and ``None`` when we can't tell (no API
-    key, request error). The ``None`` case is deliberate — flagging a target as
-    "UNVERIFIED" on a transient failure would cry wolf, so callers should only
-    surface the warning on an explicit ``False``.
-    """
-    api_key = os.getenv("ETHERSCAN_TOKEN")
-    if not api_key:
-        return None
-
-    # Verified contracts are already cached by source-context collection.
-    if _fetch_etherscan_contract(chain_id, address) is not None:
-        return True
-
-    # Cache miss → unverified or a transient error. One explicit call to
-    # disambiguate: Etherscan returns status "1" with an empty SourceCode for a
-    # genuinely unverified contract, and status "0" on error.
-    params = {
-        "chainid": str(chain_id),
-        "module": "contract",
-        "action": "getsourcecode",
-        "address": address,
-        "apikey": api_key,
-    }
-    data = fetch_json(ETHERSCAN_V2_API_URL, params=params)
-    if not data or data.get("status") != "1":
-        return None
-    results = data.get("result") or []
-    entry = results[0] if isinstance(results, list) and results else {}
-    if not entry.get("SourceCode"):
-        return False
-    return None
+    """Return True for verified source, False for a confirmed miss, or None on uncertainty."""
+    result = _lookup_contract(chain_id, address)
+    return True if isinstance(result, VerifiedContract) else result
 
 
 def get_function_state_mutability(chain_id: int, address: str, function_name: str) -> str | None:
@@ -375,7 +487,7 @@ def get_function_state_mutability(chain_id: int, address: str, function_name: st
     overload is ``payable``, ``"payable"`` is returned so a value-bearing call
     is never falsely flagged as reverting.
     """
-    record = _fetch_etherscan_contract(chain_id, address)
+    record = fetch_verified_contract(chain_id, address)
     if record is None:
         return None
 
@@ -391,7 +503,7 @@ def get_function_state_mutability(chain_id: int, address: str, function_name: st
     impl = get_current_implementation(address, chain_id)
     if not impl or impl.lower() == address.lower():
         return None
-    impl_record = _fetch_etherscan_contract(chain_id, impl)
+    impl_record = fetch_verified_contract(chain_id, impl)
     if impl_record is None:
         return None
     return _function_state_mutability_from_abi(impl_record.abi, function_name)
@@ -405,7 +517,7 @@ def get_function_signature_by_selector(chain_id: int, address: str, selector_hex
     target's own ABI has exactly the function being called. Follows EIP-1967 to
     the implementation for generic proxies. Returns None when unavailable.
     """
-    record = _fetch_etherscan_contract(chain_id, address)
+    record = fetch_verified_contract(chain_id, address)
     if record is None:
         return None
 
@@ -422,7 +534,7 @@ def get_function_signature_by_selector(chain_id: int, address: str, selector_hex
     impl = get_current_implementation(address, chain_id)
     if not impl or impl.lower() == address.lower():
         return None
-    impl_record = _fetch_etherscan_contract(chain_id, impl)
+    impl_record = fetch_verified_contract(chain_id, impl)
     if impl_record is None:
         return None
     return _function_signature_from_abi(impl_record.abi, selector_hex)
@@ -858,11 +970,9 @@ def get_source_context(
     EIP-1967 proxy slot (if any) and retry against the implementation source.
     Best-effort: returns None on any failure (unverified, missing key, no match).
     """
-    fetched = fetch_source(chain_id, address)
-    if fetched:
-        ctx = _build_context(fetched[0], fetched[1], function_name, signature)
-        if ctx:
-            return ctx
+    ctx = _source_context_for_address(chain_id, address, function_name, signature)
+    if ctx:
+        return ctx
 
     # Function not in proxy source — try the implementation if this is a proxy.
     from utils.proxy import get_current_implementation
@@ -871,10 +981,29 @@ def get_source_context(
     if not impl or impl.lower() == address.lower():
         return None
 
-    fetched_impl = fetch_source(chain_id, impl)
-    if not fetched_impl:
+    return _source_context_for_address(chain_id, impl, function_name, signature)
+
+
+def _source_context_for_address(
+    chain_id: int, address: str, function_name: str, signature: str | None
+) -> SourceContext | None:
+    """Prefer address-specific Etherscan source over a non-exact Sourcify excerpt."""
+    record = fetch_verified_contract(chain_id, address)
+    if record is None:
         return None
-    return _build_context(fetched_impl[0], fetched_impl[1], function_name, signature)
+    ctx = _build_context(record.contract_name, record.concatenated_source(), function_name, signature)
+    if ctx is None:
+        return None
+    if record.provider == "Sourcify" and record.match_quality != "exact_match":
+        candidate = fetch_contract_from_provider(chain_id, address, "Etherscan")
+        # Etherscan identifies similar matches but does not report an exact flag in getsourcecode.
+        if candidate is not None and candidate.match_quality != "similar_match":
+            preferred = _build_context(
+                candidate.contract_name, candidate.concatenated_source(), function_name, signature
+            )
+            if preferred is not None:
+                record, ctx = candidate, preferred
+    return replace(ctx, provider=record.provider, match_quality=record.match_quality)
 
 
 def get_contract_label(chain_id: int, address: str) -> str:
@@ -893,11 +1022,17 @@ def format_source_context(ctx: SourceContext) -> str:
     lines: list[str] = []
     if ctx.contract_name:
         lines.append(f"Contract: {ctx.contract_name}")
+    creation_only = is_creation_only_match(ctx.match_quality)
+    lines.extend(source_provenance_lines(ctx.provider, ctx.match_quality))
     lines.append("")
     lines.append(ctx.function_snippet)
     if ctx.function_body:
         lines.append("")
-        lines.append("Function body (verified source — what actually executes; it overrides the natspec):")
+        lines.append(
+            "Function body (creation-matched source):"
+            if creation_only
+            else "Function body (verified source — what actually executes; it overrides the natspec):"
+        )
         lines.append(textwrap.indent(ctx.function_body, "    "))
     if ctx.state_var_snippets:
         lines.append("")
@@ -916,6 +1051,7 @@ def reset_cache() -> None:
     global _source_cache_hits, _source_cache_misses
     with _source_cache_lock:
         _source_cache.clear()
+        _unknown_lookups.clear()
         _source_key_locks.clear()
         _source_cache_hits = 0
         _source_cache_misses = 0

@@ -63,7 +63,7 @@ A Yearn governance Executor `execute(bytes)` call also gets `script_calls`: its 
 
 ### 2. Verified Source Context (`utils/source_context.py`)
 
-For each `(target, function)` pair, fetches the verified source via the Etherscan v2 multichain API and extracts:
+For each `(target, function)` pair, fetches the verified source via Sourcify with Etherscan v2 as a fallback and extracts:
 
 - The function's preceding natspec block + signature line. A bare `/// @inheritdoc IFoo` is replaced by the natspec on `IFoo`'s declaration of the same function, found in the same verified bundle — implementations routinely keep every parameter's units in the interface
 - The function body, dedented, when it fits `MAX_BODY_LINES` (30) and `MAX_BODY_CHARS` (2,000). Natspec describes intent and can be stale; the body is what runs. GroveCompounder's natspec says `setMinimumAuctionPrice` records a requirement the Auction must meet, but its body also calls `Auction(auction).setMinimumPrice(...)`. A report that saw only the natspec told signers the auction's pricing was untouched. Bodiless interface declarations are skipped when locating the body. Because the body is presented as what executes, it must be the overload the call decodes to. The decoded signature selects it (source parameter types are matched against the ABI types; contracts, interfaces, enums and structs match any encoding), and contexts are deduplicated per signature. When no definition, or several different ones, match, no body is shown: overloads without a signature, or a base and an override. The verified Auction's `take(address)` uses an unlimited amount and `msg.sender`, and showing it for a `take(address,uint256,address,bytes)` call would misstate the call
@@ -77,18 +77,20 @@ Decoded parameters are named from the verified ABI (`fetch_function_input_names`
 
 If the function isn't found in the target's source (e.g., the target is an `ERC1967Proxy` / `TransparentUpgradeableProxy` / `BeaconProxy`), resolves the implementation (`utils/proxy.get_current_implementation`) and retries against the impl source. Caches per `(chain_id, address)` for the workflow run.
 
-Requires `ETHERSCAN_TOKEN`. Failures degrade gracefully — no `--- Contract Source Context ---` section is added.
+Sourcify lookups need no credentials. Set `ETHERSCAN_TOKEN` to enable the fallback. If neither provider supplies source, the explainer omits the source context.
+
+Source excerpts identify the provider and its reported match quality. For a non-exact Sourcify excerpt, the explainer prefers Etherscan source for the same address when Etherscan does not identify it as a similar match. If the excerpt still comes from a non-exact match, the prompt treats comments and NatSpec as unconfirmed. Creation-only matches count as verified source and carry an explicit runtime coverage note.
 
 #### Disk-Backed Source And Label Cache
 
 Verified source/ABI lookups and Swiss Knife labels are cached under `CACHE_DIR` via `utils/disk_cache.py`:
 
-- `source-cache-v2/`: Etherscan verified record — per-file sources, compiler settings, ABI and resolved compilation target. The version is part of the namespace because positive entries never expire; a shape change must not read records written by an older version.
+- `source-cache-v2/`: Shared verified records with per-file sources, compiler settings, ABI, the compilation target and provider provenance. Verification checks, ABI lookups and Wavey diffs reuse this cache. Existing Etherscan source records remain readable.
 - `sourcify-layout-v1/`: Sourcify compiler storage layouts. Misses use the negative TTL, since Sourcify coverage grows over time.
 - `label-cache/`: Swiss Knife address labels.
 - `label-api-backoff/`: five-minute per-chain backoff after exhausted Swiss Knife HTTP 429/5xx responses, timeouts, or connection failures. Other 4xx responses and malformed JSON affect only the requested address. Cached labels and other label sources still work during an outage; failures never become address-level negative entries.
 
-Positive entries do not expire because verified source and curated labels are effectively stable for a given address. Negative entries use a short TTL so a newly verified contract or newly labeled address is picked up later. Tunables:
+Verified source and curated labels generally do not expire. Negative entries and creation-only Sourcify records use a short TTL so new source, runtime verification, or address labels can be picked up later. Tunables:
 
 - `CACHE_DIR`: parent directory for cache namespaces. Empty/default means the repo working directory; systemd should set a persistent cache path.
 - `CACHE_NEGATIVE_TTL_SECONDS`: TTL for negative entries, default `86400`.
@@ -173,7 +175,7 @@ When an upgrade is detected the pipeline:
    - **Target-defined function changes** (`utils/solidity_text.py`) — scoped to the deployed contract's own definition in its own file: bodies that changed under an unchanged signature (with a short unified diff), plus internal/private members added or removed (added ones carry their source). ABI equality is not behavioral equality, and neither is an unchanged function list — comparing only the functions both sides share would miss behavior *moved* into a new internal helper, or a deleted transfer hook. External additions stay in the ABI section, so nothing is reported twice.
    - **Source file changes** (`utils/source_diff.py`) — every file in the implementation's verified bundle diffed by path, including inherited bases, internal libraries and interfaces. An upgrade whose change sits in a base contract (e.g. `nonReentrant` added to an inherited `mint`) leaves the target's own file untouched, so the target-scoped section alone reports "none". Moved files are paired by content or unique basename; project files get the diff budget before `node_modules/`/`lib/` dependencies, and long diffs are cut at hunk boundaries.
    - **Compiler settings and linked libraries** — compiler version, `evmVersion`, optimizer and `viaIR` changes (they change bytecode without a source change), plus relinked external libraries. Each relinked library's own verified source is fetched at both addresses and diffed, since the code that runs is whatever is deployed there. Import remappings are ignored — they only matter through the files they resolve to, which are already diffed. The compiler version is a top-level Etherscan field and is always compared; the other settings exist only for standard-json verifications, so for single-file verifications the section says only the compiler version was comparable and lists the rest under Unvalidated items.
-   - **Storage compatibility** — one verdict from two parts. Precedence: any *proven* conflict is `INCOMPATIBLE`; otherwise anything the check could not see is `UNKNOWN`; only full coverage is `COMPATIBLE`. The positional result is always shown on its own line too.
+   - **Storage compatibility** — one verdict from two parts. Creation-only source or layout evidence makes the verdict `UNKNOWN`. With runtime evidence, a proven conflict is `INCOMPATIBLE`, coverage gaps are `UNKNOWN`, and full coverage is `COMPATIBLE`. The positional compiler results are always shown.
      - *Positional layout* (`utils/sourcify_layout.py`, `utils/storage_layout.py`): the compiler `storageLayout` Sourcify publishes for both implementations. Slot, byte offset and recursive type shape are compared, including a normalized type *kind* at every level — `uint256` and `bytes32` fill the same 32 bytes, but retyping one as the other changes what stored data means ("reinterpreted as"). Contract types and `address` count as one kind. Custom value types are compared by what they wrap, resolved from each side's source (`type Id is bytes32`): unwrapping `Id` to `bytes32` is compatible and reported as a retype, `Id` redeclared over `uint256` is not, and an unresolved or ambiguous declaration is a gap rather than a name match. Compiler ids and variable names are ignored, so renames are context. Reserved `__gap` space may be consumed freely.
      - *Non-positional storage* (`utils/storage_scope.py`, `utils/storage_access.py`, `utils/namespaced_storage.py`): everything a layout can't describe, found in the code that can run against the proxy's storage — the deployed contract, its whole inheritance chain, and library and free (file-level) functions actually reachable from them, read through each file's import aliases (`import {Lib as State}`) — a merely imported library contributes nothing. ERC-7201 namespaces count as unchanged only with the same id, identical elementary struct text, and every accessor resolving to the root the annotation defines (ERC-7201 leaves enforcing that to the developer). Structs are identified by their declaration (`Vault.Main` ≠ `Lib.Main`), never by bare name. A root that provably moved is a conflict; differently shaped structs sharing a root are an unresolved overlap, not a conflict. Unannotated `s.slot := ROOT` accessors, raw `sload`/`sstore` and `delegatecall` are coverage gaps. Roots resolve only from bounded forms — literals, unique constants, one never-reassigned local or getter hop, and the `keccak256`, EIP-1967 and ERC-7201 expressions — never guessed.
    - **Unvalidated items** — code reached at other addresses, missing compiler settings, unverified relinked libraries, and anything else not checked, stated explicitly so silence is never read as safety.
@@ -188,9 +190,9 @@ The diff is injected into the prompt under `--- Proxy Upgrade ---`. Best-effort:
 
 ### 5b. Deterministic Safety Checks (`utils/llm/ai_explainer.py`, `utils/source_context.py`)
 
-`_collect_safety_checks()` runs seatbelt-style checks grounded in Etherscan data we already fetch, and surfaces them as hard facts under `--- Safety Checks ---`:
+`_collect_safety_checks()` uses cached contract records to surface findings under `--- Safety Checks ---`:
 
-- **Unverified target** — a governance tx whose target has no published source is a red flag (`get_verification_status` returns a tri-state; the note is emitted only on an explicit `False`, never on a fetch error, so it doesn't cry wolf).
+- **Unverified target** — the explainer flags targets only when both providers confirm they lack verified source. A failed lookup leaves verification status unknown.
 - **ETH to a non-payable function** — forwarding `value > 0` to a `nonpayable` function reverts and can strand funds (`get_function_state_mutability`, with EIP-1967 proxy follow; overloaded functions resolve to `payable` if any overload accepts value).
 
 The system prompt instructs the LLM to treat each item as verified and reflect it in the verdict (e.g. an unverified target is at least MEDIUM).
@@ -668,7 +670,7 @@ All configuration is via environment variables:
 | `LLM_STRUCTURED_OUTPUT` | *(per provider)* | `true`/`false` to force JSON-schema output. Default: on for anthropic/openai/venice (all verified live), off for groq/custom |
 | `LLM_CREDIT_ALERT_THRESHOLD_USD` | `1` | Venice only: alert when what the key can still spend (DIEM + bundled credits + USD) drops below this (see [Credit Alert](#credit-alert)) |
 | `WAVEY_GIST_API_KEY` | *(required for Wavey links)* | API key for publishing detailed AI reports and proxy upgrade source diffs to Wavey Gist |
-| `ETHERSCAN_TOKEN` | *(optional)* | Etherscan v2 multichain API key for source context |
+| `ETHERSCAN_TOKEN` | *(optional)* | Etherscan v2 multichain API key for verified-source fallback |
 | `TENDERLY_API_KEY` | *(optional)* | Tenderly API key for simulation |
 | `TENDERLY_ACCOUNT` | `yearn` | Tenderly account slug |
 | `TENDERLY_PROJECT` | `sam` | Tenderly project slug |
@@ -762,7 +764,7 @@ utils/llm/
 
 utils/eth_view.py            # One raw eth_call view read, None when the getter is missing or reverts
 utils/related_tokens.py      # Token discovery from a contract's own zero-arg address getters
-utils/source_context.py      # Etherscan v2 source fetch + natspec / short-body extractor + proxy follow
+utils/source_context.py      # Shared Sourcify and Etherscan source fetch, source extraction and proxy follow
 utils/verified_contract.py   # Structured verified record: per-file sources, settings, ABI, target
 utils/on_chain_state.py      # Before-state reader (auto-generated getters, mappings, diamond storage)
 utils/proxy.py               # Impl resolution (EIP-1967, zeppelinos, beacon, getters), EIP-1167 clone decode, upgrade detection (direct + nested), alert lines
