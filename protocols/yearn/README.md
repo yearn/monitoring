@@ -311,7 +311,7 @@ uv run yearn/check_stuck_triggers.py --include-strategies 0x1234...,0x5678...
 
 ## Safe Multisig Monitoring
 
-Yearn Safe multisigs are monitored via the shared [Safe monitoring script](../safe/main.py). The script polls the [Safe Transaction Service](https://docs.safe.global/core-api/transaction-service-reference) for queued transactions and sends Telegram alerts when unexpected pending txs appear. It runs every 20 minutes via the [monitoring runner](../automation/jobs.yaml).
+Yearn Safe multisigs are monitored via the shared [Safe monitoring script](../safe/main.py). The script polls the [Safe Queue Service](https://docs.safe.global/core-api/safe-queue-service-overview) for queued transactions and sends Telegram alerts when unexpected pending txs appear. It runs every 20 minutes via the [monitoring runner](../automation/jobs.yaml).
 
 Yearn multisig config lives in [`safe/addresses.py`](../safe/addresses.py) under `YEARN_MULTISIGS`. The same workflow also monitors non-Yearn protocol multisigs (LIDO, AAVE, etc.) configured in `ALL_SAFE_ADDRESSES`.
 
@@ -319,9 +319,9 @@ Yearn multisig config lives in [`safe/addresses.py`](../safe/addresses.py) under
 
 For each configured Safe on each chain:
 
-1. Fetches unexecuted multisig transactions from the Safe Transaction Service API.
+1. Fetches unexecuted multisig transactions from the Safe Queue Service API.
 2. Filters out already-alerted nonces (cached in `nonces.txt`) and dead slots where `nonce < safe.currentNonce`.
-3. For Yearn safes, skips txs proposed by known bot EOAs (see Expected Proposers below).
+3. For Yearn safes, sends txs from known proposers (`YEARN_PROPOSER_BOTS`) silently and escalates any other proposer to a critical alert. A bot counts when it is the `proposer`, or the delegate in `proposedBy` when `proposedVia` is `DELEGATE` (see the [Safe monitor README](../safe/README.md)).
 4. Sends a Telegram alert with Safe URL, target contract, nonce, and an optional AI calldata explanation.
 
 =======

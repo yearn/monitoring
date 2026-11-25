@@ -43,8 +43,9 @@ EIP1967_BEACON_SLOT = 0xA3F0AD74E5423AEBFD80D3EF4346578335A9A72AEAEE59FF6CB3582B
 # - upgradeTo(address)                       — called on the proxy itself
 # - upgradeToAndCall(address,bytes)          — called on the proxy itself
 # - upgradeAndCall(address,address,bytes)    — called on a ProxyAdmin (proxy = arg 0)
+# - upgrade(address,address)                 — called on a ProxyAdmin (proxy = arg 0)
 _PROXY_DIRECT_SELECTORS = frozenset({"0x3659cfe6", "0x4f1ef286"})
-_PROXY_ADMIN_SELECTOR = "0x9623609d"
+_PROXY_ADMIN_SELECTORS = frozenset({"0x9623609d", "0x99a88ec4"})
 
 # How many governance wrappers deep to look for an upgrade. One covers a Safe
 # calling a timelock; two covers a timelock operation that itself schedules on
@@ -80,6 +81,7 @@ def detect_proxy_upgrade(data_hex: str, target: str = "") -> ProxyUpgrade | None
         - upgradeTo(address)                       (called on the proxy itself)
         - upgradeToAndCall(address,bytes)          (called on the proxy itself)
         - upgradeAndCall(address,address,bytes)    (called on ProxyAdmin; proxy is arg 0)
+        - upgrade(address,address)                 (called on ProxyAdmin; proxy is arg 0)
 
     Args:
         data_hex: calldata hex with 0x prefix
@@ -96,7 +98,7 @@ def detect_proxy_upgrade(data_hex: str, target: str = "") -> ProxyUpgrade | None
     selector = data_hex[:10].lower()
     # Short-circuit before decoding: the vast majority of calls are not proxy
     # upgrades, and a `decode_calldata` miss can wait on a 30s Sourcify lookup.
-    if selector not in _PROXY_DIRECT_SELECTORS and selector != _PROXY_ADMIN_SELECTOR:
+    if selector not in _PROXY_DIRECT_SELECTORS and selector not in _PROXY_ADMIN_SELECTORS:
         return None
 
     decoded = decode_calldata(data_hex)
@@ -112,7 +114,7 @@ def detect_proxy_upgrade(data_hex: str, target: str = "") -> ProxyUpgrade | None
             new_implementation=to_checksum_address(value),
         )
 
-    if selector == _PROXY_ADMIN_SELECTOR and len(decoded.params) >= 2:
+    if selector in _PROXY_ADMIN_SELECTORS and len(decoded.params) >= 2:
         proxy_type, proxy_addr = decoded.params[0]
         impl_type, impl_addr = decoded.params[1]
         if proxy_type != "address" or impl_type != "address":

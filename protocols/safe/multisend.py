@@ -2,10 +2,10 @@
 
 When a Safe executes a batch via MultiSendCallOnly (or legacy MultiSend), the
 outer call is a DELEGATECALL from the Safe into the utility, which then makes
-each inner transaction from the Safe's own context. The Safe API already
-provides the decoded inner calls in ``dataDecoded.parameters[0].valueDecoded``;
-we use that decoded form directly rather than decoding the packed
-`multiSend(bytes)` payload ourselves.
+each inner transaction from the Safe's own context. The Safe Queue Service does
+not decode calldata, so the packed ``multiSend(bytes)`` payload is decoded here,
+and only when the outer call delegates into a known multisend utility: the
+selector alone does not prove the destination runs Safe's packed call format.
 
 An inner transaction with ``operation == 0`` is a plain CALL whose
 ``msg.sender`` is the Safe, so a batch made only of those is exactly a
@@ -13,14 +13,30 @@ sequence of calls from the Safe and can be simulated as one ordered bundle.
 Only an inner DELEGATECALL (legacy MultiSend permits them) cannot be modeled.
 """
 
-# Canonical Safe utility contract addresses are identical across all chains
-# Safe is deployed on. Source: https://github.com/safe-global/safe-deployments
+from eth_abi import decode
+from eth_utils import to_checksum_address
+
+from utils.logger import get_logger
+
+logger = get_logger("safe.multisend")
+
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+_MULTISEND_V1_5_0 = "0x218543288004cd07832472d464648173c77d7eb7"
+_MULTISEND_CALL_ONLY_V1_5_0 = "0xa83c336b20401af773b6219ba5027174338d1836"
+
+# Official Safe utility deployments. Each address is the same on every chain it is deployed to; v1.3.0
+# has both a "canonical" and an "EIP-155" deployment, and a chain may use either.
+# Source: https://github.com/safe-global/safe-deployments (src/assets/v*/multi_send*.json)
 _SAFE_UTILS: dict[str, str] = {
-    "0x40a2accbd92bca938b02010e17a5b8929b49130d": "Safe MultiSendCallOnly",
+    "0x40a2accbd92bca938b02010e17a5b8929b49130d": "Safe MultiSendCallOnly",  # v1.3.0 canonical
+    "0xa1dabef33b3b82c7814b6d82a79e50f4ac44102b": "Safe MultiSendCallOnly v1.3.0 (EIP-155)",
     "0x9641d764fc13c8b624c04430c7356c1c7c8102e2": "Safe MultiSendCallOnly v1.4.1",
-    "0x38869bf66a61cf6bdb996a6ae40d5853fd43b526": "Safe MultiSend (legacy, permits nested DELEGATECALL)",
-    "0x998739bfdaadde7c933b942a68053933098f9eda": "Safe MultiSend v1.3.0",
-    "0xa238cbeb142c10ef7ad8442c6d1f9e89e07e7761": "Safe MultiSend v1.4.1",
+    _MULTISEND_CALL_ONLY_V1_5_0: "Safe MultiSendCallOnly v1.5.0",
+    "0x8d29be29923b68abfdd21e541b9374737b49cdad": "Safe MultiSend v1.1.1 (permits nested DELEGATECALL)",
+    "0xa238cbeb142c10ef7ad8442c6d1f9e89e07e7761": "Safe MultiSend v1.3.0 (permits nested DELEGATECALL)",
+    "0x998739bfdaadde7c933b942a68053933098f9eda": "Safe MultiSend v1.3.0 EIP-155 (permits nested DELEGATECALL)",
+    "0x38869bf66a61cf6bdb996a6ae40d5853fd43b526": "Safe MultiSend v1.4.1 (permits nested DELEGATECALL)",
+    _MULTISEND_V1_5_0: "Safe MultiSend v1.5.0 (permits nested DELEGATECALL)",
     "0xd53cd0ab83d845ac265be939c57f53ad838012c9": "Safe SignMessageLib",
 }
 
@@ -28,45 +44,113 @@ _SAFE_UTILS: dict[str, str] = {
 # CALL unless its own operation says DELEGATECALL (MultiSendCallOnly rejects those).
 _MULTISEND_UTILS = frozenset(address for address, label in _SAFE_UTILS.items() if "MultiSend" in label)
 
+# bytes4(keccak256("multiSend(bytes)"))
+MULTISEND_SELECTOR = "0x8d80ff0a"
+# operation (1) + to (20) + value (32) + data length (32)
+_PACKED_HEADER_BYTES = 85
+
 
 def safe_utility_label(address: str) -> str:
     """Return a human-readable label for a canonical Safe utility, or ""."""
     return _SAFE_UTILS.get(address.lower(), "")
 
 
-def extract_inner_calls(tx: dict) -> list[dict[str, str]]:
-    """Pull the multisend inner calls out of a Safe transaction.
+def is_multisend_call(tx: dict) -> bool:
+    """Whether a Safe tx is a DELEGATECALL of ``multiSend(bytes)`` into a known multisend utility.
 
-    Expects ``tx['dataDecoded']['parameters'][0]['valueDecoded']`` to contain a
-    list of inner txs (the Safe API's decoded multiSend payload). Returns a list
-    of ``{target, data, value}`` dicts suitable for ``explain_batch_transaction``.
-    Returns ``[]`` when the structure isn't present.
+    Args:
+        tx: Safe Queue Service multisig transaction.
+
+    Returns:
+        True when the destination, operation and selector all match.
     """
-    data_decoded = tx.get("dataDecoded") or {}
-    if data_decoded.get("method") not in {"multiSend"}:
-        return []
+    if int(tx.get("operation", 0) or 0) != 1:
+        return False
+    if (tx.get("to") or "").lower() not in _MULTISEND_UTILS:
+        return False
+    return (tx.get("data") or "").lower().startswith(MULTISEND_SELECTOR)
 
-    params = data_decoded.get("parameters") or []
-    if not params:
-        return []
 
-    value_decoded = params[0].get("valueDecoded")
-    if not isinstance(value_decoded, list):
-        return []
+def decode_multisend(data_hex: str) -> list[dict[str, str]]:
+    """Decode ``multiSend(bytes)`` calldata into its inner calls.
+
+    The ``bytes`` argument packs each call as ``operation (1 byte) | to (20) |
+    value (32) | data length (32) | data``, back to back, and must be consumed
+    exactly.
+
+    Args:
+        data_hex: 0x-prefixed ``multiSend(bytes)`` calldata.
+
+    Returns:
+        ``{target, data, value, operation}`` dicts (all strings, ``target``
+        checksummed) in execution order.
+
+    Raises:
+        ValueError: If the calldata is not a well-formed, non-empty multisend.
+    """
+    if not data_hex.lower().startswith(MULTISEND_SELECTOR):
+        raise ValueError("not multiSend(bytes) calldata")
+    try:
+        (packed,) = decode(["bytes"], bytes.fromhex(data_hex[10:]))
+    except Exception as e:  # noqa: BLE001 - eth_abi raises several decoding error types
+        raise ValueError(f"multiSend argument does not decode: {e}") from e
 
     calls: list[dict[str, str]] = []
-    for inner in value_decoded:
-        to = inner.get("to")
-        if not to:
-            continue
+    offset = 0
+    while offset < len(packed):
+        if offset + _PACKED_HEADER_BYTES > len(packed):
+            raise ValueError(f"truncated multisend call header at byte {offset}")
+        operation = packed[offset]
+        if operation not in (0, 1):
+            raise ValueError(f"invalid multisend operation {operation} at byte {offset}")
+        to = packed[offset + 1 : offset + 21]
+        value = int.from_bytes(packed[offset + 21 : offset + 53], "big")
+        size = int.from_bytes(packed[offset + 53 : offset + 85], "big")
+        offset += _PACKED_HEADER_BYTES
+        if offset + size > len(packed):
+            raise ValueError(f"multisend call data at byte {offset} overruns the payload")
         calls.append(
             {
-                "target": to,
-                "data": inner.get("data") or "0x",
-                "value": str(inner.get("value", "0")),
-                "operation": str(inner.get("operation", "0")),
+                "target": to_checksum_address(to),
+                "data": "0x" + packed[offset : offset + size].hex(),
+                "value": str(value),
+                "operation": str(operation),
             }
         )
+        offset += size
+    if not calls:
+        raise ValueError("empty multisend payload")
+    return calls
+
+
+def extract_inner_calls(tx: dict, safe_address: str) -> list[dict[str, str]]:
+    """Pull the multisend inner calls out of a Safe transaction.
+
+    Decodes only a DELEGATECALL into a known multisend utility (see
+    :func:`is_multisend_call`); anything else stays a single call. Returns a
+    list of ``{target, data, value, operation}`` dicts suitable for
+    ``explain_batch_transaction``, or ``[]`` when the tx is not a multisend or
+    its payload is malformed.
+
+    Args:
+        tx: Safe Queue Service multisig transaction.
+        safe_address: The Safe executing the multisend, used to resolve v1.5.0 self-calls.
+    """
+    if not is_multisend_call(tx):
+        return []
+    try:
+        calls = decode_multisend(tx["data"])
+    except ValueError as e:
+        logger.warning("Could not decode multisend payload of Safe tx %s: %s", tx.get("safeTxHash", "?"), e)
+        return []
+
+    # The v1.5.0 utilities substitute address(this) for a zero inner destination.
+    # The outer DELEGATECALL makes address(this) the Safe.
+    if tx["to"].lower() in (_MULTISEND_V1_5_0, _MULTISEND_CALL_ONLY_V1_5_0):
+        safe_target = to_checksum_address(safe_address)
+        for call in calls:
+            if call["target"] == ZERO_ADDRESS:
+                call["target"] = safe_target
     return calls
 
 
@@ -79,11 +163,11 @@ def is_simulatable_multisend(tx: dict, inner_calls: list[dict[str, str]]) -> boo
     one ordered bundle from the Safe reproduces the real execution. Any inner
     DELEGATECALL, or an unknown delegate target, is not modeled.
     """
-    if int(tx.get("operation", 0) or 0) != 1:
-        return False
-    if (tx.get("to") or "").lower() not in _MULTISEND_UTILS:
-        return False
-    return bool(inner_calls) and all(int(call.get("operation", "0") or 0) == 0 for call in inner_calls)
+    return (
+        is_multisend_call(tx)
+        and bool(inner_calls)
+        and all(int(call.get("operation", "0") or 0) == 0 for call in inner_calls)
+    )
 
 
 def build_context_note(tx: dict, safe_address: str, *, simulate_as_bundle: bool = False) -> str:

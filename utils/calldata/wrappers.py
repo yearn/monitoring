@@ -17,6 +17,9 @@ Supported wrappers:
     - Yearn governance Executor: ``execute(bytes)``, whose script packs each call
       as a 32-byte header ``target (160 bits) | calldata size (96 bits)`` followed
       by the calldata
+    - Pendle governance proxy: ``aggregate((address,uint256,bytes)[])`` and
+      ``aggregateWithScopedAccess((address,uint256,bytes)[])``, which run each
+      ``(target, value, data)`` call in order
 """
 
 from collections.abc import Callable
@@ -58,6 +61,11 @@ def _compound(values: tuple) -> list[tuple[str, bytes]]:
     if signature:
         data = function_signature_to_4byte_selector(signature) + data
     return [(target, data)]
+
+
+def _aggregate(values: tuple) -> list[tuple[str, bytes]]:
+    """((target, value, data)[],) — Pendle governance proxy aggregate / aggregateWithScopedAccess."""
+    return [(target, data) for target, _value, data in values[0]]
 
 
 def _maple(values: tuple) -> list[tuple[str, bytes]]:
@@ -127,13 +135,41 @@ _WRAPPER_SIGNATURES: dict[str, _Extractor] = {
     "executeTransaction(address,uint256,string,bytes,uint256)": _compound,
     "scheduleProposals(address[],bytes[])": _maple,
     PACKED_SCRIPT_SIGNATURE: _packed_script,
+    "aggregate((address,uint256,bytes)[])": _aggregate,
+    "aggregateWithScopedAccess((address,uint256,bytes)[])": _aggregate,
 }
 
 
+def split_top_level_types(types: str) -> list[str]:
+    """Split a comma-separated type list on top-level commas only.
+
+    Commas inside ``(...)`` tuples or ``[...]`` array sizes are preserved so a
+    type like ``(address,uint256)[]`` stays intact. Public so consumers that
+    walk decoded values (e.g. the gist report renderer) can decompose a tuple
+    type into its component types.
+    """
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in types:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        parts.append("".join(current).strip())
+    return parts
+
+
 def _parse_types(signature: str) -> list[str]:
-    """Top-level parameter types of a signature with no tuple parameters."""
+    """Top-level parameter types of a signature; tuple types stay whole, e.g. ``(address,bytes)[]``."""
     inner = signature[signature.index("(") + 1 : -1]
-    return inner.split(",") if inner else []
+    return split_top_level_types(inner) if inner else []
 
 
 _WRAPPERS: dict[str, tuple[str, list[str], _Extractor]] = {
@@ -143,7 +179,9 @@ _WRAPPERS: dict[str, tuple[str, list[str], _Extractor]] = {
 
 # Wrappers whose inner calls run inside the wrapping transaction. The others
 # only queue their inner calls for a later transaction.
-_EXECUTING_WRAPPERS = frozenset({"execute", "executeBatch", "executeTransaction"})
+_EXECUTING_WRAPPERS = frozenset(
+    {"execute", "executeBatch", "executeTransaction", "aggregate", "aggregateWithScopedAccess"}
+)
 
 
 def is_wrapper_call(data_hex: str) -> bool:
@@ -151,11 +189,16 @@ def is_wrapper_call(data_hex: str) -> bool:
     return bool(data_hex) and data_hex[:10].lower() in _WRAPPERS
 
 
-def unwrap_calls(data_hex: str) -> list[InnerCall]:
-    """Inner calls of a supported wrapper, in order; [] for anything else.
+def try_unwrap_calls(data_hex: str) -> list[InnerCall] | None:
+    """Inner calls of a supported wrapper, telling a decode failure apart from an empty batch.
 
-    Malformed wrapper calldata also yields [] — this feeds best-effort
-    enrichment, and a decode failure must not break the alert.
+    Args:
+        data_hex: 0x-prefixed calldata.
+
+    Returns:
+        The inner calls in order (``[]`` for a well-formed empty batch, or for
+        calldata that is not a supported wrapper), or ``None`` when the wrapper
+        calldata does not decode.
     """
     if not is_wrapper_call(data_hex):
         return []
@@ -166,7 +209,18 @@ def unwrap_calls(data_hex: str) -> list[InnerCall]:
         return _inner_calls(name, extractor(values))
     except Exception as e:  # noqa: BLE001 - adversarial/malformed payloads
         logger.debug("could not unwrap %s calldata: %s", name, e)
-        return []
+        return None
+
+
+def unwrap_calls(data_hex: str) -> list[InnerCall]:
+    """Inner calls of a supported wrapper, in order; [] for anything else.
+
+    Malformed wrapper calldata also yields [] — this feeds best-effort
+    enrichment, and a decode failure must not break the alert. Use
+    :func:`try_unwrap_calls` when a decode failure must be told apart from an
+    empty batch.
+    """
+    return try_unwrap_calls(data_hex) or []
 
 
 def unwrap_call_values(signature: str, values: tuple) -> list[InnerCall]:

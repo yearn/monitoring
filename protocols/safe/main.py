@@ -3,6 +3,7 @@ import itertools
 import os
 import re
 import time
+from collections.abc import Iterator
 from dataclasses import replace
 
 import requests
@@ -11,45 +12,63 @@ from web3 import Web3
 
 from protocols.safe.addresses import (
     ALL_SAFE_ADDRESSES,
-    PROXY_UPGRADE_SIGNATURES,
+    SAFE_QUEUE_API_URL,
     YEARN_EXPECTED_PROPOSERS,
     safe_address_network_prefix,
-    safe_apis,
 )
+from protocols.safe.executed import (
+    NonceCheck,
+    NonceCheckState,
+    SafeKey,
+    TxId,
+    load_nonce_check_state,
+    plan_nonce_check,
+    read_onchain_nonces,
+    save_nonce_check_state,
+)
+from protocols.safe.filters import should_alert
 from protocols.safe.multisend import (
+    ZERO_ADDRESS,
     build_context_note,
     extract_inner_calls,
     is_simulatable_multisend,
     safe_utility_label,
 )
-from protocols.safe.specific import handle_pendle
 from utils.cache import (
     cache_filename,
-    get_last_executed_nonce_from_file,
     get_last_value_for_key_from_file,
-    write_last_executed_nonce_to_file,
+    nonces_filename,
     write_last_value_to_file,
 )
-from utils.chains import Chain, safe_network_to_chain_id
+from utils.chains import safe_network_to_chain_id
 from utils.formatting import parse_wei
 from utils.llm.ai_explainer import Explanation, explain_batch_transaction, explain_transaction, format_explanation_line
 from utils.llm.credits import check_llm_credits
 from utils.logger import get_logger
 from utils.proxy import ProxyUpgrade, dedupe_upgrades, find_proxy_upgrades, format_upgrade_lines
-from utils.telegram import escape_markdown, send_error_message, send_telegram_message
+from utils.telegram import (
+    MAX_MESSAGE_LENGTH,
+    escape_markdown,
+    send_error_message,
+    send_telegram_message,
+    telegram_credentials_configured,
+)
 from utils.upgrade_diff import (
     UpgradeDiffLink,
     apply_upgrade_diff_links,
     format_upgrade_report_links,
     resolve_upgrade_diff_links,
 )
-from utils.web3_wrapper import ChainManager
 
 load_dotenv()
 logger = get_logger("safe")
 
 SAFE_WEBSITE_URL = "https://app.safe.global/transactions/queue?safe="
-provider_url_mainnet = os.getenv("PROVIDER_URL_MAINNET")
+SAFE_HISTORY_URL = "https://app.safe.global/transactions/history?safe="
+# Queue Service ``proposedVia`` values whose ``proposer`` / ``proposedBy`` semantics we rely on.
+_KNOWN_PROPOSAL_ROUTES = frozenset({"OWNER", "DELEGATE", "NESTED_OWNER"})
+# How much of an unexpected Safe API error body to put in the error alert.
+_ERROR_BODY_CHARS = 500
 
 # Values treated as "no key": unset env templates and serialized nulls.
 _PLACEHOLDER_KEYS = {"null", "none", "nil", "undefined", "false", "0", "changeme"}
@@ -93,6 +112,8 @@ _api_key_cycle = itertools.cycle(_api_keys)
 # Keys whose account quota is used up this run. A 429 with ``x-ratelimit-remaining: 0``
 # means retrying only burns requests. Extra keys on the same account share one quota.
 _exhausted_api_keys: dict[str, int] = {}  # key -> seconds until its quota resets
+_api_window_start = 0.0
+_api_requests_in_window = 0
 
 CACHE_KEY_QUOTA_ALERTED_UNTIL = "SAFE_API_QUOTA_ALERTED_UNTIL"
 # Per-key "exhausted until" unix time, so later runs skip a dead key instead of spending a
@@ -105,9 +126,18 @@ CACHE_KEY_EXHAUSTED_UNTIL_PREFIX = "SAFE_API_KEY_EXHAUSTED_UNTIL_"
 ERROR_LABEL = "yearn"
 ALERT_PROTOCOL = "yearn-internal"
 
-SAFE_NONCE_ABI = [
-    {"inputs": [], "name": "nonce", "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"}
-]
+# The Queue Service's maximum page size. One page covers every watched Safe's queue together.
+SAFE_QUEUE_PAGE_SIZE = 100
+# Hard cap on pages per listing. An oversized shared listing falls back to per-Safe listings.
+SAFE_QUEUE_MAX_PAGES = 5
+_SAFE_TX_HASH_RE = re.compile(r"0x[0-9a-fA-F]{64}")
+# Per (network, safe) cache entry listing the queued txs already alerted on (or skipped by the
+# protocol's alert rule), as comma-separated ``nonce@safeTxHash`` items.
+CACHE_KEY_HANDLED_TXS_PREFIX = "safe_handled_txs"
+# The batch endpoint's cap on hashes per request.
+SAFE_TX_HASH_BATCH_SIZE = 100
+# Reserve room for the alert text and the optional Telegram test-channel prefix.
+_MAX_NONCE_LIST_LENGTH = MAX_MESSAGE_LENGTH // 2
 
 
 class SafeApiQuotaExhausted(Exception):
@@ -116,6 +146,18 @@ class SafeApiQuotaExhausted(Exception):
     def __init__(self, reset_seconds: int) -> None:
         super().__init__(f"all Safe API keys exhausted; quota resets in {reset_seconds}s")
         self.reset_seconds = reset_seconds
+
+
+class SafeApiAuthError(Exception):
+    """Raised when the Safe API rejects the API key; every safe in the run would fail the same way."""
+
+
+class SafeApiRequestError(Exception):
+    """Raised when the Safe API rejects a request, e.g. a Safe it cannot resolve."""
+
+
+class SafeApiUnavailable(Exception):
+    """Raised when Safe API retries run out; every Safe in the request is unchecked this run."""
 
 
 def _next_api_key() -> str | None:
@@ -172,25 +214,28 @@ def _quota_reset_seconds(response: requests.Response) -> int | None:
         return 0
 
 
-def get_safe_transactions(
-    safe_address: str, network_name: str, executed: bool | None = None, limit: int = 10, max_retries: int = 3
-) -> list[dict]:
-    """
-    Docs: https://docs.safe.global/core-api/transaction-service-reference/mainnet#List-a-Safe's-Multisig-Transactions
+def _queue_request(
+    path: str, params: list[tuple[str, str | int]], context: str, max_retries: int
+) -> dict | list | None:
+    """Send one Queue Service GET request, retrying transient failures.
+
+    Args:
+        path: Endpoint path under ``/api/v1``.
+        params: Query parameters; a repeated parameter appears once per value.
+        context: What the request covers, for log and error messages.
+        max_retries: Attempts for transport errors, rate limits and 5xx responses.
+
+    Returns:
+        The response body, or ``None`` when retries run out.
 
     Raises:
-        SafeApiQuotaExhausted: When every API key has used up its quota; retrying
-            would only burn requests until the window resets.
+        SafeApiQuotaExhausted: When every API key has used up its quota.
+        SafeApiAuthError: When the service rejects the API key.
+        SafeApiRequestError: When the service rejects the request (e.g. 422 for a Safe it cannot resolve).
     """
+    global _api_window_start, _api_requests_in_window
 
-    base_url = safe_apis[network_name] + "/api/v2"
-    endpoint = f"{base_url}/safes/{safe_address}/multisig-transactions/"
-
-    params = {"limit": limit, "ordering": "-nonce"}  # Order by nonce descending
-
-    if executed is not None:
-        params["executed"] = str(executed).lower()
-
+    endpoint = f"{SAFE_QUEUE_API_URL}/api/v1/{path}"
     attempt = 0
     while attempt < max_retries:
         api_key = _next_api_key()
@@ -198,11 +243,12 @@ def get_safe_transactions(
             raise SafeApiQuotaExhausted(min(_exhausted_api_keys.values()))
         headers = {"Authorization": f"Bearer {api_key}"}
 
+        _api_window_start, _api_requests_in_window = check_api_limit(_api_window_start, _api_requests_in_window)
+        _api_requests_in_window += 1
         try:
-            response = requests.get(endpoint, params=params, headers=headers, timeout=10)
+            response = requests.get(endpoint, params=params, headers=headers, timeout=20)
         except requests.exceptions.RequestException as e:
             # Transient transport failure (connection reset, read timeout, DNS).
-            # Retry with backoff instead of letting it bubble up and crash the run.
             wait_time = 2**attempt
             logger.warning(
                 "Request error talking to Safe API (%s), waiting %ss before retry (attempt %s/%s)...",
@@ -216,9 +262,9 @@ def get_safe_transactions(
             continue
 
         if response.status_code == 200:
-            return response.json()["results"]
+            return response.json()
         elif response.status_code == 401:
-            raise ValueError("Invalid API key. Please check your SAFE_API_KEY.")
+            raise SafeApiAuthError("Invalid API key. Please check your SAFE_API_KEY.")
         elif response.status_code == 429:
             reset_seconds = _quota_reset_seconds(response)
             if reset_seconds is not None:
@@ -232,7 +278,6 @@ def get_safe_transactions(
             attempt += 1
             continue
         elif response.status_code >= 500:
-            # server error - wait and retry with exponential backoff
             wait_time = 2**attempt
             logger.warning(
                 "Server error %s, waiting %ss before retry (attempt %s/%s)...",
@@ -245,98 +290,203 @@ def get_safe_transactions(
             attempt += 1
             continue
         else:
-            logger.error("Error: %s\nResponse text: %s", response.status_code, response.text)
-            return []
+            # 422 means the service rejected a Safe in the request. Returning nothing here
+            # would silently stop alerts, so surface it instead.
+            raise SafeApiRequestError(
+                f"Safe API returned {response.status_code} for {context}: {response.text[:_ERROR_BODY_CHARS]}"
+            )
 
-    logger.error("Failed after %s retries for %s on %s", max_retries, safe_address, network_name)
-    return []
+    logger.error("Failed after %s retries for %s", max_retries, context)
+    return None
 
 
-def get_safe_current_nonce(safe_address: str, network_name: str) -> int | None:
-    """Read the safe's current onchain nonce (next nonce to use) over RPC.
+def fetch_queued_transactions(
+    safes: list[SafeKey], max_retries: int = 3, max_pages: int = SAFE_QUEUE_MAX_PAGES
+) -> tuple[dict[SafeKey, list[dict]], bool]:
+    """List the executable queued txs of several Safes with one paged Queue Service request.
 
-    Read on-chain rather than from the Safe API so each safe costs one API
-    request per run instead of two. Returns None if the call fails so callers
-    can fail closed.
+    Docs: https://docs.safe.global/core-api/safe-queue-service-reference
+
+    The ``/queue`` endpoint returns only txs that are not executed and whose nonce is at
+    or above their Safe's current nonce, so dead slots never come back and no onchain
+    nonce read is needed. Every Safe shares the same request, so a run costs one request
+    against the shared Safe API quota (more only past ``SAFE_QUEUE_PAGE_SIZE`` queued txs).
+
+    Args:
+        safes: ``(network_name, safe_address)`` pairs to list.
+        max_retries: Attempts per page for transport errors, rate limits and 5xx responses.
+        max_pages: Upper bound on pages fetched.
+
+    Returns:
+        Each requested Safe's queued txs and whether the listing is complete. Shared
+        listings start at the lowest nonce. A single-Safe listing starts at the highest
+        nonce so its page cap retains the highest proposals. An incomplete listing
+        hit the page cap or reported more rows than the cap can cover.
+
+    Raises:
+        SafeApiQuotaExhausted: When every API key has used up its quota.
+        SafeApiAuthError: When the service rejects the API key.
+        SafeApiRequestError: When the service rejects the request.
+        SafeApiUnavailable: When retries run out for a page.
     """
-    try:
-        chain = Chain.from_chain_id(safe_network_to_chain_id(network_name))
-        client = ChainManager.get_client(chain)
-        safe = client.eth.contract(address=Web3.to_checksum_address(safe_address), abi=SAFE_NONCE_ABI)
-        return int(safe.functions.nonce().call())
-    except Exception as e:
-        logger.warning("Failed to fetch current nonce for %s on %s: %s", safe_address, network_name, e)
-        return None
+    queues: dict[SafeKey, list[dict]] = {safe: [] for safe in safes}
+    by_param = {_safe_param(network, address): (network, address) for network, address in safes}
+    context = f"{len(safes)} Safe(s)" if len(safes) > 1 else f"{safes[0][1]} on {safes[0][0]}"
+    seen: set[tuple[SafeKey, TxId]] = set()
+    shared = len(safes) > 1
+    nonce_order = "asc" if shared else "desc"
+    params: list[tuple[str, str | int]] = [("safes", param) for param in by_param]
+    params += [("nonceOrder", nonce_order), ("limit", SAFE_QUEUE_PAGE_SIZE)]
+    for page in range(max_pages):
+        page_params = params + ([("offset", page * SAFE_QUEUE_PAGE_SIZE)] if page else [])
+        body = _queue_request("multisig-transactions/queue", page_params, context, max_retries)
+        if not isinstance(body, dict):
+            raise SafeApiUnavailable(f"Safe API retries exhausted for {context} at page {page + 1}")
+        for tx in body.get("results", []):
+            safe = by_param.get(f"{str(tx.get('safe', '')).lower()}:{tx.get('chainId')}")
+            if safe is None:
+                logger.warning(
+                    "Ignoring queued tx for unrequested Safe %s on chain %s", tx.get("safe"), tx.get("chainId")
+                )
+                continue
+            key = (safe, _tx_id(tx))
+            # Pages fetched one after another can overlap when the queue changes in between.
+            if key not in seen:
+                seen.add(key)
+                queues[safe].append(tx)
+        if not body.get("next"):
+            return queues, True
+        count = body.get("count")
+        if shared and isinstance(count, int) and count > max_pages * SAFE_QUEUE_PAGE_SIZE:
+            break
+    logger.warning("Queued txs for %s exceed the %s-page listing cap", context, max_pages)
+    return queues, False
 
 
-def _is_executed_safe_tx(tx: dict) -> bool:
-    """Return True for tx-service rows that are already executed.
+def _safe_param(network_name: str, safe_address: str) -> str:
+    """Return a Safe's ``address:chainId`` value for the Queue Service ``safes`` parameter."""
+    return f"{safe_address.lower()}:{safe_network_to_chain_id(network_name)}"
 
-    The API request asks for ``executed=false``, but the monitor treats the
-    response defensively: if an item carries any executed marker, it must never
-    reach the alert path.
+
+def fetch_executed_safe_tx_hashes(safe_tx_hashes: list[str], max_retries: int = 3) -> set[str]:
+    """Return which of ``safe_tx_hashes`` the Queue Service reports as executed.
+
+    One request per ``SAFE_TX_HASH_BATCH_SIZE`` hashes, across every Safe: a
+    ``safeTxHash`` commits to its chain and Safe, so the hashes never collide.
+
+    Args:
+        safe_tx_hashes: Lowercased ``safeTxHash`` values to look up.
+        max_retries: Attempts per request for transport errors, rate limits and 5xx responses.
+
+    Raises:
+        SafeApiQuotaExhausted: When every API key has used up its quota.
+        SafeApiAuthError: When the service rejects the API key.
+        SafeApiRequestError: When the service rejects the request.
+        SafeApiUnavailable: When retries run out.
     """
-    return tx.get("isExecuted") is True or bool(tx.get("executionDate")) or bool(tx.get("transactionHash"))
+    executed: set[str] = set()
+    for start in range(0, len(safe_tx_hashes), SAFE_TX_HASH_BATCH_SIZE):
+        chunk = safe_tx_hashes[start : start + SAFE_TX_HASH_BATCH_SIZE]
+        context = f"{len(chunk)} executed-tx lookup(s)"
+        body = _queue_request("multisig-transactions/batch", [("safeTxHash", h) for h in chunk], context, max_retries)
+        if not isinstance(body, list):
+            raise SafeApiUnavailable(f"Safe API retries exhausted for {context}")
+        executed.update(str(tx["safeTxHash"]).lower() for tx in body if tx.get("txHash"))
+    return executed
 
 
-def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]:
-    """Fetch pending transactions worth alerting on.
+def _safe_tx_hash(tx: dict) -> str:
+    """Return the tx's ``safeTxHash`` when it is a well-formed 32-byte hex string, else ``""``."""
+    safe_tx_hash = tx.get("safeTxHash")
+    if isinstance(safe_tx_hash, str) and _SAFE_TX_HASH_RE.fullmatch(safe_tx_hash):
+        return safe_tx_hash
+    return ""
 
-    Filters out two classes of noise:
-    - Already-cached: nonce <= last_cached_nonce (we've alerted on them).
-    - Dead-slot: nonce < safe.currentNonce. These remain in the API as
-      ``executed=false`` because a competing tx at the same nonce executed
-      first, but they will never run themselves.
-    - Executed rows: any tx-service row with executed markers. These must never
-      alert even if the API includes them in an ``executed=false`` response.
 
-    The baseline is the higher of (a) the last nonce we already alerted on
-    and (b) ``currentNonce - 1`` (the last *executed* nonce, when we could
-    fetch it). A tx is eligible iff ``nonce > baseline``.
+def _tx_id(tx: dict) -> TxId:
+    """Return the ``(nonce, lowercased safeTxHash)`` a queued tx is deduplicated on.
 
-    When ``currentNonce`` is unknown (e.g. the RPC read failed), the chain
-    baseline can't be computed safely, so we fail closed and skip alerts for
-    this safe until the next run. That prevents dead-slot txs from alerting as
-    queued after a competing tx at the same nonce has already executed.
+    The safeTxHash commits to the chain, the Safe and the nonce, so it alone identifies
+    the tx; the nonce rides along to keep the stored entries readable. A row without a usable hash falls back to ``(nonce, "")``,
+    i.e. nonce-only deduplication.
     """
-    last_cached_nonce = get_last_executed_nonce_from_file(safe_address)
-    current_safe_nonce = get_safe_current_nonce(safe_address, network_name)
-    if current_safe_nonce is None:
-        logger.warning(
-            "Skipping pending tx alerts for %s on %s because currentNonce could not be fetched",
-            safe_address,
-            network_name,
-        )
-        return []
-    pending_txs = get_safe_transactions(safe_address, network_name, executed=False)
-
-    baseline = last_cached_nonce
-    chain_baseline = current_safe_nonce - 1
-    if chain_baseline > last_cached_nonce:
-        write_last_executed_nonce_to_file(safe_address, chain_baseline)
-    baseline = max(baseline, chain_baseline)
-
-    return [tx for tx in pending_txs if not _is_executed_safe_tx(tx) and int(tx["nonce"]) > baseline]
+    return int(tx["nonce"]), _safe_tx_hash(tx).lower()
 
 
-def _pending_filter_diag(safe_address: str, network_name: str) -> dict:
-    """Snapshot the filter inputs for diagnostic logging.
+def _handled_txs_cache_key(safe_address: str, network_name: str) -> str:
+    """Return the cache key for a Safe's handled txs; same-address Safes on other chains get their own."""
+    return f"{CACHE_KEY_HANDLED_TXS_PREFIX}+{network_name}+{safe_address.lower()}"
 
-    Re-reads the on-disk cache and the live ``currentNonce`` so
-    ``check_for_pending_transactions`` can log the exact numbers that
-    decided what to alert on, without leaking them through the
-    ``get_pending_transactions`` return value.
+
+def load_handled_txs(safe_address: str, network_name: str) -> set[TxId]:
+    """Read the queued txs already alerted on (or skipped by the alert rule).
+
+    Returns:
+        The handled tx ids; empty when nothing was ever stored for this Safe.
     """
-    last_cached = get_last_executed_nonce_from_file(safe_address)
-    current = get_safe_current_nonce(safe_address, network_name)
-    chain_baseline = (current - 1) if current is not None else None
-    baseline = max(last_cached, chain_baseline) if chain_baseline is not None else last_cached
-    return {
-        "last_cached_nonce": last_cached,
-        "current_safe_nonce": current,
-        "chain_baseline": chain_baseline,
-        "baseline": baseline,
-    }
+    raw = get_last_value_for_key_from_file(nonces_filename, _handled_txs_cache_key(safe_address, network_name))
+    if not raw:
+        return set()
+    handled: set[TxId] = set()
+    for item in str(raw).split(","):
+        nonce, sep, safe_tx_hash = item.partition("@")
+        if sep and nonce.isdigit():
+            handled.add((int(nonce), safe_tx_hash))
+    return handled
+
+
+def save_handled_txs(safe_address: str, network_name: str, handled: set[TxId]) -> None:
+    """Persist the handled tx ids as comma-separated ``nonce@safeTxHash`` items."""
+    value = ",".join(f"{nonce}@{safe_tx_hash}" for nonce, safe_tx_hash in sorted(handled))
+    write_last_value_to_file(nonces_filename, _handled_txs_cache_key(safe_address, network_name), value)
+
+
+def mark_tx_handled(safe_address: str, network_name: str, tx: dict) -> None:
+    """Record one tx as handled right away, so a later failure in the run cannot re-alert it."""
+    handled = load_handled_txs(safe_address, network_name)
+    handled.add(_tx_id(tx))
+    save_handled_txs(safe_address, network_name, handled)
+
+
+def get_pending_transactions(
+    safe_address: str, network_name: str, queued_txs: list[dict], complete: bool = True
+) -> list[dict]:
+    """Return the queued txs of one Safe that have not been alerted on yet.
+
+    Deduplicating on the ``safeTxHash`` rather than on a nonce high-water mark means a
+    tx queued later at a lower pending nonce, or a replacement proposed at an
+    already-alerted nonce, still alerts.
+
+    A handled entry is pruned once it is out of the queue (executed, replaced or deleted)
+    and its nonce is settled by the executed-nonce check, which needs the entry to tell
+    an alerted execution from an unalerted one. Pruning only happens on a ``complete``
+    listing: a tx missing from a truncated one may still be queued.
+
+    Args:
+        safe_address: The Safe's address.
+        network_name: Safe network name from the watchlist.
+        queued_txs: The Safe's executable queued txs from ``fetch_queued_transactions``.
+        complete: Whether ``queued_txs`` is the Safe's whole queue.
+    """
+    stored = load_handled_txs(safe_address, network_name)
+    handled = stored
+    nonce_check = load_nonce_check_state((network_name, safe_address))
+    if complete and nonce_check is not None:
+        queued_ids = {_tx_id(tx) for tx in queued_txs}
+        handled = {tx_id for tx_id in stored if tx_id in queued_ids or not nonce_check.is_settled(tx_id[0])}
+    if handled != stored:
+        save_handled_txs(safe_address, network_name, handled)
+
+    pending = [tx for tx in queued_txs if _tx_id(tx) not in handled]
+    logger.info(
+        "safe %s on %s: queued=%d handled=%d new=%d",
+        safe_address,
+        network_name,
+        len(queued_txs),
+        len(handled),
+        len(pending),
+    )
+    return pending
 
 
 def get_safe_url(safe_address: str, network_name: str) -> str:
@@ -361,11 +511,9 @@ def _explain_safe_tx(
     multisend executes. An inner DELEGATECALL can't be modeled, so those
     batches skip simulation.
     """
-    safe_tx_hash = tx.get("safeTxHash")
-    if not isinstance(safe_tx_hash, str) or not re.fullmatch(r"0x[0-9a-fA-F]{64}", safe_tx_hash):
-        safe_tx_hash = ""
+    safe_tx_hash = _safe_tx_hash(tx)
     operation = int(tx.get("operation", 0) or 0)
-    inner_calls = extract_inner_calls(tx) if operation == 1 else []
+    inner_calls = extract_inner_calls(tx, safe_address)
 
     if inner_calls:
         simulate = is_simulatable_multisend(tx, inner_calls)
@@ -406,14 +554,13 @@ def _explain_safe_tx(
     )
 
 
-def _find_safe_tx_upgrades(tx: dict, target: str, hex_data: str) -> list[ProxyUpgrade]:
+def _find_safe_tx_upgrades(tx: dict, target: str, hex_data: str, safe_address: str) -> list[ProxyUpgrade]:
     """Proxy upgrades a Safe tx performs: direct, per multisend call, or inside a timelock call.
 
     Multisend upgrades carry ``multiSend call N`` in their path, because the
     alert's target is the multisend utility, not the call that upgrades.
     """
-    operation = int(tx.get("operation", 0) or 0)
-    inner_calls = extract_inner_calls(tx) if operation == 1 else []
+    inner_calls = extract_inner_calls(tx, safe_address)
     if not inner_calls:
         return find_proxy_upgrades(hex_data, target)
 
@@ -426,39 +573,72 @@ def _find_safe_tx_upgrades(tx: dict, target: str, hex_data: str) -> list[ProxyUp
 
 
 def _upgrade_alert_lines(
-    tx: dict, target: str, hex_data: str, chain_id: int, diffs: list[UpgradeDiffLink]
+    tx: dict, target: str, hex_data: str, safe_address: str, chain_id: int, diffs: list[UpgradeDiffLink]
 ) -> list[str]:
     """Collect the alert lines and diff links for each detected Safe upgrade."""
     lines: list[str] = []
-    for upgrade in _find_safe_tx_upgrades(tx, target, hex_data):
+    for upgrade in _find_safe_tx_upgrades(tx, target, hex_data, safe_address):
         lines.extend(format_upgrade_lines(upgrade, target, chain_id, diffs=diffs))
     return lines
 
 
-def check_for_pending_transactions(safe_address: str, network_name: str, protocol: str) -> None:
-    pending_transactions = get_pending_transactions(safe_address, network_name)
+def _proposer_and_delegate(tx: dict) -> tuple[str, str]:
+    """Return the lowercased (proposer, delegate) a Yearn multisig tx is matched on.
+
+    ``proposedBy`` counts as a delegate only when ``proposedVia`` is ``DELEGATE``.
+    For ``NESTED_OWNER`` it is an EOA acting through an owner Safe, which must
+    not make the tx look expected when that owner Safe (``proposer``) is not.
+
+    Any other route (``UNKNOWN``, a missing value, or one the service adds later)
+    has unknown semantics, so neither address is trusted and a Yearn multisig tx
+    escalates as an unexpected proposer.
+    """
+    route = tx.get("proposedVia")
+    if route not in _KNOWN_PROPOSAL_ROUTES:
+        return "", ""
+    proposer = (tx.get("proposer") or "").lower()
+    delegate = (tx.get("proposedBy") or "").lower() if route == "DELEGATE" else ""
+    return proposer, delegate
+
+
+def check_for_pending_transactions(
+    safe_address: str, network_name: str, protocol: str, queued_txs: list[dict], complete: bool = True
+) -> None:
+    """Alert on a Safe's queued txs that have not been alerted on yet.
+
+    Args:
+        safe_address: The Safe's address.
+        network_name: Safe network name from the watchlist.
+        protocol: Protocol key that picks the alert rule and Telegram channel.
+        queued_txs: The Safe's executable queued txs.
+        complete: Whether ``queued_txs`` is the Safe's whole queue.
+    """
+    pending_transactions = get_pending_transactions(safe_address, network_name, queued_txs, complete)
     expected_proposers = YEARN_EXPECTED_PROPOSERS.get((network_name, safe_address.lower()), set())
 
     if pending_transactions:
-        diag = _pending_filter_diag(safe_address, network_name)
-        logger.info(
-            "safe %s on %s: last_cached=%s currentNonce=%s chain_baseline=%s baseline=%s pending=%d",
-            safe_address,
-            network_name,
-            diag["last_cached_nonce"],
-            diag["current_safe_nonce"],
-            diag["chain_baseline"],
-            diag["baseline"],
-            len(pending_transactions),
-        )
-        highest_alerted_nonce = None
         for tx in pending_transactions:
             nonce = int(tx["nonce"])
+            # The Queue Service returns null for empty calldata and for a zero-address
+            # destination, and lowercases addresses.
+            hex_data = tx.get("data") or "0x"
+            target_contract = Web3.to_checksum_address(tx.get("to") or ZERO_ADDRESS)
 
-            target_contract = tx["to"]
+            if not should_alert(protocol, tx, target_contract, hex_data):
+                logger.info("Skipping nonce %s on %s: outside the %s alert rule", nonce, safe_address, protocol)
+                # The rule only reads the tx's own fields, so it would skip this tx again.
+                mark_tx_handled(safe_address, network_name, tx)
+                continue
 
-            if protocol == "EULER" and target_contract != "0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9":
-                # send message for txs that target only vaults that we use in our strategies
+            if not telegram_credentials_configured(protocol):
+                # An undelivered alert stays eligible, so without this check every poll would
+                # re-run the explainer and simulation and store another skipped alert row.
+                logger.warning(
+                    "No Telegram destination for %s; leaving nonce %s on %s queued until one is configured",
+                    protocol,
+                    nonce,
+                    safe_address,
+                )
                 continue
 
             # Yearn multisigs (expected_proposers is non-empty) always get an
@@ -468,8 +648,7 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
             # critical alert — it could mean a compromised proposer.
             is_yearn_multisig = bool(expected_proposers)
             unexpected_proposer = False
-            tx_proposer = (tx.get("proposer") or "").lower()
-            tx_delegate = (tx.get("proposedByDelegate") or "").lower()
+            tx_proposer, tx_delegate = _proposer_and_delegate(tx)
             if is_yearn_multisig:
                 matched = next((a for a in (tx_proposer, tx_delegate) if a and a in expected_proposers), None)
                 if matched:
@@ -482,11 +661,12 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
                 else:
                     unexpected_proposer = True
                     logger.warning(
-                        "Nonce %s on %s proposed by UNEXPECTED address (proposer=%s delegate=%s)",
+                        "Nonce %s on %s proposed by UNEXPECTED address (proposer=%s via=%s proposedBy=%s)",
                         nonce,
                         safe_address,
                         tx_proposer or "?",
-                        tx_delegate or "?",
+                        tx.get("proposedVia") or "?",
+                        tx.get("proposedBy") or "?",
                     )
 
             message = ""
@@ -495,7 +675,8 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
                     "⚠️🚨 *CRITICAL: UNEXPECTED PROPOSER* 🚨⚠️\n"
                     "This Yearn multisig tx was NOT proposed by a known Yearn bot/EOA!\n"
                     f"👤 Proposer: {tx_proposer or 'unknown'}\n"
-                    f"👤 Proposed by delegate: {tx_delegate or 'none'}\n\n"
+                    f"👤 Proposed via: {escape_markdown(str(tx.get('proposedVia') or 'unknown'))}"
+                    f" by {tx.get('proposedBy') or 'none'}\n\n"
                 )
             message += (
                 "🚨 QUEUED TX DETECTED 🚨\n"
@@ -504,7 +685,7 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
                 f"🔗 Safe URL: {get_safe_url(safe_address, network_name)}\n"
                 f"#️⃣ Nonce: {nonce}\n"
                 f"📜 Target Contract Address: {target_contract}\n"
-                f"📅 Submission Date: {tx['submissionDate']}"
+                f"📅 Submission Date: {tx.get('created') or 'unknown'}"
             )
             # Find the additional info for the current safe address
             additional_info = None
@@ -517,28 +698,13 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
             if additional_info:
                 message += f"\nℹ️ Additional Info: {escape_markdown(additional_info)}"
 
-            # pendle uses specific owner of the contracts where we need to decode the data
-            if protocol == "PENDLE":
-                hex_data = tx["data"]
-                # if hex data doesnt contain any of the proxy upgrade signatures, skip
-                if not any(signature in hex_data for signature in PROXY_UPGRADE_SIGNATURES):
-                    logger.info("Skipping tx with nonce %s as it does not contain any proxy upgrade signatures.", nonce)
-                    continue
-
-                try:
-                    if network_name == "mainnet":
-                        message += handle_pendle(provider_url_mainnet, hex_data)
-                except Exception as e:
-                    logger.error("Cannot decode Pendle aggregate calls: %s", e)
-
-            hex_data = tx.get("data") or "0x"
             chain_id = safe_network_to_chain_id(network_name)
             # Proxy upgrades, including ones nested in a timelock call or a
             # multisend (best-effort: an RPC failure must not block the alert).
             diffs: list[UpgradeDiffLink] = []
             upgrade_lines: list[str] = []
             try:
-                upgrade_lines = _upgrade_alert_lines(tx, target_contract, hex_data, chain_id, diffs)
+                upgrade_lines = _upgrade_alert_lines(tx, target_contract, hex_data, safe_address, chain_id, diffs)
             except Exception:
                 diffs.clear()
                 logger.warning("Upgrade detection failed for Safe tx nonce=%s", nonce, exc_info=True)
@@ -573,33 +739,121 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
             # Silent for routine Yearn multisig txs (expected proposer); loud
             # for unexpected proposers and for all non-Yearn protocol alerts.
             disable_notification = is_yearn_multisig and not unexpected_proposer
-            send_telegram_message(message, protocol, disable_notification)
-            if highest_alerted_nonce is None or nonce > highest_alerted_nonce:
-                highest_alerted_nonce = nonce
-                # Persist progress after each delivered alert, but never move
-                # the scalar nonce cache backwards. The Safe tx-service returns
-                # pending txs in DESCENDING nonce order, so a lower nonce must
-                # not overwrite a higher nonce already alerted in this batch.
-                write_last_executed_nonce_to_file(safe_address, highest_alerted_nonce)
+            if send_telegram_message(message, protocol, disable_notification):
+                mark_tx_handled(safe_address, network_name, tx)
     else:
-        logger.info("No pending transactions found with higher nonce than the last executed transaction.")
+        logger.info("No new queued transactions for %s on %s", safe_address, network_name)
+
+
+def _nonce_alert_batches(nonces: list[int]) -> Iterator[tuple[list[int], str]]:
+    """Group sorted nonces into ranges and fit those ranges into individual alert messages."""
+    batch: list[int] = []
+    labels: list[str] = []
+    length = 0
+    for _, group in itertools.groupby(enumerate(nonces), key=lambda item: item[1] - item[0]):
+        run = [nonce for _, nonce in group]
+        label = str(run[0]) if len(run) == 1 else f"{run[0]}–{run[-1]}"
+        if labels and length + 2 + len(label) > _MAX_NONCE_LIST_LENGTH:
+            yield batch, ", ".join(labels)
+            batch, labels, length = [], [], 0
+        length += (2 if labels else 0) + len(label)
+        labels.append(label)
+        batch.extend(run)
+    if labels:
+        yield batch, ", ".join(labels)
+
+
+def _alert_unalerted_executions(check: NonceCheck, nonce_list: str) -> bool:
+    """Send one loud alert for the listed nonces that executed without a queued-tx alert.
+
+    Returns:
+        Whether Telegram accepted it. ``False`` keeps the nonces for the next run.
+    """
+    network_name, safe_address = check.safe
+    if not telegram_credentials_configured(check.protocol):
+        logger.warning(
+            "No Telegram destination for %s; leaving unalerted executions %s on %s for the next run",
+            check.protocol,
+            nonce_list,
+            safe_address,
+        )
+        return False
+    message = (
+        "🚨 SAFE TX EXECUTED WITHOUT A QUEUED ALERT 🚨\n"
+        f"🅿️ Protocol: {escape_markdown(check.protocol)}\n"
+        f"🔐 Safe Address: {safe_address}\n"
+        f"🔗 Safe history: {SAFE_HISTORY_URL}{safe_address_network_prefix[network_name]}:{safe_address}\n"
+        f"#️⃣ Nonce: {nonce_list}\n"
+        "No queued-tx alert covered what executed at this nonce. It was executed without being "
+        "posted to the Safe service, replaced an alerted tx at the same nonce, or was proposed and "
+        "executed between two polls. Check what executed."
+    )
+    logger.warning("Safe %s on %s executed nonces %s without a queued alert", safe_address, network_name, nonce_list)
+    return send_telegram_message(message, check.protocol, False)
+
+
+def check_executed_nonces(safes: list[list[str]]) -> None:
+    """Alert on nonces each Safe executed without a queued-tx alert covering the executed tx.
+
+    Runs after the queue alerts, so a tx alerted this run counts as alerted. A Safe's
+    first successful nonce read only records the nonce.
+
+    Args:
+        safes: Watchlist entries (``[protocol, network_name, safe_address, ...]``).
+
+    Raises:
+        SafeApiQuotaExhausted, SafeApiAuthError, SafeApiRequestError, SafeApiUnavailable:
+            From the executed-hash lookup. Every Safe then keeps its progress for the next run.
+    """
+    protocols = {(safe[1], safe[2]): safe[0] for safe in safes}
+    onchain = read_onchain_nonces(list(protocols))
+    checks: list[NonceCheck] = []
+    for safe, protocol in protocols.items():
+        current_nonce = onchain.get(safe)
+        if current_nonce is None:
+            continue
+        state = load_nonce_check_state(safe)
+        if state is None:
+            save_nonce_check_state(safe, NonceCheckState(current_nonce))
+            continue
+        if current_nonce < state.next_nonce:
+            logger.error("Onchain nonce %s of %s on %s went backwards", current_nonce, safe[1], safe[0])
+            continue
+        handled = load_handled_txs(safe[1], safe[0])
+        checks.append(plan_nonce_check(safe, protocol, state, current_nonce, handled))
+
+    lookups = sorted({h for check in checks for hashes in check.alerted_hashes.values() for h in hashes if h})
+    executed = fetch_executed_safe_tx_hashes(lookups) if lookups else set()
+
+    for check in checks:
+        unalerted, awaiting = check.resolve(executed)
+        try:
+            if not unalerted:
+                save_nonce_check_state(check.safe, NonceCheckState(check.current_nonce, awaiting))
+                continue
+
+            outstanding = set(unalerted) | awaiting
+            for batch, nonce_list in _nonce_alert_batches(unalerted):
+                if not _alert_unalerted_executions(check, nonce_list):
+                    break
+                outstanding.difference_update(batch)
+                save_nonce_check_state(check.safe, NonceCheckState(check.current_nonce, frozenset(outstanding)))
+        except Exception as exc:  # noqa: BLE001 - one Safe's delivery or save must not block the others
+            report_executed_check_failure(exc, safe=check.safe)
 
 
 def check_api_limit(last_api_call_time: float, request_counter: int) -> tuple[float, int]:
-    current_time = time.time()
+    """Allow at most four Queue Service requests per second before the next window."""
+    current_time = time.monotonic()
     if current_time - last_api_call_time > 1:
         last_api_call_time = current_time
         request_counter = 0
     elif request_counter >= 4:
         time.sleep(1)
         request_counter = 0
-        last_api_call_time = time.time()
+        last_api_call_time = time.monotonic()
 
     return last_api_call_time, request_counter
-
-
-def run_for_network(network_name: str, safe_address: str, protocol: str) -> None:
-    check_for_pending_transactions(safe_address, network_name, protocol)
 
 
 def report_quota_exhausted(exc: SafeApiQuotaExhausted, now: float | None = None) -> None:
@@ -632,22 +886,92 @@ def report_quota_exhausted(exc: SafeApiQuotaExhausted, now: float | None = None)
     write_last_value_to_file(cache_filename, CACHE_KEY_QUOTA_ALERTED_UNTIL, int(reset_at))
 
 
+def report_safe_failure(protocol: str, network_name: str, safe_address: str, exc: Exception) -> None:
+    """Alert that one safe could not be checked this run, and carry on with the others.
+
+    Args:
+        protocol: Protocol key from the watchlist.
+        network_name: Safe network name.
+        safe_address: The safe that failed.
+        exc: The exception raised while checking it.
+    """
+    logger.error("Safe check failed for %s %s on %s", protocol, safe_address, network_name, exc_info=exc)
+    try:
+        send_error_message(
+            f"Safe monitor could not check {protocol} Safe {safe_address} on {network_name}; "
+            f"its queued txs are not being alerted on this run.\n{type(exc).__name__}: {exc}",
+            ERROR_LABEL,
+            source="safe_check_failed",
+            alert_protocol=ALERT_PROTOCOL,
+        )
+    except Exception:  # noqa: BLE001 - a failed notification must not skip the remaining safes
+        logger.exception("Could not send the Safe check failure alert for %s on %s", safe_address, network_name)
+
+
+def report_executed_check_failure(exc: Exception, safe: SafeKey | None = None) -> None:
+    """Alert that the executed-nonce check failed this run; its progress is kept for the next run."""
+    scope = f" for {safe[1]} on {safe[0]}" if safe else ""
+    logger.error("Safe executed-nonce check failed%s", scope, exc_info=exc)
+    try:
+        send_error_message(
+            f"Safe monitor could not check which executed Safe txs were alerted{scope} on this run; "
+            f"it retries next run.\n{type(exc).__name__}: {exc}",
+            ERROR_LABEL,
+            source="safe_check_failed",
+            alert_protocol=ALERT_PROTOCOL,
+        )
+    except Exception:  # noqa: BLE001 - a failed notification must not crash the run
+        logger.exception("Could not send the Safe executed-nonce check failure alert")
+
+
 def main():
-    last_api_call_time = 0
-    request_counter = 0
     load_known_exhausted_keys()
     check_llm_credits(ERROR_LABEL, alert_protocol=ALERT_PROTOCOL)
-    # loop all
+    # One request lists every watched Safe's queue. SafeApiAuthError and SafeApiUnavailable
+    # blind every Safe the same way, so they crash the run and alert once.
+    try:
+        queues, complete = fetch_queued_transactions([(safe[1], safe[2]) for safe in ALL_SAFE_ADDRESSES])
+    except SafeApiQuotaExhausted as exc:
+        report_quota_exhausted(exc)
+        return
+    except SafeApiRequestError as exc:
+        # The service rejected a Safe in the batch: query each one alone, so only the bad
+        # one goes unchecked. This costs one request per Safe until the watchlist is fixed.
+        logger.error("Batched Safe queue request rejected (%s); querying each Safe separately", exc)
+        queues, complete = None, False
+
+    if queues is not None and not complete and len(ALL_SAFE_ADDRESSES) > 1:
+        logger.warning("Batched Safe queue exceeded its page budget; querying each Safe separately")
+        queues = None
+
     for safe in ALL_SAFE_ADDRESSES:
-        logger.info("Running for %s on %s", safe[0], safe[1])
-        last_api_call_time, request_counter = check_api_limit(last_api_call_time, request_counter)
+        protocol, network_name, safe_address = safe[0], safe[1], safe[2]
+        logger.info("Running for %s on %s", protocol, network_name)
         try:
-            run_for_network(safe[1], safe[2], safe[0])
+            if queues is None:
+                safe_queues, safe_complete = fetch_queued_transactions([(network_name, safe_address)], max_retries=1)
+                queued_txs = safe_queues[(network_name, safe_address)]
+            else:
+                queued_txs, safe_complete = queues[(network_name, safe_address)], complete
+            check_for_pending_transactions(safe_address, network_name, protocol, queued_txs, safe_complete)
         except SafeApiQuotaExhausted as exc:
             # Every remaining safe would hit the same exhausted keys; stop the run.
             report_quota_exhausted(exc)
             return
-        request_counter += 1
+        except SafeApiAuthError:
+            # A rejected key fails every safe the same way: let the run crash and alert once.
+            raise
+        except Exception as exc:  # noqa: BLE001 - one safe's failure must not skip the rest
+            report_safe_failure(protocol, network_name, safe_address, exc)
+
+    try:
+        check_executed_nonces(ALL_SAFE_ADDRESSES)
+    except SafeApiQuotaExhausted as exc:
+        report_quota_exhausted(exc)
+    except SafeApiAuthError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - progress is kept, so the next run rechecks
+        report_executed_check_failure(exc)
 
 
 if __name__ == "__main__":

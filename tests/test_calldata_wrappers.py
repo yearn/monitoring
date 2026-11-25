@@ -7,7 +7,7 @@ from eth_abi import encode
 from eth_utils import function_signature_to_4byte_selector
 from eth_utils import to_checksum_address as _cs
 
-from utils.calldata.wrappers import InnerCall, is_wrapper_call, unwrap_calls
+from utils.calldata.wrappers import InnerCall, is_wrapper_call, try_unwrap_calls, unwrap_calls, unwrap_executed_calls
 
 ORACLE = _cs("0xcd7f45566bc0e7303fb92a93969bb4d3f6e662bb")
 CUSD = _cs("0xcccc62962d17b8914c62d74ffb843d73b2a3cccc")
@@ -30,6 +30,15 @@ def execute_batch(targets: list[str], payloads: list[str]) -> str:
         "executeBatch(address[],uint256[],bytes[],bytes32,bytes32)",
         ["address[]", "uint256[]", "bytes[]", "bytes32", "bytes32"],
         [targets, [0] * len(targets), [bytes.fromhex(p[2:]) for p in payloads], ZERO32, ZERO32],
+    )
+
+
+def pendle_aggregate(calls: list[tuple[str, int, str]], name: str = "aggregate") -> str:
+    """Pendle governance proxy ``aggregate`` (or ``aggregateWithScopedAccess``) of ``(target, value, data_hex)`` calls."""
+    return encode_call(
+        f"{name}((address,uint256,bytes)[])",
+        ["(address,uint256,bytes)[]"],
+        [[(target, value, bytes.fromhex(data[2:])) for target, value, data in calls]],
     )
 
 
@@ -98,6 +107,34 @@ class TestUnwrapCalls(unittest.TestCase):
         self.assertEqual(
             unwrap_calls(data), [InnerCall(ORACLE, upgrade_to_and_call(NEW_ORACLE_IMPL), "scheduleProposals")]
         )
+
+    def test_pendle_aggregate_yields_each_call_in_order(self) -> None:
+        data = pendle_aggregate([(ORACLE, 0, upgrade_to_and_call(NEW_ORACLE_IMPL)), (CUSD, 1, "0x8456cb59")])
+        self.assertTrue(data.startswith("0x1acaa198"))
+        self.assertEqual(
+            unwrap_calls(data),
+            [
+                InnerCall(ORACLE, upgrade_to_and_call(NEW_ORACLE_IMPL), "aggregate call 1"),
+                InnerCall(CUSD, "0x8456cb59", "aggregate call 2"),
+            ],
+        )
+        self.assertEqual(unwrap_executed_calls(data), unwrap_calls(data))
+
+    def test_pendle_aggregate_with_scoped_access_yields_each_call(self) -> None:
+        data = pendle_aggregate([(ORACLE, 0, upgrade_to_and_call(NEW_ORACLE_IMPL))], name="aggregateWithScopedAccess")
+        self.assertTrue(data.startswith("0xc45ce972"))
+        self.assertEqual(
+            unwrap_calls(data),
+            [InnerCall(ORACLE, upgrade_to_and_call(NEW_ORACLE_IMPL), "aggregateWithScopedAccess")],
+        )
+        self.assertEqual(unwrap_executed_calls(data), unwrap_calls(data))
+
+    def test_try_unwrap_separates_empty_batch_from_decode_failure(self) -> None:
+        empty = pendle_aggregate([])
+        self.assertEqual(try_unwrap_calls(empty), [])
+        self.assertIsNone(try_unwrap_calls(empty[:20]))
+        self.assertEqual(unwrap_calls(empty[:20]), [])
+        self.assertEqual(try_unwrap_calls(upgrade_to_and_call(NEW_ORACLE_IMPL)), [])
 
     def test_non_wrapper_and_empty_calldata(self) -> None:
         self.assertEqual(unwrap_calls(upgrade_to_and_call(NEW_ORACLE_IMPL)), [])

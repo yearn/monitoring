@@ -68,6 +68,14 @@ class TestDetectProxyUpgrade(unittest.TestCase):
         self.assertEqual(result.proxy_address, PROXY_ADDR)
         self.assertEqual(result.new_implementation, NEW_IMPL)
 
+    def test_proxy_admin_upgrade(self) -> None:
+        # OpenZeppelin v4 ProxyAdmin.upgrade(proxy, implementation)
+        data = encode_call("upgrade(address,address)", ["address", "address"], [PROXY_ADDR, NEW_IMPL])
+        admin = _cs("0xecda55c32966b00592ed3922e386063e1bc752c2")
+        self.assertEqual(
+            detect_proxy_upgrade(data, admin), ProxyUpgrade(proxy_address=PROXY_ADDR, new_implementation=NEW_IMPL)
+        )
+
     def test_non_upgrade_returns_none(self) -> None:
         data = encode_call("transfer(address,uint256)", ["address", "uint256"], [NEW_IMPL, 1])
         self.assertIsNone(detect_proxy_upgrade(data, PROXY_ADDR))
@@ -104,6 +112,12 @@ class TestDetectProxyUpgrade(unittest.TestCase):
                 "upgradeAndCall(address,address,bytes)",
                 ["address", "address", "bytes"],
                 [PROXY_ADDR, NEW_IMPL, b""],
+                _cs("0xecda55c32966b00592ed3922e386063e1bc752c2"),
+            ),
+            (
+                "upgrade(address,address)",
+                ["address", "address"],
+                [PROXY_ADDR, NEW_IMPL],
                 _cs("0xecda55c32966b00592ed3922e386063e1bc752c2"),
             ),
         ]

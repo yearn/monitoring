@@ -25,6 +25,12 @@ KNOWN_SELECTORS: dict[str, str] = {
     "0x3659cfe6": "upgradeTo(address)",
     "0x4f1ef286": "upgradeToAndCall(address,bytes)",
     "0x9623609d": "upgradeAndCall(address,address,bytes)",  # OpenZeppelin ProxyAdmin
+    "0x99a88ec4": "upgrade(address,address)",  # OpenZeppelin ProxyAdmin (v4)
+    "0x7eff275e": "changeProxyAdmin(address,address)",  # OpenZeppelin ProxyAdmin (v4)
+    "0x1f931c1c": "diamondCut((address,uint8,bytes4[])[],address,bytes)",  # EIP-2535
+    # Pendle governance proxy
+    "0x1acaa198": "aggregate((address,uint256,bytes)[])",
+    "0xc45ce972": "aggregateWithScopedAccess((address,uint256,bytes)[])",
     # Ownable
     "0xf2fde38b": "transferOwnership(address)",
     # Pausable

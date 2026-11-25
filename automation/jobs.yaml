@@ -136,9 +136,10 @@ profiles:
     description: "Safe multisig queue polling every 20 minutes."
     # Safe API budget: 50,000 requests per 30-day window per developer account.
     # Keys on the same account share that allowance; extra keys do not add quota.
-    # One request per Safe per run (the nonce is read over RPC): 15 Safes at
-    # 72 runs per day use 32,400 requests per 30-day window before retries.
-    # Re-check the budget when adding safes.
+    # One batched /queue request per run covers every Safe: 72 runs per day use
+    # about 2,160 requests per 30-day window before retries. Runs after an alerted
+    # tx executed add one hash lookup. A rejected or oversized shared listing
+    # falls back to individual Safe listings, each capped at five pages.
     # No env override: nonces land in the default nonces.txt under $CACHE_DIR.
     tasks:
       - { name: "safe",    script: protocols/safe/main.py }

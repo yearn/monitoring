@@ -10,21 +10,9 @@ safe_address_network_prefix = {
     "katana-main": "katana",
 }
 
-# Maps Safe API network names to their transaction-service base URL.
-safe_apis = {
-    "mainnet": "https://api.safe.global/tx-service/eth",
-    "base-main": "https://api.safe.global/tx-service/base",
-    "katana-main": "https://api.safe.global/tx-service/katana",
-}
-
-PROXY_UPGRADE_SIGNATURES = [
-    # Standard Proxy (OpenZeppelin, UUPS, Transparent)
-    "3659cfe6",  # bytes4(keccak256("upgradeTo(address)"))
-    "4f1ef286",  # upgradeToAndCall(address,bytes)
-    "f2fde38b",  # changeProxyAdmin(address,address)
-    # Diamond Proxy (EIP-2535)
-    "1f931c1c",  # diamondCut((address,uint8,bytes4[])[],address,bytes)
-]
+# Safe Queue Service: one base URL for every chain; the chain goes in the ``chainId`` query parameter.
+# Docs: https://docs.safe.global/core-api/safe-queue-service-overview
+SAFE_QUEUE_API_URL = "https://api.safe.global/queue"
 
 # Watched non-yearn protocol multisigs. Format: [protocol, network, address, optional label].
 # The protocol field doubles as the Telegram channel key: send_telegram_message resolves
