@@ -391,9 +391,16 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         safe_main = self._import_safe_main()
         transfer = "0xa9059cbb" + "00" * 64
         data = pack_multisend([(0, ORACLE, 0, transfer), (0, ORACLE, 0, upgrade_to_and_call(NEW_ORACLE_IMPL))])
-        tx = {**self._tx(10), "to": MULTISEND_CALL_ONLY.lower(), "operation": 1, "data": data}
-        upgrades = safe_main._find_safe_tx_upgrades(tx, MULTISEND_CALL_ONLY, data)
-        self.assertEqual([(u.proxy_address, u.via) for u in upgrades], [(ORACLE, "multiSend call 2")])
+        # v1.3.0, plus the v1.5.0 MultiSendCallOnly and MultiSend deployments.
+        for multisend in (
+            MULTISEND_CALL_ONLY,
+            "0xA83c336B20401Af773B6219BA5027174338D1836",
+            "0x218543288004CD07832472D464648173c77D7eB7",
+        ):
+            with self.subTest(multisend=multisend):
+                tx = {**self._tx(10), "to": multisend.lower(), "operation": 1, "data": data}
+                upgrades = safe_main._find_safe_tx_upgrades(tx, multisend, data)
+                self.assertEqual([(u.proxy_address, u.via) for u in upgrades], [(ORACLE, "multiSend call 2")])
 
     def test_upgrade_detection_failure_does_not_block_the_alert(self):
         safe_main = self._import_safe_main()

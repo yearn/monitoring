@@ -116,15 +116,18 @@ class TestDecodeMultisend(unittest.TestCase):
 
 class TestExtractInnerCalls(unittest.TestCase):
     def test_official_multisend_deployments_are_decoded(self) -> None:
-        # v1.3.0 canonical + EIP-155, v1.4.1, and the MultiSend variants (safe-global/safe-deployments).
+        # Every official multisend deployment in safe-global/safe-deployments: v1.1.1, v1.3.0 canonical +
+        # EIP-155, v1.4.1 and v1.5.0 (older releases ship none).
         for to in (
             MULTISEND_CALL_ONLY,
             "0xA1dabEF33b3B82c7814B6D82A79e50F4AC44102B",
             "0x9641d764fc13c8B624c04430C7356C1C7C8102e2",
+            "0xA83c336B20401Af773B6219BA5027174338D1836",
             "0x8D29bE29923b68abfDD21e541b9374737B49cdAD",
             "0xA238CBeb142c10Ef7Ad8442C6D1f9E89e07e7761",
             "0x998739BFdAAdde7C933B942a68053933098f9EDa",
             "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
+            "0x218543288004CD07832472D464648173c77D7eB7",
         ):
             with self.subTest(to=to):
                 calls = extract_inner_calls(multisend_tx(YCHAD_2308_DATA, to=to))
