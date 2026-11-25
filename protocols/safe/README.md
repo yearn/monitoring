@@ -10,6 +10,11 @@ later at a lower pending nonce, or a replacement proposed at a nonce that alread
 own alert. Transactions below the Safe's onchain nonce never alert: a competing tx at that nonce
 already executed. Alerted hashes are pruned once the onchain nonce passes them.
 
+An alert is marked handled after Telegram accepts it, so a skipped delivery stays eligible on
+the next poll. The first successful queue poll seeds routine proposals covered by the legacy
+nonce cutoff. Yearn proposals from unexpected proposers stay eligible for a critical alert, even
+if their nonce is covered by the legacy cache.
+
 Each Safe costs one Queue Service request per run (`limit=100`, highest nonce first). A further
 page is fetched only when the first is full and its lowest nonce is still at or above the onchain
 nonce, up to 5 pages.

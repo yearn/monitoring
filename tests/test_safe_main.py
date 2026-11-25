@@ -59,7 +59,7 @@ class TestSafePendingTransactions(unittest.TestCase):
         self.safe_main = self._import_safe_main()
 
     def _pending(
-        self, txs: list[dict], current_nonce: int | None, legacy_nonce: int = 0, network: str = "mainnet"
+        self, txs: list[dict], current_nonce: int | None, legacy_nonce: int | None = None, network: str = "mainnet"
     ) -> list[int]:
         """Run ``get_pending_transactions`` on ``txs`` and return the pending nonces."""
         with (
@@ -162,7 +162,7 @@ class TestSafePendingTransactions(unittest.TestCase):
             patch.object(self.safe_main, "get_safe_transactions", return_value=[replacement, original]),
             patch.object(self.safe_main, "YEARN_EXPECTED_PROPOSERS", {("mainnet", self.SAFE.lower()): {bot}}),
             patch.object(self.safe_main, "_explain_safe_tx", return_value=None),
-            patch.object(self.safe_main, "send_telegram_message") as mock_send,
+            patch.object(self.safe_main, "send_telegram_message", return_value=True) as mock_send,
         ):
             self.safe_main.check_for_pending_transactions(self.SAFE, "mainnet", "YEARN_MS")
 
@@ -172,6 +172,28 @@ class TestSafePendingTransactions(unittest.TestCase):
         self.assertFalse(disable_notification)
         # Both txs at nonce 101 are now handled; the next run alerts on neither.
         self.assertEqual(self._pending([replacement, original], current_nonce=100), [])
+
+    def test_migration_keeps_unexpected_replacement_eligible_for_critical_alert(self):
+        bot = "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"
+        original = queue_tx(101, proposer=bot)
+        replacement = queue_tx(101, safeTxHash=safe_tx_hash(101, variant=1), proposer="0x" + "66" * 20)
+        safe_main = self.safe_main
+        safe_main.write_last_value_to_file(safe_main.nonces_filename, self.SAFE, 101)
+
+        with (
+            patch.object(safe_main, "get_safe_current_nonce", return_value=100),
+            patch.object(safe_main, "get_safe_transactions", return_value=[replacement, original]),
+            patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {("mainnet", self.SAFE.lower()): {bot}}),
+            patch.object(safe_main, "_explain_safe_tx", return_value=None),
+            patch.object(safe_main, "send_telegram_message", return_value=True) as mock_send,
+        ):
+            safe_main.check_for_pending_transactions(self.SAFE, "mainnet", "YEARN_MS")
+            self.assertEqual(safe_main.get_pending_transactions(self.SAFE, "mainnet"), [])
+
+        mock_send.assert_called_once()
+        message, _protocol, disable_notification = mock_send.call_args.args
+        self.assertIn("UNEXPECTED PROPOSER", message)
+        self.assertFalse(disable_notification)
 
     def test_txs_without_a_hash_fall_back_to_nonce_dedup(self):
         self._alerted(queue_tx(101, safeTxHash=None))
@@ -196,8 +218,9 @@ class TestSafePendingTransactions(unittest.TestCase):
         self.assertEqual(self._pending([queue_tx(101)], current_nonce=100), [101])
 
     def test_first_run_seeds_from_the_old_nonce_cache(self):
-        """Switching to hash dedup must not re-alert txs the old nonce cache already covered."""
-        txs = [queue_tx(103), queue_tx(102), queue_tx(101), queue_tx(100)]
+        """The old nonce cutoff seeds routine proposals during the first successful poll."""
+        bot = "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"
+        txs = [queue_tx(nonce, proposer=bot) for nonce in (103, 102, 101, 100)]
 
         self.assertEqual(self._pending(txs, current_nonce=101, legacy_nonce=102), [103])
 
@@ -207,6 +230,42 @@ class TestSafePendingTransactions(unittest.TestCase):
         )
         # Once seeded, the old cache is no longer read.
         self.assertEqual(self._pending(txs, current_nonce=101, legacy_nonce=10**6), [103])
+
+    def test_fresh_safe_can_alert_on_nonce_zero(self):
+        safe_main = self.safe_main
+        first_tx = queue_tx(0)
+        with (
+            patch.object(safe_main, "get_safe_current_nonce", return_value=0),
+            patch.object(safe_main, "get_safe_transactions", return_value=[first_tx]),
+        ):
+            self.assertEqual(safe_main.get_pending_transactions(self.SAFE, "mainnet"), [first_tx])
+
+    def test_failed_queue_pages_do_not_complete_migration(self):
+        safe_main = self.safe_main
+        bot = "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"
+        safe_main.write_last_value_to_file(safe_main.nonces_filename, self.SAFE, 200)
+        first_page = Mock(status_code=200)
+        first_page.json.return_value = {"results": [queue_tx(nonce, proposer=bot) for nonce in range(200, 100, -1)]}
+        last_page = Mock(status_code=200)
+        last_page.json.return_value = {"results": [queue_tx(100, proposer=bot)]}
+        unavailable = Mock(status_code=503)
+        responses = [unavailable] * 3 + [first_page] + [unavailable] * 3 + [first_page, last_page]
+
+        with (
+            patch.object(safe_main, "get_safe_current_nonce", return_value=100),
+            patch.object(safe_main.requests, "get", side_effect=responses),
+            patch.object(safe_main.time, "sleep"),
+        ):
+            for offset in (0, 100):
+                with self.assertRaisesRegex(safe_main.SafeApiRequestError, f"at offset {offset}"):
+                    safe_main.get_pending_transactions(self.SAFE, "mainnet")
+                self.assertIsNone(safe_main.load_handled_txs(self.SAFE, "mainnet"))
+            self.assertEqual(safe_main.get_pending_transactions(self.SAFE, "mainnet"), [])
+
+        self.assertEqual(
+            safe_main.load_handled_txs(self.SAFE, "mainnet"),
+            {(nonce, safe_tx_hash(nonce)) for nonce in range(100, 201)},
+        )
 
     def test_more_than_ten_eligible_txs_are_all_returned(self):
         txs = [queue_tx(nonce) for nonce in range(124, 99, -1)]  # 25 queued, descending
@@ -293,7 +352,7 @@ class TestCheckForPendingTransactions(unittest.TestCase):
             patch.object(safe_main, "get_pending_transactions", return_value=pending),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
             patch.object(safe_main, "_explain_safe_tx", return_value=None),
-            patch.object(safe_main, "send_telegram_message") as mock_send,
+            patch.object(safe_main, "send_telegram_message", return_value=True) as mock_send,
             patch.object(safe_main, "mark_tx_handled") as mock_mark,
         ):
             safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
@@ -311,7 +370,7 @@ class TestCheckForPendingTransactions(unittest.TestCase):
             patch.object(safe_main, "get_safe_transactions", return_value=queued),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
             patch.object(safe_main, "_explain_safe_tx", return_value=None),
-            patch.object(safe_main, "send_telegram_message", side_effect=[None, RuntimeError("telegram down")]),
+            patch.object(safe_main, "send_telegram_message", side_effect=[True, RuntimeError("telegram down")]),
         ):
             with self.assertRaises(RuntimeError):
                 safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
@@ -320,6 +379,26 @@ class TestCheckForPendingTransactions(unittest.TestCase):
 
         self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), {safe_main._tx_id(queued[0])})
         self.assertEqual(pending, [queued[1]])
+
+    def test_skipped_telegram_delivery_retries_on_next_poll(self):
+        safe_main = self._import_safe_main()
+        safe_address = "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52"
+        tx = self._tx(2281)
+
+        with (
+            patch.object(safe_main, "get_safe_current_nonce", return_value=2281),
+            patch.object(safe_main, "get_safe_transactions", return_value=[tx]),
+            patch.object(safe_main, "_explain_safe_tx", return_value=None),
+            patch.object(safe_main, "send_telegram_message", side_effect=[False, True]) as mock_send,
+        ):
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+            self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), set())
+
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+            self.assertEqual(safe_main.get_pending_transactions(safe_address, "mainnet"), [])
+
+        self.assertEqual(mock_send.call_count, 2)
+        self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), {safe_main._tx_id(tx)})
 
     def test_no_cache_write_when_no_pending(self):
         safe_main = self._import_safe_main()
@@ -348,7 +427,7 @@ class TestCheckForPendingTransactions(unittest.TestCase):
             patch.object(safe_main, "get_pending_transactions", return_value=pending),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
             patch.object(safe_main, "_explain_safe_tx", return_value=None),
-            patch.object(safe_main, "send_telegram_message") as mock_send,
+            patch.object(safe_main, "send_telegram_message", return_value=True) as mock_send,
             patch.object(safe_main, "mark_tx_handled") as mock_write,
         ):
             safe_main.check_for_pending_transactions(safe_address, "mainnet", "EULER")

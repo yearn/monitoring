@@ -33,8 +33,10 @@ def write_last_queued_id_to_file(protocol: str, proposal_id: Union[int, str]) ->
     write_last_value_to_file(cache_filename, protocol, proposal_id)
 
 
-def get_last_executed_nonce_from_file(safe_address: str) -> int:
-    return int(get_last_value_for_key_from_file(nonces_filename, safe_address))
+def get_last_executed_nonce_from_file(safe_address: str) -> int | None:
+    """Read the legacy Safe nonce, returning None when the cache key is missing."""
+    value = get_last_value_for_key_from_file(nonces_filename, safe_address)
+    return None if value == 0 else int(value)
 
 
 def get_last_executed_morpho_from_file(vault_address: str, market_id: str, value_type: str) -> int:

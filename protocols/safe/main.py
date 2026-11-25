@@ -135,7 +135,7 @@ class SafeApiAuthError(Exception):
 
 
 class SafeApiRequestError(Exception):
-    """Raised when the Safe API rejects a request it should accept (e.g. 422), so the safe is not monitored."""
+    """Raised when the Safe API rejects a request or retries for a required page run out."""
 
 
 def _next_api_key() -> str | None:
@@ -200,6 +200,8 @@ def get_safe_transactions(
     max_retries: int = 3,
     min_nonce: int | None = None,
     max_pages: int = SAFE_QUEUE_MAX_PAGES,
+    *,
+    require_all_pages: bool = False,
 ) -> list[dict]:
     """List a Safe's multisig transactions from the Safe Queue Service, highest nonce first.
 
@@ -217,6 +219,7 @@ def get_safe_transactions(
         max_retries: Attempts per page for transport errors, rate limits and 5xx responses.
         min_nonce: Lowest nonce the caller wants. ``None`` fetches only the first page.
         max_pages: Upper bound on pages fetched.
+        require_all_pages: Raise if retries run out for a requested page within the page cap.
 
     Returns:
         The transactions fetched before retries ran out (``[]`` if the first page failed).
@@ -225,14 +228,17 @@ def get_safe_transactions(
         SafeApiQuotaExhausted: When every API key has used up its quota; retrying
             would only burn requests until the window resets.
         SafeApiAuthError: When the service rejects the API key.
-        SafeApiRequestError: When the service rejects the request (e.g. 422).
+        SafeApiRequestError: When the service rejects the request or a required page fails.
     """
     results: list[dict] = []
     for page in range(max_pages):
-        page_results = _get_safe_transactions_page(
-            safe_address, network_name, executed, limit, page * limit, max_retries
-        )
+        offset = page * limit
+        page_results = _get_safe_transactions_page(safe_address, network_name, executed, limit, offset, max_retries)
         if page_results is None:
+            if require_all_pages:
+                raise SafeApiRequestError(
+                    f"Safe API retries exhausted for {safe_address} on {network_name} at offset {offset}"
+                )
             break
         results.extend(page_results)
         if min_nonce is None or len(page_results) < limit or int(page_results[-1]["nonce"]) < min_nonce:
@@ -429,14 +435,23 @@ def mark_tx_handled(safe_address: str, network_name: str, tx: dict) -> None:
     save_handled_txs(safe_address, network_name, handled)
 
 
-def _seed_handled_from_nonce_cache(safe_address: str, queued_txs: list[dict]) -> set[TxId]:
-    """Migrate from the old last-alerted-nonce cache: txs at or below it were already alerted.
+def _seed_handled_from_nonce_cache(safe_address: str, network_name: str, queued_txs: list[dict]) -> set[TxId]:
+    """Seed routine txs that the old nonce cutoff covered.
 
-    Runs once per Safe (when it has no handled-tx entry yet) so switching to hash
-    deduplication does not re-alert every tx that is currently queued.
+    The old cache cannot tell which hash at a nonce reached Telegram. On Yearn Safes,
+    leave unexpected-proposer txs eligible so critical alerts can run after migration.
     """
     last_alerted_nonce = get_last_executed_nonce_from_file(safe_address)
-    return {_tx_id(tx) for tx in queued_txs if int(tx["nonce"]) <= last_alerted_nonce}
+    if last_alerted_nonce is None:
+        return set()
+
+    expected_proposers = YEARN_EXPECTED_PROPOSERS.get((network_name, safe_address.lower()), set())
+    return {
+        _tx_id(tx)
+        for tx in queued_txs
+        if int(tx["nonce"]) <= last_alerted_nonce
+        and (not expected_proposers or not expected_proposers.isdisjoint(_proposer_and_delegate(tx)))
+    }
 
 
 def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]:
@@ -467,9 +482,14 @@ def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]
             network_name,
         )
         return []
+    stored = load_handled_txs(safe_address, network_name)
+    transactions = get_safe_transactions(
+        safe_address, network_name, executed=False, min_nonce=current_safe_nonce, require_all_pages=stored is None
+    )
+
     queued_txs: list[dict] = []
     seen: set[TxId] = set()
-    for tx in get_safe_transactions(safe_address, network_name, executed=False, min_nonce=current_safe_nonce):
+    for tx in transactions:
         tx_id = _tx_id(tx)
         # Pages fetched one after another can overlap when the queue changes in between.
         if _is_executed_safe_tx(tx) or tx_id[0] < current_safe_nonce or tx_id in seen:
@@ -477,8 +497,7 @@ def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]
         seen.add(tx_id)
         queued_txs.append(tx)
 
-    stored = load_handled_txs(safe_address, network_name)
-    handled = _seed_handled_from_nonce_cache(safe_address, queued_txs) if stored is None else stored
+    handled = _seed_handled_from_nonce_cache(safe_address, network_name, queued_txs) if stored is None else stored
     handled = {tx_id for tx_id in handled if tx_id[0] >= current_safe_nonce}
     if handled != stored:
         save_handled_txs(safe_address, network_name, handled)
@@ -725,10 +744,8 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
             # Silent for routine Yearn multisig txs (expected proposer); loud
             # for unexpected proposers and for all non-Yearn protocol alerts.
             disable_notification = is_yearn_multisig and not unexpected_proposer
-            send_telegram_message(message, protocol, disable_notification)
-            # Persist after each delivered alert, so a later failure in this run
-            # cannot re-send the alerts already delivered.
-            mark_tx_handled(safe_address, network_name, tx)
+            if send_telegram_message(message, protocol, disable_notification):
+                mark_tx_handled(safe_address, network_name, tx)
     else:
         logger.info("No new queued transactions for %s on %s", safe_address, network_name)
 
