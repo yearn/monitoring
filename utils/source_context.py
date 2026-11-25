@@ -41,6 +41,11 @@ MAX_BODY_CHARS = 2000
 # Both providers share the persistent cache, so source, ABI and verification
 # consumers can reuse the same response across processes.
 _source_cache: dict[tuple[int, str], ContractLookup] = {}
+# Keys whose unbounded lookup could not establish a result (no Etherscan key, a provider
+# error). Readers without a timeout, retry or deadline budget reuse that outcome for the
+# rest of the process instead of repeating both provider requests for every consumer.
+# Budgeted lookups (the upgrade diff) ignore it and always try again.
+_unknown_lookups: set[tuple[int, str]] = set()
 _source_cache_hits = 0
 _source_cache_misses = 0
 _source_cache_lock = threading.RLock()
@@ -211,6 +216,30 @@ def _lookup_providers(
     return False if sourcify is False and etherscan is False else None
 
 
+def _memory_lookup(
+    cache_key: tuple[int, str], require_constructor_arguments: bool, unbounded: bool
+) -> tuple[bool, ContractLookup]:
+    """Answer a lookup from this process's memory.
+
+    Args:
+        cache_key: Chain ID and lowercase address.
+        require_constructor_arguments: Whether the caller needs constructor arguments.
+        unbounded: Whether the caller has no timeout, retry or deadline budget.
+
+    Returns:
+        Whether memory answered, and the cached result (the stale record on a miss).
+    """
+    with _source_cache_lock:
+        cached = _source_cache.get(cache_key)
+        if _is_usable(cached, require_constructor_arguments):
+            _record_cache_event("memory", True, cache_key)
+            return True, cached
+        if unbounded and cached is None and cache_key in _unknown_lookups:
+            _record_cache_event("memory", True, cache_key)
+            return True, None
+        return False, cached
+
+
 def _lookup_contract(
     chain_id: int,
     address: str,
@@ -222,18 +251,15 @@ def _lookup_contract(
 ) -> ContractLookup:
     """Share source and verification results across readers and cron runs."""
     cache_key = (chain_id, address.lower())
-    with _source_cache_lock:
-        cached = _source_cache.get(cache_key)
-        if _is_usable(cached, require_constructor_arguments):
-            _record_cache_event("memory", True, cache_key)
-            return cached
+    unbounded = timeout is None and retries is None and deadline is None
+    hit, cached = _memory_lookup(cache_key, require_constructor_arguments, unbounded)
+    if hit:
+        return cached
 
     with _lock_for_key(cache_key):
-        with _source_cache_lock:
-            cached = _source_cache.get(cache_key)
-            if _is_usable(cached, require_constructor_arguments):
-                _record_cache_event("memory", True, cache_key)
-                return cached
+        hit, cached = _memory_lookup(cache_key, require_constructor_arguments, unbounded)
+        if hit:
+            return cached
 
         disk_key = _disk_key(chain_id, address)
         disk_val = _source_disk_cache.get(disk_key)
@@ -255,9 +281,14 @@ def _lookup_contract(
             deadline=deadline,
             require_constructor_arguments=require_constructor_arguments,
         )
-        if result is not None:
+        if result is None:
+            if unbounded:
+                with _source_cache_lock:
+                    _unknown_lookups.add(cache_key)
+        else:
             with _source_cache_lock:
                 _source_cache[cache_key] = result
+                _unknown_lookups.discard(cache_key)
             if isinstance(result, VerifiedContract) and result is not previous:
                 _source_disk_cache.set_positive(disk_key, result.to_cache_dict())
             elif result is False:
@@ -299,6 +330,34 @@ def fetch_verified_contract(
         deadline=deadline,
         require_constructor_arguments=require_constructor_arguments,
     )
+    return result if isinstance(result, VerifiedContract) else None
+
+
+def fetch_contract_from_provider(
+    chain_id: int, address: str, provider: str, *, timeout: float, retries: int = 0
+) -> VerifiedContract | None:
+    """Fetch one provider's verified record directly, bypassing the shared cache.
+
+    The shared cache keeps one preferred record per address. A caller comparing two
+    contracts uses this to read both from the same provider, because providers lay
+    out file paths and compiler versions differently.
+
+    Args:
+        chain_id: Chain of the deployed contract.
+        address: Address of the deployed contract.
+        provider: ``"Sourcify"`` or ``"Etherscan"``.
+        timeout: Timeout in seconds per HTTP attempt.
+        retries: HTTP retry count.
+
+    Returns:
+        That provider's verified record, or None when it has none or the request fails.
+    """
+    if provider == "Sourcify":
+        result = fetch_sourcify_contract(chain_id, address, timeout=timeout)
+    elif provider == "Etherscan":
+        result = _fetch_etherscan_contract(chain_id, address, timeout=timeout, retries=retries)
+    else:
+        return None
     return result if isinstance(result, VerifiedContract) else None
 
 
@@ -928,6 +987,7 @@ def reset_cache() -> None:
     global _source_cache_hits, _source_cache_misses
     with _source_cache_lock:
         _source_cache.clear()
+        _unknown_lookups.clear()
         _source_key_locks.clear()
         _source_cache_hits = 0
         _source_cache_misses = 0

@@ -12,7 +12,7 @@ from utils.chains import EXPLORER_URLS
 from utils.disk_cache import DiskCache
 from utils.file_lock import LockTimeout, file_lock
 from utils.logger import get_logger
-from utils.source_context import fetch_verified_contract
+from utils.source_context import fetch_contract_from_provider, fetch_verified_contract
 from utils.source_diff import diff_compiler_settings, pair_moved_sources
 from utils.verified_contract import VerifiedContract
 from utils.wavey_gist import upload_to_gist
@@ -204,6 +204,7 @@ def _create_upgrade_diff(old_impl: str, new_impl: str, chain_id: int, deadline: 
     new = _fetch_for_diff(chain_id, new_impl, deadline)
     if not new or not new.sources:
         return ""
+    old, new = _same_provider_pair(chain_id, (old_impl, old), (new_impl, new), deadline)
 
     contract_name = new.contract_name if new.contract_name.isidentifier() else new_impl
     title = f"{contract_name} upgrade source diff"
@@ -214,6 +215,11 @@ def _create_upgrade_diff(old_impl: str, new_impl: str, chain_id: int, deadline: 
         f"- Old implementation {old_link} ({_source_label(old)})\n"
         f"- New implementation {new_link} ({_source_label(new)})\n\n"
     )
+    if old.provider != new.provider:
+        body += (
+            "> The implementations come from different source providers. File paths, flattening and "
+            "compiler version strings can differ even where the deployed code does not.\n\n"
+        )
     body += _format_source_diff(old.sources, new.sources)
     if deployment := _format_deployment_changes(old, new):
         body += "\n\n" + deployment
@@ -227,6 +233,42 @@ def _create_upgrade_diff(old_impl: str, new_impl: str, chain_id: int, deadline: 
         )
         return ""
     return upload_to_gist(body, title=title, timeout=timeout, retries=0)
+
+
+def _same_provider_pair(
+    chain_id: int,
+    old: tuple[str, VerifiedContract],
+    new: tuple[str, VerifiedContract],
+    deadline: float,
+) -> tuple[VerifiedContract, VerifiedContract]:
+    """Read both implementations from one source provider when they came from different ones.
+
+    Cached records are usually from Etherscan and new lookups from Sourcify. The
+    providers name files and compiler versions differently, so a mixed pair would
+    report changes that are only formatting. The new implementation is refetched
+    from the old one's provider first, then the old from the new one's provider.
+
+    Args:
+        chain_id: Chain on which both implementations are deployed.
+        old: Current implementation address and its verified record.
+        new: Proposed implementation address and its verified record.
+        deadline: Monotonic deadline for the alert's gists.
+
+    Returns:
+        The old and new records, from one provider when either refetch succeeded.
+    """
+    (old_impl, old_record), (new_impl, new_record) = old, new
+    if old_record.provider == new_record.provider:
+        return old_record, new_record
+    for address, provider, keep_old in ((new_impl, old_record.provider, True), (old_impl, new_record.provider, False)):
+        timeout = _request_timeout(deadline)
+        if timeout is None:
+            break
+        aligned = fetch_contract_from_provider(chain_id, address, provider, timeout=timeout)
+        if aligned and aligned.sources:
+            return (old_record, aligned) if keep_old else (aligned, new_record)
+    logger.info("Source diff for chain=%s old=%s new=%s mixes source providers", chain_id, old_impl, new_impl)
+    return old_record, new_record
 
 
 def _source_label(contract: VerifiedContract) -> str:

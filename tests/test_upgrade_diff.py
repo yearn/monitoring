@@ -140,6 +140,39 @@ def test_unchanged_deployment_is_not_listed(constructor_arguments: tuple[str | N
     assert "constructor arguments: differ" not in body
 
 
+@pytest.mark.parametrize("aligned_side", ["new", "old", None])
+def test_mixed_providers_are_compared_from_one_provider(aligned_side: str | None) -> None:
+    """Refetch one side so formatting differences between providers do not show as changes."""
+    etherscan_old = replace(_verified({"Vault.vy": "# old\n"}), compiler_version="v0.3.10")
+    sourcify_new = replace(
+        _verified({"contracts/Vault.vy": "# new\n"}), compiler_version="0.3.10+commit.9136169", provider="Sourcify"
+    )
+    etherscan_new = replace(
+        sourcify_new, sources={"Vault.vy": "# new\n"}, compiler_version="v0.3.10", provider="Etherscan"
+    )
+    sourcify_old = replace(sourcify_new, sources={"contracts/Vault.vy": "# old\n"})
+    responses = {"new": [etherscan_new], "old": [None, sourcify_old], None: [None, None]}[aligned_side]
+    with (
+        patch("utils.upgrade_diff.fetch_verified_contract", side_effect=[etherscan_old, sourcify_new]),
+        patch("utils.upgrade_diff.fetch_contract_from_provider", side_effect=responses) as refetch,
+        patch("utils.upgrade_diff.upload_to_gist", return_value=GIST_URL) as upload,
+    ):
+        assert publish_upgrade_diff(OLD_IMPL, NEW_IMPL, 1) == GIST_URL
+
+    assert [call.args for call in refetch.call_args_list] == [(1, NEW_IMPL, "Etherscan"), (1, OLD_IMPL, "Sourcify")][
+        : len(responses)
+    ]
+    assert all(0 < call.kwargs["timeout"] <= REQUEST_TIMEOUT_SECONDS for call in refetch.call_args_list)
+    body = upload.call_args.args[0]
+    assert ("different source providers" in body) == (aligned_side is None)
+    if aligned_side is None:
+        return
+    path = "Vault.vy" if aligned_side == "new" else "contracts/Vault.vy"
+    assert f"--- a/{path}\n+++ b/{path}" in body
+    assert "/dev/null" not in body
+    assert "compiler:" not in body
+
+
 def test_moved_files_keep_paths_and_unusual_line_breaks() -> None:
     """Pair moves and treat Unicode line separators as part of their source lines."""
     old = _verified({"old/Vault.sol": "// before\u2028keep\n", "old/I.sol": "interface I {}\n"})

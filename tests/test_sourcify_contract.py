@@ -103,7 +103,7 @@ def test_etherscan_supplies_missing_source_or_constructor_arguments(
 
 
 def test_only_confirmed_misses_are_cached_as_unverified(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A provider outage keeps verification unknown and allows a later lookup."""
+    """A provider outage keeps verification unknown and allows a lookup in a later run."""
     etherscan = _etherscan_response("")
     monkeypatch.setenv("ETHERSCAN_TOKEN", "test-key")
     monkeypatch.setattr("utils.source_context.fetch_json", etherscan)
@@ -111,11 +111,36 @@ def test_only_confirmed_misses_are_cached_as_unverified(monkeypatch: pytest.Monk
         unavailable.setattr("utils.sourcify_contract.request_with_retry", Mock(side_effect=Timeout))
         assert get_verification_status(1, ADDRESS) is None
 
+    reset_cache()
     assert get_verification_status(1, ADDRESS) is False
     reset_cache()
     assert fetch_verified_contract(1, ADDRESS) is None
     assert get_verification_status(1, ADDRESS) is False
     assert etherscan.call_count == 2
+
+
+@pytest.mark.parametrize("etherscan_key", [False, True])
+def test_unknown_result_is_reused_by_unbounded_readers(monkeypatch: pytest.MonkeyPatch, etherscan_key: bool) -> None:
+    """Repeat readers do not refetch an unknown result, but a budgeted lookup still tries."""
+    sourcify = Mock(side_effect=Timeout)
+    etherscan = Mock(return_value=None)
+    monkeypatch.setattr("utils.sourcify_contract.request_with_retry", sourcify)
+    monkeypatch.setattr("utils.source_context.fetch_json", etherscan)
+    if etherscan_key:
+        monkeypatch.setenv("ETHERSCAN_TOKEN", "test-key")
+
+    assert fetch_abi_entries(1, ADDRESS) is None
+    assert fetch_verified_contract(1, ADDRESS) is None
+    assert get_verification_status(1, ADDRESS) is None
+    assert sourcify.call_count == 1
+    assert etherscan.call_count == int(etherscan_key)
+
+    sourcify.side_effect = None
+    sourcify.return_value = _sourcify_response()
+    record = fetch_verified_contract(1, ADDRESS, timeout=5, retries=0)
+    assert record is not None
+    assert sourcify.call_count == 2
+    assert get_verification_status(1, ADDRESS) is True
 
 
 def test_fallback_uses_remaining_alert_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
