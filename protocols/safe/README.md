@@ -7,8 +7,9 @@ The monitor polls configured Safe queues every 20 minutes through the
 
 Each queued transaction alerts once, keyed by its `safeTxHash` per chain and Safe. A tx queued
 later at a lower pending nonce, or a replacement proposed at a nonce that already alerted, gets its
-own alert. Transactions below the Safe's onchain nonce never alert: a competing tx at that nonce
-already executed. Alerted hashes are pruned once the onchain nonce passes them.
+own alert. The Queue Service's `/queue` endpoint returns only txs that can still execute (not
+executed, nonce at or above the Safe's current nonce), so dead slots never alert. Alerted hashes
+are pruned once they leave the queue; a tx that leaves and comes back alerts again.
 
 An alert is marked handled after Telegram accepts it, so a skipped delivery stays eligible on
 the next poll. A tx whose protocol has no Telegram destination configured is left queued before
@@ -17,9 +18,9 @@ destination is set. The legacy nonce cache is not read: it records only a nonce,
 which proposal at that nonce was delivered. The first poll after rollout therefore alerts every
 queued tx once, which can repeat alerts the old monitor already sent.
 
-Each Safe costs one Queue Service request per run (`limit=100`, highest nonce first). A further
-page is fetched only when the first is full and its lowest nonce is still at or above the onchain
-nonce, up to 5 pages.
+One Queue Service request per run lists every watched Safe (`safes=address:chainId`, repeated;
+`limit=100`, lowest nonce first). A further page is fetched only while the response has a `next`
+link, up to 5 pages; a listing cut off at that cap alerts what it has but prunes nothing.
 
 Alerts cover queued transactions and surface proxy upgrades, including upgrades inside multisend
 and timelock calls. The Queue Service does not decode calldata, so the monitor decodes multisend
@@ -40,8 +41,11 @@ when `proposedVia` is `DELEGATE`. A nested-owner signer in `proposedBy` does not
   wrappers. Calldata the rule
   cannot fully inspect alerts rather than being skipped.
 
-If one Safe cannot be checked (for example the API rejects the request), the monitor sends an
-internal error alert and continues with the remaining Safes.
+If the service rejects the batched request (for example a Safe it cannot resolve), the monitor
+queries each Safe on its own, so only the bad one goes unchecked; this costs one request per Safe
+until the watchlist is fixed. A Safe that still fails gets an internal error alert and the rest
+continue. When retries run out (an outage), the run fails and the crash alert goes to the internal
+errors channel on every run until the service is back.
 
 The **Diff** link opens a Wavey Gist, published with `WAVEY_GIST_API_KEY`, with the verified
 source diff of both implementations. Any compiler, linked-library or constructor-argument changes

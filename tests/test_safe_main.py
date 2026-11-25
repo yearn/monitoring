@@ -8,6 +8,8 @@ import pytest
 import requests
 from web3 import Web3
 
+SAFE = "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52"
+
 
 @pytest.fixture(autouse=True)
 def _isolate_safe_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -31,6 +33,7 @@ def queue_tx(nonce: int, **fields) -> dict:
     """A Safe Queue Service row: string numerics, lowercase addresses, ``created``."""
     return {
         "safeTxHash": safe_tx_hash(nonce),
+        "safe": SAFE.lower(),
         "nonce": str(nonce),
         "chainId": "1",
         "to": "0x0000000000000000000000000000000000000abc",
@@ -47,106 +50,49 @@ def queue_tx(nonce: int, **fields) -> dict:
     }
 
 
+def queue_response(txs: list[dict], next_url: str | None = None) -> Mock:
+    """A 200 response from the ``/queue`` endpoint."""
+    response = Mock(status_code=200)
+    response.json.return_value = {"count": len(txs), "next": next_url, "previous": None, "results": txs}
+    return response
+
+
+def import_safe_main():
+    with patch.dict(os.environ, {"SAFE_API_KEY": "test-key"}):
+        import protocols.safe.main as safe_main
+
+        return importlib.reload(safe_main)
+
+
 class TestSafePendingTransactions(unittest.TestCase):
     """Which queued txs ``get_pending_transactions`` returns, against the real (per-test) cache."""
 
-    SAFE = "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52"
-
-    def _import_safe_main(self):
-        with patch.dict(os.environ, {"SAFE_API_KEY": "test-key"}):
-            import protocols.safe.main as safe_main
-
-            return importlib.reload(safe_main)
+    SAFE = SAFE
 
     def setUp(self) -> None:
-        self.safe_main = self._import_safe_main()
+        self.safe_main = import_safe_main()
 
-    def _pending(self, txs: list[dict], current_nonce: int | None, network: str = "mainnet") -> list[int]:
+    def _pending(self, txs: list[dict], network: str = "mainnet", complete: bool = True) -> list[int]:
         """Run ``get_pending_transactions`` on ``txs`` and return the pending nonces."""
-        with (
-            patch.object(self.safe_main, "get_safe_current_nonce", return_value=current_nonce),
-            patch.object(self.safe_main, "get_safe_transactions", return_value=txs),
-        ):
-            pending = self.safe_main.get_pending_transactions(self.SAFE, network)
-        return [int(tx["nonce"]) for tx in pending]
+        return [int(tx["nonce"]) for tx in self.safe_main.get_pending_transactions(self.SAFE, network, txs, complete)]
 
     def _alerted(self, *txs: dict, network: str = "mainnet") -> None:
         for tx in txs:
             self.safe_main.mark_tx_handled(self.SAFE, network, tx)
 
-    def test_get_safe_transactions_retries_on_connection_error(self):
-        safe_main = self.safe_main
-
-        ok_response = Mock(status_code=200)
-        ok_response.json.return_value = {"results": [{"nonce": 5}]}
-
-        with (
-            patch.object(
-                safe_main.requests,
-                "get",
-                side_effect=[
-                    requests.exceptions.ConnectionError("Connection reset by peer"),
-                    ok_response,
-                ],
-            ) as mock_get,
-            patch.object(safe_main.time, "sleep") as mock_sleep,
-        ):
-            result = safe_main.get_safe_transactions("0xSafe", "base-main")
-
-        self.assertEqual(result, [{"nonce": 5}])
-        self.assertEqual(mock_get.call_count, 2)
-        mock_sleep.assert_called_once()
-
-    def test_get_safe_transactions_returns_empty_after_exhausting_retries(self):
-        safe_main = self.safe_main
-
-        with (
-            patch.object(
-                safe_main.requests,
-                "get",
-                side_effect=requests.exceptions.ConnectionError("Connection reset by peer"),
-            ) as mock_get,
-            patch.object(safe_main.time, "sleep"),
-        ):
-            result = safe_main.get_safe_transactions("0xSafe", "katana-main", max_retries=3)
-
-        self.assertEqual(result, [])
-        self.assertEqual(mock_get.call_count, 3)
-
-    def test_executed_rows_are_filtered_even_when_api_returns_them(self):
-        txs = [
-            queue_tx(30, txHash="0x" + "ab" * 32, failed=False),
-            queue_tx(31, failed=True),
-            queue_tx(32, txHash="0x" + "cd" * 32),
-            queue_tx(33),
-        ]
-        self.assertEqual(self._pending(txs, current_nonce=30), [33])
-
-    def test_current_nonce_unknown_fails_closed(self):
-        self.assertEqual(self._pending([queue_tx(3274), queue_tx(3280)], current_nonce=None), [])
-        self.assertEqual(self.safe_main.load_handled_txs(self.SAFE, "mainnet"), set())
-
-    def test_dead_slot_rows_below_current_nonce_never_alert(self):
-        """A tx below the onchain nonce can never execute, even if it was never alerted on."""
-        self.assertEqual(self._pending([queue_tx(3282), queue_tx(3281), queue_tx(3280)], current_nonce=3282), [3282])
-
     def test_alerted_tx_is_not_returned_again(self):
         self._alerted(queue_tx(101))
-        self.assertEqual(self._pending([queue_tx(101)], current_nonce=100), [])
+        self.assertEqual(self._pending([queue_tx(101)]), [])
 
     def test_lower_nonce_queued_after_a_higher_one_alerted(self):
         self._alerted(queue_tx(101))
-        self.assertEqual(self._pending([queue_tx(101), queue_tx(100)], current_nonce=100), [100])
+        self.assertEqual(self._pending([queue_tx(100), queue_tx(101)]), [100])
 
     def test_replacement_at_an_alerted_nonce_alerts(self):
         replacement = queue_tx(101, safeTxHash=safe_tx_hash(101, variant=1))
         self._alerted(queue_tx(101))
 
-        with (
-            patch.object(self.safe_main, "get_safe_current_nonce", return_value=100),
-            patch.object(self.safe_main, "get_safe_transactions", return_value=[replacement, queue_tx(101)]),
-        ):
-            pending = self.safe_main.get_pending_transactions(self.SAFE, "mainnet")
+        pending = self.safe_main.get_pending_transactions(self.SAFE, "mainnet", [queue_tx(101), replacement])
 
         self.assertEqual([tx["safeTxHash"] for tx in pending], [replacement["safeTxHash"]])
 
@@ -158,31 +104,40 @@ class TestSafePendingTransactions(unittest.TestCase):
         self._alerted(original)
 
         with (
-            patch.object(self.safe_main, "get_safe_current_nonce", return_value=100),
-            patch.object(self.safe_main, "get_safe_transactions", return_value=[replacement, original]),
             patch.object(self.safe_main, "YEARN_EXPECTED_PROPOSERS", {("mainnet", self.SAFE.lower()): {bot}}),
             patch.object(self.safe_main, "_explain_safe_tx", return_value=None),
             patch.object(self.safe_main, "send_telegram_message", return_value=True) as mock_send,
         ):
-            self.safe_main.check_for_pending_transactions(self.SAFE, "mainnet", "YEARN_MS")
+            self.safe_main.check_for_pending_transactions(self.SAFE, "mainnet", "YEARN_MS", [original, replacement])
 
         mock_send.assert_called_once()
         message, _protocol, disable_notification = mock_send.call_args.args
         self.assertIn("UNEXPECTED PROPOSER", message)
         self.assertFalse(disable_notification)
         # Both txs at nonce 101 are now handled; the next run alerts on neither.
-        self.assertEqual(self._pending([replacement, original], current_nonce=100), [])
+        self.assertEqual(self._pending([original, replacement]), [])
 
     def test_txs_without_a_hash_fall_back_to_nonce_dedup(self):
         self._alerted(queue_tx(101, safeTxHash=None))
-        self.assertEqual(self._pending([queue_tx(101, safeTxHash=None), queue_tx(102, safeTxHash="")], 100), [102])
+        self.assertEqual(self._pending([queue_tx(101, safeTxHash=None), queue_tx(102, safeTxHash="")]), [102])
 
-    def test_handled_txs_below_current_nonce_are_pruned(self):
+    def test_handled_txs_no_longer_queued_are_pruned(self):
+        """Executed, replaced or deleted txs leave the queue, so their entries are dropped."""
         self._alerted(queue_tx(100), queue_tx(101), queue_tx(102, safeTxHash=safe_tx_hash(102, variant=1)))
 
-        self.assertEqual(self._pending([queue_tx(102)], current_nonce=102), [102])
+        self.assertEqual(self._pending([queue_tx(102, safeTxHash=safe_tx_hash(102, variant=1)), queue_tx(103)]), [103])
 
         self.assertEqual(self.safe_main.load_handled_txs(self.SAFE, "mainnet"), {(102, safe_tx_hash(102, variant=1))})
+
+    def test_truncated_listing_does_not_prune(self):
+        """A tx missing from a truncated listing may still be queued; pruning it would re-alert it."""
+        self._alerted(queue_tx(100), queue_tx(101))
+
+        self.assertEqual(self._pending([queue_tx(100)], complete=False), [])
+
+        self.assertEqual(
+            self.safe_main.load_handled_txs(self.SAFE, "mainnet"), {(100, safe_tx_hash(100)), (101, safe_tx_hash(101))}
+        )
 
     def test_handled_txs_are_stored_compactly(self):
         self._alerted(queue_tx(102), queue_tx(101))
@@ -193,98 +148,103 @@ class TestSafePendingTransactions(unittest.TestCase):
 
     def test_same_address_on_another_chain_has_its_own_cache(self):
         self._alerted(queue_tx(101), network="base-main")
-        self.assertEqual(self._pending([queue_tx(101)], current_nonce=100), [101])
+        self.assertEqual(self._pending([queue_tx(101)]), [101])
 
     def test_first_poll_ignores_the_old_nonce_cache(self):
         """The old cache holds only a nonce, so it cannot prove which proposal at it was delivered."""
         bot = "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"
         self.safe_main.write_last_value_to_file(self.safe_main.nonces_filename, self.SAFE, 102)
         replacement = queue_tx(101, proposer=bot, safeTxHash=safe_tx_hash(101, variant=1))
-        txs = [queue_tx(102, proposer=bot), replacement, queue_tx(101, proposer=bot)]
+        txs = [queue_tx(101, proposer=bot), replacement, queue_tx(102, proposer=bot)]
 
-        self.assertEqual(self._pending(txs, current_nonce=101), [102, 101, 101])
+        self.assertEqual(self._pending(txs), [101, 101, 102])
 
-    def test_fresh_safe_can_alert_on_nonce_zero(self):
-        safe_main = self.safe_main
-        first_tx = queue_tx(0)
+
+class TestSafeQueueFetch(unittest.TestCase):
+    """One ``/queue`` request lists every watched Safe; each page costs one request against the quota."""
+
+    BASE_SAFE = "0x1111111111111111111111111111111111111111"
+
+    def setUp(self) -> None:
+        self.safe_main = import_safe_main()
+
+    def _fetch(self, responses: list, safes: list[tuple[str, str]] | None = None, **kwargs):
+        safes = safes or [("mainnet", SAFE), ("base-main", self.BASE_SAFE)]
         with (
-            patch.object(safe_main, "get_safe_current_nonce", return_value=0),
-            patch.object(safe_main, "get_safe_transactions", return_value=[first_tx]),
+            patch.object(self.safe_main.requests, "get", side_effect=responses) as mock_get,
+            patch.object(self.safe_main.time, "sleep"),
         ):
-            self.assertEqual(safe_main.get_pending_transactions(self.SAFE, "mainnet"), [first_tx])
+            queues, complete = self.safe_main.fetch_queued_transactions(safes, **kwargs)
+        return queues, complete, mock_get
 
-    def test_more_than_ten_eligible_txs_are_all_returned(self):
-        txs = [queue_tx(nonce) for nonce in range(124, 99, -1)]  # 25 queued, descending
-        ok = Mock(status_code=200)
-        ok.json.return_value = {"results": txs}
+    def test_one_request_lists_every_safe_and_groups_rows(self):
+        base_tx = queue_tx(7, safe=self.BASE_SAFE, chainId="8453")
+        stray = queue_tx(9, safe="0x" + "22" * 20)
+        queues, complete, mock_get = self._fetch([queue_response([queue_tx(5), base_tx, stray])])
 
-        with (
-            patch.object(self.safe_main, "get_safe_current_nonce", return_value=100),
-            patch.object(self.safe_main.requests, "get", return_value=ok) as mock_get,
-        ):
-            pending = self.safe_main.get_pending_transactions(self.SAFE, "mainnet")
-
-        self.assertEqual(len(pending), 25)
         mock_get.assert_called_once()
-        self.assertEqual(mock_get.call_args.kwargs["params"]["limit"], 100)
+        self.assertEqual(mock_get.call_args.args[0], "https://api.safe.global/queue/api/v1/multisig-transactions/queue")
+        self.assertEqual(
+            mock_get.call_args.kwargs["params"],
+            [
+                ("safes", f"{SAFE.lower()}:1"),
+                ("safes", f"{self.BASE_SAFE}:8453"),
+                ("nonceOrder", "asc"),
+                ("limit", 100),
+            ],
+        )
+        self.assertTrue(complete)
+        self.assertEqual(queues, {("mainnet", SAFE): [queue_tx(5)], ("base-main", self.BASE_SAFE): [base_tx]})
 
+    def test_same_address_on_two_chains_is_kept_apart(self):
+        safes = [("mainnet", SAFE), ("base-main", SAFE)]
+        base_tx = queue_tx(7, chainId="8453")
+        queues, _, _ = self._fetch([queue_response([queue_tx(5), base_tx])], safes)
+        self.assertEqual(queues, {("mainnet", SAFE): [queue_tx(5)], ("base-main", SAFE): [base_tx]})
 
-class TestSafeQueuePaging(unittest.TestCase):
-    """A second page costs quota, so it is fetched only when the first may hide wanted txs."""
+    def test_next_page_is_fetched_and_overlap_is_dropped(self):
+        first = queue_response([queue_tx(n) for n in range(100)], next_url="https://next")
+        second = queue_response([queue_tx(99), queue_tx(100)])
+        queues, complete, mock_get = self._fetch([first, second])
 
-    def _import_safe_main(self):
-        with patch.dict(os.environ, {"SAFE_API_KEY": "test-key"}):
-            import protocols.safe.main as safe_main
+        self.assertEqual([int(tx["nonce"]) for tx in queues[("mainnet", SAFE)]], list(range(101)))
+        self.assertTrue(complete)
+        self.assertEqual([dict(c.kwargs["params"]).get("offset") for c in mock_get.call_args_list], [None, 100])
 
-            return importlib.reload(safe_main)
+    def test_page_cap_bounds_requests_and_marks_the_listing_incomplete(self):
+        pages = [queue_response([queue_tx(n)], next_url="https://next") for n in range(3)]
+        queues, complete, mock_get = self._fetch(pages, max_pages=2)
 
-    @staticmethod
-    def _page(nonces: range) -> Mock:
-        response = Mock(status_code=200)
-        response.json.return_value = {"results": [queue_tx(nonce) for nonce in nonces]}
-        return response
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertFalse(complete)
+        self.assertEqual(len(queues[("mainnet", SAFE)]), 2)
 
-    def _fetch(self, pages: list[Mock], min_nonce: int | None, **kwargs) -> tuple[list[int], list[dict]]:
-        safe_main = self._import_safe_main()
-        with patch.object(safe_main.requests, "get", side_effect=pages) as mock_get:
-            txs = safe_main.get_safe_transactions("0xSafe", "mainnet", executed=False, min_nonce=min_nonce, **kwargs)
-        return [int(tx["nonce"]) for tx in txs], [call.kwargs["params"] for call in mock_get.call_args_list]
+    def test_connection_error_is_retried(self):
+        queues, _, mock_get = self._fetch([requests.exceptions.ConnectionError("reset"), queue_response([queue_tx(5)])])
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertEqual(queues[("mainnet", SAFE)], [queue_tx(5)])
 
-    def test_full_page_of_eligible_txs_fetches_the_next_page(self):
-        nonces, params = self._fetch([self._page(range(249, 149, -1)), self._page(range(149, 119, -1))], 120)
+    def test_exhausted_retries_raise_unavailable(self):
+        with self.assertRaises(self.safe_main.SafeApiUnavailable):
+            self._fetch([Mock(status_code=503)] * 3)
 
-        self.assertEqual(nonces, list(range(249, 119, -1)))
-        self.assertEqual([p.get("offset") for p in params], [None, 100])
-        self.assertEqual({p["limit"] for p in params}, {100})
+    def test_validation_error_is_raised_not_swallowed(self):
+        rejected = Mock(status_code=422, text='{"detail": "Safe not found on chain"}')
+        with self.assertRaises(self.safe_main.SafeApiRequestError) as ctx:
+            self._fetch([rejected])
+        self.assertIn("422", str(ctx.exception))
+        self.assertIn("Safe not found on chain", str(ctx.exception))
 
-    def test_full_page_reaching_dead_slots_stops(self):
-        nonces, params = self._fetch([self._page(range(249, 149, -1))], 200)
-        self.assertEqual(len(nonces), 100)
-        self.assertEqual(len(params), 1)
-
-    def test_partial_page_stops(self):
-        _, params = self._fetch([self._page(range(130, 119, -1))], 0)
-        self.assertEqual(len(params), 1)
-
-    def test_without_min_nonce_only_the_first_page_is_fetched(self):
-        _, params = self._fetch([self._page(range(249, 149, -1))], None)
-        self.assertEqual(len(params), 1)
-
-    def test_page_cap_bounds_requests(self):
-        pages = [self._page(range(start, start - 2, -1)) for start in (9, 7, 5)]
-        nonces, params = self._fetch(pages, 0, limit=2, max_pages=2)
-        self.assertEqual(nonces, [9, 8, 7, 6])
-        self.assertEqual(len(params), 2)
+    def test_rejected_key_raises_auth_error(self):
+        with self.assertRaises(self.safe_main.SafeApiAuthError):
+            self._fetch([Mock(status_code=401)])
 
 
 class TestCheckForPendingTransactions(unittest.TestCase):
     """The alert loop: each alerted (or rule-skipped) tx is recorded as handled right away."""
 
     def _import_safe_main(self):
-        with patch.dict(os.environ, {"SAFE_API_KEY": "test-key"}):
-            import protocols.safe.main as safe_main
-
-            return importlib.reload(safe_main)
+        return import_safe_main()
 
     def _tx(self, nonce: int) -> dict:
         return queue_tx(nonce)
@@ -295,13 +255,12 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         pending = [self._tx(2281), self._tx(2280)]  # API returns descending
 
         with (
-            patch.object(safe_main, "get_pending_transactions", return_value=pending),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
             patch.object(safe_main, "_explain_safe_tx", return_value=None),
             patch.object(safe_main, "send_telegram_message", return_value=True) as mock_send,
             patch.object(safe_main, "mark_tx_handled") as mock_mark,
         ):
-            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS", pending)
 
         self.assertEqual(mock_send.call_count, 2)
         self.assertEqual([c.args for c in mock_mark.call_args_list], [(safe_address, "mainnet", tx) for tx in pending])
@@ -312,16 +271,14 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         queued = [self._tx(2281), self._tx(2280)]
 
         with (
-            patch.object(safe_main, "get_safe_current_nonce", return_value=2280),
-            patch.object(safe_main, "get_safe_transactions", return_value=queued),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
             patch.object(safe_main, "_explain_safe_tx", return_value=None),
             patch.object(safe_main, "send_telegram_message", side_effect=[True, RuntimeError("telegram down")]),
         ):
             with self.assertRaises(RuntimeError):
-                safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+                safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS", queued)
             # The next run re-sends only the alert that failed.
-            pending = safe_main.get_pending_transactions(safe_address, "mainnet")
+            pending = safe_main.get_pending_transactions(safe_address, "mainnet", queued)
 
         self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), {safe_main._tx_id(queued[0])})
         self.assertEqual(pending, [queued[1]])
@@ -332,16 +289,14 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         tx = self._tx(2281)
 
         with (
-            patch.object(safe_main, "get_safe_current_nonce", return_value=2281),
-            patch.object(safe_main, "get_safe_transactions", return_value=[tx]),
             patch.object(safe_main, "_explain_safe_tx", return_value=None),
             patch.object(safe_main, "send_telegram_message", side_effect=[False, True]) as mock_send,
         ):
-            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS", [tx])
             self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), set())
 
-            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
-            self.assertEqual(safe_main.get_pending_transactions(safe_address, "mainnet"), [])
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS", [tx])
+            self.assertEqual(safe_main.get_pending_transactions(safe_address, "mainnet", [tx]), [])
 
         self.assertEqual(mock_send.call_count, 2)
         self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), {safe_main._tx_id(tx)})
@@ -352,23 +307,21 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         tx = self._tx(2281)
 
         with (
-            patch.object(safe_main, "get_safe_current_nonce", return_value=2281),
-            patch.object(safe_main, "get_safe_transactions", return_value=[tx]),
             patch.object(safe_main, "_explain_safe_tx", return_value=None) as mock_explain,
             patch.object(safe_main, "_upgrade_alert_lines", return_value=[]) as mock_upgrades,
             patch.object(safe_main, "send_telegram_message", return_value=True) as mock_send,
             patch.object(safe_main, "telegram_credentials_configured", side_effect=[False, False, True]),
         ):
             # Two polls without a destination: no explanation, simulation, upgrade lookup or send.
-            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
-            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS", [tx])
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS", [tx])
             mock_explain.assert_not_called()
             mock_upgrades.assert_not_called()
             mock_send.assert_not_called()
             self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), set())
 
             # Once a destination is configured, the tx alerts and is handled.
-            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS", [tx])
 
         mock_explain.assert_called_once()
         mock_send.assert_called_once()
@@ -379,10 +332,9 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         safe_address = "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52"
 
         with (
-            patch.object(safe_main, "get_pending_transactions", return_value=[]),
             patch.object(safe_main, "mark_tx_handled") as mock_write,
         ):
-            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS", [])
 
         mock_write.assert_not_called()
 
@@ -398,13 +350,12 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         ]
 
         with (
-            patch.object(safe_main, "get_pending_transactions", return_value=pending),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
             patch.object(safe_main, "_explain_safe_tx", return_value=None),
             patch.object(safe_main, "send_telegram_message", return_value=True) as mock_send,
             patch.object(safe_main, "mark_tx_handled") as mock_write,
         ):
-            safe_main.check_for_pending_transactions(safe_address, "mainnet", "EULER")
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "EULER", pending)
 
         # Only the matching-target tx should produce a Telegram message.
         self.assertEqual(mock_send.call_count, 1)
@@ -417,14 +368,13 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         tx = {**self._tx(2281), "data": "0x", "value": "1000000000000000000"}
 
         with (
-            patch.object(safe_main, "get_pending_transactions", return_value=[tx]),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
             patch.object(safe_main, "_explain_safe_tx") as mock_explain,
             patch.object(safe_main, "send_telegram_message"),
             patch.object(safe_main, "mark_tx_handled"),
         ):
             mock_explain.return_value = None
-            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS", [tx])
 
         mock_explain.assert_called_once()
         self.assertEqual(mock_explain.call_args.kwargs["hex_data"], "0x")
@@ -436,14 +386,13 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         tx = {**self._tx(2281), "data": "0x12"}
 
         with (
-            patch.object(safe_main, "get_pending_transactions", return_value=[tx]),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
             patch.object(safe_main, "_explain_safe_tx") as mock_explain,
             patch.object(safe_main, "send_telegram_message"),
             patch.object(safe_main, "mark_tx_handled"),
         ):
             mock_explain.return_value = None
-            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS", [tx])
 
         mock_explain.assert_called_once()
         self.assertEqual(mock_explain.call_args.kwargs["hex_data"], "0x12")
@@ -472,7 +421,6 @@ class TestCheckForPendingTransactions(unittest.TestCase):
 
         with (
             patch.dict("os.environ", {"WAVEY_GIST_API_KEY": "test-key"}),
-            patch.object(safe_main, "get_pending_transactions", return_value=[tx]),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
             patch.object(safe_main, "_explain_safe_tx", return_value=Explanation("Upgrades CAP.", "Contract details.")),
             patch.object(safe_main, "send_telegram_message") as mock_send,
@@ -486,7 +434,7 @@ class TestCheckForPendingTransactions(unittest.TestCase):
                 "utils.llm.ai_explainer.upload_to_gist", return_value="https://gist.wavey.info/report"
             ) as mock_report,
         ):
-            safe_main.check_for_pending_transactions(safe_address, "mainnet", "CAP")
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "CAP", [tx])
 
         message = mock_send.call_args.args[0]
         self.assertIn(f"🅿️ Proxy: `{ORACLE}` (via executeBatch call 1)", message)
@@ -521,14 +469,15 @@ class TestCheckForPendingTransactions(unittest.TestCase):
     def test_upgrade_detection_failure_does_not_block_the_alert(self):
         safe_main = self._import_safe_main()
         with (
-            patch.object(safe_main, "get_pending_transactions", return_value=[self._tx(5)]),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
             patch.object(safe_main, "_upgrade_alert_lines", side_effect=RuntimeError("rpc down")),
             patch.object(safe_main, "_explain_safe_tx", return_value=None),
             patch.object(safe_main, "send_telegram_message") as mock_send,
             patch.object(safe_main, "mark_tx_handled"),
         ):
-            safe_main.check_for_pending_transactions("0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52", "mainnet", "CAP")
+            safe_main.check_for_pending_transactions(
+                "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52", "mainnet", "CAP", [self._tx(5)]
+            )
         mock_send.assert_called_once()
 
     def test_explain_safe_tx_forwards_empty_calldata(self):
@@ -627,10 +576,6 @@ def test_watched_safes_use_supported_networks() -> None:
         assert network in safe_address_network_prefix, f"{network} has no app.safe.global prefix"
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestSafeProtocolLabels(unittest.TestCase):
     """The protocol field in ALL_SAFE_ADDRESSES doubles as the Telegram channel key.
 
@@ -652,6 +597,8 @@ class TestSafeProtocolLabels(unittest.TestCase):
 
 
 class TestSafeApiQuota(unittest.TestCase):
+    SAFES = [("mainnet", SAFE)]
+
     def _import_safe_main(self, keys: dict[str, str]):
         env = {"SAFE_API_KEY": "", "SAFE_API_KEY_2": "", **keys}
         with patch.dict(os.environ, env):
@@ -665,40 +612,40 @@ class TestSafeApiQuota(unittest.TestCase):
         return safe_main
 
     @staticmethod
-    def _response(status: int, remaining: str | None = None, reset: str = "3600", results=None) -> Mock:
-        response = Mock(status_code=status)
+    def _response(status: int, remaining: str | None = None, reset: str = "3600") -> Mock:
+        response = queue_response([]) if status == 200 else Mock(status_code=status)
         response.headers = {} if remaining is None else {"x-ratelimit-remaining": remaining, "x-ratelimit-reset": reset}
-        response.json.return_value = {"results": results or []}
         return response
+
+    def _fetch(self, safe_main) -> None:
+        safe_main.fetch_queued_transactions(self.SAFES)
 
     def test_exhausted_key_rotates_to_next_key_without_sleeping(self):
         safe_main = self._import_safe_main({"SAFE_API_KEY": "k1", "SAFE_API_KEY_2": "k2"})
-        exhausted = self._response(429, remaining="0")
-        ok = self._response(200, results=[{"nonce": 7}])
+        ok = self._response(200)
 
         with (
-            patch.object(safe_main.requests, "get", side_effect=[exhausted, ok]) as mock_get,
+            patch.object(safe_main.requests, "get", side_effect=[self._response(429, remaining="0"), ok]) as mock_get,
             patch.object(safe_main.time, "sleep") as mock_sleep,
         ):
-            result = safe_main.get_safe_transactions("0xSafe", "mainnet")
+            self._fetch(safe_main)
 
-        self.assertEqual(result, [{"nonce": 7}])
         used_keys = [call.kwargs["headers"]["Authorization"] for call in mock_get.call_args_list]
         self.assertEqual(used_keys, ["Bearer k1", "Bearer k2"])
         mock_sleep.assert_not_called()
 
         # The exhausted key is skipped for the rest of the run.
         with patch.object(safe_main.requests, "get", return_value=ok) as mock_get:
-            safe_main.get_safe_transactions("0xSafe", "mainnet")
-            safe_main.get_safe_transactions("0xSafe", "mainnet")
+            self._fetch(safe_main)
+            self._fetch(safe_main)
         self.assertEqual({c.kwargs["headers"]["Authorization"] for c in mock_get.call_args_list}, {"Bearer k2"})
 
     def test_exhausted_key_is_skipped_by_later_runs_until_reset(self):
         safe_main = self._import_safe_main({"SAFE_API_KEY": "k1", "SAFE_API_KEY_2": "k2"})
-        ok = self._response(200, results=[{"nonce": 7}])
+        ok = self._response(200)
 
         with patch.object(safe_main.requests, "get", side_effect=[self._response(429, "0", "3600"), ok]):
-            safe_main.get_safe_transactions("0xSafe", "mainnet")
+            self._fetch(safe_main)
         stored = safe_main.get_last_value_for_key_from_file(
             safe_main.cache_filename, safe_main._exhausted_cache_key("k1")
         )
@@ -708,16 +655,16 @@ class TestSafeApiQuota(unittest.TestCase):
         safe_main = self._import_safe_main({"SAFE_API_KEY": "k1", "SAFE_API_KEY_2": "k2"})
         safe_main.load_known_exhausted_keys(now=float(stored) - 60)
         with patch.object(safe_main.requests, "get", return_value=ok) as mock_get:
-            safe_main.get_safe_transactions("0xSafe", "mainnet")
-            safe_main.get_safe_transactions("0xSafe", "mainnet")
+            self._fetch(safe_main)
+            self._fetch(safe_main)
         self.assertEqual({c.kwargs["headers"]["Authorization"] for c in mock_get.call_args_list}, {"Bearer k2"})
 
         # Once the window has reset, the key is used again.
         safe_main = self._import_safe_main({"SAFE_API_KEY": "k1", "SAFE_API_KEY_2": "k2"})
         safe_main.load_known_exhausted_keys(now=float(stored) + 1)
         with patch.object(safe_main.requests, "get", return_value=ok) as mock_get:
-            safe_main.get_safe_transactions("0xSafe", "mainnet")
-            safe_main.get_safe_transactions("0xSafe", "mainnet")
+            self._fetch(safe_main)
+            self._fetch(safe_main)
         self.assertEqual(
             [c.kwargs["headers"]["Authorization"] for c in mock_get.call_args_list], ["Bearer k1", "Bearer k2"]
         )
@@ -732,7 +679,6 @@ class TestSafeApiQuota(unittest.TestCase):
 
         with (
             patch.object(safe_main, "ALL_SAFE_ADDRESSES", [["LIDO", "mainnet", "0x1"]]),
-            patch.object(safe_main, "get_safe_current_nonce", return_value=1),
             patch.object(safe_main.requests, "get") as mock_get,
             patch.object(safe_main, "send_error_message") as mock_error,
         ):
@@ -753,7 +699,7 @@ class TestSafeApiQuota(unittest.TestCase):
             patch.object(safe_main.time, "sleep") as mock_sleep,
             self.assertRaises(safe_main.SafeApiQuotaExhausted) as ctx,
         ):
-            safe_main.get_safe_transactions("0xSafe", "mainnet")
+            self._fetch(safe_main)
 
         self.assertEqual(ctx.exception.reset_seconds, 355270)
         self.assertEqual(mock_get.call_count, 2)
@@ -763,14 +709,10 @@ class TestSafeApiQuota(unittest.TestCase):
         safe_main = self._import_safe_main({"SAFE_API_KEY": "k1"})
 
         with (
-            patch.object(
-                safe_main.requests,
-                "get",
-                side_effect=[self._response(429, "12"), self._response(200, results=[{"nonce": 1}])],
-            ),
+            patch.object(safe_main.requests, "get", side_effect=[self._response(429, "12"), self._response(200)]),
             patch.object(safe_main.time, "sleep") as mock_sleep,
         ):
-            self.assertEqual(safe_main.get_safe_transactions("0xSafe", "mainnet"), [{"nonce": 1}])
+            self._fetch(safe_main)
         mock_sleep.assert_called_once_with(1)
 
     def test_main_stops_and_alerts_once_per_quota_window(self):
@@ -780,7 +722,10 @@ class TestSafeApiQuota(unittest.TestCase):
 
         with (
             patch.object(safe_main, "ALL_SAFE_ADDRESSES", safes),
-            patch.object(safe_main, "run_for_network", side_effect=safe_main.SafeApiQuotaExhausted(3600)) as mock_run,
+            patch.object(
+                safe_main, "fetch_queued_transactions", side_effect=safe_main.SafeApiQuotaExhausted(3600)
+            ) as mock_fetch,
+            patch.object(safe_main, "check_for_pending_transactions") as mock_check,
             patch.object(safe_main, "get_last_value_for_key_from_file", side_effect=lambda _f, k: cache.get(k, 0)),
             patch.object(safe_main, "write_last_value_to_file", side_effect=lambda _f, k, v: cache.__setitem__(k, v)),
             patch.object(safe_main, "send_error_message") as mock_error,
@@ -789,44 +734,14 @@ class TestSafeApiQuota(unittest.TestCase):
             safe_main.main()
             safe_main.main()
 
-        self.assertEqual(mock_run.call_count, 2)  # one safe per run, then stop
+        self.assertEqual(mock_fetch.call_count, 2)  # one batched request per run, then stop
+        mock_check.assert_not_called()
         mock_public.assert_not_called()  # never to a public channel/topic
         mock_error.assert_called_once()
         message, label = mock_error.call_args.args
         self.assertEqual(label, "yearn")
         self.assertEqual(mock_error.call_args.kwargs["alert_protocol"], "yearn-internal")
         self.assertIn("Safe API quota exhausted", message)
-
-    def test_unknown_nonce_skips_safe_api_call(self):
-        safe_main = self._import_safe_main({"SAFE_API_KEY": "k1"})
-
-        with (
-            patch.object(safe_main, "get_safe_current_nonce", return_value=None),
-            patch.object(safe_main, "get_safe_transactions") as mock_txs,
-        ):
-            self.assertEqual(safe_main.get_pending_transactions("0xSafe", "mainnet"), [])
-        mock_txs.assert_not_called()
-
-    def test_current_nonce_is_read_onchain(self):
-        safe_main = self._import_safe_main({"SAFE_API_KEY": "k1"})
-        client = Mock()
-        client.eth.contract.return_value.functions.nonce.return_value.call.return_value = 42
-
-        with (
-            patch.object(safe_main.ChainManager, "get_client", return_value=client) as mock_get_client,
-            patch.object(safe_main.requests, "get") as mock_http,
-        ):
-            nonce = safe_main.get_safe_current_nonce("0x73b047fe6337183A454c5217241D780a932777bD", "katana-main")
-
-        self.assertEqual(nonce, 42)
-        mock_get_client.assert_called_once_with(safe_main.Chain.KATANA)
-        mock_http.assert_not_called()
-
-    def test_current_nonce_rpc_failure_returns_none(self):
-        safe_main = self._import_safe_main({"SAFE_API_KEY": "k1"})
-
-        with patch.object(safe_main.ChainManager, "get_client", side_effect=ValueError("No providers")):
-            self.assertIsNone(safe_main.get_safe_current_nonce("0x73b047fe6337183A454c5217241D780a932777bD", "mainnet"))
 
 
 class TestLoadSafeApiKeys(unittest.TestCase):
@@ -870,17 +785,11 @@ class TestLoadSafeApiKeys(unittest.TestCase):
 
 
 class TestQueueServiceMigration(unittest.TestCase):
-    """Safe Queue Service request shape, response fields and failure handling."""
+    """Safe Queue Service response fields, proposer escalation and run-level failure handling."""
 
-    SAFE = "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52"
+    SAFE = SAFE
     BOT = "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"
     OWNER = "0x962228a90eac69238c7d1f216d80037e61ea9255"
-
-    def _import_safe_main(self):
-        with patch.dict(os.environ, {"SAFE_API_KEY": "test-key"}):
-            import protocols.safe.main as safe_main
-
-            return importlib.reload(safe_main)
 
     def _tx(self, nonce: int = 10, **fields) -> dict:
         return queue_tx(nonce, **fields)
@@ -889,52 +798,13 @@ class TestQueueServiceMigration(unittest.TestCase):
         """Run the alert loop for ``txs`` and return the send_telegram_message mock."""
         proposers = {("mainnet", self.SAFE.lower()): expected} if expected else {}
         with (
-            patch.object(safe_main, "get_pending_transactions", return_value=txs),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", proposers),
             patch.object(safe_main, "_explain_safe_tx", return_value=None),
             patch.object(safe_main, "send_telegram_message") as mock_send,
             patch.object(safe_main, "mark_tx_handled"),
         ):
-            safe_main.check_for_pending_transactions(self.SAFE, "mainnet", protocol)
+            safe_main.check_for_pending_transactions(self.SAFE, "mainnet", protocol, txs)
         return mock_send
-
-    # --- request -------------------------------------------------------------
-
-    def test_request_targets_queue_service_with_chain_id_and_nonce_order(self):
-        safe_main = self._import_safe_main()
-        ok = Mock(status_code=200)
-        ok.json.return_value = {"results": []}
-
-        with patch.object(safe_main.requests, "get", return_value=ok) as mock_get:
-            safe_main.get_safe_transactions(self.SAFE, "base-main", executed=False)
-
-        url = mock_get.call_args.args[0]
-        self.assertEqual(url, f"https://api.safe.global/queue/api/v1/safes/{self.SAFE}/multisig-transactions")
-        self.assertFalse(url.endswith("/"))
-        self.assertEqual(
-            mock_get.call_args.kwargs["params"],
-            {"chainId": 8453, "limit": 100, "nonceOrder": "desc", "executed": "false"},
-        )
-
-    def test_validation_error_is_raised_not_swallowed(self):
-        safe_main = self._import_safe_main()
-        rejected = Mock(status_code=422, text='{"detail": "Invalid chainId"}')
-
-        with (
-            patch.object(safe_main.requests, "get", return_value=rejected),
-            self.assertRaises(safe_main.SafeApiRequestError) as ctx,
-        ):
-            safe_main.get_safe_transactions(self.SAFE, "mainnet")
-        self.assertIn("422", str(ctx.exception))
-        self.assertIn("Invalid chainId", str(ctx.exception))
-
-    def test_rejected_key_raises_auth_error(self):
-        safe_main = self._import_safe_main()
-        with (
-            patch.object(safe_main.requests, "get", return_value=Mock(status_code=401)),
-            self.assertRaises(safe_main.SafeApiAuthError),
-        ):
-            safe_main.get_safe_transactions(self.SAFE, "mainnet")
 
     # --- proposer escalation ---------------------------------------------------
 
@@ -949,42 +819,38 @@ class TestQueueServiceMigration(unittest.TestCase):
         self.assertFalse(disable_notification)
 
     def test_delegate_proposal_by_known_bot_is_quiet(self):
-        safe_main = self._import_safe_main()
         tx = self._tx(proposer=self.OWNER, proposedVia="DELEGATE", proposedBy=self.BOT)
-        self._assert_quiet(self._alert(safe_main, [tx], expected={self.BOT}))
+        self._assert_quiet(self._alert(import_safe_main(), [tx], expected={self.BOT}))
 
     def test_nested_owner_signer_on_allowlist_does_not_make_tx_expected(self):
-        safe_main = self._import_safe_main()
         tx = self._tx(proposer=self.OWNER, proposedVia="NESTED_OWNER", proposedBy=self.BOT)
-        self._assert_critical(self._alert(safe_main, [tx], expected={self.BOT}))
+        self._assert_critical(self._alert(import_safe_main(), [tx], expected={self.BOT}))
 
     def test_unrecognized_route_does_not_trust_an_allowlisted_proposer(self):
-        safe_main = self._import_safe_main()
+        safe_main = import_safe_main()
         for route in ("SOMETHING_NEW", "UNKNOWN", None):
             with self.subTest(route=route):
                 tx = self._tx(proposer=self.BOT, proposedVia=route, proposedBy=self.BOT)
                 self._assert_critical(self._alert(safe_main, [tx], expected={self.BOT}))
 
     def test_owner_proposal_by_known_address_is_quiet(self):
-        safe_main = self._import_safe_main()
         tx = self._tx(proposer=self.BOT, proposedVia="OWNER", proposedBy=None)
-        self._assert_quiet(self._alert(safe_main, [tx], expected={self.BOT}))
+        self._assert_quiet(self._alert(import_safe_main(), [tx], expected={self.BOT}))
 
     # --- response fields -------------------------------------------------------
 
     def test_alert_shows_created_date_and_checksummed_target(self):
-        safe_main = self._import_safe_main()
-        message = self._alert(safe_main, [self._tx(created="2026-11-17T10:37:02Z")]).call_args.args[0]
+        message = self._alert(import_safe_main(), [self._tx(created="2026-11-17T10:37:02Z")]).call_args.args[0]
         self.assertIn("📅 Submission Date: 2026-11-17T10:37:02Z", message)
         self.assertIn("0x0000000000000000000000000000000000000aBc", message)
 
     def test_null_destination_is_the_zero_address(self):
-        safe_main = self._import_safe_main()
+        safe_main = import_safe_main()
         message = self._alert(safe_main, [self._tx(to=None)]).call_args.args[0]
         self.assertIn(f"Target Contract Address: {safe_main.ZERO_ADDRESS}", message)
 
     def test_null_calldata_does_not_crash_any_protocol_path(self):
-        safe_main = self._import_safe_main()
+        safe_main = import_safe_main()
         vault = "0x797dd80692c3b2dadabce8e30c07fde5307d48a9"
         cases = {
             "PENDLE": (self._tx(data=None), 0),
@@ -998,34 +864,80 @@ class TestQueueServiceMigration(unittest.TestCase):
     def test_pendle_alerts_on_privileged_call_only(self):
         from tests.test_calldata_wrappers import NEW_ORACLE_IMPL, ORACLE, pendle_aggregate, upgrade_to_and_call
 
-        safe_main = self._import_safe_main()
+        safe_main = import_safe_main()
         upgrade = self._tx(11, data=pendle_aggregate([(ORACLE, 0, upgrade_to_and_call(NEW_ORACLE_IMPL))]))
         routine = self._tx(10, data=pendle_aggregate([(ORACLE, 0, "0x8456cb59")]))
         with (
             patch("utils.proxy.get_current_implementation", return_value=None),
             patch("utils.upgrade_diff.publish_upgrade_diff", return_value=None),
         ):
-            mock_send = self._alert(safe_main, [upgrade, routine], protocol="PENDLE")
+            mock_send = self._alert(safe_main, [routine, upgrade], protocol="PENDLE")
         self.assertEqual(mock_send.call_count, 1)
         self.assertIn("#️⃣ Nonce: 11", mock_send.call_args.args[0])
 
-    # --- per-safe isolation ------------------------------------------------------
+    # --- run-level failure handling ----------------------------------------------
 
-    def test_one_failing_safe_alerts_and_the_rest_still_run(self):
-        safe_main = self._import_safe_main()
-        safes = [["PENDLE", "mainnet", "0x1"], ["LIDO", "mainnet", "0x2"]]
+    SAFES = [["PENDLE", "mainnet", "0x1"], ["LIDO", "mainnet", "0x2"]]
 
+    def _main(self, safe_main, fetch, check=None, error=None):
+        """Run ``main()`` over ``SAFES`` and return the (fetch, check, error) mocks."""
         with (
             patch.object(safe_main, "check_llm_credits"),
-            patch.object(safe_main, "ALL_SAFE_ADDRESSES", safes),
-            patch.object(safe_main, "run_for_network", side_effect=[TypeError("boom"), None]) as mock_run,
-            patch.object(safe_main, "send_error_message") as mock_error,
+            patch.object(safe_main, "ALL_SAFE_ADDRESSES", self.SAFES),
+            patch.object(safe_main, "fetch_queued_transactions", side_effect=fetch) as mock_fetch,
+            patch.object(safe_main, "check_for_pending_transactions", side_effect=check) as mock_check,
+            patch.object(safe_main, "send_error_message", side_effect=error) as mock_error,
+            patch.object(safe_main.time, "sleep"),
         ):
             safe_main.main()
+        return mock_fetch, mock_check, mock_error
+
+    def test_one_batched_request_feeds_every_safe(self):
+        safe_main = import_safe_main()
+        txs = [self._tx(5)]
+        queues = {("mainnet", "0x1"): txs, ("mainnet", "0x2"): []}
+        mock_fetch, mock_check, _ = self._main(safe_main, [(queues, True)])
+
+        mock_fetch.assert_called_once_with([("mainnet", "0x1"), ("mainnet", "0x2")])
+        self.assertEqual(
+            [c.args for c in mock_check.call_args_list],
+            [("0x1", "mainnet", "PENDLE", txs, True), ("0x2", "mainnet", "LIDO", [], True)],
+        )
+
+    def test_rejected_batch_falls_back_to_one_request_per_safe(self):
+        """A Safe the service cannot resolve must not blind the others."""
+        safe_main = import_safe_main()
+        fetch = [
+            safe_main.SafeApiRequestError("422 Safe not found"),
+            safe_main.SafeApiRequestError("422 Safe not found"),
+            ({("mainnet", "0x2"): []}, True),
+        ]
+        mock_fetch, mock_check, mock_error = self._main(safe_main, fetch)
 
         self.assertEqual(
-            [c.args for c in mock_run.call_args_list], [("mainnet", "0x1", "PENDLE"), ("mainnet", "0x2", "LIDO")]
+            [(c.args, c.kwargs) for c in mock_fetch.call_args_list[1:]],
+            [(([("mainnet", "0x1")],), {"max_retries": 1}), (([("mainnet", "0x2")],), {"max_retries": 1})],
         )
+        self.assertEqual([c.args for c in mock_check.call_args_list], [("0x2", "mainnet", "LIDO", [], True)])
+        mock_error.assert_called_once()
+        self.assertIn("0x1", mock_error.call_args.args[0])
+
+    def test_unavailable_service_crashes_the_run_for_one_alert(self):
+        safe_main = import_safe_main()
+        with self.assertRaises(safe_main.SafeApiUnavailable):
+            self._main(safe_main, safe_main.SafeApiUnavailable("retries exhausted"))
+
+    def test_rejected_key_crashes_the_run(self):
+        safe_main = import_safe_main()
+        with self.assertRaises(safe_main.SafeApiAuthError):
+            self._main(safe_main, safe_main.SafeApiAuthError("bad key"))
+
+    def test_one_failing_safe_alerts_and_the_rest_still_run(self):
+        safe_main = import_safe_main()
+        queues = {("mainnet", "0x1"): [], ("mainnet", "0x2"): []}
+        _, mock_check, mock_error = self._main(safe_main, [(queues, True)], check=[TypeError("boom"), None])
+
+        self.assertEqual(mock_check.call_count, 2)
         mock_error.assert_called_once()
         message, label = mock_error.call_args.args
         self.assertEqual(label, "yearn")
@@ -1036,32 +948,15 @@ class TestQueueServiceMigration(unittest.TestCase):
     def test_failed_error_alert_does_not_skip_the_remaining_safes(self):
         from utils.telegram import TelegramError
 
-        safe_main = self._import_safe_main()
-        safes = [["PENDLE", "mainnet", "0x1"], ["LIDO", "mainnet", "0x2"]]
+        safe_main = import_safe_main()
+        queues = {("mainnet", "0x1"): [], ("mainnet", "0x2"): []}
+        _, mock_check, mock_error = self._main(
+            safe_main, [(queues, True)], check=[TypeError("boom"), None], error=TelegramError("chat not found")
+        )
 
-        with (
-            patch.object(safe_main, "check_llm_credits"),
-            patch.object(safe_main, "ALL_SAFE_ADDRESSES", safes),
-            patch.object(safe_main, "run_for_network", side_effect=[TypeError("boom"), None]) as mock_run,
-            patch.object(safe_main, "send_error_message", side_effect=TelegramError("chat not found")) as mock_error,
-        ):
-            safe_main.main()
-
-        self.assertEqual(mock_run.call_count, 2)
+        self.assertEqual(mock_check.call_count, 2)
         mock_error.assert_called_once()
 
-    def test_rejected_key_stops_the_run(self):
-        safe_main = self._import_safe_main()
-        safes = [["LIDO", "mainnet", "0x1"], ["LIDO", "mainnet", "0x2"]]
 
-        with (
-            patch.object(safe_main, "check_llm_credits"),
-            patch.object(safe_main, "ALL_SAFE_ADDRESSES", safes),
-            patch.object(safe_main, "run_for_network", side_effect=safe_main.SafeApiAuthError("bad key")) as mock_run,
-            patch.object(safe_main, "send_error_message") as mock_error,
-            self.assertRaises(safe_main.SafeApiAuthError),
-        ):
-            safe_main.main()
-
-        mock_run.assert_called_once()
-        mock_error.assert_not_called()
+if __name__ == "__main__":
+    unittest.main()
