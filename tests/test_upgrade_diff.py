@@ -137,7 +137,7 @@ def test_unchanged_deployment_is_not_listed(constructor_arguments: tuple[str | N
     body = upload.call_args.args[0]
     assert "Deployment" not in body
     assert ("constructor arguments unavailable" in body) == (None in constructor_arguments)
-    assert "constructor" not in body
+    assert "constructor arguments: differ" not in body
 
 
 def test_moved_files_keep_paths_and_unusual_line_breaks() -> None:
