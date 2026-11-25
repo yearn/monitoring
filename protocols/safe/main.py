@@ -36,7 +36,12 @@ from utils.llm.ai_explainer import Explanation, explain_batch_transaction, expla
 from utils.llm.credits import check_llm_credits
 from utils.logger import get_logger
 from utils.proxy import ProxyUpgrade, dedupe_upgrades, find_proxy_upgrades, format_upgrade_lines
-from utils.telegram import escape_markdown, send_error_message, send_telegram_message
+from utils.telegram import (
+    escape_markdown,
+    send_error_message,
+    send_telegram_message,
+    telegram_credentials_configured,
+)
 from utils.upgrade_diff import (
     UpgradeDiffLink,
     apply_upgrade_diff_links,
@@ -651,6 +656,17 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
                 logger.info("Skipping nonce %s on %s: outside the %s alert rule", nonce, safe_address, protocol)
                 # The rule only reads the tx's own fields, so it would skip this tx again.
                 mark_tx_handled(safe_address, network_name, tx)
+                continue
+
+            if not telegram_credentials_configured(protocol):
+                # An undelivered alert stays eligible, so without this check every poll would
+                # re-run the explainer and simulation and store another skipped alert row.
+                logger.warning(
+                    "No Telegram destination for %s; leaving nonce %s on %s queued until one is configured",
+                    protocol,
+                    nonce,
+                    safe_address,
+                )
                 continue
 
             # Yearn multisigs (expected_proposers is non-empty) always get an

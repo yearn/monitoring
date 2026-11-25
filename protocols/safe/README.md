@@ -11,7 +11,9 @@ own alert. Transactions below the Safe's onchain nonce never alert: a competing 
 already executed. Alerted hashes are pruned once the onchain nonce passes them.
 
 An alert is marked handled after Telegram accepts it, so a skipped delivery stays eligible on
-the next poll. The first successful queue poll seeds routine proposals covered by the legacy
+the next poll. A tx whose protocol has no Telegram destination configured is left queued before
+any explanation, simulation or stored alert, so it costs nothing per poll and alerts once a
+destination is set. The first successful queue poll seeds routine proposals covered by the legacy
 nonce cutoff. Yearn proposals from unexpected proposers stay eligible for a critical alert, even
 if their nonce is covered by the legacy cache. Pendle proposals are reevaluated under the new
 filter on that first poll, which can resend a previously delivered alert.

@@ -501,3 +501,51 @@ class TestTelegramHardening(unittest.TestCase):
 
         self.assertEqual(mock_post.call_count, 2)
         self.assertNotIn("parse_mode", mock_post.call_args.kwargs["json"])
+
+
+class TestTelegramCredentialsConfigured(unittest.TestCase):
+    """The predicate must agree with whether send_telegram_message attempts delivery."""
+
+    CASES: dict[str, dict[str, str]] = {
+        "nothing configured": {},
+        "default token, no chat": {"TELEGRAM_BOT_TOKEN_DEFAULT": "t"},
+        "chat, no token": {"TELEGRAM_CHAT_ID_PENDLE": "-1"},
+        "default token and chat": {"TELEGRAM_BOT_TOKEN_DEFAULT": "t", "TELEGRAM_CHAT_ID_PENDLE": "-1"},
+        "protocol token and chat": {"TELEGRAM_BOT_TOKEN_PENDLE": "t", "TELEGRAM_CHAT_ID_PENDLE": "-1"},
+        "topic without topics chat": {"TELEGRAM_TOPIC_ID_PENDLE": "7", "TELEGRAM_BOT_TOKEN_DEFAULT": "t"},
+        "topic without default token": {"TELEGRAM_TOPIC_ID_PENDLE": "7", "TELEGRAM_CHAT_ID_TOPICS": "-2"},
+        "topic configured": {
+            "TELEGRAM_TOPIC_ID_PENDLE": "7",
+            "TELEGRAM_CHAT_ID_TOPICS": "-2",
+            "TELEGRAM_BOT_TOKEN_DEFAULT": "t",
+        },
+        "topic ignores protocol chat": {
+            "TELEGRAM_TOPIC_ID_PENDLE": "7",
+            "TELEGRAM_BOT_TOKEN_PENDLE": "t",
+            "TELEGRAM_CHAT_ID_PENDLE": "-1",
+        },
+        "test chat without default token": {"TELEGRAM_TEST_CHAT_ID": "-3", "TELEGRAM_BOT_TOKEN_PENDLE": "t"},
+        "test chat configured": {"TELEGRAM_TEST_CHAT_ID": "-3", "TELEGRAM_BOT_TOKEN_DEFAULT": "t"},
+    }
+
+    def test_matches_send_telegram_message(self) -> None:
+        from utils import telegram
+
+        for name, env in self.CASES.items():
+            with (
+                self.subTest(name),
+                patch.dict(os.environ, {"LOG_LEVEL": "INFO", **env}, clear=True),
+                patch.object(telegram, "_deliver"),
+                patch.object(telegram, "_record_alert_safe", return_value=None),
+            ):
+                self.assertEqual(
+                    telegram.telegram_credentials_configured("PENDLE"),
+                    telegram.send_telegram_message("msg", "PENDLE"),
+                )
+
+    def test_debug_log_level_does_not_count_as_missing(self) -> None:
+        from utils import telegram
+
+        env = {"LOG_LEVEL": "DEBUG", "TELEGRAM_BOT_TOKEN_DEFAULT": "t", "TELEGRAM_CHAT_ID_PENDLE": "-1"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertTrue(telegram.telegram_credentials_configured("PENDLE"))

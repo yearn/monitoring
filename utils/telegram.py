@@ -414,6 +414,25 @@ def error_channel_configured() -> bool:
     return _channel_configured(ERROR_CHANNEL)
 
 
+def telegram_credentials_configured(protocol: str) -> bool:
+    """Whether ``send_telegram_message`` has a bot token and chat to deliver ``protocol`` alerts to.
+
+    Mirrors its routing: the ``TELEGRAM_TEST_CHAT_ID`` override, then a forum topic, then
+    the per-protocol chat. ``LOG_LEVEL=DEBUG`` is deliberately ignored, so local runs still
+    build and log the message. Callers that retry undelivered alerts check this before
+    costly work (LLM explanations, simulations) for an alert that cannot be delivered.
+
+    Args:
+        protocol: Protocol identifier, as passed to ``send_telegram_message``.
+    """
+    if os.getenv("TELEGRAM_TEST_CHAT_ID"):
+        return bool(os.getenv("TELEGRAM_BOT_TOKEN_DEFAULT"))
+    if os.getenv(f"TELEGRAM_TOPIC_ID_{protocol.upper()}"):
+        return bool(os.getenv("TELEGRAM_BOT_TOKEN_DEFAULT") and os.getenv("TELEGRAM_CHAT_ID_TOPICS"))
+    bot_token = os.getenv(f"TELEGRAM_BOT_TOKEN_{protocol.upper()}") or os.getenv("TELEGRAM_BOT_TOKEN_DEFAULT")
+    return bool(bot_token and os.getenv(f"TELEGRAM_CHAT_ID_{protocol.upper()}"))
+
+
 def resolve_channel(channel: str, fallback: str) -> str:
     """Return `channel` when its chat id is configured, else `fallback`.
 

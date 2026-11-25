@@ -17,6 +17,9 @@ def _isolate_safe_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
         if name.startswith("SAFE_API_KEY_"):
             monkeypatch.delenv(name)
     monkeypatch.setenv("SAFE_API_KEY", "test-key")
+    # Tests patch send_telegram_message; treat every protocol as having a destination.
+    # Patched on utils.telegram so the reload in each test picks it up.
+    monkeypatch.setattr("utils.telegram.telegram_credentials_configured", lambda _protocol: True)
 
 
 def safe_tx_hash(nonce: int, variant: int = 0) -> str:
@@ -421,6 +424,34 @@ class TestCheckForPendingTransactions(unittest.TestCase):
             self.assertEqual(safe_main.get_pending_transactions(safe_address, "mainnet", "YEARN_MS"), [])
 
         self.assertEqual(mock_send.call_count, 2)
+        self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), {safe_main._tx_id(tx)})
+
+    def test_missing_telegram_destination_defers_without_explaining(self):
+        safe_main = self._import_safe_main()
+        safe_address = "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52"
+        tx = self._tx(2281)
+
+        with (
+            patch.object(safe_main, "get_safe_current_nonce", return_value=2281),
+            patch.object(safe_main, "get_safe_transactions", return_value=[tx]),
+            patch.object(safe_main, "_explain_safe_tx", return_value=None) as mock_explain,
+            patch.object(safe_main, "_upgrade_alert_lines", return_value=[]) as mock_upgrades,
+            patch.object(safe_main, "send_telegram_message", return_value=True) as mock_send,
+            patch.object(safe_main, "telegram_credentials_configured", side_effect=[False, False, True]),
+        ):
+            # Two polls without a destination: no explanation, simulation, upgrade lookup or send.
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+            mock_explain.assert_not_called()
+            mock_upgrades.assert_not_called()
+            mock_send.assert_not_called()
+            self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), set())
+
+            # Once a destination is configured, the tx alerts and is handled.
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+
+        mock_explain.assert_called_once()
+        mock_send.assert_called_once()
         self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), {safe_main._tx_id(tx)})
 
     def test_no_cache_write_when_no_pending(self):
