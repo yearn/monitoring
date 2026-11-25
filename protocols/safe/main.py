@@ -17,6 +17,7 @@ from protocols.safe.addresses import (
 )
 from protocols.safe.filters import should_alert
 from protocols.safe.multisend import (
+    ZERO_ADDRESS,
     build_context_note,
     extract_inner_calls,
     is_simulatable_multisend,
@@ -48,7 +49,6 @@ load_dotenv()
 logger = get_logger("safe")
 
 SAFE_WEBSITE_URL = "https://app.safe.global/transactions/queue?safe="
-ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 # Queue Service ``proposedVia`` values whose ``proposer`` / ``proposedBy`` semantics we rely on.
 _KNOWN_PROPOSAL_ROUTES = frozenset({"OWNER", "DELEGATE", "NESTED_OWNER"})
 # How much of an unexpected Safe API error body to put in the error alert.
@@ -435,12 +435,18 @@ def mark_tx_handled(safe_address: str, network_name: str, tx: dict) -> None:
     save_handled_txs(safe_address, network_name, handled)
 
 
-def _seed_handled_from_nonce_cache(safe_address: str, network_name: str, queued_txs: list[dict]) -> set[TxId]:
+def _seed_handled_from_nonce_cache(
+    safe_address: str, network_name: str, protocol: str, queued_txs: list[dict]
+) -> set[TxId]:
     """Seed routine txs that the old nonce cutoff covered.
 
     The old cache cannot tell which hash at a nonce reached Telegram. On Yearn Safes,
     leave unexpected-proposer txs eligible so critical alerts can run after migration.
+    For Pendle, reevaluate proposals with the new filter because it covers calls the old filter skipped.
     """
+    if protocol == "PENDLE":
+        return set()
+
     last_alerted_nonce = get_last_executed_nonce_from_file(safe_address)
     if last_alerted_nonce is None:
         return set()
@@ -454,7 +460,7 @@ def _seed_handled_from_nonce_cache(safe_address: str, network_name: str, queued_
     }
 
 
-def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]:
+def get_pending_transactions(safe_address: str, network_name: str, protocol: str) -> list[dict]:
     """Fetch queued transactions that have not been alerted on yet.
 
     A tx is returned when all of these hold:
@@ -497,7 +503,9 @@ def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]
         seen.add(tx_id)
         queued_txs.append(tx)
 
-    handled = _seed_handled_from_nonce_cache(safe_address, network_name, queued_txs) if stored is None else stored
+    handled = (
+        _seed_handled_from_nonce_cache(safe_address, network_name, protocol, queued_txs) if stored is None else stored
+    )
     handled = {tx_id for tx_id in handled if tx_id[0] >= current_safe_nonce}
     if handled != stored:
         save_handled_txs(safe_address, network_name, handled)
@@ -539,7 +547,7 @@ def _explain_safe_tx(
     """
     safe_tx_hash = _safe_tx_hash(tx)
     operation = int(tx.get("operation", 0) or 0)
-    inner_calls = extract_inner_calls(tx) if operation == 1 else []
+    inner_calls = extract_inner_calls(tx, safe_address)
 
     if inner_calls:
         simulate = is_simulatable_multisend(tx, inner_calls)
@@ -580,14 +588,13 @@ def _explain_safe_tx(
     )
 
 
-def _find_safe_tx_upgrades(tx: dict, target: str, hex_data: str) -> list[ProxyUpgrade]:
+def _find_safe_tx_upgrades(tx: dict, target: str, hex_data: str, safe_address: str) -> list[ProxyUpgrade]:
     """Proxy upgrades a Safe tx performs: direct, per multisend call, or inside a timelock call.
 
     Multisend upgrades carry ``multiSend call N`` in their path, because the
     alert's target is the multisend utility, not the call that upgrades.
     """
-    operation = int(tx.get("operation", 0) or 0)
-    inner_calls = extract_inner_calls(tx) if operation == 1 else []
+    inner_calls = extract_inner_calls(tx, safe_address)
     if not inner_calls:
         return find_proxy_upgrades(hex_data, target)
 
@@ -600,11 +607,11 @@ def _find_safe_tx_upgrades(tx: dict, target: str, hex_data: str) -> list[ProxyUp
 
 
 def _upgrade_alert_lines(
-    tx: dict, target: str, hex_data: str, chain_id: int, diffs: list[UpgradeDiffLink]
+    tx: dict, target: str, hex_data: str, safe_address: str, chain_id: int, diffs: list[UpgradeDiffLink]
 ) -> list[str]:
     """Collect the alert lines and diff links for each detected Safe upgrade."""
     lines: list[str] = []
-    for upgrade in _find_safe_tx_upgrades(tx, target, hex_data):
+    for upgrade in _find_safe_tx_upgrades(tx, target, hex_data, safe_address):
         lines.extend(format_upgrade_lines(upgrade, target, chain_id, diffs=diffs))
     return lines
 
@@ -629,7 +636,7 @@ def _proposer_and_delegate(tx: dict) -> tuple[str, str]:
 
 
 def check_for_pending_transactions(safe_address: str, network_name: str, protocol: str) -> None:
-    pending_transactions = get_pending_transactions(safe_address, network_name)
+    pending_transactions = get_pending_transactions(safe_address, network_name, protocol)
     expected_proposers = YEARN_EXPECTED_PROPOSERS.get((network_name, safe_address.lower()), set())
 
     if pending_transactions:
@@ -709,7 +716,7 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
             diffs: list[UpgradeDiffLink] = []
             upgrade_lines: list[str] = []
             try:
-                upgrade_lines = _upgrade_alert_lines(tx, target_contract, hex_data, chain_id, diffs)
+                upgrade_lines = _upgrade_alert_lines(tx, target_contract, hex_data, safe_address, chain_id, diffs)
             except Exception:
                 diffs.clear()
                 logger.warning("Upgrade detection failed for Safe tx nonce=%s", nonce, exc_info=True)

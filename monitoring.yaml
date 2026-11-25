@@ -342,7 +342,7 @@ protocols:
       - name: "Queued Transactions"
         description: "Pending transactions across monitored Safe multisigs, including lower-nonce and replacement proposals. Alerts are deduplicated by safeTxHash after Telegram accepts them."
       - name: "Proxy Upgrades"
-        description: "Proxy upgrades in queued txs, including upgrades inside multisend and timelock calls, with a Wavey Gist verified source diff"
+        description: "Proxy upgrades in queued txs, including multisend, Safe v1.5 self-calls and timelock calls, with a Wavey Gist verified source diff"
       - name: "Unexpected Proposers"
         description: "Yearn multisig txs proposed by addresses outside known bot/EOA set"
 

@@ -115,6 +115,8 @@ class TestDecodeMultisend(unittest.TestCase):
 
 
 class TestExtractInnerCalls(unittest.TestCase):
+    SAFE_ADDRESS = "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52"
+
     def test_official_multisend_deployments_are_decoded(self) -> None:
         # Every official multisend deployment in safe-global/safe-deployments: v1.1.1, v1.3.0 canonical +
         # EIP-155, v1.4.1 and v1.5.0 (older releases ship none).
@@ -130,7 +132,7 @@ class TestExtractInnerCalls(unittest.TestCase):
             "0x218543288004CD07832472D464648173c77D7eB7",
         ):
             with self.subTest(to=to):
-                calls = extract_inner_calls(multisend_tx(YCHAD_2308_DATA, to=to))
+                calls = extract_inner_calls(multisend_tx(YCHAD_2308_DATA, to=to), self.SAFE_ADDRESS)
                 self.assertEqual([c["target"] for c in calls], ["0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"])
 
     def test_anything_else_stays_a_single_call(self) -> None:
@@ -148,7 +150,7 @@ class TestExtractInnerCalls(unittest.TestCase):
         }
         for name, tx in cases.items():
             with self.subTest(name):
-                self.assertEqual(extract_inner_calls(tx), [])
+                self.assertEqual(extract_inner_calls(tx, self.SAFE_ADDRESS), [])
 
 
 class TestIsSimulatableMultisend(unittest.TestCase):

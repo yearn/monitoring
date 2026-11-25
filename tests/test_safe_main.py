@@ -67,7 +67,7 @@ class TestSafePendingTransactions(unittest.TestCase):
             patch.object(self.safe_main, "get_safe_current_nonce", return_value=current_nonce),
             patch.object(self.safe_main, "get_safe_transactions", return_value=txs),
         ):
-            pending = self.safe_main.get_pending_transactions(self.SAFE, network)
+            pending = self.safe_main.get_pending_transactions(self.SAFE, network, "YEARN_MS")
         return [int(tx["nonce"]) for tx in pending]
 
     def _alerted(self, *txs: dict, network: str = "mainnet") -> None:
@@ -146,7 +146,7 @@ class TestSafePendingTransactions(unittest.TestCase):
             patch.object(self.safe_main, "get_safe_current_nonce", return_value=100),
             patch.object(self.safe_main, "get_safe_transactions", return_value=[replacement, queue_tx(101)]),
         ):
-            pending = self.safe_main.get_pending_transactions(self.SAFE, "mainnet")
+            pending = self.safe_main.get_pending_transactions(self.SAFE, "mainnet", "YEARN_MS")
 
         self.assertEqual([tx["safeTxHash"] for tx in pending], [replacement["safeTxHash"]])
 
@@ -188,7 +188,7 @@ class TestSafePendingTransactions(unittest.TestCase):
             patch.object(safe_main, "send_telegram_message", return_value=True) as mock_send,
         ):
             safe_main.check_for_pending_transactions(self.SAFE, "mainnet", "YEARN_MS")
-            self.assertEqual(safe_main.get_pending_transactions(self.SAFE, "mainnet"), [])
+            self.assertEqual(safe_main.get_pending_transactions(self.SAFE, "mainnet", "YEARN_MS"), [])
 
         mock_send.assert_called_once()
         message, _protocol, disable_notification = mock_send.call_args.args
@@ -231,6 +231,29 @@ class TestSafePendingTransactions(unittest.TestCase):
         # Once seeded, the old cache is no longer read.
         self.assertEqual(self._pending(txs, current_nonce=101, legacy_nonce=10**6), [103])
 
+    def test_migration_reevaluates_pending_pendle_proposals(self):
+        from tests.test_calldata_wrappers import NEW_ORACLE_IMPL, ORACLE, encode_call
+
+        safe_main = self.safe_main
+        pendle_safe = "0x8119EC16F0573B7dAc7C0CB94EB504FB32456ee1"
+        safe_main.write_last_value_to_file(safe_main.nonces_filename, pendle_safe, 8)
+        proxy_admin_upgrade = encode_call("upgrade(address,address)", ["address", "address"], [ORACLE, NEW_ORACLE_IMPL])
+        queued = [queue_tx(8), queue_tx(7, data=proxy_admin_upgrade)]
+
+        with (
+            patch.object(safe_main, "get_safe_current_nonce", return_value=7),
+            patch.object(safe_main, "get_safe_transactions", return_value=queued),
+            patch("utils.proxy.get_current_implementation", return_value=None),
+            patch.object(safe_main, "_explain_safe_tx", return_value=None),
+            patch.object(safe_main, "send_telegram_message", return_value=True) as mock_send,
+        ):
+            for _ in range(2):
+                safe_main.check_for_pending_transactions(pendle_safe, "mainnet", "PENDLE")
+
+        mock_send.assert_called_once()
+        self.assertIn("#️⃣ Nonce: 7", mock_send.call_args.args[0])
+        self.assertIn(NEW_ORACLE_IMPL, mock_send.call_args.args[0])
+
     def test_fresh_safe_can_alert_on_nonce_zero(self):
         safe_main = self.safe_main
         first_tx = queue_tx(0)
@@ -238,7 +261,7 @@ class TestSafePendingTransactions(unittest.TestCase):
             patch.object(safe_main, "get_safe_current_nonce", return_value=0),
             patch.object(safe_main, "get_safe_transactions", return_value=[first_tx]),
         ):
-            self.assertEqual(safe_main.get_pending_transactions(self.SAFE, "mainnet"), [first_tx])
+            self.assertEqual(safe_main.get_pending_transactions(self.SAFE, "mainnet", "YEARN_MS"), [first_tx])
 
     def test_failed_queue_pages_do_not_complete_migration(self):
         safe_main = self.safe_main
@@ -258,9 +281,9 @@ class TestSafePendingTransactions(unittest.TestCase):
         ):
             for offset in (0, 100):
                 with self.assertRaisesRegex(safe_main.SafeApiRequestError, f"at offset {offset}"):
-                    safe_main.get_pending_transactions(self.SAFE, "mainnet")
+                    safe_main.get_pending_transactions(self.SAFE, "mainnet", "YEARN_MS")
                 self.assertIsNone(safe_main.load_handled_txs(self.SAFE, "mainnet"))
-            self.assertEqual(safe_main.get_pending_transactions(self.SAFE, "mainnet"), [])
+            self.assertEqual(safe_main.get_pending_transactions(self.SAFE, "mainnet", "YEARN_MS"), [])
 
         self.assertEqual(
             safe_main.load_handled_txs(self.SAFE, "mainnet"),
@@ -276,7 +299,7 @@ class TestSafePendingTransactions(unittest.TestCase):
             patch.object(self.safe_main, "get_safe_current_nonce", return_value=100),
             patch.object(self.safe_main.requests, "get", return_value=ok) as mock_get,
         ):
-            pending = self.safe_main.get_pending_transactions(self.SAFE, "mainnet")
+            pending = self.safe_main.get_pending_transactions(self.SAFE, "mainnet", "YEARN_MS")
 
         self.assertEqual(len(pending), 25)
         mock_get.assert_called_once()
@@ -375,7 +398,7 @@ class TestCheckForPendingTransactions(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
             # The next run re-sends only the alert that failed.
-            pending = safe_main.get_pending_transactions(safe_address, "mainnet")
+            pending = safe_main.get_pending_transactions(safe_address, "mainnet", "YEARN_MS")
 
         self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), {safe_main._tx_id(queued[0])})
         self.assertEqual(pending, [queued[1]])
@@ -395,7 +418,7 @@ class TestCheckForPendingTransactions(unittest.TestCase):
             self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), set())
 
             safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
-            self.assertEqual(safe_main.get_pending_transactions(safe_address, "mainnet"), [])
+            self.assertEqual(safe_main.get_pending_transactions(safe_address, "mainnet", "YEARN_MS"), [])
 
         self.assertEqual(mock_send.call_count, 2)
         self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), {safe_main._tx_id(tx)})
@@ -541,7 +564,7 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         ):
             with self.subTest(multisend=multisend):
                 tx = {**self._tx(10), "to": multisend.lower(), "operation": 1, "data": data}
-                upgrades = safe_main._find_safe_tx_upgrades(tx, multisend, data)
+                upgrades = safe_main._find_safe_tx_upgrades(tx, multisend, data, ORACLE)
                 self.assertEqual([(u.proxy_address, u.via) for u in upgrades], [(ORACLE, "multiSend call 2")])
 
     def test_upgrade_detection_failure_does_not_block_the_alert(self):
@@ -613,6 +636,29 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         self.assertEqual(kwargs["from_address"], "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52")
         self.assertEqual(kwargs["safe_tx_hash"], tx["safeTxHash"])
         self.assertIn("can be simulated as one ordered bundle", kwargs["context_note"])
+
+    def test_multisend_zero_destination_uses_version_specific_target(self):
+        from tests.test_calldata_wrappers import encode_call
+        from tests.test_safe_multisend import pack_multisend
+
+        safe_main = self._import_safe_main()
+        safe_address = "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52"
+        inner_data = encode_call("getThreshold()", [], [])
+        data = pack_multisend([(0, safe_main.ZERO_ADDRESS, 0, inner_data)])
+        for utility, target in (
+            ("0x9641d764fc13c8b624c04430c7356c1c7c8102e2", safe_main.ZERO_ADDRESS),  # v1.4.1
+            ("0xa83c336b20401af773b6219ba5027174338d1836", safe_address),  # v1.5.0 CallOnly
+            ("0x218543288004cd07832472d464648173c77d7eb7", safe_address),  # v1.5.0
+        ):
+            with self.subTest(utility=utility):
+                tx = self._tx(2296) | {"to": utility, "operation": 1, "data": data}
+                kwargs = self._explain_multisend(tx)
+                self.assertEqual(kwargs["calls"][0]["target"], target)
+                self.assertFalse(kwargs["skip_simulation"])
+
+                with patch.object(safe_main, "find_proxy_upgrades", return_value=[]) as mock_find:
+                    safe_main._find_safe_tx_upgrades(tx, utility, data, safe_address)
+                mock_find.assert_called_once_with(inner_data, target)
 
     def test_multisend_with_inner_delegatecall_skips_simulation(self):
         kwargs = self._explain_multisend(self._multisend_tx([0, 1]))
@@ -809,7 +855,7 @@ class TestSafeApiQuota(unittest.TestCase):
             patch.object(safe_main, "get_safe_current_nonce", return_value=None),
             patch.object(safe_main, "get_safe_transactions") as mock_txs,
         ):
-            self.assertEqual(safe_main.get_pending_transactions("0xSafe", "mainnet"), [])
+            self.assertEqual(safe_main.get_pending_transactions("0xSafe", "mainnet", "YEARN_MS"), [])
         mock_txs.assert_not_called()
 
     def test_current_nonce_is_read_onchain(self):
