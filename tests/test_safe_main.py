@@ -19,9 +19,15 @@ def _isolate_safe_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SAFE_API_KEY", "test-key")
 
 
+def safe_tx_hash(nonce: int, variant: int = 0) -> str:
+    """A deterministic, well-formed safeTxHash for a nonce (``variant`` tells replacements apart)."""
+    return f"0x{variant:032x}{nonce:032x}"
+
+
 def queue_tx(nonce: int, **fields) -> dict:
     """A Safe Queue Service row: string numerics, lowercase addresses, ``created``."""
     return {
+        "safeTxHash": safe_tx_hash(nonce),
         "nonce": str(nonce),
         "chainId": "1",
         "to": "0x0000000000000000000000000000000000000abc",
@@ -39,37 +45,37 @@ def queue_tx(nonce: int, **fields) -> dict:
 
 
 class TestSafePendingTransactions(unittest.TestCase):
+    """Which queued txs ``get_pending_transactions`` returns, against the real (per-test) cache."""
+
+    SAFE = "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52"
+
     def _import_safe_main(self):
         with patch.dict(os.environ, {"SAFE_API_KEY": "test-key"}):
             import protocols.safe.main as safe_main
 
             return importlib.reload(safe_main)
 
-    def test_current_nonce_advances_nonce_cache(self):
-        safe_main = self._import_safe_main()
-        safe_address = "0xSafe"
+    def setUp(self) -> None:
+        self.safe_main = self._import_safe_main()
 
+    def _pending(
+        self, txs: list[dict], current_nonce: int | None, legacy_nonce: int | None = None, network: str = "mainnet"
+    ) -> list[int]:
+        """Run ``get_pending_transactions`` on ``txs`` and return the pending nonces."""
         with (
-            patch.object(safe_main, "get_last_executed_nonce_from_file", return_value=9),
-            patch.object(safe_main, "get_safe_current_nonce", return_value=23),
-            patch.object(
-                safe_main,
-                "get_safe_transactions",
-                return_value=[
-                    {"nonce": 22},
-                    {"nonce": 20},
-                    {"nonce": 23},
-                ],
-            ),
-            patch.object(safe_main, "write_last_executed_nonce_to_file") as mock_write,
+            patch.object(self.safe_main, "get_last_executed_nonce_from_file", return_value=legacy_nonce),
+            patch.object(self.safe_main, "get_safe_current_nonce", return_value=current_nonce),
+            patch.object(self.safe_main, "get_safe_transactions", return_value=txs),
         ):
-            pending = safe_main.get_pending_transactions(safe_address, "base-main")
+            pending = self.safe_main.get_pending_transactions(self.SAFE, network)
+        return [int(tx["nonce"]) for tx in pending]
 
-        mock_write.assert_called_once_with(safe_address, 22)
-        self.assertEqual(pending, [{"nonce": 23}])
+    def _alerted(self, *txs: dict, network: str = "mainnet") -> None:
+        for tx in txs:
+            self.safe_main.mark_tx_handled(self.SAFE, network, tx)
 
     def test_get_safe_transactions_retries_on_connection_error(self):
-        safe_main = self._import_safe_main()
+        safe_main = self.safe_main
 
         ok_response = Mock(status_code=200)
         ok_response.json.return_value = {"results": [{"nonce": 5}]}
@@ -92,7 +98,7 @@ class TestSafePendingTransactions(unittest.TestCase):
         mock_sleep.assert_called_once()
 
     def test_get_safe_transactions_returns_empty_after_exhausting_retries(self):
-        safe_main = self._import_safe_main()
+        safe_main = self.safe_main
 
         with (
             patch.object(
@@ -108,84 +114,225 @@ class TestSafePendingTransactions(unittest.TestCase):
         self.assertEqual(mock_get.call_count, 3)
 
     def test_executed_rows_are_filtered_even_when_api_returns_them(self):
-        safe_main = self._import_safe_main()
-        safe_address = "0xSafe"
-
         txs = [
-            {"nonce": "30", "txHash": "0x" + "ab" * 32, "failed": False},
-            {"nonce": "31", "txHash": None, "failed": True},
-            {"nonce": "32", "txHash": "0x" + "cd" * 32, "failed": None},
-            {"nonce": "33", "txHash": None, "failed": None},
+            queue_tx(30, txHash="0x" + "ab" * 32, failed=False),
+            queue_tx(31, failed=True),
+            queue_tx(32, txHash="0x" + "cd" * 32),
+            queue_tx(33),
         ]
-
-        with (
-            patch.object(safe_main, "get_last_executed_nonce_from_file", return_value=0),
-            patch.object(safe_main, "get_safe_current_nonce", return_value=30),
-            patch.object(safe_main, "get_safe_transactions", return_value=txs),
-            patch.object(safe_main, "write_last_executed_nonce_to_file") as mock_write,
-        ):
-            pending = safe_main.get_pending_transactions(safe_address, "mainnet")
-
-        mock_write.assert_called_once_with(safe_address, 29)
-        self.assertEqual(pending, [{"nonce": "33", "txHash": None, "failed": None}])
+        self.assertEqual(self._pending(txs, current_nonce=30), [33])
 
     def test_current_nonce_unknown_fails_closed(self):
-        safe_main = self._import_safe_main()
-        safe_address = "0xSafe"
+        self.assertEqual(self._pending([queue_tx(3274), queue_tx(3280)], current_nonce=None), [])
+        self.assertIsNone(self.safe_main.load_handled_txs(self.SAFE, "mainnet"))
 
-        txs = [
-            {"nonce": 3274, "txHash": None, "failed": None},
-            {"nonce": 3280, "txHash": None, "failed": None},
-        ]
+    def test_dead_slot_rows_below_current_nonce_never_alert(self):
+        """A tx below the onchain nonce can never execute, even if it was never alerted on."""
+        self.assertEqual(self._pending([queue_tx(3282), queue_tx(3281), queue_tx(3280)], current_nonce=3282), [3282])
 
-        with (
-            patch.object(safe_main, "get_last_executed_nonce_from_file", return_value=0),
-            patch.object(safe_main, "get_safe_current_nonce", return_value=None),
-            patch.object(safe_main, "get_safe_transactions", return_value=txs),
-            patch.object(safe_main, "write_last_executed_nonce_to_file") as mock_write,
-        ):
-            pending = safe_main.get_pending_transactions(safe_address, "mainnet")
+    def test_alerted_tx_is_not_returned_again(self):
+        self._alerted(queue_tx(101))
+        self.assertEqual(self._pending([queue_tx(101)], current_nonce=100), [])
 
-        self.assertEqual(pending, [])
-        mock_write.assert_not_called()
+    def test_lower_nonce_queued_after_a_higher_one_alerted(self):
+        self._alerted(queue_tx(101))
+        self.assertEqual(self._pending([queue_tx(101), queue_tx(100)], current_nonce=100), [100])
 
-    def test_dead_slot_rows_below_current_nonce_are_filtered(self):
-        safe_main = self._import_safe_main()
-        safe_address = "0xSafe"
-
-        txs = [
-            {"nonce": 3280, "txHash": None, "failed": None},
-            {"nonce": 3282, "txHash": None, "failed": None},
-        ]
+    def test_replacement_at_an_alerted_nonce_alerts(self):
+        replacement = queue_tx(101, safeTxHash=safe_tx_hash(101, variant=1))
+        self._alerted(queue_tx(101))
 
         with (
-            patch.object(safe_main, "get_last_executed_nonce_from_file", return_value=0),
-            patch.object(safe_main, "get_safe_current_nonce", return_value=3282),
-            patch.object(safe_main, "get_safe_transactions", return_value=txs),
-            patch.object(safe_main, "write_last_executed_nonce_to_file") as mock_write,
+            patch.object(self.safe_main, "get_safe_current_nonce", return_value=100),
+            patch.object(self.safe_main, "get_safe_transactions", return_value=[replacement, queue_tx(101)]),
         ):
-            pending = safe_main.get_pending_transactions(safe_address, "mainnet")
+            pending = self.safe_main.get_pending_transactions(self.SAFE, "mainnet")
 
-        mock_write.assert_called_once_with(safe_address, 3281)
-        self.assertEqual(pending, [{"nonce": 3282, "txHash": None, "failed": None}])
+        self.assertEqual([tx["safeTxHash"] for tx in pending], [replacement["safeTxHash"]])
+
+    def test_replacement_by_an_unexpected_proposer_is_critical(self):
+        """A different tx at an alerted nonce must still reach the unexpected-proposer check."""
+        bot = "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"
+        original = queue_tx(101, proposer=bot)
+        replacement = queue_tx(101, safeTxHash=safe_tx_hash(101, variant=1), proposer="0x" + "66" * 20)
+        self._alerted(original)
+
+        with (
+            patch.object(self.safe_main, "get_safe_current_nonce", return_value=100),
+            patch.object(self.safe_main, "get_safe_transactions", return_value=[replacement, original]),
+            patch.object(self.safe_main, "YEARN_EXPECTED_PROPOSERS", {("mainnet", self.SAFE.lower()): {bot}}),
+            patch.object(self.safe_main, "_explain_safe_tx", return_value=None),
+            patch.object(self.safe_main, "send_telegram_message", return_value=True) as mock_send,
+        ):
+            self.safe_main.check_for_pending_transactions(self.SAFE, "mainnet", "YEARN_MS")
+
+        mock_send.assert_called_once()
+        message, _protocol, disable_notification = mock_send.call_args.args
+        self.assertIn("UNEXPECTED PROPOSER", message)
+        self.assertFalse(disable_notification)
+        # Both txs at nonce 101 are now handled; the next run alerts on neither.
+        self.assertEqual(self._pending([replacement, original], current_nonce=100), [])
+
+    def test_migration_keeps_unexpected_replacement_eligible_for_critical_alert(self):
+        bot = "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"
+        original = queue_tx(101, proposer=bot)
+        replacement = queue_tx(101, safeTxHash=safe_tx_hash(101, variant=1), proposer="0x" + "66" * 20)
+        safe_main = self.safe_main
+        safe_main.write_last_value_to_file(safe_main.nonces_filename, self.SAFE, 101)
+
+        with (
+            patch.object(safe_main, "get_safe_current_nonce", return_value=100),
+            patch.object(safe_main, "get_safe_transactions", return_value=[replacement, original]),
+            patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {("mainnet", self.SAFE.lower()): {bot}}),
+            patch.object(safe_main, "_explain_safe_tx", return_value=None),
+            patch.object(safe_main, "send_telegram_message", return_value=True) as mock_send,
+        ):
+            safe_main.check_for_pending_transactions(self.SAFE, "mainnet", "YEARN_MS")
+            self.assertEqual(safe_main.get_pending_transactions(self.SAFE, "mainnet"), [])
+
+        mock_send.assert_called_once()
+        message, _protocol, disable_notification = mock_send.call_args.args
+        self.assertIn("UNEXPECTED PROPOSER", message)
+        self.assertFalse(disable_notification)
+
+    def test_txs_without_a_hash_fall_back_to_nonce_dedup(self):
+        self._alerted(queue_tx(101, safeTxHash=None))
+        self.assertEqual(self._pending([queue_tx(101, safeTxHash=None), queue_tx(102, safeTxHash="")], 100), [102])
+
+    def test_handled_txs_below_current_nonce_are_pruned(self):
+        self._alerted(queue_tx(100), queue_tx(101), queue_tx(102, safeTxHash=safe_tx_hash(102, variant=1)))
+
+        self.assertEqual(self._pending([queue_tx(102)], current_nonce=102), [102])
+
+        self.assertEqual(self.safe_main.load_handled_txs(self.SAFE, "mainnet"), {(102, safe_tx_hash(102, variant=1))})
+
+    def test_handled_txs_are_stored_compactly(self):
+        self._alerted(queue_tx(102), queue_tx(101))
+        raw = self.safe_main.get_last_value_for_key_from_file(
+            self.safe_main.nonces_filename, self.safe_main._handled_txs_cache_key(self.SAFE, "mainnet")
+        )
+        self.assertEqual(raw, f"101@{safe_tx_hash(101)},102@{safe_tx_hash(102)}")
+
+    def test_same_address_on_another_chain_has_its_own_cache(self):
+        self._alerted(queue_tx(101), network="base-main")
+        self.assertEqual(self._pending([queue_tx(101)], current_nonce=100), [101])
+
+    def test_first_run_seeds_from_the_old_nonce_cache(self):
+        """The old nonce cutoff seeds routine proposals during the first successful poll."""
+        bot = "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"
+        txs = [queue_tx(nonce, proposer=bot) for nonce in (103, 102, 101, 100)]
+
+        self.assertEqual(self._pending(txs, current_nonce=101, legacy_nonce=102), [103])
+
+        self.assertEqual(
+            self.safe_main.load_handled_txs(self.SAFE, "mainnet"),
+            {(101, safe_tx_hash(101)), (102, safe_tx_hash(102))},
+        )
+        # Once seeded, the old cache is no longer read.
+        self.assertEqual(self._pending(txs, current_nonce=101, legacy_nonce=10**6), [103])
+
+    def test_fresh_safe_can_alert_on_nonce_zero(self):
+        safe_main = self.safe_main
+        first_tx = queue_tx(0)
+        with (
+            patch.object(safe_main, "get_safe_current_nonce", return_value=0),
+            patch.object(safe_main, "get_safe_transactions", return_value=[first_tx]),
+        ):
+            self.assertEqual(safe_main.get_pending_transactions(self.SAFE, "mainnet"), [first_tx])
+
+    def test_failed_queue_pages_do_not_complete_migration(self):
+        safe_main = self.safe_main
+        bot = "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"
+        safe_main.write_last_value_to_file(safe_main.nonces_filename, self.SAFE, 200)
+        first_page = Mock(status_code=200)
+        first_page.json.return_value = {"results": [queue_tx(nonce, proposer=bot) for nonce in range(200, 100, -1)]}
+        last_page = Mock(status_code=200)
+        last_page.json.return_value = {"results": [queue_tx(100, proposer=bot)]}
+        unavailable = Mock(status_code=503)
+        responses = [unavailable] * 3 + [first_page] + [unavailable] * 3 + [first_page, last_page]
+
+        with (
+            patch.object(safe_main, "get_safe_current_nonce", return_value=100),
+            patch.object(safe_main.requests, "get", side_effect=responses),
+            patch.object(safe_main.time, "sleep"),
+        ):
+            for offset in (0, 100):
+                with self.assertRaisesRegex(safe_main.SafeApiRequestError, f"at offset {offset}"):
+                    safe_main.get_pending_transactions(self.SAFE, "mainnet")
+                self.assertIsNone(safe_main.load_handled_txs(self.SAFE, "mainnet"))
+            self.assertEqual(safe_main.get_pending_transactions(self.SAFE, "mainnet"), [])
+
+        self.assertEqual(
+            safe_main.load_handled_txs(self.SAFE, "mainnet"),
+            {(nonce, safe_tx_hash(nonce)) for nonce in range(100, 201)},
+        )
+
+    def test_more_than_ten_eligible_txs_are_all_returned(self):
+        txs = [queue_tx(nonce) for nonce in range(124, 99, -1)]  # 25 queued, descending
+        ok = Mock(status_code=200)
+        ok.json.return_value = {"results": txs}
+
+        with (
+            patch.object(self.safe_main, "get_safe_current_nonce", return_value=100),
+            patch.object(self.safe_main.requests, "get", return_value=ok) as mock_get,
+        ):
+            pending = self.safe_main.get_pending_transactions(self.SAFE, "mainnet")
+
+        self.assertEqual(len(pending), 25)
+        mock_get.assert_called_once()
+        self.assertEqual(mock_get.call_args.kwargs["params"]["limit"], 100)
+
+
+class TestSafeQueuePaging(unittest.TestCase):
+    """A second page costs quota, so it is fetched only when the first may hide wanted txs."""
+
+    def _import_safe_main(self):
+        with patch.dict(os.environ, {"SAFE_API_KEY": "test-key"}):
+            import protocols.safe.main as safe_main
+
+            return importlib.reload(safe_main)
+
+    @staticmethod
+    def _page(nonces: range) -> Mock:
+        response = Mock(status_code=200)
+        response.json.return_value = {"results": [queue_tx(nonce) for nonce in nonces]}
+        return response
+
+    def _fetch(self, pages: list[Mock], min_nonce: int | None, **kwargs) -> tuple[list[int], list[dict]]:
+        safe_main = self._import_safe_main()
+        with patch.object(safe_main.requests, "get", side_effect=pages) as mock_get:
+            txs = safe_main.get_safe_transactions("0xSafe", "mainnet", executed=False, min_nonce=min_nonce, **kwargs)
+        return [int(tx["nonce"]) for tx in txs], [call.kwargs["params"] for call in mock_get.call_args_list]
+
+    def test_full_page_of_eligible_txs_fetches_the_next_page(self):
+        nonces, params = self._fetch([self._page(range(249, 149, -1)), self._page(range(149, 119, -1))], 120)
+
+        self.assertEqual(nonces, list(range(249, 119, -1)))
+        self.assertEqual([p.get("offset") for p in params], [None, 100])
+        self.assertEqual({p["limit"] for p in params}, {100})
+
+    def test_full_page_reaching_dead_slots_stops(self):
+        nonces, params = self._fetch([self._page(range(249, 149, -1))], 200)
+        self.assertEqual(len(nonces), 100)
+        self.assertEqual(len(params), 1)
+
+    def test_partial_page_stops(self):
+        _, params = self._fetch([self._page(range(130, 119, -1))], 0)
+        self.assertEqual(len(params), 1)
+
+    def test_without_min_nonce_only_the_first_page_is_fetched(self):
+        _, params = self._fetch([self._page(range(249, 149, -1))], None)
+        self.assertEqual(len(params), 1)
+
+    def test_page_cap_bounds_requests(self):
+        pages = [self._page(range(start, start - 2, -1)) for start in (9, 7, 5)]
+        nonces, params = self._fetch(pages, 0, limit=2, max_pages=2)
+        self.assertEqual(nonces, [9, 8, 7, 6])
+        self.assertEqual(len(params), 2)
 
 
 class TestCheckForPendingTransactions(unittest.TestCase):
-    """Regression tests for the dedupe write and dead-slot / stale-snapshot behavior.
-
-    The Safe tx-service returns pending txs in descending nonce order
-    (ordering=-nonce). The original loop wrote the cache to each nonce in
-    turn, so the cache ended at the *lowest* nonce and re-fired the highest
-    one next run. We now write progress after each delivered alert without
-    ever moving the scalar cache backwards.
-    """
-
-    _DIAG = {
-        "last_cached_nonce": 0,
-        "current_safe_nonce": None,
-        "chain_baseline": None,
-        "baseline": 0,
-    }
+    """The alert loop: each alerted (or rule-skipped) tx is recorded as handled right away."""
 
     def _import_safe_main(self):
         with patch.dict(os.environ, {"SAFE_API_KEY": "test-key"}):
@@ -196,63 +343,62 @@ class TestCheckForPendingTransactions(unittest.TestCase):
     def _tx(self, nonce: int) -> dict:
         return queue_tx(nonce)
 
-    def test_cache_write_uses_highest_nonce_not_lowest(self):
-        """Two pending txs in DESCENDING order; cache must end at the highest.
-
-        Regression: previously the loop wrote the cache after each tx, so
-        the final value was the *lowest* nonce (2280) and the highest (2281)
-        was re-alerted on the next run.
-        """
+    def test_each_delivered_alert_is_marked_handled(self):
         safe_main = self._import_safe_main()
         safe_address = "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52"
-
         pending = [self._tx(2281), self._tx(2280)]  # API returns descending
 
         with (
             patch.object(safe_main, "get_pending_transactions", return_value=pending),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
-            patch.object(safe_main, "_pending_filter_diag", return_value=self._DIAG),
             patch.object(safe_main, "_explain_safe_tx", return_value=None),
-            patch.object(safe_main, "send_telegram_message") as mock_send,
-            patch.object(safe_main, "write_last_executed_nonce_to_file") as mock_write,
+            patch.object(safe_main, "send_telegram_message", return_value=True) as mock_send,
+            patch.object(safe_main, "mark_tx_handled") as mock_mark,
         ):
             safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
 
         self.assertEqual(mock_send.call_count, 2)
-        mock_write.assert_called_once_with(safe_address, 2281)
-
-    def test_cache_write_single_call_even_for_single_tx(self):
-        safe_main = self._import_safe_main()
-        safe_address = "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52"
-
-        with (
-            patch.object(safe_main, "get_pending_transactions", return_value=[self._tx(2281)]),
-            patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
-            patch.object(safe_main, "_pending_filter_diag", return_value=self._DIAG),
-            patch.object(safe_main, "_explain_safe_tx", return_value=None),
-            patch.object(safe_main, "send_telegram_message"),
-            patch.object(safe_main, "write_last_executed_nonce_to_file") as mock_write,
-        ):
-            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
-
-        mock_write.assert_called_once_with(safe_address, 2281)
+        self.assertEqual([c.args for c in mock_mark.call_args_list], [(safe_address, "mainnet", tx) for tx in pending])
 
     def test_cache_progress_survives_later_send_failure(self):
         safe_main = self._import_safe_main()
         safe_address = "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52"
+        queued = [self._tx(2281), self._tx(2280)]
 
         with (
-            patch.object(safe_main, "get_pending_transactions", return_value=[self._tx(2281), self._tx(2280)]),
+            patch.object(safe_main, "get_safe_current_nonce", return_value=2280),
+            patch.object(safe_main, "get_safe_transactions", return_value=queued),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
-            patch.object(safe_main, "_pending_filter_diag", return_value=self._DIAG),
             patch.object(safe_main, "_explain_safe_tx", return_value=None),
-            patch.object(safe_main, "send_telegram_message", side_effect=[None, RuntimeError("telegram down")]),
-            patch.object(safe_main, "write_last_executed_nonce_to_file") as mock_write,
+            patch.object(safe_main, "send_telegram_message", side_effect=[True, RuntimeError("telegram down")]),
         ):
             with self.assertRaises(RuntimeError):
                 safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+            # The next run re-sends only the alert that failed.
+            pending = safe_main.get_pending_transactions(safe_address, "mainnet")
 
-        mock_write.assert_called_once_with(safe_address, 2281)
+        self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), {safe_main._tx_id(queued[0])})
+        self.assertEqual(pending, [queued[1]])
+
+    def test_skipped_telegram_delivery_retries_on_next_poll(self):
+        safe_main = self._import_safe_main()
+        safe_address = "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52"
+        tx = self._tx(2281)
+
+        with (
+            patch.object(safe_main, "get_safe_current_nonce", return_value=2281),
+            patch.object(safe_main, "get_safe_transactions", return_value=[tx]),
+            patch.object(safe_main, "_explain_safe_tx", return_value=None),
+            patch.object(safe_main, "send_telegram_message", side_effect=[False, True]) as mock_send,
+        ):
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+            self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), set())
+
+            safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+            self.assertEqual(safe_main.get_pending_transactions(safe_address, "mainnet"), [])
+
+        self.assertEqual(mock_send.call_count, 2)
+        self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), {safe_main._tx_id(tx)})
 
     def test_no_cache_write_when_no_pending(self):
         safe_main = self._import_safe_main()
@@ -260,7 +406,7 @@ class TestCheckForPendingTransactions(unittest.TestCase):
 
         with (
             patch.object(safe_main, "get_pending_transactions", return_value=[]),
-            patch.object(safe_main, "write_last_executed_nonce_to_file") as mock_write,
+            patch.object(safe_main, "mark_tx_handled") as mock_write,
         ):
             safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
 
@@ -280,17 +426,16 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         with (
             patch.object(safe_main, "get_pending_transactions", return_value=pending),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
-            patch.object(safe_main, "_pending_filter_diag", return_value=self._DIAG),
             patch.object(safe_main, "_explain_safe_tx", return_value=None),
-            patch.object(safe_main, "send_telegram_message") as mock_send,
-            patch.object(safe_main, "write_last_executed_nonce_to_file") as mock_write,
+            patch.object(safe_main, "send_telegram_message", return_value=True) as mock_send,
+            patch.object(safe_main, "mark_tx_handled") as mock_write,
         ):
             safe_main.check_for_pending_transactions(safe_address, "mainnet", "EULER")
 
         # Only the matching-target tx should produce a Telegram message.
         self.assertEqual(mock_send.call_count, 1)
-        # Cache still advances to the highest processed nonce.
-        mock_write.assert_called_once_with(safe_address, 11)
+        # The skipped tx is handled too, so the rule is not re-run on it every poll.
+        self.assertEqual([c.args[2]["nonce"] for c in mock_write.call_args_list], ["10", "11"])
 
     def test_empty_calldata_reaches_explainer(self):
         safe_main = self._import_safe_main()
@@ -300,10 +445,9 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         with (
             patch.object(safe_main, "get_pending_transactions", return_value=[tx]),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
-            patch.object(safe_main, "_pending_filter_diag", return_value=self._DIAG),
             patch.object(safe_main, "_explain_safe_tx") as mock_explain,
             patch.object(safe_main, "send_telegram_message"),
-            patch.object(safe_main, "write_last_executed_nonce_to_file"),
+            patch.object(safe_main, "mark_tx_handled"),
         ):
             mock_explain.return_value = None
             safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
@@ -320,10 +464,9 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         with (
             patch.object(safe_main, "get_pending_transactions", return_value=[tx]),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
-            patch.object(safe_main, "_pending_filter_diag", return_value=self._DIAG),
             patch.object(safe_main, "_explain_safe_tx") as mock_explain,
             patch.object(safe_main, "send_telegram_message"),
-            patch.object(safe_main, "write_last_executed_nonce_to_file"),
+            patch.object(safe_main, "mark_tx_handled"),
         ):
             mock_explain.return_value = None
             safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
@@ -357,10 +500,9 @@ class TestCheckForPendingTransactions(unittest.TestCase):
             patch.dict("os.environ", {"WAVEY_GIST_API_KEY": "test-key"}),
             patch.object(safe_main, "get_pending_transactions", return_value=[tx]),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
-            patch.object(safe_main, "_pending_filter_diag", return_value=self._DIAG),
             patch.object(safe_main, "_explain_safe_tx", return_value=Explanation("Upgrades CAP.", "Contract details.")),
             patch.object(safe_main, "send_telegram_message") as mock_send,
-            patch.object(safe_main, "write_last_executed_nonce_to_file"),
+            patch.object(safe_main, "mark_tx_handled"),
             patch("utils.proxy.get_current_implementation", return_value=old_impl),
             patch(
                 "utils.upgrade_diff.publish_upgrade_diff",
@@ -407,11 +549,10 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         with (
             patch.object(safe_main, "get_pending_transactions", return_value=[self._tx(5)]),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {}),
-            patch.object(safe_main, "_pending_filter_diag", return_value=self._DIAG),
             patch.object(safe_main, "_upgrade_alert_lines", side_effect=RuntimeError("rpc down")),
             patch.object(safe_main, "_explain_safe_tx", return_value=None),
             patch.object(safe_main, "send_telegram_message") as mock_send,
-            patch.object(safe_main, "write_last_executed_nonce_to_file"),
+            patch.object(safe_main, "mark_tx_handled"),
         ):
             safe_main.check_for_pending_transactions("0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52", "mainnet", "CAP")
         mock_send.assert_called_once()
@@ -477,64 +618,6 @@ class TestCheckForPendingTransactions(unittest.TestCase):
         kwargs = self._explain_multisend(self._multisend_tx([0, 1]))
         self.assertTrue(kwargs["skip_simulation"])
         self.assertIn("simulation was skipped", kwargs["context_note"])
-
-
-class TestPendingFilterDiag(unittest.TestCase):
-    """The diagnostic helper must mirror the same baseline math as get_pending_transactions."""
-
-    def _import_safe_main(self):
-        with patch.dict(os.environ, {"SAFE_API_KEY": "test-key"}):
-            import protocols.safe.main as safe_main
-
-            return importlib.reload(safe_main)
-
-    def test_diag_baseline_when_current_nonce_known(self):
-        safe_main = self._import_safe_main()
-        with (
-            patch.object(safe_main, "get_last_executed_nonce_from_file", return_value=10),
-            patch.object(safe_main, "get_safe_current_nonce", return_value=42),
-        ):
-            diag = safe_main._pending_filter_diag("0xSafe", "mainnet")
-
-        self.assertEqual(
-            diag,
-            {
-                "last_cached_nonce": 10,
-                "current_safe_nonce": 42,
-                "chain_baseline": 41,
-                "baseline": 41,  # max(10, 41)
-            },
-        )
-
-    def test_diag_baseline_when_current_nonce_unknown(self):
-        safe_main = self._import_safe_main()
-        with (
-            patch.object(safe_main, "get_last_executed_nonce_from_file", return_value=10),
-            patch.object(safe_main, "get_safe_current_nonce", return_value=None),
-        ):
-            diag = safe_main._pending_filter_diag("0xSafe", "mainnet")
-
-        self.assertEqual(
-            diag,
-            {
-                "last_cached_nonce": 10,
-                "current_safe_nonce": None,
-                "chain_baseline": None,
-                "baseline": 10,  # degraded to last_cached
-            },
-        )
-
-    def test_diag_baseline_uses_last_cached_when_ahead_of_chain(self):
-        """If the cache is ahead of chain_baseline (e.g. we previously alerted on a future tx), baseline is last_cached."""
-        safe_main = self._import_safe_main()
-        with (
-            patch.object(safe_main, "get_last_executed_nonce_from_file", return_value=100),
-            patch.object(safe_main, "get_safe_current_nonce", return_value=42),
-        ):
-            diag = safe_main._pending_filter_diag("0xSafe", "mainnet")
-
-        self.assertEqual(diag["chain_baseline"], 41)
-        self.assertEqual(diag["baseline"], 100)  # max(100, 41)
 
 
 def test_watched_safes_use_supported_networks() -> None:
@@ -797,7 +880,6 @@ class TestQueueServiceMigration(unittest.TestCase):
     SAFE = "0xFEB4acf3df3cDEA7399794D0869ef76A6EfAff52"
     BOT = "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"
     OWNER = "0x962228a90eac69238c7d1f216d80037e61ea9255"
-    _DIAG = TestCheckForPendingTransactions._DIAG
 
     def _import_safe_main(self):
         with patch.dict(os.environ, {"SAFE_API_KEY": "test-key"}):
@@ -814,10 +896,9 @@ class TestQueueServiceMigration(unittest.TestCase):
         with (
             patch.object(safe_main, "get_pending_transactions", return_value=txs),
             patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", proposers),
-            patch.object(safe_main, "_pending_filter_diag", return_value=self._DIAG),
             patch.object(safe_main, "_explain_safe_tx", return_value=None),
             patch.object(safe_main, "send_telegram_message") as mock_send,
-            patch.object(safe_main, "write_last_executed_nonce_to_file"),
+            patch.object(safe_main, "mark_tx_handled"),
         ):
             safe_main.check_for_pending_transactions(self.SAFE, "mainnet", protocol)
         return mock_send
@@ -837,7 +918,7 @@ class TestQueueServiceMigration(unittest.TestCase):
         self.assertFalse(url.endswith("/"))
         self.assertEqual(
             mock_get.call_args.kwargs["params"],
-            {"chainId": 8453, "limit": 10, "nonceOrder": "desc", "executed": "false"},
+            {"chainId": 8453, "limit": 100, "nonceOrder": "desc", "executed": "false"},
         )
 
     def test_validation_error_is_raised_not_swallowed(self):
