@@ -5,6 +5,15 @@ The monitor polls configured Safe queues every 20 minutes through the
 (`https://api.safe.global/queue`). It supports Ethereum mainnet, Base, and Katana.
 [The watchlist](addresses.py) defines which Safes are polled on those networks.
 
+Each queued transaction alerts once, keyed by its `safeTxHash` per chain and Safe. A tx queued
+later at a lower pending nonce, or a replacement proposed at a nonce that already alerted, gets its
+own alert. Transactions below the Safe's onchain nonce never alert: a competing tx at that nonce
+already executed. Alerted hashes are pruned once the onchain nonce passes them.
+
+Each Safe costs one Queue Service request per run (`limit=100`, highest nonce first). A further
+page is fetched only when the first is full and its lowest nonce is still at or above the onchain
+nonce, up to 5 pages.
+
 Alerts cover queued transactions and surface proxy upgrades, including upgrades inside multisend
 and timelock calls. The Queue Service does not decode calldata, so the monitor decodes multisend
 batches itself, and only for a DELEGATECALL into a known Safe multisend utility.

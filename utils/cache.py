@@ -37,10 +37,6 @@ def get_last_executed_nonce_from_file(safe_address: str) -> int:
     return int(get_last_value_for_key_from_file(nonces_filename, safe_address))
 
 
-def write_last_executed_nonce_to_file(safe_address: str, nonce: int) -> None:
-    write_last_value_to_file(nonces_filename, safe_address, nonce)
-
-
 def get_last_executed_morpho_from_file(vault_address: str, market_id: str, value_type: str) -> int:
     return int(get_last_value_for_key_from_file(morpho_filename, morpho_key(vault_address, market_id, value_type)))
 

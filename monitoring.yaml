@@ -340,7 +340,7 @@ protocols:
       - protocols/safe/main.py
     monitors:
       - name: "Queued Transactions"
-        description: "Pending transactions across all monitored protocol Safe multisigs, polled from the Safe Queue Service"
+        description: "Pending transactions across all monitored protocol Safe multisigs, polled from the Safe Queue Service; each safeTxHash alerts once, including lower-nonce and replacement txs"
       - name: "Proxy Upgrades"
         description: "Proxy upgrades in queued txs, including upgrades inside multisend and timelock calls, with a Wavey Gist verified source diff"
       - name: "Unexpected Proposers"

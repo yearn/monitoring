@@ -26,7 +26,7 @@ from utils.cache import (
     cache_filename,
     get_last_executed_nonce_from_file,
     get_last_value_for_key_from_file,
-    write_last_executed_nonce_to_file,
+    nonces_filename,
     write_last_value_to_file,
 )
 from utils.chains import Chain, safe_network_to_chain_id
@@ -108,6 +108,15 @@ CACHE_KEY_EXHAUSTED_UNTIL_PREFIX = "SAFE_API_KEY_EXHAUSTED_UNTIL_"
 ERROR_LABEL = "yearn"
 ALERT_PROTOCOL = "yearn-internal"
 
+# The Queue Service's maximum page size. One page per safe covers any realistic queue.
+SAFE_QUEUE_PAGE_SIZE = 100
+# Hard cap on pages per safe, so a runaway queue cannot drain the shared request quota.
+SAFE_QUEUE_MAX_PAGES = 5
+_SAFE_TX_HASH_RE = re.compile(r"0x[0-9a-fA-F]{64}")
+# Per (network, safe) cache entry listing the queued txs already alerted on (or skipped by the
+# protocol's alert rule), as comma-separated ``nonce@safeTxHash`` items.
+CACHE_KEY_HANDLED_TXS_PREFIX = "safe_handled_txs"
+
 SAFE_NONCE_ABI = [
     {"inputs": [], "name": "nonce", "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"}
 ]
@@ -184,25 +193,78 @@ def _quota_reset_seconds(response: requests.Response) -> int | None:
 
 
 def get_safe_transactions(
-    safe_address: str, network_name: str, executed: bool | None = None, limit: int = 10, max_retries: int = 3
+    safe_address: str,
+    network_name: str,
+    executed: bool | None = None,
+    limit: int = SAFE_QUEUE_PAGE_SIZE,
+    max_retries: int = 3,
+    min_nonce: int | None = None,
+    max_pages: int = SAFE_QUEUE_MAX_PAGES,
 ) -> list[dict]:
     """List a Safe's multisig transactions from the Safe Queue Service, highest nonce first.
 
     Docs: https://docs.safe.global/core-api/safe-queue-service-reference
+
+    Each page costs one request against the shared Safe API quota, so a later page is
+    fetched only when ``min_nonce`` is set and the previous page was full and ended at
+    a nonce still ``>= min_nonce``: only then can more wanted txs be below it.
 
     Args:
         safe_address: The Safe's address.
         network_name: Safe network name from the watchlist (e.g. ``"mainnet"``).
         executed: Filter on execution state; ``None`` returns both.
         limit: Page size (the service accepts 1–100).
-        max_retries: Attempts for transport errors, rate limits and 5xx responses.
+        max_retries: Attempts per page for transport errors, rate limits and 5xx responses.
+        min_nonce: Lowest nonce the caller wants. ``None`` fetches only the first page.
+        max_pages: Upper bound on pages fetched.
 
     Returns:
-        The transactions, or ``[]`` when retries run out.
+        The transactions fetched before retries ran out (``[]`` if the first page failed).
 
     Raises:
         SafeApiQuotaExhausted: When every API key has used up its quota; retrying
             would only burn requests until the window resets.
+        SafeApiAuthError: When the service rejects the API key.
+        SafeApiRequestError: When the service rejects the request (e.g. 422).
+    """
+    results: list[dict] = []
+    for page in range(max_pages):
+        page_results = _get_safe_transactions_page(
+            safe_address, network_name, executed, limit, page * limit, max_retries
+        )
+        if page_results is None:
+            break
+        results.extend(page_results)
+        if min_nonce is None or len(page_results) < limit or int(page_results[-1]["nonce"]) < min_nonce:
+            break
+    else:
+        logger.warning(
+            "Stopped after %s pages of queued txs for %s on %s; lower queued nonces were not fetched",
+            max_pages,
+            safe_address,
+            network_name,
+        )
+    return results
+
+
+def _get_safe_transactions_page(
+    safe_address: str, network_name: str, executed: bool | None, limit: int, offset: int, max_retries: int
+) -> list[dict] | None:
+    """Fetch one page of a Safe's multisig transactions, highest nonce first.
+
+    Args:
+        safe_address: The Safe's address.
+        network_name: Safe network name from the watchlist.
+        executed: Filter on execution state; ``None`` returns both.
+        limit: Page size.
+        offset: Number of transactions to skip.
+        max_retries: Attempts for transport errors, rate limits and 5xx responses.
+
+    Returns:
+        The page's transactions, or ``None`` when retries run out.
+
+    Raises:
+        SafeApiQuotaExhausted: When every API key has used up its quota.
         SafeApiAuthError: When the service rejects the API key.
         SafeApiRequestError: When the service rejects the request (e.g. 422).
     """
@@ -211,6 +273,8 @@ def get_safe_transactions(
 
     # The service silently ignores unknown parameters, so a misspelled one fails quietly.
     params: dict[str, str | int] = {"chainId": chain_id, "limit": limit, "nonceOrder": "desc"}
+    if offset:
+        params["offset"] = offset
 
     if executed is not None:
         params["executed"] = str(executed).lower()
@@ -277,7 +341,7 @@ def get_safe_transactions(
             )
 
     logger.error("Failed after %s retries for %s on %s", max_retries, safe_address, network_name)
-    return []
+    return None
 
 
 def get_safe_current_nonce(safe_address: str, network_name: str) -> int | None:
@@ -308,27 +372,93 @@ def _is_executed_safe_tx(tx: dict) -> bool:
     return bool(tx.get("txHash")) or tx.get("failed") is not None
 
 
-def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]:
-    """Fetch pending transactions worth alerting on.
+def _safe_tx_hash(tx: dict) -> str:
+    """Return the tx's ``safeTxHash`` when it is a well-formed 32-byte hex string, else ``""``."""
+    safe_tx_hash = tx.get("safeTxHash")
+    if isinstance(safe_tx_hash, str) and _SAFE_TX_HASH_RE.fullmatch(safe_tx_hash):
+        return safe_tx_hash
+    return ""
 
-    Filters out two classes of noise:
-    - Already-cached: nonce <= last_cached_nonce (we've alerted on them).
-    - Dead-slot: nonce < safe.currentNonce. These remain in the API as
-      ``executed=false`` because a competing tx at the same nonce executed
-      first, but they will never run themselves.
-    - Executed rows: any Queue Service row with executed markers. These must never
-      alert even if the API includes them in an ``executed=false`` response.
 
-    The baseline is the higher of (a) the last nonce we already alerted on
-    and (b) ``currentNonce - 1`` (the last *executed* nonce, when we could
-    fetch it). A tx is eligible iff ``nonce > baseline``.
+TxId = tuple[int, str]
 
-    When ``currentNonce`` is unknown (e.g. the RPC read failed), the chain
-    baseline can't be computed safely, so we fail closed and skip alerts for
-    this safe until the next run. That prevents dead-slot txs from alerting as
-    queued after a competing tx at the same nonce has already executed.
+
+def _tx_id(tx: dict) -> TxId:
+    """Return the ``(nonce, lowercased safeTxHash)`` a queued tx is deduplicated on.
+
+    The safeTxHash commits to the chain, the Safe and the nonce, so it alone identifies
+    the tx; the nonce rides along so handled entries can be pruned once the Safe's
+    onchain nonce passes them. A row without a usable hash falls back to ``(nonce, "")``,
+    i.e. nonce-only deduplication.
     """
-    last_cached_nonce = get_last_executed_nonce_from_file(safe_address)
+    return int(tx["nonce"]), _safe_tx_hash(tx).lower()
+
+
+def _handled_txs_cache_key(safe_address: str, network_name: str) -> str:
+    """Return the cache key for a Safe's handled txs; same-address Safes on other chains get their own."""
+    return f"{CACHE_KEY_HANDLED_TXS_PREFIX}+{network_name}+{safe_address.lower()}"
+
+
+def load_handled_txs(safe_address: str, network_name: str) -> set[TxId] | None:
+    """Read the queued txs already alerted on (or skipped by the alert rule).
+
+    Returns:
+        The handled tx ids, or ``None`` when nothing was ever stored for this Safe.
+    """
+    raw = get_last_value_for_key_from_file(nonces_filename, _handled_txs_cache_key(safe_address, network_name))
+    if raw == 0:
+        return None
+    handled: set[TxId] = set()
+    for item in str(raw).split(","):
+        nonce, sep, safe_tx_hash = item.partition("@")
+        if sep and nonce.isdigit():
+            handled.add((int(nonce), safe_tx_hash))
+    return handled
+
+
+def save_handled_txs(safe_address: str, network_name: str, handled: set[TxId]) -> None:
+    """Persist the handled tx ids as comma-separated ``nonce@safeTxHash`` items."""
+    value = ",".join(f"{nonce}@{safe_tx_hash}" for nonce, safe_tx_hash in sorted(handled))
+    write_last_value_to_file(nonces_filename, _handled_txs_cache_key(safe_address, network_name), value)
+
+
+def mark_tx_handled(safe_address: str, network_name: str, tx: dict) -> None:
+    """Record one tx as handled right away, so a later failure in the run cannot re-alert it."""
+    handled = load_handled_txs(safe_address, network_name) or set()
+    handled.add(_tx_id(tx))
+    save_handled_txs(safe_address, network_name, handled)
+
+
+def _seed_handled_from_nonce_cache(safe_address: str, queued_txs: list[dict]) -> set[TxId]:
+    """Migrate from the old last-alerted-nonce cache: txs at or below it were already alerted.
+
+    Runs once per Safe (when it has no handled-tx entry yet) so switching to hash
+    deduplication does not re-alert every tx that is currently queued.
+    """
+    last_alerted_nonce = get_last_executed_nonce_from_file(safe_address)
+    return {_tx_id(tx) for tx in queued_txs if int(tx["nonce"]) <= last_alerted_nonce}
+
+
+def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]:
+    """Fetch queued transactions that have not been alerted on yet.
+
+    A tx is returned when all of these hold:
+    - It is not executed. The request asks for ``executed=false``, but any row with an
+      executed marker is dropped too.
+    - Its nonce is ``>= currentNonce`` (read onchain). Lower nonces are dead slots: a
+      competing tx at that nonce executed, so they stay ``executed=false`` forever but
+      can never run.
+    - Its ``safeTxHash`` was not handled by an earlier run. Deduplicating on the hash
+      rather than on a nonce high-water mark means a tx queued later at a lower
+      pending nonce, or a replacement proposed at an already-alerted nonce, still alerts.
+
+    Handled entries below ``currentNonce`` are pruned, so the cache only holds txs that
+    are still queued.
+
+    When ``currentNonce`` is unknown (e.g. the RPC read failed), dead slots can't be told
+    apart, so this fails closed and skips the Safe until the next run, without spending
+    a Safe API request.
+    """
     current_safe_nonce = get_safe_current_nonce(safe_address, network_name)
     if current_safe_nonce is None:
         logger.warning(
@@ -337,35 +467,33 @@ def get_pending_transactions(safe_address: str, network_name: str) -> list[dict]
             network_name,
         )
         return []
-    pending_txs = get_safe_transactions(safe_address, network_name, executed=False)
+    queued_txs: list[dict] = []
+    seen: set[TxId] = set()
+    for tx in get_safe_transactions(safe_address, network_name, executed=False, min_nonce=current_safe_nonce):
+        tx_id = _tx_id(tx)
+        # Pages fetched one after another can overlap when the queue changes in between.
+        if _is_executed_safe_tx(tx) or tx_id[0] < current_safe_nonce or tx_id in seen:
+            continue
+        seen.add(tx_id)
+        queued_txs.append(tx)
 
-    baseline = last_cached_nonce
-    chain_baseline = current_safe_nonce - 1
-    if chain_baseline > last_cached_nonce:
-        write_last_executed_nonce_to_file(safe_address, chain_baseline)
-    baseline = max(baseline, chain_baseline)
+    stored = load_handled_txs(safe_address, network_name)
+    handled = _seed_handled_from_nonce_cache(safe_address, queued_txs) if stored is None else stored
+    handled = {tx_id for tx_id in handled if tx_id[0] >= current_safe_nonce}
+    if handled != stored:
+        save_handled_txs(safe_address, network_name, handled)
 
-    return [tx for tx in pending_txs if not _is_executed_safe_tx(tx) and int(tx["nonce"]) > baseline]
-
-
-def _pending_filter_diag(safe_address: str, network_name: str) -> dict:
-    """Snapshot the filter inputs for diagnostic logging.
-
-    Re-reads the on-disk cache and the live ``currentNonce`` so
-    ``check_for_pending_transactions`` can log the exact numbers that
-    decided what to alert on, without leaking them through the
-    ``get_pending_transactions`` return value.
-    """
-    last_cached = get_last_executed_nonce_from_file(safe_address)
-    current = get_safe_current_nonce(safe_address, network_name)
-    chain_baseline = (current - 1) if current is not None else None
-    baseline = max(last_cached, chain_baseline) if chain_baseline is not None else last_cached
-    return {
-        "last_cached_nonce": last_cached,
-        "current_safe_nonce": current,
-        "chain_baseline": chain_baseline,
-        "baseline": baseline,
-    }
+    pending = [tx for tx in queued_txs if _tx_id(tx) not in handled]
+    logger.info(
+        "safe %s on %s: currentNonce=%s queued=%d handled=%d new=%d",
+        safe_address,
+        network_name,
+        current_safe_nonce,
+        len(queued_txs),
+        len(handled),
+        len(pending),
+    )
+    return pending
 
 
 def get_safe_url(safe_address: str, network_name: str) -> str:
@@ -390,9 +518,7 @@ def _explain_safe_tx(
     multisend executes. An inner DELEGATECALL can't be modeled, so those
     batches skip simulation.
     """
-    safe_tx_hash = tx.get("safeTxHash")
-    if not isinstance(safe_tx_hash, str) or not re.fullmatch(r"0x[0-9a-fA-F]{64}", safe_tx_hash):
-        safe_tx_hash = ""
+    safe_tx_hash = _safe_tx_hash(tx)
     operation = int(tx.get("operation", 0) or 0)
     inner_calls = extract_inner_calls(tx) if operation == 1 else []
 
@@ -488,18 +614,6 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
     expected_proposers = YEARN_EXPECTED_PROPOSERS.get((network_name, safe_address.lower()), set())
 
     if pending_transactions:
-        diag = _pending_filter_diag(safe_address, network_name)
-        logger.info(
-            "safe %s on %s: last_cached=%s currentNonce=%s chain_baseline=%s baseline=%s pending=%d",
-            safe_address,
-            network_name,
-            diag["last_cached_nonce"],
-            diag["current_safe_nonce"],
-            diag["chain_baseline"],
-            diag["baseline"],
-            len(pending_transactions),
-        )
-        highest_alerted_nonce = None
         for tx in pending_transactions:
             nonce = int(tx["nonce"])
             # The Queue Service returns null for empty calldata and for a zero-address
@@ -509,6 +623,8 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
 
             if not should_alert(protocol, tx, target_contract, hex_data):
                 logger.info("Skipping nonce %s on %s: outside the %s alert rule", nonce, safe_address, protocol)
+                # The rule only reads the tx's own fields, so it would skip this tx again.
+                mark_tx_handled(safe_address, network_name, tx)
                 continue
 
             # Yearn multisigs (expected_proposers is non-empty) always get an
@@ -610,15 +726,11 @@ def check_for_pending_transactions(safe_address: str, network_name: str, protoco
             # for unexpected proposers and for all non-Yearn protocol alerts.
             disable_notification = is_yearn_multisig and not unexpected_proposer
             send_telegram_message(message, protocol, disable_notification)
-            if highest_alerted_nonce is None or nonce > highest_alerted_nonce:
-                highest_alerted_nonce = nonce
-                # Persist progress after each delivered alert, but never move
-                # the scalar nonce cache backwards. The Safe Queue Service returns
-                # pending txs in DESCENDING nonce order, so a lower nonce must
-                # not overwrite a higher nonce already alerted in this batch.
-                write_last_executed_nonce_to_file(safe_address, highest_alerted_nonce)
+            # Persist after each delivered alert, so a later failure in this run
+            # cannot re-send the alerts already delivered.
+            mark_tx_handled(safe_address, network_name, tx)
     else:
-        logger.info("No pending transactions found with higher nonce than the last executed transaction.")
+        logger.info("No new queued transactions for %s on %s", safe_address, network_name)
 
 
 def check_api_limit(last_api_call_time: float, request_counter: int) -> tuple[float, int]:
