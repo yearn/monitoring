@@ -13,10 +13,9 @@ already executed. Alerted hashes are pruned once the onchain nonce passes them.
 An alert is marked handled after Telegram accepts it, so a skipped delivery stays eligible on
 the next poll. A tx whose protocol has no Telegram destination configured is left queued before
 any explanation, simulation or stored alert, so it costs nothing per poll and alerts once a
-destination is set. The first successful queue poll seeds routine proposals covered by the legacy
-nonce cutoff. Yearn proposals from unexpected proposers stay eligible for a critical alert, even
-if their nonce is covered by the legacy cache. Pendle proposals are reevaluated under the new
-filter on that first poll, which can resend a previously delivered alert.
+destination is set. The legacy nonce cache is not read: it records only a nonce, so it cannot tell
+which proposal at that nonce was delivered. The first poll after rollout therefore alerts every
+queued tx once, which can repeat alerts the old monitor already sent.
 
 Each Safe costs one Queue Service request per run (`limit=100`, highest nonce first). A further
 page is fetched only when the first is full and its lowest nonce is still at or above the onchain

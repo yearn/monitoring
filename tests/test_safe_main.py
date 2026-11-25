@@ -61,16 +61,13 @@ class TestSafePendingTransactions(unittest.TestCase):
     def setUp(self) -> None:
         self.safe_main = self._import_safe_main()
 
-    def _pending(
-        self, txs: list[dict], current_nonce: int | None, legacy_nonce: int | None = None, network: str = "mainnet"
-    ) -> list[int]:
+    def _pending(self, txs: list[dict], current_nonce: int | None, network: str = "mainnet") -> list[int]:
         """Run ``get_pending_transactions`` on ``txs`` and return the pending nonces."""
         with (
-            patch.object(self.safe_main, "get_last_executed_nonce_from_file", return_value=legacy_nonce),
             patch.object(self.safe_main, "get_safe_current_nonce", return_value=current_nonce),
             patch.object(self.safe_main, "get_safe_transactions", return_value=txs),
         ):
-            pending = self.safe_main.get_pending_transactions(self.SAFE, network, "YEARN_MS")
+            pending = self.safe_main.get_pending_transactions(self.SAFE, network)
         return [int(tx["nonce"]) for tx in pending]
 
     def _alerted(self, *txs: dict, network: str = "mainnet") -> None:
@@ -127,7 +124,7 @@ class TestSafePendingTransactions(unittest.TestCase):
 
     def test_current_nonce_unknown_fails_closed(self):
         self.assertEqual(self._pending([queue_tx(3274), queue_tx(3280)], current_nonce=None), [])
-        self.assertIsNone(self.safe_main.load_handled_txs(self.SAFE, "mainnet"))
+        self.assertEqual(self.safe_main.load_handled_txs(self.SAFE, "mainnet"), set())
 
     def test_dead_slot_rows_below_current_nonce_never_alert(self):
         """A tx below the onchain nonce can never execute, even if it was never alerted on."""
@@ -149,7 +146,7 @@ class TestSafePendingTransactions(unittest.TestCase):
             patch.object(self.safe_main, "get_safe_current_nonce", return_value=100),
             patch.object(self.safe_main, "get_safe_transactions", return_value=[replacement, queue_tx(101)]),
         ):
-            pending = self.safe_main.get_pending_transactions(self.SAFE, "mainnet", "YEARN_MS")
+            pending = self.safe_main.get_pending_transactions(self.SAFE, "mainnet")
 
         self.assertEqual([tx["safeTxHash"] for tx in pending], [replacement["safeTxHash"]])
 
@@ -176,28 +173,6 @@ class TestSafePendingTransactions(unittest.TestCase):
         # Both txs at nonce 101 are now handled; the next run alerts on neither.
         self.assertEqual(self._pending([replacement, original], current_nonce=100), [])
 
-    def test_migration_keeps_unexpected_replacement_eligible_for_critical_alert(self):
-        bot = "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"
-        original = queue_tx(101, proposer=bot)
-        replacement = queue_tx(101, safeTxHash=safe_tx_hash(101, variant=1), proposer="0x" + "66" * 20)
-        safe_main = self.safe_main
-        safe_main.write_last_value_to_file(safe_main.nonces_filename, self.SAFE, 101)
-
-        with (
-            patch.object(safe_main, "get_safe_current_nonce", return_value=100),
-            patch.object(safe_main, "get_safe_transactions", return_value=[replacement, original]),
-            patch.object(safe_main, "YEARN_EXPECTED_PROPOSERS", {("mainnet", self.SAFE.lower()): {bot}}),
-            patch.object(safe_main, "_explain_safe_tx", return_value=None),
-            patch.object(safe_main, "send_telegram_message", return_value=True) as mock_send,
-        ):
-            safe_main.check_for_pending_transactions(self.SAFE, "mainnet", "YEARN_MS")
-            self.assertEqual(safe_main.get_pending_transactions(self.SAFE, "mainnet", "YEARN_MS"), [])
-
-        mock_send.assert_called_once()
-        message, _protocol, disable_notification = mock_send.call_args.args
-        self.assertIn("UNEXPECTED PROPOSER", message)
-        self.assertFalse(disable_notification)
-
     def test_txs_without_a_hash_fall_back_to_nonce_dedup(self):
         self._alerted(queue_tx(101, safeTxHash=None))
         self.assertEqual(self._pending([queue_tx(101, safeTxHash=None), queue_tx(102, safeTxHash="")], 100), [102])
@@ -220,42 +195,14 @@ class TestSafePendingTransactions(unittest.TestCase):
         self._alerted(queue_tx(101), network="base-main")
         self.assertEqual(self._pending([queue_tx(101)], current_nonce=100), [101])
 
-    def test_first_run_seeds_from_the_old_nonce_cache(self):
-        """The old nonce cutoff seeds routine proposals during the first successful poll."""
+    def test_first_poll_ignores_the_old_nonce_cache(self):
+        """The old cache holds only a nonce, so it cannot prove which proposal at it was delivered."""
         bot = "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"
-        txs = [queue_tx(nonce, proposer=bot) for nonce in (103, 102, 101, 100)]
+        self.safe_main.write_last_value_to_file(self.safe_main.nonces_filename, self.SAFE, 102)
+        replacement = queue_tx(101, proposer=bot, safeTxHash=safe_tx_hash(101, variant=1))
+        txs = [queue_tx(102, proposer=bot), replacement, queue_tx(101, proposer=bot)]
 
-        self.assertEqual(self._pending(txs, current_nonce=101, legacy_nonce=102), [103])
-
-        self.assertEqual(
-            self.safe_main.load_handled_txs(self.SAFE, "mainnet"),
-            {(101, safe_tx_hash(101)), (102, safe_tx_hash(102))},
-        )
-        # Once seeded, the old cache is no longer read.
-        self.assertEqual(self._pending(txs, current_nonce=101, legacy_nonce=10**6), [103])
-
-    def test_migration_reevaluates_pending_pendle_proposals(self):
-        from tests.test_calldata_wrappers import NEW_ORACLE_IMPL, ORACLE, encode_call
-
-        safe_main = self.safe_main
-        pendle_safe = "0x8119EC16F0573B7dAc7C0CB94EB504FB32456ee1"
-        safe_main.write_last_value_to_file(safe_main.nonces_filename, pendle_safe, 8)
-        proxy_admin_upgrade = encode_call("upgrade(address,address)", ["address", "address"], [ORACLE, NEW_ORACLE_IMPL])
-        queued = [queue_tx(8), queue_tx(7, data=proxy_admin_upgrade)]
-
-        with (
-            patch.object(safe_main, "get_safe_current_nonce", return_value=7),
-            patch.object(safe_main, "get_safe_transactions", return_value=queued),
-            patch("utils.proxy.get_current_implementation", return_value=None),
-            patch.object(safe_main, "_explain_safe_tx", return_value=None),
-            patch.object(safe_main, "send_telegram_message", return_value=True) as mock_send,
-        ):
-            for _ in range(2):
-                safe_main.check_for_pending_transactions(pendle_safe, "mainnet", "PENDLE")
-
-        mock_send.assert_called_once()
-        self.assertIn("#️⃣ Nonce: 7", mock_send.call_args.args[0])
-        self.assertIn(NEW_ORACLE_IMPL, mock_send.call_args.args[0])
+        self.assertEqual(self._pending(txs, current_nonce=101), [102, 101, 101])
 
     def test_fresh_safe_can_alert_on_nonce_zero(self):
         safe_main = self.safe_main
@@ -264,34 +211,7 @@ class TestSafePendingTransactions(unittest.TestCase):
             patch.object(safe_main, "get_safe_current_nonce", return_value=0),
             patch.object(safe_main, "get_safe_transactions", return_value=[first_tx]),
         ):
-            self.assertEqual(safe_main.get_pending_transactions(self.SAFE, "mainnet", "YEARN_MS"), [first_tx])
-
-    def test_failed_queue_pages_do_not_complete_migration(self):
-        safe_main = self.safe_main
-        bot = "0x5e69fb460c9950f5ae90daffc4c4f32ecafacaa5"
-        safe_main.write_last_value_to_file(safe_main.nonces_filename, self.SAFE, 200)
-        first_page = Mock(status_code=200)
-        first_page.json.return_value = {"results": [queue_tx(nonce, proposer=bot) for nonce in range(200, 100, -1)]}
-        last_page = Mock(status_code=200)
-        last_page.json.return_value = {"results": [queue_tx(100, proposer=bot)]}
-        unavailable = Mock(status_code=503)
-        responses = [unavailable] * 3 + [first_page] + [unavailable] * 3 + [first_page, last_page]
-
-        with (
-            patch.object(safe_main, "get_safe_current_nonce", return_value=100),
-            patch.object(safe_main.requests, "get", side_effect=responses),
-            patch.object(safe_main.time, "sleep"),
-        ):
-            for offset in (0, 100):
-                with self.assertRaisesRegex(safe_main.SafeApiRequestError, f"at offset {offset}"):
-                    safe_main.get_pending_transactions(self.SAFE, "mainnet", "YEARN_MS")
-                self.assertIsNone(safe_main.load_handled_txs(self.SAFE, "mainnet"))
-            self.assertEqual(safe_main.get_pending_transactions(self.SAFE, "mainnet", "YEARN_MS"), [])
-
-        self.assertEqual(
-            safe_main.load_handled_txs(self.SAFE, "mainnet"),
-            {(nonce, safe_tx_hash(nonce)) for nonce in range(100, 201)},
-        )
+            self.assertEqual(safe_main.get_pending_transactions(self.SAFE, "mainnet"), [first_tx])
 
     def test_more_than_ten_eligible_txs_are_all_returned(self):
         txs = [queue_tx(nonce) for nonce in range(124, 99, -1)]  # 25 queued, descending
@@ -302,7 +222,7 @@ class TestSafePendingTransactions(unittest.TestCase):
             patch.object(self.safe_main, "get_safe_current_nonce", return_value=100),
             patch.object(self.safe_main.requests, "get", return_value=ok) as mock_get,
         ):
-            pending = self.safe_main.get_pending_transactions(self.SAFE, "mainnet", "YEARN_MS")
+            pending = self.safe_main.get_pending_transactions(self.SAFE, "mainnet")
 
         self.assertEqual(len(pending), 25)
         mock_get.assert_called_once()
@@ -401,7 +321,7 @@ class TestCheckForPendingTransactions(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
             # The next run re-sends only the alert that failed.
-            pending = safe_main.get_pending_transactions(safe_address, "mainnet", "YEARN_MS")
+            pending = safe_main.get_pending_transactions(safe_address, "mainnet")
 
         self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), {safe_main._tx_id(queued[0])})
         self.assertEqual(pending, [queued[1]])
@@ -421,7 +341,7 @@ class TestCheckForPendingTransactions(unittest.TestCase):
             self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), set())
 
             safe_main.check_for_pending_transactions(safe_address, "mainnet", "YEARN_MS")
-            self.assertEqual(safe_main.get_pending_transactions(safe_address, "mainnet", "YEARN_MS"), [])
+            self.assertEqual(safe_main.get_pending_transactions(safe_address, "mainnet"), [])
 
         self.assertEqual(mock_send.call_count, 2)
         self.assertEqual(safe_main.load_handled_txs(safe_address, "mainnet"), {safe_main._tx_id(tx)})
@@ -812,7 +732,6 @@ class TestSafeApiQuota(unittest.TestCase):
 
         with (
             patch.object(safe_main, "ALL_SAFE_ADDRESSES", [["LIDO", "mainnet", "0x1"]]),
-            patch.object(safe_main, "get_last_executed_nonce_from_file", return_value=0),
             patch.object(safe_main, "get_safe_current_nonce", return_value=1),
             patch.object(safe_main.requests, "get") as mock_get,
             patch.object(safe_main, "send_error_message") as mock_error,
@@ -882,11 +801,10 @@ class TestSafeApiQuota(unittest.TestCase):
         safe_main = self._import_safe_main({"SAFE_API_KEY": "k1"})
 
         with (
-            patch.object(safe_main, "get_last_executed_nonce_from_file", return_value=0),
             patch.object(safe_main, "get_safe_current_nonce", return_value=None),
             patch.object(safe_main, "get_safe_transactions") as mock_txs,
         ):
-            self.assertEqual(safe_main.get_pending_transactions("0xSafe", "mainnet", "YEARN_MS"), [])
+            self.assertEqual(safe_main.get_pending_transactions("0xSafe", "mainnet"), [])
         mock_txs.assert_not_called()
 
     def test_current_nonce_is_read_onchain(self):
