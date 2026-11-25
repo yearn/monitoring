@@ -22,10 +22,9 @@ from dataclasses import dataclass
 from utils.disk_cache import MISS, DiskCache
 from utils.http_client import fetch_json
 from utils.logger import get_logger
+from utils.sourcify_contract import SOURCIFY_V2_API_URL
 
 logger = get_logger("utils.sourcify_layout")
-
-SOURCIFY_V2_API_URL = "https://sourcify.dev/server/v2/contract"
 
 # Layouts for a verified address are immutable, so positive entries never expire.
 # Misses get the short negative TTL: Sourcify coverage grows over time, and a

@@ -1,7 +1,7 @@
 """Pytest fixtures shared across the test suite.
 
 Tests are supposed to mock their own network dependencies. None of our tests
-make real RPC calls or hit Etherscan — every place that touches ChainManager
+make real RPC calls or hit the contract source APIs. Code that touches ChainManager
 or `fetch_source` patches the call site. The fixtures here are defense-in-
 depth: they make sure that if a future test forgets a mock, the failure is a
 clean "no token" / "no provider" rather than a slow live call that depends
@@ -13,6 +13,14 @@ import warnings
 from pathlib import Path
 
 import pytest
+from requests import HTTPError, Response
+
+
+def _sourcify_miss(*args: object, **kwargs: object) -> Response:
+    """Return a provider miss unless a test installs its own Sourcify response."""
+    response = Response()
+    response.status_code = 404
+    raise HTTPError(response=response)
 
 
 @pytest.fixture(autouse=True)
@@ -43,6 +51,8 @@ def _isolate_from_live_apis(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("LOG_LEVEL", "INFO")
     monkeypatch.setenv("CACHE_DIR", str(tmp_path))
+    # The public contract API has no credential gate, so block it at the transport.
+    monkeypatch.setattr("utils.sourcify_contract.request_with_retry", _sourcify_miss)
     # `cache_path` reads this module global at call time when the env var is
     # unset, so keep both path entry points redirected for tests that patch env.
     monkeypatch.setattr("utils.paths.CACHE_DIR", str(tmp_path))

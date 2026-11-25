@@ -136,6 +136,7 @@ def test_unchanged_deployment_is_not_listed(constructor_arguments: tuple[str | N
         assert publish_upgrade_diff(OLD_IMPL, NEW_IMPL, 1) == GIST_URL
     body = upload.call_args.args[0]
     assert "Deployment" not in body
+    assert ("constructor arguments unavailable" in body) == (None in constructor_arguments)
     assert "constructor" not in body
 
 

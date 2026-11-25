@@ -63,7 +63,7 @@ A Yearn governance Executor `execute(bytes)` call also gets `script_calls`: its 
 
 ### 2. Verified Source Context (`utils/source_context.py`)
 
-For each `(target, function)` pair, fetches the verified source via the Etherscan v2 multichain API and extracts:
+For each `(target, function)` pair, fetches the verified source via Sourcify with Etherscan v2 as a fallback and extracts:
 
 - The function's preceding natspec block + signature line. A bare `/// @inheritdoc IFoo` is replaced by the natspec on `IFoo`'s declaration of the same function, found in the same verified bundle — implementations routinely keep every parameter's units in the interface
 - The function body, dedented, when it fits `MAX_BODY_LINES` (30) and `MAX_BODY_CHARS` (2,000). Natspec describes intent and can be stale; the body is what runs. GroveCompounder's natspec says `setMinimumAuctionPrice` records a requirement the Auction must meet, but its body also calls `Auction(auction).setMinimumPrice(...)`. A report that saw only the natspec told signers the auction's pricing was untouched. Bodiless interface declarations are skipped when locating the body. Because the body is presented as what executes, it must be the overload the call decodes to. The decoded signature selects it (source parameter types are matched against the ABI types; contracts, interfaces, enums and structs match any encoding), and contexts are deduplicated per signature. When no definition, or several different ones, match, no body is shown: overloads without a signature, or a base and an override. The verified Auction's `take(address)` uses an unlimited amount and `msg.sender`, and showing it for a `take(address,uint256,address,bytes)` call would misstate the call
@@ -77,13 +77,13 @@ Decoded parameters are named from the verified ABI (`fetch_function_input_names`
 
 If the function isn't found in the target's source (e.g., the target is an `ERC1967Proxy` / `TransparentUpgradeableProxy` / `BeaconProxy`), resolves the implementation (`utils/proxy.get_current_implementation`) and retries against the impl source. Caches per `(chain_id, address)` for the workflow run.
 
-Requires `ETHERSCAN_TOKEN`. Failures degrade gracefully — no `--- Contract Source Context ---` section is added.
+Sourcify lookups need no credentials. Set `ETHERSCAN_TOKEN` to enable the fallback. If neither provider supplies source, the explainer omits the source context.
 
 #### Disk-Backed Source And Label Cache
 
 Verified source/ABI lookups and Swiss Knife labels are cached under `CACHE_DIR` via `utils/disk_cache.py`:
 
-- `source-cache-v2/`: Etherscan verified record — per-file sources, compiler settings, ABI and resolved compilation target. The version is part of the namespace because positive entries never expire; a shape change must not read records written by an older version.
+- `source-cache-v2/`: Shared verified records with per-file sources, compiler settings, ABI, the compilation target and provider provenance. Verification checks, ABI lookups and Wavey diffs reuse this cache. Existing Etherscan source records remain readable.
 - `sourcify-layout-v1/`: Sourcify compiler storage layouts. Misses use the negative TTL, since Sourcify coverage grows over time.
 - `label-cache/`: Swiss Knife address labels.
 - `label-api-backoff/`: five-minute per-chain backoff after exhausted Swiss Knife HTTP 429/5xx responses, timeouts, or connection failures. Other 4xx responses and malformed JSON affect only the requested address. Cached labels and other label sources still work during an outage; failures never become address-level negative entries.
@@ -188,9 +188,9 @@ The diff is injected into the prompt under `--- Proxy Upgrade ---`. Best-effort:
 
 ### 5b. Deterministic Safety Checks (`utils/llm/ai_explainer.py`, `utils/source_context.py`)
 
-`_collect_safety_checks()` runs seatbelt-style checks grounded in Etherscan data we already fetch, and surfaces them as hard facts under `--- Safety Checks ---`:
+`_collect_safety_checks()` uses cached contract records to surface findings under `--- Safety Checks ---`:
 
-- **Unverified target** — a governance tx whose target has no published source is a red flag (`get_verification_status` returns a tri-state; the note is emitted only on an explicit `False`, never on a fetch error, so it doesn't cry wolf).
+- **Unverified target** — the explainer flags targets only when both providers confirm they lack verified source. A failed lookup leaves verification status unknown.
 - **ETH to a non-payable function** — forwarding `value > 0` to a `nonpayable` function reverts and can strand funds (`get_function_state_mutability`, with EIP-1967 proxy follow; overloaded functions resolve to `payable` if any overload accepts value).
 
 The system prompt instructs the LLM to treat each item as verified and reflect it in the verdict (e.g. an unverified target is at least MEDIUM).
@@ -668,7 +668,7 @@ All configuration is via environment variables:
 | `LLM_STRUCTURED_OUTPUT` | *(per provider)* | `true`/`false` to force JSON-schema output. Default: on for anthropic/openai/venice (all verified live), off for groq/custom |
 | `LLM_CREDIT_ALERT_THRESHOLD_USD` | `1` | Venice only: alert when what the key can still spend (DIEM + bundled credits + USD) drops below this (see [Credit Alert](#credit-alert)) |
 | `WAVEY_GIST_API_KEY` | *(required for Wavey links)* | API key for publishing detailed AI reports and proxy upgrade source diffs to Wavey Gist |
-| `ETHERSCAN_TOKEN` | *(optional)* | Etherscan v2 multichain API key for source context |
+| `ETHERSCAN_TOKEN` | *(optional)* | Etherscan v2 multichain API key for verified-source fallback |
 | `TENDERLY_API_KEY` | *(optional)* | Tenderly API key for simulation |
 | `TENDERLY_ACCOUNT` | `yearn` | Tenderly account slug |
 | `TENDERLY_PROJECT` | `sam` | Tenderly project slug |
@@ -762,7 +762,7 @@ utils/llm/
 
 utils/eth_view.py            # One raw eth_call view read, None when the getter is missing or reverts
 utils/related_tokens.py      # Token discovery from a contract's own zero-arg address getters
-utils/source_context.py      # Etherscan v2 source fetch + natspec / short-body extractor + proxy follow
+utils/source_context.py      # Shared Sourcify and Etherscan source fetch, source extraction and proxy follow
 utils/verified_contract.py   # Structured verified record: per-file sources, settings, ABI, target
 utils/on_chain_state.py      # Before-state reader (auto-generated getters, mappings, diamond storage)
 utils/proxy.py               # Impl resolution (EIP-1967, zeppelinos, beacon, getters), EIP-1167 clone decode, upgrade detection (direct + nested), alert lines

@@ -191,7 +191,9 @@ def _fetch_for_diff(chain_id: int, address: str, deadline: float) -> VerifiedCon
     timeout = _request_timeout(deadline)
     if timeout is None:
         return None
-    return fetch_verified_contract(chain_id, address, timeout=timeout, retries=0, require_constructor_arguments=True)
+    return fetch_verified_contract(
+        chain_id, address, timeout=timeout, retries=0, require_constructor_arguments=True, deadline=deadline
+    )
 
 
 def _create_upgrade_diff(old_impl: str, new_impl: str, chain_id: int, deadline: float) -> str:
@@ -207,7 +209,11 @@ def _create_upgrade_diff(old_impl: str, new_impl: str, chain_id: int, deadline: 
     title = f"{contract_name} upgrade source diff"
     old_link = _address_link(old_impl, chain_id, code=True)
     new_link = _address_link(new_impl, chain_id, code=True)
-    body = f"Chain ID {chain_id}\n\n- Old implementation {old_link}\n- New implementation {new_link}\n\n"
+    body = (
+        f"Chain ID {chain_id}\n\n"
+        f"- Old implementation {old_link} ({_source_label(old)})\n"
+        f"- New implementation {new_link} ({_source_label(new)})\n\n"
+    )
     body += _format_source_diff(old.sources, new.sources)
     if deployment := _format_deployment_changes(old, new):
         body += "\n\n" + deployment
@@ -221,6 +227,16 @@ def _create_upgrade_diff(old_impl: str, new_impl: str, chain_id: int, deadline: 
         )
         return ""
     return upload_to_gist(body, title=title, timeout=timeout, retries=0)
+
+
+def _source_label(contract: VerifiedContract) -> str:
+    """Show the provenance and any missing constructor data for one side."""
+    labels = [contract.provider]
+    if contract.match_quality:
+        labels.append(contract.match_quality.replace("_", " "))
+    if contract.constructor_arguments is None:
+        labels.append("constructor arguments unavailable")
+    return ", ".join(labels)
 
 
 def _format_deployment_changes(old: VerifiedContract, new: VerifiedContract) -> str:

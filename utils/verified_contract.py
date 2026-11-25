@@ -1,4 +1,4 @@
-"""Structured record of an Etherscan-verified contract.
+"""Structured record of a verified contract.
 
 Etherscan returns a *bundle*: the deployed contract plus every base, library and
 interface it imports, as a standard-json ``sources`` map. Flattening that bundle
@@ -19,6 +19,7 @@ added without a bump when a missing value reads as "unknown" (``None``), as
 
 import json
 from dataclasses import dataclass, field
+from typing import Literal
 
 from utils.logger import get_logger
 from utils.solidity_text import declares_contract
@@ -32,7 +33,7 @@ _NOT_VERIFIED_ABI = "Contract source code not verified"
 
 @dataclass(frozen=True)
 class VerifiedContract:
-    """One verified contract as Etherscan reports it, with provenance preserved."""
+    """One verified contract with source and deployment provenance."""
 
     contract_name: str
     compiler_version: str
@@ -41,8 +42,10 @@ class VerifiedContract:
     settings: dict = field(default_factory=dict)  # standard-json settings (remappings, optimizer, …)
     abi: list[dict] = field(default_factory=list)
     contract_file: str | None = None  # resolved compilation target, None if ambiguous
-    # Etherscan hex. None when unavailable, including records cached before the field existed.
+    # Hex without a prefix. None when unavailable.
     constructor_arguments: str | None = None
+    provider: str = "Etherscan"
+    match_quality: str | None = None
 
     @property
     def compilation_target(self) -> tuple[str, str] | None:
@@ -73,6 +76,8 @@ class VerifiedContract:
             "abi": self.abi,
             "contract_file": self.contract_file,
             "constructor_arguments": self.constructor_arguments,
+            "provider": self.provider,
+            "match_quality": self.match_quality,
         }
 
     @classmethod
@@ -86,6 +91,7 @@ class VerifiedContract:
         settings = data.get("settings")
         abi = data.get("abi")
         constructor_arguments = data.get("constructor_arguments")
+        match_quality = data.get("match_quality")
         return cls(
             contract_name=str(data.get("contract_name") or ""),
             compiler_version=str(data.get("compiler_version") or ""),
@@ -95,7 +101,13 @@ class VerifiedContract:
             abi=abi if isinstance(abi, list) else [],
             contract_file=data.get("contract_file") or None,
             constructor_arguments=constructor_arguments if isinstance(constructor_arguments, str) else None,
+            provider=data.get("provider") or "Etherscan",
+            match_quality=match_quality if isinstance(match_quality, str) else None,
         )
+
+
+# False is a provider-confirmed miss. None means that the lookup could not establish verification.
+type ContractLookup = VerifiedContract | Literal[False] | None
 
 
 def parse_etherscan_entry(entry: dict) -> VerifiedContract | None:
@@ -121,6 +133,7 @@ def parse_etherscan_entry(entry: dict) -> VerifiedContract | None:
         constructor_arguments=constructor_arguments.strip().lower().removeprefix("0x")
         if isinstance(constructor_arguments, str)
         else None,
+        match_quality="similar_match" if entry.get("SimilarMatch") else None,
     )
 
 
