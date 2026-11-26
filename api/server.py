@@ -16,6 +16,8 @@ logger = get_logger("api.server")
 
 ALLOWED_SEVERITIES = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
 MAX_LIMIT = 500
+# Alert ids are SQLite INTEGERs (signed 64-bit); larger values overflow the driver.
+MAX_ALERT_ID = 2**63 - 1
 
 
 class BadRequest(ValueError):
@@ -72,7 +74,7 @@ def parse_alert_query(query: str) -> AlertQuery:
             cursor = int(cursor_raw)
         except ValueError as exc:
             raise BadRequest("invalid cursor") from exc
-        if cursor < 1:
+        if not 1 <= cursor <= MAX_ALERT_ID:
             raise BadRequest("invalid cursor")
 
     from_raw = _one(params, "from") or _one(params, "since")
@@ -187,7 +189,7 @@ class AlertsHandler(BaseHTTPRequestHandler):
                 except ValueError:
                     write_error(self, 404, "not_found", "unknown path")
                     return
-                row = get_alert(alert_id)
+                row = get_alert(alert_id) if 1 <= alert_id <= MAX_ALERT_ID else None
                 if row is None:
                     write_error(self, 404, "not_found", "alert not found")
                     return
