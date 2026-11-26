@@ -11,6 +11,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable
+from ipaddress import ip_address
 
 
 class RateLimiter:
@@ -56,8 +57,8 @@ class RateLimiter:
         Returns:
             0.0 when the request is allowed, else the seconds until it would be.
         """
-        now = self._clock()
         with self._lock:
+            now = self._clock()
             tokens, last = self._buckets.pop(key, (self._capacity, now))
             tokens = min(self._capacity, tokens + (now - last) * self._refill_per_second)
             retry_after = 0.0
@@ -93,20 +94,16 @@ class ConcurrencyGate:
         self._semaphore.release()
 
 
-def client_key(forwarded_for: str | None, peer_host: str) -> str:
-    """Identify the client a request is rate limited as.
-
-    The API only listens on loopback behind Caddy. Caddy discards any client-sent
-    ``X-Forwarded-For`` (no ``trusted_proxies`` configured) and sets it to the real
-    peer address, so its rightmost entry is the client. Direct local callers send no
-    header and are keyed by their socket address.
+def client_key(proxy_client_ip: str | None, peer_host: str) -> str:
+    """Use the single client IP resolved by Caddy or fall back to the socket peer.
 
     Args:
-        forwarded_for: The request's ``X-Forwarded-For`` header, if any.
-        peer_host: Host of the TCP peer (Caddy, or a local caller).
+        proxy_client_ip: The client IP set by the loopback proxy, if present.
+        peer_host: Host of the TCP peer.
     """
-    if forwarded_for:
-        last = forwarded_for.rsplit(",", 1)[-1].strip()
-        if last:
-            return last
+    if proxy_client_ip:
+        try:
+            return str(ip_address(proxy_client_ip))
+        except ValueError:
+            pass
     return peer_host

@@ -99,18 +99,31 @@ Missing alerts, and ids outside SQLite's 64-bit range, return `404`.
 
 The server applies its own guards behind the proxy:
 
-- **Rate limit**: 60 requests per minute per client (burst of 60, then one more
-  every second). Over the limit returns `429` with `Retry-After`. Clients are keyed
-  by the `X-Forwarded-For` value Caddy sets (the real peer address, since no
-  `trusted_proxies` is configured), or by socket address for direct local calls.
-- **Concurrency**: at most 16 requests in flight; more return `503` with
+- **Direct API clients** have a 60-request burst and refill one request per
+  second. `/healthz` has its own per-IP bucket at the same rate. Caddy overwrites
+  `X-Monitoring-Client-IP` with its resolved client IP. Direct local calls use
+  the socket peer when the header is absent.
+- **The monitoring website Worker** has a separate shared budget of 600 requests
+  per minute with a burst of 600. Caddy assigns this budget only to the Worker
+  bearer token. This treats the Worker as one service even when its outbound IPs
+  change. Both rate limits return `429` with `Retry-After`.
+- **Concurrency** defaults to 16 active API requests. `/healthz` runs outside
+  this cap. Caddy limits upstream connections to 24 for the API and 4 for health
+  checks. Python admits at most 32 connections before starting handler threads.
+  The application responds to overload at either of its caps with `503` and
   `Retry-After: 1`.
-- **Idle connections**: closed after 10 seconds without a complete request.
+- **Socket timeout** is 10 seconds of inactivity per read or write.
 
-Tune with `MONITORING_API_RATE_LIMIT_PER_MINUTE` and `MONITORING_API_MAX_IN_FLIGHT`
-in the systemd unit (`0` disables either). If you put a CDN in front of Caddy,
-configure Caddy's `trusted_proxies` for it, or every client shares the CDN's
-address and one rate-limit bucket.
+Tune the application limits in the systemd unit with
+`MONITORING_API_RATE_LIMIT_PER_MINUTE`,
+`MONITORING_API_WORKER_RATE_LIMIT_PER_MINUTE`, and
+`MONITORING_API_MAX_IN_FLIGHT`. A value of `0` disables the corresponding
+request guard. The connection cap still applies.
+
+If a CDN fronts Caddy, configure the CDN's proxy ranges under the global
+`servers { trusted_proxies ... }` option. For a proxy that appends to
+`X-Forwarded-For`, also enable `trusted_proxies_strict`. Caddy will resolve the
+viewer IP and put it in `X-Monitoring-Client-IP` for the API.
 
 ### `GET /v1/protocols`
 
@@ -194,9 +207,10 @@ separately:
 
 Do not expose the Python service directly. Keep it bound to `127.0.0.1` and put
 a reverse proxy in front of it. The proxy enforces TLS, authentication, and
-request/response timeouts. The stdlib server adds per-client rate limits, a
-concurrency cap, and an idle timeout (see [Request limits](#request-limits)), but
-it still uses one thread per connection and has no TLS or auth of its own.
+request/response timeouts. The stdlib server adds rate limits, concurrency caps,
+and an idle timeout (see [Request limits](#request-limits)). It trusts
+proxy identity headers from loopback peers, so restrict local access to trusted
+processes.
 
 ### Caddy (Hetzner VPS)
 
@@ -222,6 +236,7 @@ sudo systemctl edit caddy        # add, then save:
 #   [Service]
 #   Environment=ALERTS_API_DOMAIN=alerts.example.com
 #   Environment=ALERTS_API_TOKENS=<token1>|<token2>     # pipe-separated, one per consumer
+#   Environment=ALERTS_API_WORKER_TOKEN=<token1>        # the monitoring site's existing token
 #   Environment=ACME_EMAIL=you@example.com
 sudo systemctl restart caddy
 
@@ -230,6 +245,12 @@ curl https://alerts.example.com/healthz                                   # publ
 curl https://alerts.example.com/v1/alerts?limit=5                         # 401 (no token)
 curl -H "Authorization: Bearer <token>" https://alerts.example.com/v1/alerts?limit=5
 ```
+
+When upgrading an existing deployment, install the new Caddyfile and restart
+Caddy before restarting the API. Set `ALERTS_API_WORKER_TOKEN` to the same value
+as the monitoring website's `MONITORING_API_TOKEN` and keep it in
+`ALERTS_API_TOKENS` too. A deployment without the website Worker can leave
+`ALERTS_API_WORKER_TOKEN` unset.
 
 ### Generating and storing API tokens
 
@@ -249,8 +270,7 @@ are refused. Hex also needs no escaping inside Caddy's matcher regex.
 **Where to store them:**
 
 - **Source of truth**: your team password manager / secrets vault, one entry per
-  consumer labelled with who holds it (the proxy can't tell tokens apart, so this
-  label is how you know which to revoke). Never commit a token to git or write it
+  consumer labelled with who holds it. Never commit a token to git or write it
   into `deploy/Caddyfile`.
 - **On the box**: the pipe-joined list lives only in the caddy systemd override
   (`sudo systemctl edit caddy` → `Environment=ALERTS_API_TOKENS=...`), which is
@@ -271,7 +291,8 @@ A `restart` (not `reload`) is required because the tokens live in Caddy's proces
 environment, which is only read at start — `reload` just re-reads the Caddyfile
 from disk. The restart is sub-second; this is a read API and clients retry, so
 the blip is harmless. Removing a token invalidates it immediately; the others
-keep working.
+keep working. When rotating the website's token, update
+`ALERTS_API_WORKER_TOKEN` and the Worker secret as well.
 
 ### Firewall (Hetzner)
 
@@ -291,5 +312,5 @@ volumetric floods are largely absorbed before reaching the box. Layer the rest:
   flood.
 - Optional: front it with Cloudflare (proxied DNS) for L7 WAF + IP hiding if you
   expect hostile traffic; then restrict the firewall to Cloudflare IP ranges and
-  rate-limit on `{http.request.header.CF-Connecting-IP}` instead of
-  `{remote_host}`.
+  configure Caddy's trusted proxy ranges as described under
+  [Request limits](#request-limits).

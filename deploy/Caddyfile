@@ -23,6 +23,7 @@
 #   [Service]
 #   Environment=ALERTS_API_DOMAIN=alerts.example.com
 #   Environment=ALERTS_API_TOKENS=<token1>|<token2>   (pipe-separated; one per consumer)
+#   Environment=ALERTS_API_WORKER_TOKEN=<token1>      (the monitoring site's existing token)
 #   Environment=ACME_EMAIL=you@example.com
 #
 # Generate each token with `openssl rand -hex 32` (hex => safe inside the regex
@@ -42,7 +43,6 @@
 # and uncomment the blocks + the `order` line, or leave them off and rely on the
 # Hetzner Cloud Firewall + fail2ban (Hetzner already absorbs L3/L4 volumetric
 # DDoS for free at its network edge).
-
 {
 	email {$ACME_EMAIL}
 
@@ -73,18 +73,20 @@
 	handle /healthz {
 		# rate_limit {
 		# 	zone health {
-		# 		key    {remote_host}
+		# 		key    {client_ip}
 		# 		events 30
 		# 		window 1m
 		# 	}
 		# }
 		reverse_proxy 127.0.0.1:8923 {
-			# The stdlib server has no timeouts of its own and uses one
-			# thread per connection — these timeouts shield it from slowloris.
+			header_up X-Monitoring-Client-IP {client_ip}
+			header_up -X-Monitoring-Rate-Class
+			header_up -Authorization
 			transport http {
 				dial_timeout 2s
 				read_timeout 5s
 				write_timeout 5s
+				max_conns_per_host 4
 			}
 		}
 	}
@@ -96,26 +98,38 @@
 		@malformed {
 			not header_regexp Authorization "^Bearer [0-9a-f]{64}$"
 		}
-		error @malformed "unauthorized" 401
 
 		# Accept any token in the pipe-separated ALERTS_API_TOKENS list.
 		@unauthorized {
 			not header_regexp Authorization "^Bearer ({$ALERTS_API_TOKENS})$"
 		}
-		error @unauthorized "unauthorized" 401
 
-		# rate_limit {
-		# 	zone api {
-		# 		key    {remote_host}
-		# 		events 60
-		# 		window 1m
-		# 	}
-		# }
-		reverse_proxy 127.0.0.1:8923 {
-			transport http {
-				dial_timeout 2s
-				read_timeout 5s
-				write_timeout 5s
+		@monitoring_worker header Authorization "Bearer {$ALERTS_API_WORKER_TOKEN:}"
+		route {
+			error @malformed "unauthorized" 401
+			error @unauthorized "unauthorized" 401
+
+			vars alerts_rate_class client
+			vars @monitoring_worker alerts_rate_class worker
+
+			# rate_limit {
+			# 	zone api {
+			# 		key    {client_ip}
+			# 		events 60
+			# 		window 1m
+			# 	}
+			# }
+			reverse_proxy 127.0.0.1:8923 {
+				header_up X-Monitoring-Client-IP {client_ip}
+				header_up X-Monitoring-Rate-Class {vars.alerts_rate_class}
+				header_up -Authorization
+				transport http {
+					dial_timeout 2s
+					read_timeout 5s
+					write_timeout 5s
+					# Both routes together must fit within the API's 32 connection workers.
+					max_conns_per_host 24
+				}
 			}
 		}
 	}
