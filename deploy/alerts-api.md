@@ -50,6 +50,9 @@ Query parameters:
 - `severity`: one of `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`.
 - `source`: alert source, commonly `protocol`, `ops_error`, `crash`, or `automation_digest`.
 
+`protocol` and `source` must be 1-64 characters of `A-Z a-z 0-9 _ . : -`. Invalid
+values, a malformed `cursor`, or a query string over 2048 characters return `400`.
+
 Example response:
 
 ```json
@@ -90,7 +93,24 @@ Returns one alert:
 curl http://127.0.0.1:8923/v1/alerts/5021
 ```
 
-Missing alerts return `404`.
+Missing alerts, and ids outside SQLite's 64-bit range, return `404`.
+
+### Request limits
+
+The server applies its own guards behind the proxy:
+
+- **Rate limit**: 60 requests per minute per client (burst of 60, then one more
+  every second). Over the limit returns `429` with `Retry-After`. Clients are keyed
+  by the `X-Forwarded-For` value Caddy sets (the real peer address, since no
+  `trusted_proxies` is configured), or by socket address for direct local calls.
+- **Concurrency**: at most 16 requests in flight; more return `503` with
+  `Retry-After: 1`.
+- **Idle connections**: closed after 10 seconds without a complete request.
+
+Tune with `MONITORING_API_RATE_LIMIT_PER_MINUTE` and `MONITORING_API_MAX_IN_FLIGHT`
+in the systemd unit (`0` disables either). If you put a CDN in front of Caddy,
+configure Caddy's `trusted_proxies` for it, or every client shares the CDN's
+address and one rate-limit bucket.
 
 ### `GET /v1/protocols`
 
@@ -173,10 +193,10 @@ separately:
 ## Public Access
 
 Do not expose the Python service directly. Keep it bound to `127.0.0.1` and put
-a reverse proxy in front of it. The proxy enforces TLS, authentication, rate
-limits, and request/response timeouts — the stdlib server does none of these and
-uses one thread per connection, so an unshielded slowloris/connection flood
-would wedge it.
+a reverse proxy in front of it. The proxy enforces TLS, authentication, and
+request/response timeouts. The stdlib server adds per-client rate limits, a
+concurrency cap, and an idle timeout (see [Request limits](#request-limits)), but
+it still uses one thread per connection and has no TLS or auth of its own.
 
 ### Caddy (Hetzner VPS)
 
@@ -262,8 +282,11 @@ volumetric floods are largely absorbed before reaching the box. Layer the rest:
   (Caddy/ACME) only, TCP. HTTP/3 is disabled, so leave UDP `443` closed. Never open `8923` — the API must stay localhost-only so the
   only path in is through Caddy's auth.
 - On-box `ufw` as defense-in-depth: `ufw allow 22,80,443/tcp && ufw enable`.
-- **Rate limiting**: enable the commented `rate_limit` blocks in the Caddyfile
-  (needs the `caddy-ratelimit` plugin — see the file header), and/or add
+- **Rate limiting**: the API rate-limits each client itself (see
+  [Request limits](#request-limits)). That runs after Caddy's token check, so
+  unauthenticated floods are still Caddy's to absorb. For limits at the edge too,
+  enable the commented `rate_limit` blocks in the Caddyfile (needs the
+  `caddy-ratelimit` plugin, see the file header), and/or add
   `fail2ban` on `/var/log/caddy/alerts.log` to ban IPs that repeatedly 401 or
   flood.
 - Optional: front it with Cloudflare (proxied DNS) for L7 WAF + IP hiding if you
