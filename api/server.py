@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
-from urllib.parse import parse_qs, urlparse
+from ipaddress import ip_address
+from socket import socket
+from typing import Any, cast
+from urllib.parse import ParseResult, parse_qs, urlparse
 
+from api.guards import ConcurrencyGate, RateLimiter, client_key
 from automation.config import JobsConfig, load_jobs_config
 from utils.logger import get_logger
 from utils.monitoring_config import load_monitoring_config, monitoring_to_json
@@ -16,6 +21,32 @@ logger = get_logger("api.server")
 
 ALLOWED_SEVERITIES = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
 MAX_LIMIT = 500
+# Alert ids are SQLite INTEGERs (signed 64-bit); larger values overflow the driver.
+MAX_ALERT_ID = 2**63 - 1
+# Real queries are well under 100 chars; anything this long is probing or abuse.
+MAX_QUERY_LENGTH = 2048
+# protocol/source filter values: identifiers like "aave", "yearn-internal", "YEARN_MS".
+_FILTER_VALUE_RE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+# Socket timeout per connection. Caddy already enforces its own; this bounds direct
+# local callers and anything that slips past it, so a stalled client can't pin a thread.
+REQUEST_TIMEOUT_SECONDS = 10
+DEFAULT_RATE_LIMIT_PER_MINUTE = 60
+DEFAULT_WORKER_RATE_LIMIT_PER_MINUTE = 600
+DEFAULT_MAX_IN_FLIGHT = 16
+# Leave room below systemd's TasksMax for the main thread and system overhead.
+MAX_CONNECTION_WORKERS = 32
+
+_BUSY_MESSAGE = "too many concurrent requests"
+_BUSY_BODY = json.dumps({"error": "busy", "message": _BUSY_MESSAGE}, separators=(",", ":")).encode()
+_BUSY_RESPONSE = (
+    "HTTP/1.0 503 Service Unavailable\r\n"
+    "Content-Type: application/json\r\n"
+    "Cache-Control: no-store\r\n"
+    "X-Content-Type-Options: nosniff\r\n"
+    "Retry-After: 1\r\n"
+    "Connection: close\r\n"
+    f"Content-Length: {len(_BUSY_BODY)}\r\n\r\n"
+).encode() + _BUSY_BODY
 
 
 class BadRequest(ValueError):
@@ -48,7 +79,17 @@ def parse_timestamp(value: str, name: str) -> str:
         raise BadRequest(message) from exc
 
 
+def _filter_param(params: dict[str, list[str]], key: str) -> str | None:
+    """Return the ``key`` filter value, rejecting anything that isn't a plain identifier."""
+    value = _one(params, key)
+    if value is not None and not _FILTER_VALUE_RE.fullmatch(value):
+        raise BadRequest(f"invalid {key}")
+    return value
+
+
 def parse_alert_query(query: str) -> AlertQuery:
+    if len(query) > MAX_QUERY_LENGTH:
+        raise BadRequest("query too long")
     params = parse_qs(query, keep_blank_values=True)
     severity = _one(params, "severity")
     if severity is not None and severity not in ALLOWED_SEVERITIES:
@@ -72,7 +113,7 @@ def parse_alert_query(query: str) -> AlertQuery:
             cursor = int(cursor_raw)
         except ValueError as exc:
             raise BadRequest("invalid cursor") from exc
-        if cursor < 1:
+        if not 1 <= cursor <= MAX_ALERT_ID:
             raise BadRequest("invalid cursor")
 
     from_raw = _one(params, "from") or _one(params, "since")
@@ -83,9 +124,9 @@ def parse_alert_query(query: str) -> AlertQuery:
         raise BadRequest("to must be after from")
 
     return AlertQuery(
-        protocol=_one(params, "protocol"),
+        protocol=_filter_param(params, "protocol"),
         severity=severity,
-        source=_one(params, "source"),
+        source=_filter_param(params, "source"),
         from_ts=from_ts,
         to_ts=to_ts,
         cursor=cursor,
@@ -137,23 +178,74 @@ def protocols_to_json(config: JobsConfig) -> dict[str, object]:
     return {"data": data, "count": len(data)}
 
 
-def write_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, object]) -> None:
+def write_json(
+    handler: BaseHTTPRequestHandler,
+    status: int,
+    payload: dict[str, object],
+    headers: dict[str, str] | None = None,
+) -> None:
     body = json.dumps(payload, separators=(",", ":")).encode()
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    for name, value in (headers or {}).items():
+        handler.send_header(name, value)
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
 
 
-def write_error(handler: BaseHTTPRequestHandler, status: int, code: str, message: str) -> None:
-    write_json(handler, status, {"error": code, "message": message})
+def write_error(
+    handler: BaseHTTPRequestHandler,
+    status: int,
+    code: str,
+    message: str,
+    headers: dict[str, str] | None = None,
+) -> None:
+    write_json(handler, status, {"error": code, "message": message}, headers)
 
 
 class AlertsHandler(BaseHTTPRequestHandler):
+    # Don't advertise the Python version (Caddy strips Server too; this covers direct callers).
+    server_version = "monitoring-api"
+    sys_version = ""
+    timeout = REQUEST_TIMEOUT_SECONDS
+    # Set by configure_guards(); None (no limit) keeps tests and ad-hoc servers unthrottled.
+    rate_limiter: RateLimiter | None = None
+    worker_rate_limiter: RateLimiter | None = None
+    gate: ConcurrencyGate | None = None
+
     def do_GET(self) -> None:
+        """Apply the concurrency and rate guards, then route the request."""
         parsed = urlparse(self.path)
+        health_check = parsed.path == "/healthz"
+        gate = None if health_check else self.gate
+        if gate is not None and not gate.try_enter():
+            write_error(self, 503, "busy", _BUSY_MESSAGE, {"Retry-After": "1"})
+            return
+        try:
+            peer = self.client_address[0]
+            from_proxy = ip_address(peer).is_loopback
+            from_worker = not health_check and from_proxy and self.headers.get("X-Monitoring-Rate-Class") == "worker"
+            limiter = self.worker_rate_limiter if from_worker else self.rate_limiter
+            if limiter is not None:
+                proxy_ip = self.headers.get("X-Monitoring-Client-IP") if from_proxy else None
+                scope = "health" if health_check else "api"
+                key = "worker" if from_worker else f"{scope}:{client_key(proxy_ip, peer)}"
+                retry_after = limiter.acquire(key)
+                if retry_after > 0:
+                    write_error(
+                        self, 429, "rate_limited", "too many requests", {"Retry-After": str(math.ceil(retry_after))}
+                    )
+                    return
+            self._route(parsed)
+        finally:
+            if gate is not None:
+                gate.leave()
+
+    def _route(self, parsed: ParseResult) -> None:
+        """Dispatch a GET that passed the guards to its endpoint."""
         try:
             if parsed.path == "/healthz":
                 write_json(self, 200, {"status": "ok"})
@@ -187,7 +279,7 @@ class AlertsHandler(BaseHTTPRequestHandler):
                 except ValueError:
                     write_error(self, 404, "not_found", "unknown path")
                     return
-                row = get_alert(alert_id)
+                row = get_alert(alert_id) if 1 <= alert_id <= MAX_ALERT_ID else None
                 if row is None:
                     write_error(self, 404, "not_found", "alert not found")
                     return
@@ -211,8 +303,79 @@ class AlertsHandler(BaseHTTPRequestHandler):
         logger.info("%s - %s", self.address_string(), format % args)
 
 
+class AlertsServer(ThreadingHTTPServer):
+    """Bound accepted connections before the threaded server allocates workers."""
+
+    def __init__(self, address: tuple[str, int], *, max_workers: int = MAX_CONNECTION_WORKERS) -> None:
+        """Set the maximum number of connection handlers running at a time."""
+        self._connection_gate = ConcurrencyGate(max_workers)
+        super().__init__(address, AlertsHandler)
+
+    def process_request(self, request: socket | tuple[bytes, socket], client_address: tuple[str, int]) -> None:
+        """Admit a connection or return a busy response from the accept thread."""
+        if not self._connection_gate.try_enter():
+            connection = cast(socket, request)  # The HTTP server always accepts TCP sockets.
+            try:
+                connection.setblocking(False)
+                connection.sendall(_BUSY_RESPONSE)
+            except OSError:
+                # The peer may already have disconnected or stopped reading.
+                pass
+            finally:
+                self.shutdown_request(connection)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._connection_gate.leave()
+            raise
+
+    def process_request_thread(self, request: socket | tuple[bytes, socket], client_address: tuple[str, int]) -> None:
+        """Release the connection slot after the request and socket cleanup."""
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_gate.leave()
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read a non-negative integer setting from the environment, failing loudly on bad values."""
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+    if value < 0:
+        raise ValueError(f"{name} must be >= 0, got {value}")
+    return value
+
+
+def configure_guards() -> None:
+    """Install the rate limiter and concurrency cap from the environment.
+
+    Configure independent budgets for individual clients, the monitoring website
+    Worker, and concurrent API requests. A value of 0 disables that guard.
+    """
+    per_minute = _env_int("MONITORING_API_RATE_LIMIT_PER_MINUTE", DEFAULT_RATE_LIMIT_PER_MINUTE)
+    worker_per_minute = _env_int("MONITORING_API_WORKER_RATE_LIMIT_PER_MINUTE", DEFAULT_WORKER_RATE_LIMIT_PER_MINUTE)
+    max_in_flight = _env_int("MONITORING_API_MAX_IN_FLIGHT", DEFAULT_MAX_IN_FLIGHT)
+    AlertsHandler.rate_limiter = RateLimiter(per_minute, 60) if per_minute else None
+    AlertsHandler.worker_rate_limiter = RateLimiter(worker_per_minute, 60, max_clients=1) if worker_per_minute else None
+    AlertsHandler.gate = ConcurrencyGate(max_in_flight) if max_in_flight else None
+    logger.info(
+        "request guards: %s req/min per client, %s req/min for the Worker, %s API requests in flight, %d connections",
+        per_minute or "unlimited",
+        worker_per_minute or "unlimited",
+        max_in_flight or "unlimited",
+        MAX_CONNECTION_WORKERS,
+    )
+
+
 def run(host: str, port: int) -> None:
-    server = ThreadingHTTPServer((host, port), AlertsHandler)
+    configure_guards()
+    server = AlertsServer((host, port))
     logger.info("monitoring API listening on %s:%d", host, port)
     server.serve_forever()
 

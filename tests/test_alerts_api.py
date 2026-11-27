@@ -152,6 +152,20 @@ def test_alerts_routes_filters_and_errors(monkeypatch, tmp_path):
         assert status == 404
         assert body["error"] == "not_found"
 
+        # Ids beyond SQLite's signed 64-bit INTEGER must not reach the driver (OverflowError -> 500).
+        too_big = str(2**63)
+        status, body = _request(server, "GET", f"/v1/alerts/{too_big}")
+        assert status == 404
+        assert body["error"] == "not_found"
+
+        status, body = _request(server, "GET", f"/v1/alerts?cursor={too_big}")
+        assert status == 400
+        assert body["error"] == "bad_request"
+
+        status, body = _request(server, "GET", f"/v1/alerts?cursor={2**63 - 1}")
+        assert status == 200
+        assert [row["id"] for row in body["data"]] == [morpho_id, aave_id]
+
         status, body = _request(server, "GET", "/v1/alerts?severity=BAD")
         assert status == 400
         assert body["error"] == "bad_request"

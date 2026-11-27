@@ -9,6 +9,8 @@ Description=yearn monitoring alerts API
 Documentation=https://github.com/yearn/monitoring
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=exec
@@ -31,8 +33,6 @@ ExecStart=__REPO_DIR__/.venv/bin/python -m api
 
 Restart=on-failure
 RestartSec=10
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 NoNewPrivileges=yes
 PrivateTmp=yes
@@ -43,10 +43,28 @@ ReadWritePaths=__CACHE_DIR__
 InaccessiblePaths=-__ETC_DIR__
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
+ProtectKernelLogs=yes
 ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+PrivateDevices=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Caddy reaches the API over loopback and the API makes no outbound calls, so no
+# other address is ever needed. A bug can't be turned into SSRF or exfiltration.
+IPAddressDeny=any
+IPAddressAllow=localhost
+# Backstops for the API's 32-worker connection cap and the process's memory use.
+TasksMax=64
+MemoryMax=512M
 
 StandardOutput=journal
 StandardError=journal
