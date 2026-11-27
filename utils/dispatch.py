@@ -30,7 +30,6 @@ DISPATCHABLE_PROTOCOLS = {
     "3jane",
     "wbtc",
     "coinbase",
-    "lombard",
     "tether",
     "circle",
     "maker",
